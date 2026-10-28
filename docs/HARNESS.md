@@ -194,6 +194,20 @@ Replaying the delegations statelessly was considered and rejected: quadratic
 in model calls, non-deterministic, and side-effecting — a `coder` role with
 `Edit` permission would write the file twice.
 
+What this store is *not* is the conversation itself. The harness owns that and
+posts it back in full on every request; Ensemble keeps only the turns the
+harness was never shown. So when a manager answers a third message as if it
+were the first, the history went missing somewhere Ensemble can see but does
+not control, and there are two candidates: a client that posted only the latest
+turn, or a model server that dropped the front of an over-long prompt.
+`ENSEMBLE_SERVE_LOG=1` tells them apart — one stderr line per request with the
+role and size of every message that arrived, and how many the manager ended up
+reading. Roles and sizes only; the content is the user's work and is never
+logged. If the arriving shape grows with the conversation and the manager still
+forgets, the prompt is overflowing the model server's context window
+(llama-server `-c`, vLLM `--max-model-len`, Ollama `num_ctx`), which drops
+tokens from the front — system prompt first.
+
 ### Registering it
 
 ```json
@@ -223,6 +237,27 @@ drive a tool schema Ensemble supplied, and `claude -p` cannot — see the
 refuses to start rather than failing on the first message, and `ensemble
 check` reports `serve: available` or `serve: unavailable` so you can find out
 without starting anything.
+
+**The backend type saying yes is not the same as the server saying yes.**
+`openai-compatible-api` declares `tool_calling: true` because the protocol has
+the field; whether this server, started with these flags, parses this model's
+tool call into it is a different question. llama-server without `--jinja`,
+vLLM without `--enable-auto-tool-choice --tool-call-parser`, and an Ollama
+template with no `.Tools` branch all answer 200 with the model's call sitting
+in `content` as prose — and an empty `tool_calls` is exactly what a manager
+with a finished answer sends, so the turn ends after one step looking
+entirely normal while nothing is ever delegated. `ensemble serve` therefore
+spends one small model call at startup, with `tool_choice: required` and a
+throwaway tool, and refuses to bind if no call comes back. `auto` would not
+do: a model that chose to answer and a server that dropped the call it made
+are indistinguishable. A probe that cannot *reach* the endpoint is
+inconclusive rather than negative — the model server may not be up yet, and
+that is `ensemble health`'s business. `ensemble check` never probes, because
+a command that loads a file and reports what is in it must not quietly bill
+you. Should the fault appear mid-turn anyway, `manager.rs` recognises a
+written-out call in an otherwise finished reply and says so on stderr; it
+does not change the turn, because it cannot tell the two apart with enough
+confidence to act.
 
 **Replies do not stream token by token.** `ModelPort::complete` returns a
 finished answer, so the SSE stream is synthesised: correct chunk sequence,

@@ -61,7 +61,10 @@ impl Drop for Scratch {
 /// turns it cares about.
 struct Upstream {
     url: String,
+    /// The turn requests, in order. The startup probe is not one of them.
     seen: Arc<Mutex<Vec<String>>>,
+    /// The startup probes, kept apart so `seen` still means "turns".
+    probes: Arc<Mutex<Vec<String>>>,
 }
 
 fn completion(content: &str) -> String {
@@ -87,12 +90,20 @@ fn tool_call_completion(id: &str, name: &str, arguments: &str) -> String {
 }
 
 fn start_upstream(script: Vec<String>, fallback: String) -> Upstream {
+    start_upstream_with(script, fallback, true)
+}
+
+/// `answer_probe: false` leaves the startup probe to the script, which is how
+/// a test gets a server that claims to call tools and does not.
+fn start_upstream_with(script: Vec<String>, fallback: String, answer_probe: bool) -> Upstream {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
     let url = format!("http://{}/v1", listener.local_addr().unwrap());
     let queue = Arc::new(Mutex::new(VecDeque::from(script)));
     let seen = Arc::new(Mutex::new(Vec::new()));
+    let probes = Arc::new(Mutex::new(Vec::new()));
 
     let seen_for_thread = Arc::clone(&seen);
+    let probes_for_thread = Arc::clone(&probes);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
@@ -124,15 +135,22 @@ fn start_upstream(script: Vec<String>, fallback: String) -> Upstream {
             let reply = if path.ends_with("/models") {
                 r#"{"object":"list","data":[]}"#.to_string()
             } else {
-                seen_for_thread
-                    .lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&body).to_string());
-                queue
-                    .lock()
-                    .unwrap()
-                    .pop_front()
-                    .unwrap_or_else(|| fallback.clone())
+                let text = String::from_utf8_lossy(&body).to_string();
+                // `ensemble serve` proves the manager can return a tool call
+                // before it binds. That is a real request on the wire and it
+                // has to be answered, but it is startup rather than a turn, so
+                // it is recorded apart and never consumes a scripted reply.
+                if answer_probe && text.contains("ensemble_probe") {
+                    probes_for_thread.lock().unwrap().push(text);
+                    tool_call_completion("p1", "ensemble_probe", r#"{"ok":"yes"}"#)
+                } else {
+                    seen_for_thread.lock().unwrap().push(text);
+                    queue
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .unwrap_or_else(|| fallback.clone())
+                }
             };
 
             let _ = write!(
@@ -146,7 +164,7 @@ fn start_upstream(script: Vec<String>, fallback: String) -> Upstream {
         }
     });
 
-    Upstream { url, seen }
+    Upstream { url, seen, probes }
 }
 
 // ---------------------------------------------------------------------------
@@ -886,6 +904,91 @@ manager:
     assert!(err.contains("claude-code-cli"), "{err}");
     assert!(err.contains("openai-compatible-api"), "{err}");
     assert!(err.contains("ensemble mcp"), "{err}");
+}
+
+#[test]
+fn serve_proves_the_manager_can_call_tools_before_it_binds() {
+    let up = start_upstream(vec![], completion("x"));
+    let scratch = project("probe", &up);
+    let _server = Server::start(&scratch, &[]);
+
+    // One probe, on the wire, before the banner — and it forces a call rather
+    // than leaving the choice to the model, because a model that chose to
+    // answer and a server that dropped the call look the same otherwise.
+    let probes = up.probes.lock().unwrap();
+    assert_eq!(probes.len(), 1, "{probes:?}");
+    let sent: serde_json::Value = serde_json::from_str(&probes[0]).unwrap();
+    assert_eq!(sent["tool_choice"], "required");
+    assert_eq!(sent["tools"][0]["function"]["name"], "ensemble_probe");
+    assert_eq!(sent["model"], "manager-model");
+    // Startup is not a turn: nothing the probe did counts as one.
+    assert!(up.seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn serve_refuses_to_start_when_the_server_hands_tool_calls_back_as_text() {
+    // A server with no tool-call parser for its model: 200, and the call in
+    // `content`. Declared capable by its type, incapable in fact.
+    let up = start_upstream_with(
+        vec![],
+        completion("ensemble_probe(ok='yes')"),
+        false, // let the fallback answer the probe, in prose
+    );
+    let scratch = project("unparsed", &up);
+    let out = Command::new(BIN)
+        .args(["serve", "--port", "0"])
+        .current_dir(scratch.path())
+        .env_remove("ENSEMBLE_TEST_SERVE_URL")
+        .output()
+        .expect("run");
+
+    assert!(!out.status.success(), "it must not bind");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("manager-model"), "{err}");
+    assert!(err.contains("--jinja"), "names the llama-server fix: {err}");
+    assert!(
+        err.contains("--tool-call-parser"),
+        "names the vLLM fix: {err}"
+    );
+    assert!(err.contains(".Tools"), "names the Ollama fix: {err}");
+    assert!(
+        err.contains("ensemble_probe(ok="),
+        "quotes what came back: {err}"
+    );
+}
+
+#[test]
+fn a_delegation_the_server_returned_as_text_is_diagnosed_on_stderr() {
+    // The probe passed, so this server can parse *some* tool call — but the
+    // manager's reply arrives as prose, which is what a harness sees as "it
+    // answered in one step and never delegated". Ensemble cannot tell that
+    // from a finished answer, so it does not change the turn; it says why.
+    let up = start_upstream(
+        vec![completion(
+            "Let me look into that.\nensemble_delegate(role='planner', task='outline it')",
+        )],
+        completion("x"),
+    );
+    let scratch = project("written-out", &up);
+    let server = Server::start(&scratch, &[]);
+
+    let reply = post(
+        &server,
+        serde_json::json!({"model": "ensemble/manager",
+                           "messages": [{"role": "user", "content": "plan it"}]}),
+    );
+    assert_eq!(
+        reply.status, 200,
+        "the turn still completes: {}",
+        reply.body
+    );
+
+    let log = wait_for(&server.log, "nothing was delegated");
+    assert!(log.contains("ensemble_delegate"), "{log}");
+    assert!(log.contains("--jinja"), "{log}");
+    assert!(log.contains("--tool-call-parser"), "{log}");
+    // Stderr only. The harness must not learn any of this.
+    assert!(!reply.body.contains("--jinja"), "{}", reply.body);
 }
 
 #[test]

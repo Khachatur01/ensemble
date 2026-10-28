@@ -50,6 +50,13 @@ backends:
 # harness offered — and `claude -p` never returns one. So `serve` refuses to
 # start with the manager below; point it at `openai-local` (or any other
 # openai-compatible-api backend) first. `ensemble check` says which you have.
+#
+# Pointing it at one is necessary and not sufficient: the server also has to be
+# started with tool-call parsing for the model it serves (llama-server --jinja,
+# vLLM --enable-auto-tool-choice --tool-call-parser, an Ollama template with a
+# .Tools branch). Without it the manager's delegation comes back as prose and
+# nothing runs it. `serve` proves this with one small model call at startup and
+# refuses to bind if it fails, naming the flag to look at.
 # ---------------------------------------------------------------------------
 manager:
   backend: claude

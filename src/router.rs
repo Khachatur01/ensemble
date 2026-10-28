@@ -9,7 +9,8 @@
 
 use crate::config::{Assignment, Config};
 use crate::port::{
-    Capabilities, Error, Message, ModelPort, Request, Response, ToolCall, ToolDef, Usage,
+    Capabilities, Error, Message, ModelPort, Request, Response, ToolCall, ToolChoice, ToolDef,
+    Usage,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -91,6 +92,27 @@ impl RouteError {
             RouteError::Backend(e) => e.is_retryable(),
         }
     }
+}
+
+/// The throwaway tool [`Ensemble::probe_tool_calling`] offers. Named so it
+/// cannot collide with the ensemble's real tools and is recognisable in a
+/// server log.
+pub const PROBE_TOOL: &str = "ensemble_probe";
+
+/// What a tool-calling probe found. An `Err` from the probe is neither of
+/// these: the endpoint did not answer, which says nothing about tool calling.
+#[derive(Debug, Clone)]
+pub enum ToolCallProbe {
+    /// A structured tool call came back. This model on this server can drive a
+    /// caller-supplied schema.
+    Works,
+    /// The endpoint answered and the call was not in `tool_calls`. `text` is
+    /// whatever came instead — usually the written-out call, which names the
+    /// format the server has no parser for.
+    NotParsed {
+        text: String,
+        finish_reason: Option<String>,
+    },
 }
 
 pub struct Ensemble {
@@ -249,6 +271,64 @@ impl Ensemble {
     pub fn capabilities_of(&self, role: &str) -> Result<Capabilities, RouteError> {
         let (_, port) = self.resolve(role)?;
         Ok(port.capabilities())
+    }
+
+    /// Ask a role's backend for one tool call and find out whether it arrives
+    /// as one.
+    ///
+    /// [`Capabilities::tool_calling`] is a statement about a backend *type*:
+    /// `openai-compatible-api` says yes because the protocol has the field.
+    /// Whether *this* server, started with *these* flags, will parse *this*
+    /// model's tool call into that field is a different question, and nothing
+    /// in the config can answer it — llama-server without `--jinja`, vLLM
+    /// without a `--tool-call-parser`, and an Ollama template with no `.Tools`
+    /// branch all hand the model's call back as ordinary text.
+    ///
+    /// `Required`, not `Auto`: with `Auto` a model that simply chose to answer
+    /// is indistinguishable from a server that dropped the call it made, and
+    /// only the second is a fault.
+    ///
+    /// Spends one small model call. The caller decides whether that is worth
+    /// it; `route_of` and `capabilities_of` remain free.
+    pub fn probe_tool_calling(&self, role: &str) -> Result<ToolCallProbe, RouteError> {
+        let (assignment, port) = self.resolve(role)?;
+
+        let mut request = Request::new(
+            assignment.model.clone(),
+            vec![
+                Message::system(
+                    "You are a conformance probe. Reply only by calling the tool you are given.",
+                ),
+                Message::user(format!("Call `{PROBE_TOOL}` with `ok` set to \"yes\".")),
+            ],
+        );
+        request.tools = vec![ToolDef {
+            name: PROBE_TOOL.to_string(),
+            description: "Answer the probe. Call this and write nothing else.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "ok": { "type": "string" } },
+                "required": ["ok"],
+                "additionalProperties": false
+            }),
+        }];
+        request.tool_choice = ToolChoice::Required;
+        request.temperature = Some(0.0);
+        // Enough for a call plus a short preamble, bounded so a model that
+        // ignores the instruction and starts writing cannot cost real money.
+        request.max_tokens = Some(256);
+        // No workdir on purpose: this spends a model call and must touch
+        // nothing in the project.
+
+        let response = port.complete(&request).map_err(RouteError::Backend)?;
+        if response.tool_calls.is_empty() {
+            Ok(ToolCallProbe::NotParsed {
+                text: response.text,
+                finish_reason: response.finish_reason,
+            })
+        } else {
+            Ok(ToolCallProbe::Works)
+        }
     }
 
     /// The configured prompt for a role, if it has one.
@@ -507,6 +587,86 @@ roles:
         // Three backends, four roles, two of which share one backend.
         assert_eq!(names, vec!["claude", "openai-local", "openai-remote"]);
         assert!(results.iter().all(|(_, r)| r.is_ok()));
+    }
+
+    // --- the tool-calling probe -----------------------------------------
+
+    /// An ensemble whose manager backend answers with `script`.
+    fn with_manager_script(
+        script: Vec<crate::port::testing::Scripted>,
+    ) -> (Ensemble, Arc<FakePort>) {
+        let mgr = Arc::new(FakePort::scripted("openai-local", "plain text", script));
+        let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
+        ports.insert("openai-local".into(), mgr.clone() as Arc<dyn ModelPort>);
+        ports.insert(
+            "openai-remote".into(),
+            Arc::new(FakePort::ok("openai-remote", "x")),
+        );
+        ports.insert("claude".into(), Arc::new(FakePort::ok("claude", "x")));
+        (
+            Ensemble::with_ports(cfg(), ports, Some("/proj".into())),
+            mgr,
+        )
+    }
+
+    #[test]
+    fn a_probe_that_gets_a_structured_call_back_reports_that_it_works() {
+        let (e, mgr) = with_manager_script(vec![crate::port::testing::Scripted::call(
+            "p1",
+            PROBE_TOOL,
+            r#"{"ok":"yes"}"#,
+        )]);
+        assert!(matches!(
+            e.probe_tool_calling(Config::MANAGER).unwrap(),
+            ToolCallProbe::Works
+        ));
+        assert_eq!(mgr.call_count(), 1, "exactly one model call");
+    }
+
+    #[test]
+    fn a_probe_answered_in_prose_reports_what_came_instead() {
+        // The whole fault this exists for: the server answers 200 and the call
+        // is not in `tool_calls`.
+        let (e, _) = with_manager_script(vec![crate::port::testing::Scripted::text(
+            "ensemble_probe(ok='yes')",
+        )]);
+        let ToolCallProbe::NotParsed { text, .. } = e.probe_tool_calling(Config::MANAGER).unwrap()
+        else {
+            panic!("prose is not a tool call");
+        };
+        assert_eq!(text, "ensemble_probe(ok='yes')");
+    }
+
+    #[test]
+    fn the_probe_requires_a_call_offers_one_throwaway_tool_and_touches_no_project() {
+        let (e, mgr) = with_manager_script(vec![crate::port::testing::Scripted::call(
+            "p1", PROBE_TOOL, "{}",
+        )]);
+        e.probe_tool_calling(Config::MANAGER).unwrap();
+        let sent = mgr.last().unwrap();
+        // `auto` cannot tell "chose to answer" from "the call was dropped".
+        assert_eq!(sent.tool_choice, crate::port::ToolChoice::Required);
+        assert_eq!(sent.tools.len(), 1);
+        assert_eq!(sent.tools[0].name, PROBE_TOOL);
+        // Not one of the ensemble's real tools, so it cannot be confused for
+        // one in a server log or in `is_ensemble_tool`.
+        assert!(!crate::harness::delegation::is_ensemble_tool(PROBE_TOOL));
+        assert_eq!(sent.model, "qwen3-coder", "the role's model, not a guess");
+        assert!(sent.workdir.is_none(), "a probe acts on nothing");
+        assert!(sent.max_tokens.is_some(), "bounded: {:?}", sent.max_tokens);
+    }
+
+    #[test]
+    fn a_probe_against_an_unreachable_backend_is_an_error_not_a_verdict() {
+        let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
+        for n in ["openai-local", "openai-remote", "claude"] {
+            ports.insert(
+                n.into(),
+                Arc::new(FakePort::failing(n, "Connection refused")) as Arc<dyn ModelPort>,
+            );
+        }
+        let e = Ensemble::with_ports(cfg(), ports, None);
+        assert!(e.probe_tool_calling(Config::MANAGER).is_err());
     }
 
     #[test]

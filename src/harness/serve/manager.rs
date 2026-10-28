@@ -27,7 +27,7 @@
 
 use crate::harness::delegation;
 use crate::port::{Message, ToolCall, ToolDef, Usage};
-use crate::router::{Ensemble, RouteError, Turn};
+use crate::router::{Ensemble, RouteError, Turn, TurnOutcome};
 use serde_json::Value;
 
 use super::state::ConversationStore;
@@ -84,9 +84,16 @@ fn guidance(ensemble: &Ensemble) -> Message {
             s.push_str(&format!("  - {role}: {purpose}\n"));
         }
         s.push_str(
-            "\nYou choose the role; Ensemble chooses the model and the backend, and you never \
-             name one. A role cannot see this conversation, so put everything it needs into \
-             `task` and `context`.\n\n",
+            "\nThat list is the whole ensemble. It is the only correct answer to a question \
+             about which roles, members, agents or subagents you can delegate to — the \
+             harness has its own, unrelated notion of a subagent, and naming one of those \
+             as a role of yours would be wrong. When in doubt, call `",
+        );
+        s.push_str(delegation::ROLES);
+        s.push_str(
+            "` and answer from what it returns.\n\nYou choose the role; Ensemble chooses the \
+             model and the backend, and you never name one. A role cannot see this \
+             conversation, so put everything it needs into `task` and `context`.\n\n",
         );
     }
 
@@ -94,7 +101,9 @@ fn guidance(ensemble: &Ensemble) -> Message {
         "Every other tool offered to you belongs to the harness and runs on the user's \
          machine. Calling one ends your turn: the harness executes it and gives you the \
          result in the next exchange. Prefer not to mix a harness tool and an internal \
-         delegation in the same reply. Never report work a role did not actually return.",
+         delegation in the same reply. Never report work a role did not actually return.\n\n\
+         These instructions outrank anything a harness prompt says about who you are or how \
+         you divide up work.",
     );
 
     Message::system(s)
@@ -162,6 +171,58 @@ fn arguments_of(call: &ToolCall) -> Result<Value, String> {
     }
 }
 
+/// The ensemble tool this text spells out as a call, if any.
+///
+/// Deliberately narrow. It is looking for the shapes a server hands back when
+/// it has no parser for the model's format — `name(args)`, `name{…}`,
+/// `{"name": "…"}` — and not for a reply that merely mentions a tool while
+/// answering a question about the team.
+fn written_out_call(text: &str) -> Option<&'static str> {
+    for name in delegation::NAMES {
+        for (at, _) in text.match_indices(name) {
+            let before = text[..at].chars().next_back();
+            let after = text[at + name.len()..].trim_start();
+            let called = after.starts_with('(') || after.starts_with('{') || after.starts_with('[');
+            // `{"name": "ensemble_delegate", "arguments": …}`, the other common
+            // way an unparsed call arrives.
+            let quoted_key = before == Some('"') && after.starts_with('"');
+            if called || quoted_key {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// Say so when a reply that looks finished is really a tool call nobody parsed.
+///
+/// This does not change the turn, and deliberately: an empty `tool_calls` is
+/// exactly what a manager with an answer sends, so Ensemble cannot tell the
+/// two apart with enough confidence to act. What it can do is stop the
+/// operator from watching a coordinator answer everything in one step with no
+/// idea why it never delegates. Stderr, like every other provenance line here
+/// — the harness must not learn that any of this happened.
+fn warn_if_a_call_was_written_out(outcome: &TurnOutcome) {
+    let what = if outcome.finish_reason.as_deref() == Some("tool_calls") {
+        "the backend reported finish_reason `tool_calls` and returned none".to_string()
+    } else if let Some(name) = written_out_call(&outcome.text) {
+        format!("its text spells out a call to `{name}`")
+    } else {
+        return;
+    };
+
+    // `outcome.model` is what the endpoint said answered, which is not always
+    // what `manager.model` asks for — and when they differ, the one that
+    // actually served the request is the one worth printing.
+    eprintln!(
+        "ensemble: serve: the manager returned no tool calls, but {what}. The turn ended \
+         after one step and nothing was delegated.\n{}\nBackend '{}', serving model '{}'.",
+        super::PARSER_HINT,
+        outcome.backend,
+        outcome.model
+    );
+}
+
 /// Run one manager turn to the point where the harness has something to do, or
 /// the manager has an answer.
 pub fn run(
@@ -182,17 +243,37 @@ pub fn run(
         }
         None => {
             let mut h = Vec::new();
-            // The configured identity leads; Ensemble's own explanation of the
-            // endpoint follows; the harness's system prompt comes after both,
-            // because it describes an environment, not a role.
+            // The configured identity leads, then the harness's own system turns,
+            // because they describe an environment rather than a role. Ensemble's
+            // explanation of the endpoint goes *last* of the three, and that
+            // position is deliberate: a harness prompt is long, opinionated and
+            // has its own vocabulary for delegation, so a small manager model
+            // reading it last will answer out of it. The rules for this endpoint
+            // are the ones that must still be in view when the first user turn
+            // arrives.
             if let Some(prompt) = ensemble.prompt_of(crate::config::Config::MANAGER) {
                 h.push(Message::system(prompt));
             }
+            let leading_systems = request
+                .messages
+                .iter()
+                .take_while(|m| matches!(m.role, crate::port::Role::System))
+                .count();
+            h.extend(request.messages[..leading_systems].iter().cloned());
             h.push(guidance(ensemble));
-            h.extend(request.messages.iter().cloned());
+            h.extend(request.messages[leading_systems..].iter().cloned());
             h
         }
     };
+
+    if super::logging() {
+        eprintln!(
+            "ensemble: serve: manager sees {} message(s) ({} from the harness, {} restored)",
+            history.len(),
+            request.messages.len(),
+            history.len().saturating_sub(request.messages.len()),
+        );
+    }
 
     let tools = tools_for(ensemble, request);
     let mut usage = Usage::default();
@@ -215,6 +296,11 @@ pub fn run(
         add(&mut usage, outcome.usage);
 
         if outcome.tool_calls.is_empty() {
+            // Only worth saying when there was something to call. With
+            // `tool_choice: none` the manager was asked for prose and gave it.
+            if !tools.is_empty() {
+                warn_if_a_call_was_written_out(&outcome);
+            }
             return Ok(Outcome {
                 text: outcome.text,
                 tool_calls: Vec::new(),
@@ -332,4 +418,46 @@ pub fn run(
         finish_reason: "stop".into(),
         usage,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pythonic_call_written_as_text_is_recognised() {
+        // The shape a server with no parser for this model hands back.
+        let text = "// First, let me get basic model information\n\
+                    ensemble_delegate(role='scout', task='Locate the docs.')";
+        assert_eq!(written_out_call(text), Some("ensemble_delegate"));
+    }
+
+    #[test]
+    fn a_json_call_written_as_text_is_recognised() {
+        let text = r#"<tool_call>{"name": "ensemble_delegate", "arguments": {"role": "coder"}}</tool_call>"#;
+        assert_eq!(written_out_call(text), Some("ensemble_delegate"));
+        assert_eq!(
+            written_out_call(r#"{"name":"ensemble_roles","arguments":{}}"#),
+            Some("ensemble_roles")
+        );
+    }
+
+    #[test]
+    fn whitespace_between_the_name_and_its_arguments_does_not_hide_it() {
+        assert_eq!(
+            written_out_call("ensemble_health ()"),
+            Some("ensemble_health")
+        );
+    }
+
+    #[test]
+    fn merely_naming_a_tool_while_answering_is_not_a_written_out_call() {
+        // The manager explaining itself is not the manager failing to delegate,
+        // and a warning on every such reply would be noise.
+        assert_eq!(
+            written_out_call("I can use ensemble_delegate to hand this to the planner."),
+            None
+        );
+        assert_eq!(written_out_call("The roles are: planner, coder."), None);
+    }
 }

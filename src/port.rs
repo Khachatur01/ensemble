@@ -108,6 +108,29 @@ impl Message {
     }
 }
 
+/// Whether the model is free to answer instead of calling a tool.
+///
+/// `Auto` is what every real request asks for: a manager that has finished has
+/// to be able to simply answer, and forcing a call would turn the end of a turn
+/// into a loop. `Required` exists for one caller, the startup probe in
+/// `serve`, which is not asking what the model would do — it is asking whether
+/// a tool call from this model on this server arrives as one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolChoice {
+    #[default]
+    Auto,
+    Required,
+}
+
+impl ToolChoice {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolChoice::Auto => "auto",
+            ToolChoice::Required => "required",
+        }
+    }
+}
+
 /// One completion request, in the only shape the port understands.
 ///
 /// `tools` is what the *caller* can run, offered to the model. It is empty for
@@ -135,6 +158,8 @@ pub struct Request {
     pub workdir: Option<String>,
     /// Tools the *caller* can run. See the note on this struct.
     pub tools: Vec<ToolDef>,
+    /// Ignored when `tools` is empty: there is nothing to choose from.
+    pub tool_choice: ToolChoice,
 }
 
 impl Request {
@@ -146,6 +171,7 @@ impl Request {
             temperature: None,
             workdir: None,
             tools: Vec::new(),
+            tool_choice: ToolChoice::default(),
         }
     }
 
@@ -386,12 +412,18 @@ pub mod testing {
         Text(String),
         /// Tool calls, with optional leading prose.
         Calls(String, Vec<ToolCall>),
+        /// Text the backend reports as cut off at the token limit. Says
+        /// nothing about what the model would have produced.
+        Truncated(String),
         Fail(String),
     }
 
     impl Scripted {
         pub fn text(s: &str) -> Self {
             Scripted::Text(s.into())
+        }
+        pub fn truncated(s: &str) -> Self {
+            Scripted::Truncated(s.into())
         }
         /// One call to `name` with the given raw JSON arguments.
         pub fn call(id: &str, name: &str, arguments: &str) -> Self {
@@ -496,6 +528,7 @@ pub mod testing {
             let (text, tool_calls, finish) = match scripted {
                 Some(Scripted::Text(t)) => (t, Vec::new(), "stop"),
                 Some(Scripted::Calls(t, calls)) => (t, calls, "tool_calls"),
+                Some(Scripted::Truncated(t)) => (t, Vec::new(), "length"),
                 Some(Scripted::Fail(detail)) => {
                     return Err(Error::Transport {
                         backend: self.name.clone(),

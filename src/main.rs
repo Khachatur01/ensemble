@@ -25,6 +25,9 @@ COMMANDS:
     serve                   Serve the manager over an OpenAI-compatible HTTP
                             API, as the model id 'ensemble/manager'. Point a
                             harness at it; nothing else has to be registered.
+                            Spends one small model call at startup proving the
+                            manager's server really returns tool calls, and
+                            refuses to bind if it does not.
     mcp                     Serve the harness over MCP on stdio. This is what a
                             harness spawns; it is not meant to be run by hand.
     check                   Load and validate the config, then report the team.

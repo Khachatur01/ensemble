@@ -182,9 +182,12 @@ pub fn request_body(request: &Request) -> String {
             })
             .collect();
         body["tools"] = serde_json::Value::Array(tools);
-        // The caller decides whether to call one. Ensemble never forces a tool:
-        // a manager that has finished must be able to simply answer.
-        body["tool_choice"] = serde_json::json!("auto");
+        // `auto` for everything the manager does: a manager that has finished
+        // must be able to simply answer. `required` only for the startup probe,
+        // which asks a question `auto` cannot answer — a model that chose not
+        // to call a tool and a server that dropped the call it made look
+        // identical from here.
+        body["tool_choice"] = serde_json::json!(request.tool_choice.as_str());
     }
     body.to_string()
 }
@@ -816,6 +819,15 @@ mod tests {
             read_tool().parameters
         );
         assert_eq!(v["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn a_probe_asks_for_a_tool_call_rather_than_leaving_it_to_the_model() {
+        let mut req = Request::new("m", vec![Message::user("probe")]);
+        req.tools = vec![read_tool()];
+        req.tool_choice = crate::port::ToolChoice::Required;
+        let v: serde_json::Value = serde_json::from_str(&request_body(&req)).unwrap();
+        assert_eq!(v["tool_choice"], "required");
     }
 
     #[test]

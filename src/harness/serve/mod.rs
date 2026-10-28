@@ -31,7 +31,7 @@ pub mod state;
 pub mod wire;
 
 use crate::harness::http;
-use crate::router::Ensemble;
+use crate::router::{Ensemble, ToolCallProbe};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::mpsc::{RecvTimeoutError, channel};
@@ -119,7 +119,137 @@ pub fn preflight(ensemble: &Ensemble) -> Result<(), String> {
     ))
 }
 
+/// What to look at when a server hands a model's tool call back as text.
+///
+/// One copy, because two places report this fault — `probe` at startup and
+/// `manager.rs` mid-turn — and an operator who read one version and then the
+/// other should not have to work out whether they mean the same thing.
+pub(crate) const PARSER_HINT: &str = "\
+The model wrote a tool call and the server returned it as ordinary text, so nothing put it in \
+`tool_calls`. That is server-side configuration, not something Ensemble can work around:\n  \
+llama-server  start it with --jinja, and check the GGUF's chat template has a tools branch\n  \
+vLLM          --enable-auto-tool-choice --tool-call-parser <family> \
+(hermes, llama3_json, qwen3_coder, pythonic, …)\n  \
+Ollama        the model's template must reference .Tools; most imported GGUFs do not";
+
+/// Trim a model's reply down to something that fits in one log line, marked so
+/// nobody debugs a sentence that was never complete.
+pub(crate) fn clip(s: &str, max: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    format!("{}… [truncated]", s.chars().take(max).collect::<String>())
+}
+
+/// Whether to narrate each request on stderr. `ENSEMBLE_SERVE_LOG` set to
+/// anything but empty, `0` or `no`.
+///
+/// This exists for one question, and it is the one that cannot be answered
+/// from inside the process: **did the harness send the conversation back?**
+/// Ensemble keeps no transcript of its own between requests — the harness owns
+/// it, and `state.rs` carries only the turns the harness was never shown. So a
+/// manager that has forgotten the last exchange is either a client posting
+/// just the latest turn or a model server dropping the front of the prompt,
+/// and from here those two look identical. The line below tells them apart.
+///
+/// Roles and sizes only, never content: this is a transcript of a user's work.
+pub(crate) fn logging() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("ENSEMBLE_SERVE_LOG")
+            .map(|v| {
+                let v = v.trim();
+                !(v.is_empty() || v == "0" || v.eq_ignore_ascii_case("no"))
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// `system:4210 user:5 assistant:118 tool:901` — the shape of a transcript.
+fn shape(messages: &[crate::port::Message]) -> String {
+    messages
+        .iter()
+        .map(|m| {
+            let calls = if m.tool_calls.is_empty() {
+                String::new()
+            } else {
+                format!("+{}calls", m.tool_calls.len())
+            };
+            format!("{}:{}{calls}", m.role.as_str(), m.content.len())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Prove the manager can really return a tool call, before anything depends on
+/// it.
+///
+/// [`preflight`] asks the adapter what its *type* can do, and for
+/// `openai-compatible-api` the answer is always yes. That is the right answer
+/// to the question it is asked and the wrong one for the fault this catches: a
+/// server with no tool-call parser for the model it is serving answers 200,
+/// with the manager's delegation sitting in `content` as prose. The loop in
+/// `manager.rs` sees an empty `tool_calls`, which is exactly what a manager
+/// with a finished answer sends, so the turn ends after one step looking
+/// entirely normal and nothing is ever delegated.
+///
+/// Costs one small model call at startup. Cheaper than the alternative, which
+/// is a coordinator that silently never coordinates.
+///
+/// A probe that cannot reach the endpoint is **inconclusive**, not negative:
+/// the model server may not be up yet, and refusing to bind for that would
+/// make `serve` depend on a start-up order it has no business caring about.
+/// `ensemble health` is where unreachability belongs.
+pub fn probe(ensemble: &Ensemble) -> Result<(), String> {
+    let role = crate::config::Config::MANAGER;
+    let (backend, model) = ensemble.route_of(role).map_err(|e| format!("serve: {e}"))?;
+    let (backend, model) = (backend.to_string(), model.to_string());
+
+    match ensemble.probe_tool_calling(role) {
+        Ok(ToolCallProbe::Works) => Ok(()),
+
+        // Cut off before it could finish. Says nothing either way.
+        Ok(ToolCallProbe::NotParsed { finish_reason, .. })
+            if finish_reason.as_deref() == Some("length") =>
+        {
+            eprintln!(
+                "ensemble: serve: the tool-calling probe was cut off at the token limit, so \
+                 whether the manager can call tools is still unknown. Serving anyway."
+            );
+            Ok(())
+        }
+
+        Ok(ToolCallProbe::NotParsed { text, .. }) => Err(format!(
+            "serve: the manager (backend '{backend}', model '{model}') was required to call a \
+             tool and did not return one.\n{PARSER_HINT}\nWhat came back instead: {}\n\
+             Fix the server, or point `manager.model` at a model it can parse tool calls for. \
+             `ensemble mcp` does not need any of this and still works.",
+            if text.trim().is_empty() {
+                "(nothing)".to_string()
+            } else {
+                clip(&text, 300)
+            }
+        )),
+
+        Err(e) => {
+            eprintln!(
+                "ensemble: serve: the tool-calling probe could not reach the manager's \
+                 backend, so whether it can call tools is still unknown. Serving anyway; try \
+                 `ensemble health`. ({e})"
+            );
+            Ok(())
+        }
+    }
+}
+
 /// Why `serve` is or is not available, for `ensemble check`.
+///
+/// [`preflight`] only, never [`probe`]: `check` loads a file and reports what
+/// is in it, and a command that quietly spends a model call is not one an
+/// operator can run freely. "available" here means the config permits it, not
+/// that the probe has passed.
 pub fn availability(ensemble: &Ensemble) -> String {
     match preflight(ensemble) {
         Ok(()) => format!("available ({MODEL_ID})"),
@@ -190,6 +320,16 @@ impl ApiHandler {
             Ok(r) => r,
             Err(e) => return Self::error(&e),
         };
+
+        if logging() {
+            eprintln!(
+                "ensemble: serve: <- {} message(s) [{}], {} harness tool(s), stream={}",
+                request.messages.len(),
+                shape(&request.messages),
+                request.tools.len(),
+                request.stream
+            );
+        }
 
         if request.stream {
             self.chat_streaming(request)
@@ -383,6 +523,10 @@ pub fn serve(ensemble: Arc<Ensemble>, options: &Options) -> Result<(), String> {
             options.host
         ));
     }
+
+    // After the cheap refusals and before the port is bound: a client that can
+    // connect should be talking to a manager that works.
+    probe(&ensemble)?;
 
     let addr = resolve_addr(&options.host, options.port)?;
     let mut cfg = http::ServerConfig::new(addr);
@@ -706,7 +850,7 @@ roles:
     }
 
     #[test]
-    fn the_manager_prompt_leads_and_the_harness_prompt_follows_the_guidance() {
+    fn the_manager_prompt_leads_and_the_guidance_is_the_last_system_turn() {
         let f = harness(vec![Scripted::text("ok")], "x");
         f.handler.handle(&post(
             "/v1/chat/completions",
@@ -724,8 +868,8 @@ roles:
             .collect();
         assert_eq!(systems.len(), 3);
         assert!(systems[0].starts_with("You are the manager."));
-        assert!(systems[1].contains("ensemble_delegate"), "{}", systems[1]);
-        assert_eq!(systems[2], "HARNESS RULES");
+        assert_eq!(systems[1], "HARNESS RULES");
+        assert!(systems[2].contains("ensemble_delegate"), "{}", systems[2]);
     }
 
     #[test]
@@ -738,6 +882,7 @@ roles:
         let sent = f.manager.last().unwrap();
         let guidance = &sent.messages[1].content;
         assert!(guidance.contains("planner"), "{guidance}");
+        assert!(guidance.contains("ensemble_roles"), "{guidance}");
         assert!(guidance.contains("coder"), "{guidance}");
         assert!(
             guidance.contains("Turns a goal into an ordered plan."),
@@ -1153,6 +1298,57 @@ roles:
         assert!(!ids.contains(&"call_b"), "{ids:?}");
     }
 
+    #[test]
+    fn a_plain_conversation_reaches_the_manager_with_every_earlier_turn_intact() {
+        // The ordinary chat case, where nothing is delegated and no tool is
+        // ever called — so `state.rs` stores nothing and the harness's own
+        // messages are the whole record. If a follow-up ever arrives at the
+        // model stripped of what came before, the manager answers a third turn
+        // as if it were the first, and the fault is here rather than in the
+        // model.
+        let f = harness(
+            vec![Scripted::text("hello back"), Scripted::text("still here")],
+            "x",
+        );
+
+        body_of(f.handler.handle(&post(
+            "/v1/chat/completions",
+            chat(json!([{"role":"system","content":"you are in a harness"},
+                        {"role":"user","content":"hello"}])),
+        )));
+
+        let (status, v) = body_of(f.handler.handle(&post(
+            "/v1/chat/completions",
+            chat(json!([{"role":"system","content":"you are in a harness"},
+                        {"role":"user","content":"hello"},
+                        {"role":"assistant","content":"hello back"},
+                        {"role":"user","content":"yes"}])),
+        )));
+        assert_eq!(status, 200);
+        assert_eq!(v["choices"][0]["message"]["content"], "still here");
+
+        let sent = f.manager.last().unwrap();
+        let said: Vec<(&str, &str)> = sent
+            .messages
+            .iter()
+            .map(|m| (m.role.as_str(), m.content.as_str()))
+            .collect();
+        for turn in [
+            ("user", "hello"),
+            ("assistant", "hello back"),
+            ("user", "yes"),
+        ] {
+            assert!(said.contains(&turn), "{turn:?} is missing from {said:?}");
+        }
+        // Order matters as much as presence: a transcript the model reads
+        // backwards is no transcript.
+        let order: Vec<usize> = ["hello", "hello back", "yes"]
+            .iter()
+            .map(|t| said.iter().position(|(_, c)| c == t).unwrap())
+            .collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{said:?}");
+    }
+
     // --- streaming -------------------------------------------------------
 
     #[test]
@@ -1376,6 +1572,70 @@ roles:
         assert!(err.contains("mgr"), "{err}");
         assert!(err.contains("ensemble mcp"), "{err}");
         assert!(availability(&ensemble).starts_with("unavailable"));
+    }
+
+    // --- the startup probe -----------------------------------------------
+
+    #[test]
+    fn the_probe_passes_when_the_manager_really_returns_a_tool_call() {
+        let f = harness(
+            vec![Scripted::call("p1", crate::router::PROBE_TOOL, "{}")],
+            "x",
+        );
+        assert!(probe(&f.handler.ensemble).is_ok());
+        assert_eq!(f.manager.call_count(), 1);
+    }
+
+    #[test]
+    fn the_probe_refuses_a_manager_whose_server_hands_the_call_back_as_text() {
+        // Declared capable, actually incapable: the exact gap `preflight`
+        // cannot see, and the reason a turn silently ends after one step.
+        let f = harness(
+            vec![Scripted::text(
+                "ensemble_delegate(role='scout', task='look')",
+            )],
+            "x",
+        );
+        assert!(preflight(&f.handler.ensemble).is_ok(), "the type says yes");
+
+        let err = probe(&f.handler.ensemble).unwrap_err();
+        assert!(
+            err.contains("mgr") && err.contains("manager-model"),
+            "{err}"
+        );
+        assert!(err.contains("--jinja"), "{err}");
+        assert!(err.contains("--tool-call-parser"), "{err}");
+        assert!(err.contains(".Tools"), "{err}");
+        // And it quotes what actually came back, which is the fastest way to
+        // recognise which format went unparsed.
+        assert!(err.contains("ensemble_delegate(role="), "{err}");
+    }
+
+    #[test]
+    fn an_unreachable_backend_does_not_stop_the_server_from_binding() {
+        // The model server may simply not be up yet. That is `ensemble
+        // health`'s business, not a reason to refuse a port.
+        let f = build(
+            Arc::new(FakePort::failing("mgr", "Connection refused")),
+            Arc::new(FakePort::ok("pool", "x")),
+            Options::default(),
+        );
+        assert!(probe(&f.handler.ensemble).is_ok());
+    }
+
+    #[test]
+    fn a_reply_cut_off_at_the_token_limit_is_inconclusive_rather_than_fatal() {
+        let f = harness(vec![Scripted::truncated("thinking about it")], "x");
+        assert!(probe(&f.handler.ensemble).is_ok());
+    }
+
+    #[test]
+    fn check_reports_availability_without_spending_a_model_call() {
+        // `ensemble check` loads a file and says what is in it. A command that
+        // quietly bills the user is not one that can be run freely.
+        let f = harness(vec![], "x");
+        assert!(availability(&f.handler.ensemble).starts_with("available"));
+        assert_eq!(f.manager.call_count(), 0);
     }
 
     #[test]
