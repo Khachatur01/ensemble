@@ -9,7 +9,9 @@
 //! covered by a test that neither binds a port nor needs a model server.
 
 use crate::config::{Backend, BackendSettings};
-use crate::port::{Capabilities, Error, ModelPort, Request, Response, Usage};
+use crate::port::{
+    Capabilities, Error, Message, ModelPort, Request, Response, Role, ToolCall, Usage,
+};
 use std::time::Duration;
 
 /// A completed HTTP exchange. Status plus body is all this adapter needs.
@@ -108,17 +110,50 @@ impl Http for UreqHttp {
     }
 }
 
+/// One message, in the shape `/chat/completions` wants it.
+///
+/// `content` is `null` rather than `""` beside `tool_calls`: several local
+/// servers reject the empty string there, and the two mean different things.
+fn message_json(m: &Message) -> serde_json::Value {
+    match m.role {
+        Role::Tool => serde_json::json!({
+            "role": "tool",
+            "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
+            "content": m.content,
+        }),
+        Role::Assistant if !m.tool_calls.is_empty() => {
+            let calls: Vec<serde_json::Value> = m
+                .tool_calls
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "id": c.id,
+                        "type": "function",
+                        "function": { "name": c.name, "arguments": c.arguments },
+                    })
+                })
+                .collect();
+            let content = if m.content.trim().is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(m.content.clone())
+            };
+            serde_json::json!({ "role": "assistant", "content": content, "tool_calls": calls })
+        }
+        _ => serde_json::json!({ "role": m.role.as_str(), "content": m.content }),
+    }
+}
+
 /// Build the `/chat/completions` request body.
 ///
-/// `stream` is never set. Ensemble returns a delegated role's work as one
-/// result, so there is nothing to stream to, and asking for SSE would only mean
-/// reassembling it here.
+/// `stream` is never set. A delegated role's work comes back as one result, and
+/// `ensemble serve` synthesises its own SSE from a completed response, so
+/// asking for SSE here would only mean reassembling it twice.
+///
+/// `tools` is sent only when the caller offered some. A request that offers
+/// none must look exactly as it did before this field existed.
 pub fn request_body(request: &Request) -> String {
-    let messages: Vec<serde_json::Value> = request
-        .messages
-        .iter()
-        .map(|m| serde_json::json!({ "role": m.role.as_str(), "content": m.content }))
-        .collect();
+    let messages: Vec<serde_json::Value> = request.messages.iter().map(message_json).collect();
 
     let mut body = serde_json::json!({
         "model": request.model,
@@ -131,11 +166,88 @@ pub fn request_body(request: &Request) -> String {
     if let Some(t) = request.temperature {
         body["temperature"] = serde_json::json!(t);
     }
+    if request.offers_tools() {
+        let tools: Vec<serde_json::Value> = request
+            .tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    },
+                })
+            })
+            .collect();
+        body["tools"] = serde_json::Value::Array(tools);
+        // The caller decides whether to call one. Ensemble never forces a tool:
+        // a manager that has finished must be able to simply answer.
+        body["tool_choice"] = serde_json::json!("auto");
+    }
     body.to_string()
 }
 
-/// Pull the text, model and usage out of a chat-completion response.
-pub fn parse_completion(body: &str, backend: &str) -> Result<Response, Error> {
+/// A tool result the server cannot pair to a call is a request that will come
+/// back a 400 from somewhere further away. Catch it here, where the message
+/// index is still known to the caller.
+fn check_serviceable(backend: &str, request: &Request) -> Result<(), Error> {
+    for (i, m) in request.messages.iter().enumerate() {
+        if m.role == Role::Tool && m.tool_call_id.as_deref().unwrap_or("").trim().is_empty() {
+            return Err(Error::Unsupported {
+                backend: backend.into(),
+                detail: format!(
+                    "messages[{i}] is a tool result with no tool_call_id; \
+                     there is no call for the server to pair it with"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The tool calls on `choices[0].message`, in the order the model wrote them.
+fn parse_tool_calls(message: Option<&serde_json::Value>) -> Vec<ToolCall> {
+    message
+        .and_then(|m| m.get("tool_calls"))
+        .and_then(|t| t.as_array())
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(|c| {
+                    let f = c.get("function")?;
+                    let name = f.get("name").and_then(|n| n.as_str())?.to_string();
+                    // Arguments are a JSON *string* by the spec, but some
+                    // servers emit the object. Re-serialising beats rejecting:
+                    // the caller only ever needs to hand it back.
+                    let arguments = match f.get("arguments") {
+                        Some(serde_json::Value::String(s)) => s.clone(),
+                        Some(other) => other.to_string(),
+                        None => "{}".to_string(),
+                    };
+                    Some(ToolCall {
+                        id: c
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        name,
+                        arguments,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Pull the text, tool calls, model and usage out of a chat-completion response.
+///
+/// `tools_offered` decides what a reply of nothing but tool calls means. If the
+/// caller offered none, the model asked for something this port cannot run and
+/// that is an error (see below). If it did offer some, the tool calls *are* the
+/// answer and are returned as such.
+pub fn parse_completion(body: &str, backend: &str, tools_offered: bool) -> Result<Response, Error> {
     let v: serde_json::Value = serde_json::from_str(body.trim()).map_err(|e| Error::Protocol {
         backend: backend.into(),
         detail: format!("not JSON ({e}): {body}"),
@@ -178,32 +290,30 @@ pub fn parse_completion(body: &str, backend: &str) -> Result<Response, Error> {
         .and_then(|f| f.as_str())
         .map(str::to_string);
 
-    // A model that answered with only `tool_calls` and no content has not done
-    // the delegated work — it asked for a tool this port cannot run. Say that,
-    // rather than returning an empty string that reads as "it had nothing to
-    // say". See the `tools` note on `port::Request`.
-    if text.trim().is_empty() {
-        let wanted_tools = message
-            .and_then(|m| m.get("tool_calls"))
-            .and_then(|t| t.as_array())
-            .is_some_and(|a| !a.is_empty());
-        if wanted_tools {
-            return Err(Error::Unsupported {
-                backend: backend.into(),
-                detail: "the model replied with tool calls instead of an answer. \
-                         Ensemble delegates whole tasks and does not execute the \
-                         harness's tools on the model's behalf."
-                    .into(),
-            });
-        }
-        if finish_reason.as_deref() == Some("length") {
-            return Err(Error::Protocol {
-                backend: backend.into(),
-                detail: "the reply was cut off at the token limit before any content \
-                         was produced; raise max_tokens"
-                    .into(),
-            });
-        }
+    let tool_calls = parse_tool_calls(message);
+
+    // A model that answered a *toolless* request with only `tool_calls` has not
+    // done the delegated work — it asked for a tool nobody offered it. Say
+    // that, rather than returning an empty string that reads as "it had nothing
+    // to say". See the `tools` note on `port::Request`.
+    if !tool_calls.is_empty() && !tools_offered {
+        return Err(Error::Unsupported {
+            backend: backend.into(),
+            detail: "the model replied with tool calls instead of an answer. \
+                     Ensemble delegates whole tasks and does not execute the \
+                     harness's tools on the model's behalf."
+                .into(),
+        });
+    }
+
+    if text.trim().is_empty() && tool_calls.is_empty() && finish_reason.as_deref() == Some("length")
+    {
+        return Err(Error::Protocol {
+            backend: backend.into(),
+            detail: "the reply was cut off at the token limit before any content \
+                     was produced; raise max_tokens"
+                .into(),
+        });
     }
 
     let usage = v.get("usage");
@@ -216,6 +326,7 @@ pub fn parse_completion(body: &str, backend: &str) -> Result<Response, Error> {
 
     Ok(Response {
         text,
+        tool_calls,
         model: v
             .get("model")
             .and_then(|m| m.as_str())
@@ -319,6 +430,8 @@ impl ModelPort for OpenAiAdapter {
     }
 
     fn complete(&self, request: &Request) -> Result<Response, Error> {
+        check_serviceable(&self.name, request)?;
+
         let url = self.endpoint("chat/completions");
         let body = request_body(request);
 
@@ -330,7 +443,7 @@ impl ModelPort for OpenAiAdapter {
         if !(200..300).contains(&resp.status) {
             return Err(api_error(&self.name, resp.status, &resp.body));
         }
-        parse_completion(&resp.body, &self.name)
+        parse_completion(&resp.body, &self.name, request.offers_tools())
     }
 
     fn health(&self) -> Result<(), Error> {
@@ -373,7 +486,7 @@ fn classify_transport(backend: &str, detail: String, timeout: Duration) -> Error
 mod tests {
     use super::*;
     use crate::config::{Backend, BackendSettings};
-    use crate::port::Message;
+    use crate::port::{Message, ToolDef};
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -507,9 +620,10 @@ mod tests {
         assert_eq!(v["max_tokens"], 256);
         assert_eq!(v["messages"][0]["role"], "system");
         assert_eq!(v["messages"][1]["content"], "go");
-        // No tools array: the port does not pretend to offer tool calling it
-        // cannot route back.
+        // This request offered no tools, so none are sent and the body looks
+        // exactly as it did before the field existed.
         assert!(v.get("tools").is_none());
+        assert!(v.get("tool_choice").is_none());
     }
 
     #[test]
@@ -523,8 +637,9 @@ mod tests {
 
     #[test]
     fn a_good_completion_is_parsed_with_its_usage() {
-        let r = parse_completion(GOOD, "b").unwrap();
+        let r = parse_completion(GOOD, "b", false).unwrap();
         assert_eq!(r.text, "done");
+        assert!(r.tool_calls.is_empty(), "none were offered, none come back");
         assert_eq!(r.model, "qwen3-coder");
         assert_eq!(r.usage.prompt_tokens, 10);
         assert_eq!(r.usage.total(), 13);
@@ -629,7 +744,7 @@ mod tests {
         let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":null,
             "tool_calls":[{"id":"c1","type":"function","function":{"name":"read","arguments":"{}"}}]},
             "finish_reason":"tool_calls"}]}"#;
-        let err = parse_completion(body, "b").unwrap_err();
+        let err = parse_completion(body, "b", false).unwrap_err();
         assert!(matches!(err, Error::Unsupported { .. }), "{err}");
         assert!(err.to_string().contains("delegates whole tasks"), "{err}");
     }
@@ -638,7 +753,7 @@ mod tests {
     fn an_empty_reply_cut_off_at_the_token_limit_says_so() {
         let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":""},
             "finish_reason":"length"}]}"#;
-        let err = parse_completion(body, "b").unwrap_err();
+        let err = parse_completion(body, "b", false).unwrap_err();
         assert!(err.to_string().contains("max_tokens"), "{err}");
     }
 
@@ -663,5 +778,131 @@ mod tests {
     fn this_backend_declares_tool_calling() {
         let a = adapter(FakeHttp::ok(GOOD), None);
         assert!(a.capabilities().tool_calling);
+    }
+
+    // --- tool calling ---------------------------------------------------
+
+    fn read_tool() -> ToolDef {
+        ToolDef {
+            name: "read".into(),
+            description: "Read a file.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "filePath": { "type": "string" } },
+                "required": ["filePath"]
+            }),
+        }
+    }
+
+    const CALLED: &str = r#"{
+      "id":"chatcmpl-2","object":"chat.completion","model":"qwen3-coder",
+      "choices":[{"index":0,"message":{"role":"assistant","content":null,
+        "tool_calls":[{"id":"call_abc","type":"function",
+          "function":{"name":"read","arguments":"{\"filePath\": \"src/main.rs\"}"}}]},
+        "finish_reason":"tool_calls"}],
+      "usage":{"prompt_tokens":5,"completion_tokens":7}
+    }"#;
+
+    #[test]
+    fn tools_are_sent_only_when_the_caller_offers_them() {
+        let mut req = Request::new("m", vec![Message::user("go")]);
+        req.tools = vec![read_tool()];
+        let v: serde_json::Value = serde_json::from_str(&request_body(&req)).unwrap();
+        assert_eq!(v["tools"][0]["type"], "function");
+        assert_eq!(v["tools"][0]["function"]["name"], "read");
+        // The schema travels verbatim rather than being re-modelled.
+        assert_eq!(
+            v["tools"][0]["function"]["parameters"],
+            read_tool().parameters
+        );
+        assert_eq!(v["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn an_assistant_turn_with_tool_calls_is_sent_with_a_null_content() {
+        // Not "": several local servers reject the empty string beside
+        // tool_calls, and the two do not mean the same thing.
+        let req = Request::new(
+            "m",
+            vec![Message::assistant_calling(
+                "",
+                vec![ToolCall {
+                    id: "call_abc".into(),
+                    name: "read".into(),
+                    arguments: "{\"filePath\":\"x\"}".into(),
+                }],
+            )],
+        );
+        let v: serde_json::Value = serde_json::from_str(&request_body(&req)).unwrap();
+        assert!(v["messages"][0]["content"].is_null());
+        assert_eq!(v["messages"][0]["tool_calls"][0]["id"], "call_abc");
+        assert_eq!(v["messages"][0]["tool_calls"][0]["type"], "function");
+        assert_eq!(
+            v["messages"][0]["tool_calls"][0]["function"]["arguments"],
+            "{\"filePath\":\"x\"}"
+        );
+    }
+
+    #[test]
+    fn a_tool_result_turn_carries_the_id_it_answers() {
+        let req = Request::new("m", vec![Message::tool_result("call_abc", "ok")]);
+        let v: serde_json::Value = serde_json::from_str(&request_body(&req)).unwrap();
+        assert_eq!(v["messages"][0]["role"], "tool");
+        assert_eq!(v["messages"][0]["tool_call_id"], "call_abc");
+        assert_eq!(v["messages"][0]["content"], "ok");
+    }
+
+    #[test]
+    fn a_tool_result_with_no_id_is_refused_before_it_is_sent() {
+        let a = adapter(FakeHttp::ok(GOOD), None);
+        let mut m = Message::tool_result("call_abc", "ok");
+        m.tool_call_id = None;
+        let err = a.complete(&Request::new("m", vec![m])).unwrap_err();
+        assert!(matches!(err, Error::Unsupported { .. }), "{err}");
+        assert!(err.to_string().contains("tool_call_id"), "{err}");
+    }
+
+    #[test]
+    fn tool_calls_come_back_when_tools_were_offered() {
+        let r = parse_completion(CALLED, "b", true).unwrap();
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].id, "call_abc");
+        assert_eq!(r.tool_calls[0].name, "read");
+        // Byte for byte: the caller hands this back and pairs on the id.
+        assert_eq!(r.tool_calls[0].arguments, "{\"filePath\": \"src/main.rs\"}");
+        assert_eq!(r.finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(r.text, "");
+    }
+
+    #[test]
+    fn the_same_reply_is_an_error_when_no_tools_were_offered() {
+        // The delegation path is unchanged by the serve path existing.
+        let err = parse_completion(CALLED, "b", false).unwrap_err();
+        assert!(matches!(err, Error::Unsupported { .. }), "{err}");
+        assert!(err.to_string().contains("delegates whole tasks"), "{err}");
+    }
+
+    #[test]
+    fn arguments_emitted_as_an_object_are_carried_rather_than_rejected() {
+        // Out of spec, and several local servers do it anyway. The caller only
+        // ever hands the string back, so re-serialising loses nothing.
+        let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":null,
+            "tool_calls":[{"id":"c1","type":"function",
+              "function":{"name":"read","arguments":{"filePath":"x"}}}]},
+            "finish_reason":"tool_calls"}]}"#;
+        let r = parse_completion(body, "b", true).unwrap();
+        assert_eq!(r.tool_calls[0].arguments, r#"{"filePath":"x"}"#);
+    }
+
+    #[test]
+    fn a_completion_with_both_content_and_tool_calls_keeps_both() {
+        let body = r#"{"choices":[{"index":0,"message":{"role":"assistant",
+            "content":"Reading it now.",
+            "tool_calls":[{"id":"c1","type":"function",
+              "function":{"name":"read","arguments":"{}"}}]},
+            "finish_reason":"tool_calls"}]}"#;
+        let r = parse_completion(body, "b", true).unwrap();
+        assert_eq!(r.text, "Reading it now.");
+        assert_eq!(r.tool_calls.len(), 1);
     }
 }

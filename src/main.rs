@@ -1,15 +1,19 @@
 //! The `ensemble` binary.
 //!
-//! `ensemble mcp` is what a harness spawns; everything else is for the person
-//! setting it up — validating the config, checking the backends are reachable,
-//! and sending one task to one role without a harness in the way.
+//! `ensemble serve` is the one a harness points at: it puts the manager behind
+//! an OpenAI-compatible URL so a tool like OpenCode can select
+//! `ensemble/manager` and nothing else has to be configured. `ensemble mcp` is
+//! the older surface, spawned by a harness that prefers it. Everything else is
+//! for the person setting it up — validating the config, checking the backends
+//! are reachable, and sending one task to one role with no harness in the way.
 
 use ensemble::config::{self, Config, SystemEnv};
-use ensemble::harness::mcp;
+use ensemble::harness::{mcp, serve};
 use ensemble::router::Ensemble;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 const USAGE: &str = "\
 ensemble — one interface for several models, delegating work between them
@@ -18,6 +22,9 @@ USAGE:
     ensemble <COMMAND> [OPTIONS]
 
 COMMANDS:
+    serve                   Serve the manager over an OpenAI-compatible HTTP
+                            API, as the model id 'ensemble/manager'. Point a
+                            harness at it; nothing else has to be registered.
     mcp                     Serve the harness over MCP on stdio. This is what a
                             harness spawns; it is not meant to be run by hand.
     check                   Load and validate the config, then report the team.
@@ -34,6 +41,16 @@ OPTIONS:
         --context <TEXT>    Extra context for `run`.
     -h, --help              This.
     -V, --version           Print the version.
+
+SERVE OPTIONS:
+        --host <ADDR>       Address to bind. Default: 127.0.0.1. A non-loopback
+                            address requires --api-key-env.
+        --port <PORT>       Port to bind. Default: 8787. 0 picks a free one.
+        --api-key-env <VAR> Name of the environment variable holding the bearer
+                            token clients must present. The token itself is
+                            never written on the command line or logged.
+        --max-steps <N>     How many times the manager may be asked within one
+                            request before it has to answer. Default: 8.
 
 ENVIRONMENT:
     Backends name the variables they read; `ensemble check` lists them. API keys
@@ -56,6 +73,10 @@ struct Args {
     config: Option<PathBuf>,
     dir: Option<PathBuf>,
     context: Option<String>,
+    host: Option<String>,
+    port: Option<u16>,
+    api_key_env: Option<String>,
+    max_steps: Option<u32>,
 }
 
 fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
@@ -64,6 +85,10 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
     let mut config = None;
     let mut dir = None;
     let mut context = None;
+    let mut host = None;
+    let mut port = None;
+    let mut api_key_env = None;
+    let mut max_steps = None;
 
     let mut it = argv.into_iter();
     while let Some(arg) = it.next() {
@@ -82,6 +107,25 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             "-c" | "--config" => config = Some(PathBuf::from(value("--config")?)),
             "-d" | "--dir" => dir = Some(PathBuf::from(value("--dir")?)),
             "--context" => context = Some(value("--context")?),
+            "--host" => host = Some(value("--host")?),
+            "--port" => {
+                let raw = value("--port")?;
+                port = Some(
+                    raw.parse()
+                        .map_err(|_| format!("--port {raw}: not a port number"))?,
+                );
+            }
+            "--api-key-env" => api_key_env = Some(value("--api-key-env")?),
+            "--max-steps" => {
+                let raw = value("--max-steps")?;
+                let n: u32 = raw
+                    .parse()
+                    .map_err(|_| format!("--max-steps {raw}: not a number"))?;
+                if n == 0 {
+                    return Err("--max-steps must be at least 1".into());
+                }
+                max_steps = Some(n);
+            }
             other if other.starts_with('-') && command.is_none() => {
                 return Err(format!("unknown option '{other}'. Try --help."));
             }
@@ -101,6 +145,10 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             config,
             dir,
             context,
+            host,
+            port,
+            api_key_env,
+            max_steps,
         })),
     }
 }
@@ -132,8 +180,9 @@ fn run() -> Result<ExitCode, String> {
     let config = config::load(&config_path, &SystemEnv).map_err(|e| e.to_string())?;
 
     match args.command.as_str() {
+        "serve" => cmd_serve(config, dir, &args),
         "mcp" => cmd_mcp(config, dir),
-        "check" => cmd_check(config),
+        "check" => cmd_check(config, dir),
         "roles" => cmd_roles(config, dir),
         "health" => cmd_health(config, dir),
         "run" => cmd_run(config, dir, &args),
@@ -160,7 +209,40 @@ fn cmd_mcp(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_check(config: Config) -> Result<ExitCode, String> {
+/// Serve the manager over HTTP.
+///
+/// The project directory is settled here, once, from `--dir` — never from a
+/// request field and never from anything a model wrote. One workspace per
+/// server instance; run a second server for a second checkout.
+fn cmd_serve(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String> {
+    // The flag names the variable; the value is read from the environment, so
+    // the token never appears in a command line, a shell history or a log.
+    let api_key = match &args.api_key_env {
+        None => None,
+        Some(var) => match std::env::var(var).ok().filter(|v| !v.trim().is_empty()) {
+            Some(token) => Some(token),
+            None => {
+                return Err(format!(
+                    "serve: --api-key-env names ${var}, but it is unset or empty. \
+                     Export it, or drop the flag and bind loopback only."
+                ));
+            }
+        },
+    };
+
+    let options = serve::Options {
+        host: args.host.clone().unwrap_or_else(|| "127.0.0.1".into()),
+        port: args.port.unwrap_or(serve::DEFAULT_PORT),
+        api_key,
+        max_steps: args.max_steps.unwrap_or(serve::manager::DEFAULT_MAX_STEPS),
+    };
+
+    let ensemble = Arc::new(build(config, dir)?);
+    serve::serve(ensemble, &options)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_check(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
     // Reaching here means the config already loaded and validated; `load`
     // returns an error otherwise.
     println!(
@@ -212,6 +294,14 @@ fn cmd_check(config: Config) -> Result<ExitCode, String> {
             ""
         };
         println!("  {role}{marker}  ->  {} / {}", a.backend, a.model);
+    }
+
+    // Whether the HTTP surface can run at all is a property of the manager's
+    // backend, and finding that out should not require starting a server.
+    println!();
+    match Ensemble::new(config, Some(dir)) {
+        Ok(ensemble) => println!("serve: {}", serve::availability(&ensemble)),
+        Err(e) => println!("serve: unavailable — {e}"),
     }
     Ok(ExitCode::SUCCESS)
 }

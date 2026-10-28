@@ -8,10 +8,42 @@
 //! differently depending on which one answered.
 
 use crate::config::{Assignment, Config};
-use crate::port::{Error, Message, ModelPort, Request, Response};
+use crate::port::{
+    Capabilities, Error, Message, ModelPort, Request, Response, ToolCall, ToolDef, Usage,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// One model call for a role, with the caller's own conversation.
+///
+/// This is the counterpart to [`Ensemble::delegate`]. `delegate` assembles a
+/// conversation from a task and some context, because the caller has a job and
+/// no transcript. `Turn` is for the opposite case: `ensemble serve`, where a
+/// harness owns the transcript and Ensemble must send it as it stands rather
+/// than rewriting it.
+///
+/// Neither names a backend or a model. The role still decides that.
+#[derive(Debug, Clone, Default)]
+pub struct Turn {
+    pub messages: Vec<Message>,
+    /// Tools the *caller* will run. See the note on `port::Request`.
+    pub tools: Vec<ToolDef>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+}
+
+/// What one [`Turn`] produced.
+#[derive(Debug, Clone)]
+pub struct TurnOutcome {
+    pub role: String,
+    pub backend: String,
+    pub model: String,
+    pub text: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub usage: Usage,
+    pub finish_reason: Option<String>,
+}
 
 /// What a delegation produced, with enough provenance to audit it.
 ///
@@ -181,6 +213,59 @@ impl Ensemble {
             prompt_tokens: response.usage.prompt_tokens,
             completion_tokens: response.usage.completion_tokens,
         })
+    }
+
+    /// Send one turn to a role and return what the model said, tool calls and
+    /// all. Nothing is executed here; running a tool is the caller's business.
+    ///
+    /// A role whose backend cannot drive a caller-supplied tool schema refuses
+    /// the request inside its own adapter, naming the backend and the fix. That
+    /// check is not duplicated here: an adapter is the only thing that knows
+    /// what it can do, and two copies of a rule is one copy too many.
+    pub fn turn(&self, role: &str, turn: &Turn) -> Result<TurnOutcome, RouteError> {
+        let (assignment, port) = self.resolve(role)?;
+
+        let mut request = Request::new(assignment.model.clone(), turn.messages.clone());
+        request.tools = turn.tools.clone();
+        request.max_tokens = turn.max_tokens;
+        request.temperature = turn.temperature;
+        request.workdir = self.workdir.as_ref().map(|p| p.display().to_string());
+
+        let response = port.complete(&request).map_err(RouteError::Backend)?;
+
+        Ok(TurnOutcome {
+            role: assignment.role.clone(),
+            backend: assignment.backend.clone(),
+            model: response.model,
+            text: response.text,
+            tool_calls: response.tool_calls,
+            usage: response.usage,
+            finish_reason: response.finish_reason,
+        })
+    }
+
+    /// What the backend behind a role can do. Declared by the adapter, never
+    /// inferred. `ensemble serve` reads this before it binds.
+    pub fn capabilities_of(&self, role: &str) -> Result<Capabilities, RouteError> {
+        let (_, port) = self.resolve(role)?;
+        Ok(port.capabilities())
+    }
+
+    /// The configured prompt for a role, if it has one.
+    pub fn prompt_of(&self, role: &str) -> Option<&str> {
+        self.config
+            .assignment(role)
+            .and_then(|a| a.prompt.as_deref())
+            .filter(|p| !p.trim().is_empty())
+    }
+
+    /// Every role the manager may delegate *to* — the team without the manager.
+    ///
+    /// Over MCP the caller is outside the ensemble and the manager is a fair
+    /// target. Over the chat API the caller *is* the manager, and offering it
+    /// itself is offering it a way to recurse.
+    pub fn delegable_roles(&self) -> Vec<&str> {
+        self.config.roles.keys().map(String::as_str).collect()
     }
 
     /// Check every backend a role actually uses.

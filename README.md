@@ -9,21 +9,26 @@ GPU, a remote server or the Claude Code CLI, is Ensemble's business and nobody
 else's.
 
 ```
-        Harness (Claude Code, OpenCode, …)
-                  |
-                  v      MCP over stdio          src/harness/mcp.rs
-             Ensemble                            src/router.rs
-                  |
-                  v      the Model Port          src/port.rs
-              /         \
-             v           v
-       Claude Code    OpenAI-compatible          src/backend/
-           CLI              API
+        Harness (OpenCode, Claude Code, …)
+            |                       |
+   selects  |                       |  or spawns
+ ensemble/  v                       v
+  manager   HTTP chat API      MCP over stdio    src/harness/
+                  \             /
+                   v           v
+                     Ensemble                   src/router.rs
+                         |
+                         v  the Model Port      src/port.rs
+                   /            \
+                  v              v
+            Claude Code     OpenAI-compatible   src/backend/
+                CLI               API
 ```
 
-**Ensemble is not a harness.** It runs no tools, edits no files, holds no
-conversation and asks no permission. The harness does all of that, and
-Ensemble is one tool it can call.
+**Ensemble still runs no tools and edits no files.** The harness owns tool
+execution and permission; Ensemble owns the team. Over the chat API the
+manager may ask the harness to run one of *its* tools, and the harness decides
+whether to.
 
 ## Quick start
 
@@ -33,15 +38,54 @@ $ cp ensemble.yaml /your/project/    # then edit the roles
 $ cd /your/project && ensemble check
 ```
 
-`check` validates the config and prints the team. Once it is happy, install
-ensemble for real — `nix shell` is ephemeral, and the harness needs a path
-that outlives the shell and survives a garbage collection:
+`check` validates the config, prints the team, and says whether `serve` can
+run. Once it is happy, install ensemble for real — `nix shell` is ephemeral,
+and the harness needs a path that outlives the shell and survives a garbage
+collection:
 
 ```console
 $ nix profile install github:you/ensemble-rs
 ```
 
-Then register the binary with your harness:
+### As your model provider (recommended)
+
+Start the server in the project you are working on:
+
+```console
+$ ensemble serve --dir /your/project
+ensemble: serving ensemble/manager on http://127.0.0.1:8787/v1
+ensemble: manager -> openai-local / qwen3-coder
+ensemble: delegates to: coder, planner, reviewer
+ensemble: authentication: none (loopback only)
+```
+
+Then in `opencode.json`:
+
+```json
+{
+  "provider": {
+    "ensemble": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "http://127.0.0.1:8787/v1" },
+      "models": { "manager": { "name": "Ensemble manager" } }
+    }
+  }
+}
+```
+
+Select `ensemble/manager` as the model. That is the whole integration: no MCP
+server to register, and no second agent in front of this one. The manager
+delegates to your other roles inside Ensemble, and asks OpenCode to run
+OpenCode's own tools when it needs a file read or edited.
+
+`serve` needs a manager on an `openai-compatible-api` backend — it has to
+drive a tool schema Ensemble supplies, which `claude -p` cannot. It refuses to
+start otherwise and says so.
+
+### As an MCP server (the alternative)
+
+Still supported, and the right choice when you want a `claude-code-cli`
+manager, or a harness that is not OpenAI-compatible:
 
 ```console
 $ claude mcp add --scope local ensemble -- /path/to/ensemble mcp
@@ -56,7 +100,7 @@ For OpenCode, in `opencode.json`:
 ```
 
 See [`docs/HARNESS.md`](docs/HARNESS.md) for what was verified against which
-harness, and for the limitations that come with this integration.
+harness, how the two surfaces differ, and the limitations of each.
 
 ## Installation
 
@@ -198,6 +242,7 @@ Day to day you do not run Ensemble — the harness does. These are for setting
 it up and for debugging it.
 
 ```console
+$ ensemble serve            # the chat API, as the model id ensemble/manager
 $ ensemble check            # validate the config, print the team
 $ ensemble roles            # the routing table
 $ ensemble health           # is every backend reachable? exits non-zero if not
@@ -227,6 +272,41 @@ cleanly.
 
 Options: `--config <path>`, `--dir <path>`, `--context <text>` (for `run`).
 
+### `ensemble serve`
+
+```console
+$ ensemble serve [--host ADDR] [--port PORT] [--api-key-env VAR] [--max-steps N]
+```
+
+| option | default | |
+| --- | --- | --- |
+| `--host` | `127.0.0.1` | A non-loopback address requires `--api-key-env`. |
+| `--port` | `8787` | `0` picks a free one and the banner names it. |
+| `--api-key-env` | — | Names the variable holding the bearer token clients must send. The token is read from the environment, never written on the command line and never logged. |
+| `--max-steps` | `8` | How many times the manager may be asked within one request before it has to answer. |
+
+Two endpoints, both OpenAI-shaped, with or without the `/v1` prefix:
+
+```console
+$ curl -s localhost:8787/v1/models
+{"object":"list","data":[{"id":"ensemble/manager","object":"model",…}]}
+
+$ curl -s localhost:8787/v1/chat/completions \
+    -H 'content-type: application/json' \
+    -d '{"model":"ensemble/manager","messages":[{"role":"user","content":"hello"}]}'
+```
+
+`stream: true` returns Server-Sent Events, including `stream_options`'
+`include_usage`.
+
+**The project directory comes from `--dir`** (or the working directory), fixed
+when the server starts. No request field and nothing a model writes can change
+it — a path a model chooses is a path that can point anywhere. One workspace
+per server; run a second server for a second checkout.
+
+**Roles are not addressable.** One model id exists. `ensemble/coder` is a 404
+like any other unknown model, and delegation is the manager's decision.
+
 ## How it fits together
 
 | | |
@@ -235,7 +315,10 @@ Options: `--config <path>`, `--dir <path>`, `--context <text>` (for `run`).
 | `src/backend/claude_code.rs` | the `claude` CLI as a subprocess |
 | `src/backend/openai.rs` | anything speaking `/chat/completions` |
 | `src/router.rs` | roles → backends; the ensemble itself |
-| `src/harness/mcp.rs` | the harness interface, over stdio |
+| `src/harness/delegation.rs` | the ensemble's own tools, shared by both surfaces |
+| `src/harness/serve/` | the OpenAI-compatible chat API and the manager loop |
+| `src/harness/http.rs` | a small synchronous HTTP/1.1 server, transport only |
+| `src/harness/mcp.rs` | the MCP interface, over stdio |
 | `src/config.rs` | `ensemble.yaml`: load, resolve the environment, validate |
 | `docs/HARNESS.md` | what was verified against which harness, and the limitations |
 
@@ -302,16 +385,28 @@ Read [`docs/HARNESS.md`](docs/HARNESS.md) for the full list. The short version:
 - **Delegation is stateless and single-shot.** A role cannot ask a clarifying
   question; the caller must pass everything in `task` and `context`.
 - **Claude-backed roles return prose, never tool calls.** Right for a planner,
-  a reviewer or a manager. They cannot be driven as function-calling models.
-- **No retry, budget or concurrency cap.** Nothing stops a model calling a
-  Claude-backed role in a loop and spending the subscription limit.
-- **The project directory is fixed at spawn.** It is where the harness started
-  the server; `--dir` overrides it. It cannot vary per call, deliberately.
+  a reviewer or a manager. They cannot be driven as function-calling models,
+  and such a manager cannot run `serve`.
+- **No retry or concurrency cap.** `serve` bounds steps and delegations per
+  request, but nothing stops a model calling a Claude-backed role in a loop
+  across requests and spending the subscription limit.
+- **The project directory is fixed when the server starts.** `--dir`, else the
+  working directory. It cannot vary per call or per request, deliberately.
+- **`serve` does not stream token by token.** The reply arrives in one burst
+  once the turn finishes; SSE comments are the only progress until then.
+  Forwarding real deltas would stream the manager's internal delegation to a
+  harness that must not see it.
+- **A client disconnect does not cancel an in-flight backend call.** The call
+  runs to completion and its result is discarded.
+- **`serve` holds one workspace and no persistence.** Conversation state lives
+  in memory and is dropped on restart; a lost entry degrades to a manager that
+  has forgotten it delegated, never to a broken transcript.
 - **Process-group kill is Unix-only.** Elsewhere a timeout still returns on
   time, but an orphan may survive it.
-- **The OpenCode config block is unverified.** OpenCode was not installed here.
-  The MCP server is verified — against Claude Code and over real pipes — so
-  what is untested is the registration snippet, not the server.
+- **The OpenCode config blocks are unverified.** OpenCode was not installed
+  here. Both servers are verified — against Claude Code, over real pipes, and
+  over a real socket in `tests/serve_api.rs` — so what is untested is the
+  registration snippets, not the servers behind them.
 
 ## On the Claude Code backend
 

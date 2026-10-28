@@ -41,6 +41,15 @@ backends:
 # ---------------------------------------------------------------------------
 # The manager — mandatory. Validation fails if it is missing, names a backend
 # that is not defined, or has an empty model.
+#
+# `claude` is a fine manager for `ensemble mcp` and for `ensemble run`: it is
+# asked for work and answers with it, using Claude Code's own tools.
+#
+# `ensemble serve` needs more than that. There the manager has to drive a tool
+# schema Ensemble supplies — the internal delegation tool, plus whatever the
+# harness offered — and `claude -p` never returns one. So `serve` refuses to
+# start with the manager below; point it at `openai-local` (or any other
+# openai-compatible-api backend) first. `ensemble check` says which you have.
 # ---------------------------------------------------------------------------
 manager:
   backend: claude

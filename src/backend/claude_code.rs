@@ -15,10 +15,15 @@
 //! `claude -p` emits Claude Code's *own* tool_use blocks, which Claude Code
 //! executes itself against the filesystem, and returns prose. It never returns
 //! an OpenAI `tool_calls` array against a schema the caller supplied. So
-//! `capabilities().tool_calling` is `false`, and `config.rs` refuses to put the
-//! manager here. That is right for a planner or a reviewer — roles that do real
-//! work with their own tools and report back — and wrong for anything that must
-//! drive the harness's tools.
+//! `capabilities().tool_calling` is `false`, and a [`Request`] that offers
+//! tools is refused outright rather than answered as though none were offered.
+//!
+//! `config.rs` does *not* refuse to put the manager here, and should not: over
+//! MCP the manager is asked for work and answers with it, using Claude Code's
+//! own tools, which is exactly right for a planner, a reviewer or a manager.
+//! What this backend cannot do is drive a tool schema this process supplied,
+//! which is only ever asked of the manager under `ensemble serve` — and that
+//! command refuses to start rather than letting it fail per request.
 
 use crate::config::Backend;
 use crate::port::{Capabilities, Error, ModelPort, Request, Response, Role, Usage};
@@ -108,6 +113,11 @@ pub fn flatten(request: &Request) -> (String, String) {
             Role::System => {}
             Role::Assistant => convo.push(format!("[previous assistant reply]\n{}", m.content)),
             Role::User => convo.push(m.content.clone()),
+            // Unreachable in practice — `complete` refuses a request that
+            // offers tools, and nothing else produces a tool turn. Rendered
+            // rather than skipped anyway, so a future caller that does build
+            // one loses nothing silently.
+            Role::Tool => convo.push(format!("[tool result]\n{}", m.content)),
         }
     }
     (system, convo.join("\n\n"))
@@ -207,6 +217,8 @@ pub fn parse_reply(stdout: &str, backend: &str) -> Result<Response, Error> {
 
     Ok(Response {
         text: text.to_string(),
+        // This backend never produces them; see the module note.
+        tool_calls: Vec::new(),
         model: used
             .first()
             .map(|s| s.to_string())
@@ -389,6 +401,23 @@ impl ModelPort for ClaudeCodeAdapter {
     }
 
     fn complete(&self, request: &Request) -> Result<Response, Error> {
+        // Refused, not ignored. Answering in prose while dropping the schema
+        // would leave the caller believing its tools were offered. See the note
+        // on `port::Request`.
+        if request.offers_tools() {
+            return Err(Error::Unsupported {
+                backend: self.name.clone(),
+                detail: format!(
+                    "{} tool(s) were offered and this backend cannot call them: `claude -p` runs \
+                     Claude Code's own tools and never returns a tool_calls array against a \
+                     schema we supplied. Put the manager on an openai-compatible-api backend to \
+                     drive a harness's tools, or use `ensemble mcp`, where this backend is a \
+                     perfectly good manager.",
+                    request.tools.len()
+                ),
+            });
+        }
+
         let alias = resolve_alias(&request.model).map_err(|detail| Error::Unsupported {
             backend: self.name.clone(),
             detail,
@@ -483,6 +512,66 @@ impl ModelPort for ClaudeCodeAdapter {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tool_calling_tests {
+    use super::*;
+    use crate::config::{Backend, BackendSettings};
+    use crate::port::{Message, ToolDef};
+
+    fn backend() -> Backend {
+        Backend {
+            name: "claude".into(),
+            timeout_seconds: 60,
+            settings: BackendSettings::ClaudeCodeCli {
+                command: "claude".into(),
+                allowed_tools: "Read".into(),
+                permission_mode: "dontAsk".into(),
+                max_turns: 3,
+            },
+        }
+    }
+
+    #[test]
+    fn a_request_that_offers_tools_is_refused_rather_than_half_honoured() {
+        // Answering in prose while dropping the schema would leave the caller
+        // believing its tools had been offered.
+        struct NeverRuns;
+        impl Runner for NeverRuns {
+            fn run(&self, _: &[String], _: Option<&str>, _: Duration) -> Result<Output, String> {
+                panic!("the subprocess must not be started for a refused request");
+            }
+        }
+        let a = ClaudeCodeAdapter::new(&backend(), None, Box::new(NeverRuns)).unwrap();
+
+        let mut req = Request::new("claude-sonnet", vec![Message::user("go")]);
+        req.tools = vec![ToolDef {
+            name: "read".into(),
+            description: "Read a file.".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+
+        let err = a.complete(&req).unwrap_err();
+        assert!(matches!(err, Error::Unsupported { .. }), "{err}");
+        assert!(err.to_string().contains("openai-compatible-api"), "{err}");
+        assert!(err.to_string().contains("ensemble mcp"), "{err}");
+        assert!(!err.is_retryable(), "the same request fails the same way");
+    }
+
+    #[test]
+    fn a_tool_result_turn_is_rendered_rather_than_dropped() {
+        let req = Request::new(
+            "claude-sonnet",
+            vec![
+                Message::user("what is in it?"),
+                Message::tool_result("call_abc", "the file says ok"),
+            ],
+        );
+        let (_, user) = flatten(&req);
+        assert!(user.contains("the file says ok"), "{user}");
+        assert!(user.contains("[tool result]"), "{user}");
     }
 }
 

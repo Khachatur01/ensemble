@@ -18,6 +18,8 @@ pub enum Role {
     System,
     User,
     Assistant,
+    /// The result of a tool the *caller* ran, answering one [`ToolCall`].
+    Tool,
 }
 
 impl Role {
@@ -26,44 +28,100 @@ impl Role {
             Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
+            Role::Tool => "tool",
         }
     }
+}
+
+/// A tool the *caller* can run, offered to the model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolDef {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema for the arguments, carried verbatim. Deliberately not
+    /// modelled: it is the caller's schema, and re-encoding it here could only
+    /// lose detail.
+    pub parameters: serde_json::Value,
+}
+
+/// A model's request to run one tool.
+///
+/// Both fields are passed through this crate byte for byte. The caller pairs a
+/// result to its call on `id`, and a model that writes malformed `arguments`
+/// has to be reported as having done so rather than quietly corrected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    /// Arguments as the model wrote them — a JSON *string*, not a value.
+    pub arguments: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// Set on an assistant turn the model ended by asking for tools. Empty
+    /// otherwise.
+    pub tool_calls: Vec<ToolCall>,
+    /// Set on [`Role::Tool`] turns only: which call this answers.
+    pub tool_call_id: Option<String>,
 }
 
 impl Message {
-    pub fn system(content: impl Into<String>) -> Self {
+    fn plain(role: Role, content: impl Into<String>) -> Self {
         Message {
-            role: Role::System,
+            role,
             content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         }
+    }
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::plain(Role::System, content)
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Message {
-            role: Role::User,
-            content: content.into(),
-        }
+        Self::plain(Role::User, content)
     }
     pub fn assistant(content: impl Into<String>) -> Self {
+        Self::plain(Role::Assistant, content)
+    }
+    /// An assistant turn that ended in tool calls.
+    ///
+    /// `content` is usually empty here, which is not the same as the turn being
+    /// absent: the calls themselves are what the model said.
+    pub fn assistant_calling(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
         Message {
             role: Role::Assistant,
             content: content.into(),
+            tool_calls,
+            tool_call_id: None,
+        }
+    }
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Message {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id.into()),
         }
     }
 }
 
 /// One completion request, in the only shape the port understands.
 ///
-/// There is no `tools` field. Only one of the two shipped adapters can call a
-/// caller's tools at all (see [`Capabilities::tool_calling`]), and a field that
-/// half the implementations silently drop is worse than no field: the caller
-/// believes it was honoured. Delegated work reaches tools through the backend's
-/// own tooling — Claude Code runs its own Read/Grep/Edit and reports back.
+/// `tools` is what the *caller* can run, offered to the model. It is empty for
+/// every delegation: a role is asked for finished work and produces it with its
+/// own backend's tooling — Claude Code runs its own Read/Grep/Edit and reports
+/// back. It is non-empty for exactly one caller, `ensemble serve`, where a
+/// harness drives the manager over the chat API, so the harness's tools have to
+/// reach the model and their results have to come back.
+///
+/// The objection that once kept this field out still stands; it is now a rule
+/// rather than an absence. A silently dropped `tools` array is worse than no
+/// field at all, because the caller believes it was honoured. So no adapter may
+/// drop it: one whose [`Capabilities::tool_calling`] is false must *fail* a
+/// request that offers tools, naming the backend and the fix.
 #[derive(Debug, Clone)]
 pub struct Request {
     /// The model id as the *backend* names it. The router fills this in from
@@ -75,6 +133,8 @@ pub struct Request {
     /// Working directory for backends that act on a checkout. Ignored by
     /// adapters that have no notion of one.
     pub workdir: Option<String>,
+    /// Tools the *caller* can run. See the note on this struct.
+    pub tools: Vec<ToolDef>,
 }
 
 impl Request {
@@ -85,7 +145,13 @@ impl Request {
             max_tokens: None,
             temperature: None,
             workdir: None,
+            tools: Vec::new(),
         }
+    }
+
+    /// Does this request ask the model to drive a caller-supplied tool schema?
+    pub fn offers_tools(&self) -> bool {
+        !self.tools.is_empty()
     }
 
     /// The concatenated `system` turns, which is how both adapters want them.
@@ -114,6 +180,9 @@ impl Usage {
 #[derive(Debug, Clone)]
 pub struct Response {
     pub text: String,
+    /// What the model asked the *caller* to run. Empty unless the request
+    /// offered tools; an adapter never invents one.
+    pub tool_calls: Vec<ToolCall>,
     /// What actually answered, as reported by the backend. Not necessarily what
     /// was asked for — an endpoint is free to serve something else, and the
     /// difference belongs in the record rather than being smoothed over.
@@ -131,6 +200,12 @@ pub struct Response {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
     pub tool_calling: bool,
+    /// Not consulted anywhere today. `ensemble serve` synthesises SSE from a
+    /// completed response, so streaming is a property of the transport rather
+    /// than of the backend, and enforcing this flag would refuse requests that
+    /// work. It stays declared because the only thing that would read it — a
+    /// streaming port method — is the known next step, and removing then
+    /// re-adding it would churn both adapters and the fake.
     pub streaming: bool,
 }
 
@@ -298,43 +373,105 @@ pub mod testing {
     //! so a change to the port breaks them here rather than in six files.
 
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::Mutex;
 
+    /// One scripted answer, for a test that needs several turns in a row.
+    ///
+    /// A manager loop is several model calls, and each one has to be able to
+    /// say something different; a single canned reply cannot express
+    /// "delegate, then answer".
+    #[derive(Debug, Clone)]
+    pub enum Scripted {
+        Text(String),
+        /// Tool calls, with optional leading prose.
+        Calls(String, Vec<ToolCall>),
+        Fail(String),
+    }
+
+    impl Scripted {
+        pub fn text(s: &str) -> Self {
+            Scripted::Text(s.into())
+        }
+        /// One call to `name` with the given raw JSON arguments.
+        pub fn call(id: &str, name: &str, arguments: &str) -> Self {
+            Scripted::Calls(
+                String::new(),
+                vec![ToolCall {
+                    id: id.into(),
+                    name: name.into(),
+                    arguments: arguments.into(),
+                }],
+            )
+        }
+        pub fn calls(calls: Vec<ToolCall>) -> Self {
+            Scripted::Calls(String::new(), calls)
+        }
+    }
+
+    pub fn call(id: &str, name: &str, arguments: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+        }
+    }
+
     /// Records what it was asked and returns a canned answer or a canned error.
+    ///
+    /// `script` is consumed one entry per call; when it runs dry the standing
+    /// `reply` answers every further call. That way a test scripts only the
+    /// turns it cares about.
     pub struct FakePort {
         pub name: String,
         pub caps: Capabilities,
         pub reply: Mutex<Result<String, String>>,
+        pub script: Mutex<VecDeque<Scripted>>,
         pub seen: Mutex<Vec<Request>>,
     }
 
     impl FakePort {
-        pub fn ok(name: &str, reply: &str) -> Self {
+        fn build(name: &str, reply: Result<String, String>) -> Self {
             FakePort {
                 name: name.into(),
                 caps: Capabilities {
                     tool_calling: true,
                     streaming: true,
                 },
-                reply: Mutex::new(Ok(reply.into())),
+                reply: Mutex::new(reply),
+                script: Mutex::new(VecDeque::new()),
                 seen: Mutex::new(Vec::new()),
             }
         }
 
+        pub fn ok(name: &str, reply: &str) -> Self {
+            Self::build(name, Ok(reply.into()))
+        }
+
         pub fn failing(name: &str, detail: &str) -> Self {
-            FakePort {
-                name: name.into(),
-                caps: Capabilities {
-                    tool_calling: true,
-                    streaming: true,
-                },
-                reply: Mutex::new(Err(detail.into())),
-                seen: Mutex::new(Vec::new()),
-            }
+            Self::build(name, Err(detail.into()))
+        }
+
+        /// A port that answers the given turns in order, then falls back to
+        /// `reply` for anything after them.
+        pub fn scripted(name: &str, reply: &str, script: Vec<Scripted>) -> Self {
+            let p = Self::build(name, Ok(reply.into()));
+            *p.script.lock().unwrap() = script.into();
+            p
+        }
+
+        /// Declare a port that cannot drive a caller-supplied tool schema.
+        pub fn without_tool_calling(mut self) -> Self {
+            self.caps.tool_calling = false;
+            self
         }
 
         pub fn last(&self) -> Option<Request> {
             self.seen.lock().unwrap().last().cloned()
+        }
+
+        pub fn nth(&self, i: usize) -> Option<Request> {
+            self.seen.lock().unwrap().get(i).cloned()
         }
 
         pub fn call_count(&self) -> usize {
@@ -354,21 +491,38 @@ pub mod testing {
         }
         fn complete(&self, request: &Request) -> Result<Response, Error> {
             self.seen.lock().unwrap().push(request.clone());
-            match &*self.reply.lock().unwrap() {
-                Ok(text) => Ok(Response {
-                    text: text.clone(),
-                    model: request.model.clone(),
-                    usage: Usage {
-                        prompt_tokens: 1,
-                        completion_tokens: 2,
-                    },
-                    finish_reason: Some("stop".into()),
-                }),
-                Err(detail) => Err(Error::Transport {
-                    backend: self.name.clone(),
-                    detail: detail.clone(),
-                }),
-            }
+
+            let scripted = self.script.lock().unwrap().pop_front();
+            let (text, tool_calls, finish) = match scripted {
+                Some(Scripted::Text(t)) => (t, Vec::new(), "stop"),
+                Some(Scripted::Calls(t, calls)) => (t, calls, "tool_calls"),
+                Some(Scripted::Fail(detail)) => {
+                    return Err(Error::Transport {
+                        backend: self.name.clone(),
+                        detail,
+                    });
+                }
+                None => match &*self.reply.lock().unwrap() {
+                    Ok(text) => (text.clone(), Vec::new(), "stop"),
+                    Err(detail) => {
+                        return Err(Error::Transport {
+                            backend: self.name.clone(),
+                            detail: detail.clone(),
+                        });
+                    }
+                },
+            };
+
+            Ok(Response {
+                text,
+                tool_calls,
+                model: request.model.clone(),
+                usage: Usage {
+                    prompt_tokens: 1,
+                    completion_tokens: 2,
+                },
+                finish_reason: Some(finish.into()),
+            })
         }
         fn health(&self) -> Result<(), Error> {
             Ok(())
