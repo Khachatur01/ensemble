@@ -282,11 +282,20 @@ pub fn parse_completion(body: &str, backend: &str, tools_offered: bool) -> Resul
         })?;
 
     let message = choice.get("message");
-    let text = message
+    let content = message
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string();
+        .unwrap_or("");
+    // Thinking models (Qwen3.5 on Ollama, for one) sometimes put the whole
+    // answer in the reasoning channel and finish with an empty `content`. That
+    // is an answer, not silence, and handing the caller an empty assistant turn
+    // makes the conversation look like it stopped. Only fall back when there is
+    // no tool call: beside a tool call the reasoning is working-out, not what
+    // the caller asked for.
+    let reasoning = message
+        .and_then(|m| m.get("reasoning").or_else(|| m.get("reasoning_content")))
+        .and_then(|r| r.as_str())
+        .unwrap_or("");
 
     let finish_reason = choice
         .get("finish_reason")
@@ -294,6 +303,15 @@ pub fn parse_completion(body: &str, backend: &str, tools_offered: bool) -> Resul
         .map(str::to_string);
 
     let tool_calls = parse_tool_calls(message);
+
+    let text = if content.trim().is_empty()
+        && tool_calls.is_empty()
+        && finish_reason.as_deref() != Some("length")
+    {
+        reasoning.to_string()
+    } else {
+        content.to_string()
+    };
 
     // A model that answered a *toolless* request with only `tool_calls` has not
     // done the delegated work — it asked for a tool nobody offered it. Say
@@ -758,6 +776,60 @@ mod tests {
             "finish_reason":"length"}]}"#;
         let err = parse_completion(body, "b", false).unwrap_err();
         assert!(err.to_string().contains("max_tokens"), "{err}");
+    }
+
+    #[test]
+    fn a_reply_that_finished_in_the_reasoning_channel_is_still_an_answer() {
+        // Ollama's Qwen3.5 puts the final answer in `reasoning` and leaves
+        // `content` empty on some prompts. Returning "" makes the harness think
+        // the conversation stopped after one turn.
+        let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"",
+            "reasoning":"Here are the roles you can delegate to: coder, planner."},
+            "finish_reason":"stop"}]}"#;
+        let r = parse_completion(body, "b", false).unwrap();
+        assert_eq!(
+            r.text,
+            "Here are the roles you can delegate to: coder, planner."
+        );
+    }
+
+    #[test]
+    fn reasoning_content_is_accepted_as_well_as_reasoning() {
+        let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":null,
+            "reasoning_content":"plan: write it in two steps"},
+            "finish_reason":"stop"}]}"#;
+        let r = parse_completion(body, "b", false).unwrap();
+        assert_eq!(r.text, "plan: write it in two steps");
+    }
+
+    #[test]
+    fn reasoning_cut_off_at_the_token_limit_still_reports_the_truncation() {
+        let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"",
+            "reasoning":"Here is the start of an answer that never finished"},
+            "finish_reason":"length"}]}"#;
+        let err = parse_completion(body, "b", false).unwrap_err();
+        assert!(err.to_string().contains("max_tokens"), "{err}");
+    }
+
+    #[test]
+    fn content_wins_over_reasoning_when_both_are_present() {
+        let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"done",
+            "reasoning":"the working-out that led here"},
+            "finish_reason":"stop"}]}"#;
+        let r = parse_completion(body, "b", false).unwrap();
+        assert_eq!(r.text, "done");
+    }
+
+    #[test]
+    fn reasoning_beside_a_tool_call_is_not_sent_as_content() {
+        let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"",
+            "reasoning":"I should call read.",
+            "tool_calls":[{"id":"c1","type":"function",
+                "function":{"name":"read","arguments":"{}"}}]},
+            "finish_reason":"tool_calls"}]}"#;
+        let r = parse_completion(body, "b", true).unwrap();
+        assert!(r.text.is_empty(), "the reasoning is not the answer here");
+        assert_eq!(r.tool_calls[0].name, "read");
     }
 
     #[test]
