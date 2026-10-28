@@ -82,6 +82,17 @@ OpenCode's own tools when it needs a file read or edited.
 drive a tool schema Ensemble supplies, which `claude -p` cannot. It refuses to
 start otherwise and says so.
 
+With Ollama, raise the context window before starting it. The default is 4096
+tokens, which the manager prompt, harness system prompt and tool schemas can
+exceed before the conversation begins, and Ollama then drops the oldest turns:
+
+```console
+$ OLLAMA_CONTEXT_LENGTH=32768 ollama serve
+```
+
+A Modelfile with `PARAMETER num_ctx 32768` works too. Set the harness's declared
+context limit to match.
+
 ### As an MCP server (the alternative)
 
 Still supported, and the right choice when you want a `claude-code-cli`

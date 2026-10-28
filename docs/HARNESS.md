@@ -213,12 +213,24 @@ were the first, the history went missing somewhere Ensemble can see but does
 not control, and there are two candidates: a client that posted only the latest
 turn, or a model server that dropped the front of an over-long prompt.
 `ENSEMBLE_SERVE_LOG=1` tells them apart — one stderr line per request with the
-role and size of every message that arrived, and how many the manager ended up
-reading. Roles and sizes only; the content is the user's work and is never
-logged. If the arriving shape grows with the conversation and the manager still
-forgets, the prompt is overflowing the model server's context window
-(llama-server `-c`, vLLM `--max-model-len`, Ollama `num_ctx`), which drops
-tokens from the front — system prompt first.
+role and size of every message that arrived, how many the manager ended up
+reading, and how many prompt tokens the backend reported. Roles and sizes only;
+the content is the user's work and is never logged. If the arriving shape grows
+while the prompt-token count stays flat, the backend is truncating the prompt.
+The usual cause is a context window smaller than the system prompt, guidance and
+tool schemas combined: llama-server `-c`, vLLM `--max-model-len`, Ollama
+`num_ctx`.
+
+Ollama's default is 4096 tokens, which this surface can exceed before the first
+user turn because the manager is offered the harness's tool schemas. Start it
+with a larger window, and keep the model's declared limit in the harness config
+in step:
+
+```console
+$ OLLAMA_CONTEXT_LENGTH=32768 ollama serve
+```
+
+A Modelfile with `PARAMETER num_ctx 32768` is the persistent alternative.
 
 ### Registering it
 

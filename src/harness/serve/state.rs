@@ -76,6 +76,9 @@ struct Entry {
     /// The conversation as the *manager* should see it, system turns and
     /// internal delegation included.
     history: Vec<Message>,
+    /// Prompt tokens the backend reported for the turn that produced this
+    /// entry. Zero when the backend reports no usage.
+    prompt_tokens: u32,
     bytes: usize,
     last_used: Instant,
     created: Instant,
@@ -84,6 +87,9 @@ struct Entry {
 struct Inner {
     entries: Vec<Entry>,
     bytes: usize,
+    /// A backend that truncates the prompt will do it on every turn; say so
+    /// once per process rather than on every request.
+    warned_about_truncation: bool,
 }
 
 pub struct ConversationStore {
@@ -109,6 +115,7 @@ impl ConversationStore {
             inner: Mutex::new(Inner {
                 entries: Vec::new(),
                 bytes: 0,
+                warned_about_truncation: false,
             }),
             max_entries,
             max_bytes,
@@ -147,6 +154,21 @@ impl ConversationStore {
     /// the assistant turn it was given — a final answer, or the calls it must
     /// run.
     pub fn remember(&self, projected: &[Message], history: Vec<Message>) {
+        self.remember_with_usage(projected, history, 0);
+    }
+
+    /// [`remember`](Self::remember), with the prompt size the backend reported.
+    ///
+    /// A conversation that gains messages but not prompt tokens is being
+    /// truncated by the model server: the provider accepted the request but
+    /// dropped the front of it. That is worth one warning with the likely fix,
+    /// because from the harness side it looks like the manager simply forgot.
+    pub fn remember_with_usage(
+        &self,
+        projected: &[Message],
+        history: Vec<Message>,
+        prompt_tokens: u32,
+    ) {
         // An empty answer with no tool call is not a message a harness will
         // keep. Storing a prefix that ends there would only hide the previous,
         // still-matchable turn behind an entry that can never match.
@@ -162,6 +184,31 @@ impl ConversationStore {
         let now = Instant::now();
 
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+
+        if !inner.warned_about_truncation && prompt_tokens > 0 {
+            let previous = inner
+                .entries
+                .iter()
+                .filter(|e| {
+                    e.prefix.len() < prefix.len() && prefix[..e.prefix.len()] == e.prefix[..]
+                })
+                .map(|e| e.prompt_tokens)
+                .filter(|tokens| *tokens > 0)
+                .max();
+            if let Some(previous) = previous
+                && prompt_tokens <= previous
+            {
+                inner.warned_about_truncation = true;
+                eprintln!(
+                    "ensemble: warning: the manager backend reported {prompt_tokens} prompt \
+                     token(s) for a longer conversation (previous turn: {previous}). It is \
+                     truncating the prompt, so the manager will lose earlier turns. If this is \
+                     Ollama, its default context is 4096; start it with \
+                     OLLAMA_CONTEXT_LENGTH=32768 or set num_ctx in a Modelfile."
+                );
+            }
+        }
+
         inner.entries.retain(|e| {
             let expired = now.duration_since(e.created) > self.max_age;
             // The same conversation, one turn further on. The old transcript
@@ -177,6 +224,7 @@ impl ConversationStore {
         inner.entries.push(Entry {
             prefix,
             history,
+            prompt_tokens,
             bytes,
             last_used: now,
             created: now,
@@ -368,6 +416,7 @@ mod tests {
             inner.entries.push(Entry {
                 prefix: signatures(&short),
                 history: vec![Message::assistant("short history")],
+                prompt_tokens: 0,
                 bytes: 1,
                 last_used: Instant::now(),
                 created: Instant::now(),
@@ -375,6 +424,7 @@ mod tests {
             inner.entries.push(Entry {
                 prefix: signatures(&long),
                 history: vec![Message::assistant("long history")],
+                prompt_tokens: 0,
                 bytes: 1,
                 last_used: Instant::now(),
                 created: Instant::now(),
@@ -386,6 +436,40 @@ mod tests {
         let (history, trailing) = store.restore(&next).expect("the longest prefix matches");
         assert_eq!(history[0].content, "long history");
         assert_eq!(trailing.len(), 1);
+    }
+
+    #[test]
+    fn a_turn_that_grew_but_reported_no_new_prompt_tokens_is_flagged_as_truncated() {
+        let store = ConversationStore::new();
+        let (_, projected, next) = plain_turn("go");
+        store.remember_with_usage(&projected, hidden_history("go"), 2050);
+
+        let mut longer = next.clone();
+        longer.push(Message::user("one more"));
+        longer.push(Message::assistant("answer to one more"));
+        store.remember_with_usage(&longer, hidden_history("go"), 2050);
+
+        assert!(
+            store.inner.lock().unwrap().warned_about_truncation,
+            "a flat prompt size over a longer transcript is truncation"
+        );
+    }
+
+    #[test]
+    fn a_normally_growing_conversation_is_not_flagged_as_truncated() {
+        let store = ConversationStore::new();
+        let (_, projected, next) = plain_turn("go");
+        store.remember_with_usage(&projected, hidden_history("go"), 2050);
+
+        let mut longer = next.clone();
+        longer.push(Message::user("one more"));
+        longer.push(Message::assistant("answer to one more"));
+        store.remember_with_usage(&longer, hidden_history("go"), 3000);
+
+        assert!(
+            !store.inner.lock().unwrap().warned_about_truncation,
+            "the backend saw the new tokens"
+        );
     }
 
     #[test]

@@ -303,6 +303,7 @@ pub fn run(
     let tools = tools_for(ensemble, request);
     let mut usage = Usage::default();
     let mut delegations_run = 0u32;
+    let mut last_prompt_tokens;
 
     for step in 0..max_steps.max(1) {
         progress(&format!("manager thinking (step {})", step + 1));
@@ -319,6 +320,17 @@ pub fn run(
             )
             .map_err(|e| upstream_error(&e))?;
         add(&mut usage, outcome.usage);
+        last_prompt_tokens = outcome.usage.prompt_tokens;
+        if super::logging() {
+            // A manager that forgets earlier turns while this number stays
+            // flat, even as the request grows, is being served by a backend
+            // that is truncating the prompt. The request shape is logged
+            // before the turn; this is how much of it the backend read.
+            eprintln!(
+                "ensemble: serve: manager used {} prompt token(s)",
+                outcome.usage.prompt_tokens
+            );
+        }
 
         if outcome.tool_calls.is_empty() {
             // Only worth saying when there was something to call. With
@@ -335,7 +347,7 @@ pub fn run(
             history.push(Message::assistant(text.clone()));
             let mut projected = request.messages.clone();
             projected.push(Message::assistant(text.clone()));
-            store.remember(&projected, history);
+            store.remember_with_usage(&projected, history, last_prompt_tokens);
 
             return Ok(Outcome {
                 text,
@@ -432,7 +444,7 @@ pub fn run(
                 outcome.text.clone(),
                 external.clone(),
             ));
-            store.remember(&projected, history);
+            store.remember_with_usage(&projected, history, last_prompt_tokens);
 
             return Ok(Outcome {
                 text: outcome.text,
@@ -462,12 +474,13 @@ pub fn run(
         )
         .map_err(|e| upstream_error(&e))?;
     add(&mut usage, outcome.usage);
+    last_prompt_tokens = outcome.usage.prompt_tokens;
 
     let text = outcome.text;
     history.push(Message::assistant(text.clone()));
     let mut projected = request.messages.clone();
     projected.push(Message::assistant(text.clone()));
-    store.remember(&projected, history);
+    store.remember_with_usage(&projected, history, last_prompt_tokens);
 
     Ok(Outcome {
         text,
