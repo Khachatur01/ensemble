@@ -403,10 +403,11 @@ Read [`docs/HARNESS.md`](docs/HARNESS.md) for the full list. The short version:
   has forgotten it delegated, never to a broken transcript.
 - **Process-group kill is Unix-only.** Elsewhere a timeout still returns on
   time, but an orphan may survive it.
-- **The OpenCode config blocks are unverified.** OpenCode was not installed
-  here. Both servers are verified — against Claude Code, over real pipes, and
-  over a real socket in `tests/serve_api.rs` — so what is untested is the
-  registration snippets, not the servers behind them.
+- **The OpenCode MCP config block is unverified.** The HTTP provider block was
+  verified with OpenCode 2.1.4; the MCP registration snippet has not been run.
+  Both servers are verified — against Claude Code, over real pipes, and over a
+  real socket in `tests/serve_api.rs` — so what is untested is the MCP
+  registration snippet, not the servers behind them.
 
 ## On the Claude Code backend
 

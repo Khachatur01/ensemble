@@ -90,10 +90,13 @@ fn guidance(ensemble: &Ensemble) -> Message {
              as a role of yours would be wrong. When in doubt, call `",
         );
         s.push_str(delegation::ROLES);
+        s.push_str("` and answer from what it returns.\n\nCall `");
+        s.push_str(delegation::DELEGATE);
         s.push_str(
-            "` and answer from what it returns.\n\nYou choose the role; Ensemble chooses the \
-             model and the backend, and you never name one. A role cannot see this \
-             conversation, so put everything it needs into `task` and `context`.\n\n",
+            "` itself: a role name is not a tool, and the harness has no such tool. You choose \
+             the role; Ensemble chooses the model and the backend, and you never name one. A \
+             role cannot see this conversation, so put everything it needs into `task` and \
+             `context`.\n\n",
         );
     }
 
@@ -169,6 +172,28 @@ fn arguments_of(call: &ToolCall) -> Result<Value, String> {
             "the arguments were not valid JSON ({e}). Call it again with a JSON object."
         )),
     }
+}
+
+/// The configured role a call names directly, if the harness has not offered a
+/// tool with that name.
+///
+/// A model told that it can delegate to `scout` will sometimes call `scout` as
+/// if it were a tool of its own. On this endpoint a role is not a tool, and the
+/// harness has no such tool, so forwarding that call ends the harness's loop
+/// with "No tool named \"scout\" is currently available" — the exact failure
+/// this lookup exists to prevent.
+///
+/// A harness tool of the same name wins: the manager was shown that tool, and
+/// a config is free to name a role after a file operation. The role is still
+/// reachable through [`delegation::DELEGATE`].
+fn direct_role<'a>(ensemble: &'a Ensemble, request: &ChatRequest, name: &str) -> Option<&'a str> {
+    if request.tools.iter().any(|t| t.name == name) {
+        return None;
+    }
+    ensemble
+        .delegable_roles()
+        .into_iter()
+        .find(|role| role.eq_ignore_ascii_case(name))
 }
 
 /// The ensemble tool this text spells out as a call, if any.
@@ -301,8 +326,19 @@ pub fn run(
             if !tools.is_empty() {
                 warn_if_a_call_was_written_out(&outcome);
             }
+
+            // Keep the finished turn even though no tool call ends it. The
+            // manager may have delegated internally on the way here, and that
+            // hidden work has to be behind the answer when the next user
+            // prompt arrives.
+            let text = outcome.text;
+            history.push(Message::assistant(text.clone()));
+            let mut projected = request.messages.clone();
+            projected.push(Message::assistant(text.clone()));
+            store.remember(&projected, history);
+
             return Ok(Outcome {
-                text: outcome.text,
+                text,
                 tool_calls: Vec::new(),
                 finish_reason: outcome
                     .finish_reason
@@ -318,11 +354,11 @@ pub fn run(
             outcome.tool_calls.clone(),
         ));
 
-        let (internal, external): (Vec<ToolCall>, Vec<ToolCall>) = outcome
-            .tool_calls
-            .iter()
-            .cloned()
-            .partition(|c| delegation::is_ensemble_tool(&c.name));
+        let (internal, external): (Vec<ToolCall>, Vec<ToolCall>) =
+            outcome.tool_calls.iter().cloned().partition(|c| {
+                delegation::is_ensemble_tool(&c.name)
+                    || direct_role(ensemble, request, &c.name).is_some()
+            });
 
         for call in &internal {
             if delegations_run >= MAX_DELEGATIONS {
@@ -337,27 +373,42 @@ pub fn run(
             }
             delegations_run += 1;
 
-            let args = match arguments_of(call) {
-                Ok(v) => v,
-                Err(why) => {
-                    history.push(Message::tool_result(
-                        &call.id,
-                        format!("{}: {why}", call.name),
-                    ));
-                    continue;
-                }
+            // A role named directly is the same delegation with the role
+            // already chosen; `role_arguments` fills in the shape
+            // `ensemble_delegate` expects.
+            let (tool, args) = match direct_role(ensemble, request, &call.name) {
+                Some(role) => match delegation::role_arguments(role, &call.arguments) {
+                    Ok(args) => (delegation::DELEGATE, args),
+                    Err(why) => {
+                        history.push(Message::tool_result(
+                            &call.id,
+                            format!("{}: {why}", call.name),
+                        ));
+                        continue;
+                    }
+                },
+                None => match arguments_of(call) {
+                    Ok(v) => (call.name.as_str(), v),
+                    Err(why) => {
+                        history.push(Message::tool_result(
+                            &call.id,
+                            format!("{}: {why}", call.name),
+                        ));
+                        continue;
+                    }
+                },
             };
 
             progress(&format!(
                 "running {} ({})",
-                call.name,
+                tool,
                 args.get("role").and_then(Value::as_str).unwrap_or("-")
             ));
 
             // The one path a delegation takes. No second router, no second
             // prompt assembly, and the same failure text the MCP surface
             // produces.
-            let result = delegation::call(ensemble, &call.name, &args);
+            let result = delegation::call(ensemble, tool, &args);
             add(&mut usage, result.usage);
             if result.usage.total() > 0 {
                 // Provenance to stderr, as `ensemble run` does. Never into the
@@ -403,7 +454,7 @@ pub fn run(
         .turn(
             crate::config::Config::MANAGER,
             &Turn {
-                messages: history,
+                messages: history.clone(),
                 tools: Vec::new(),
                 max_tokens: request.max_tokens,
                 temperature: request.temperature,
@@ -412,8 +463,14 @@ pub fn run(
         .map_err(|e| upstream_error(&e))?;
     add(&mut usage, outcome.usage);
 
+    let text = outcome.text;
+    history.push(Message::assistant(text.clone()));
+    let mut projected = request.messages.clone();
+    projected.push(Message::assistant(text.clone()));
+    store.remember(&projected, history);
+
     Ok(Outcome {
-        text: outcome.text,
+        text,
         tool_calls: Vec::new(),
         finish_reason: "stop".into(),
         usage,

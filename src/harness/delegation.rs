@@ -140,6 +140,72 @@ impl ToolResult {
     }
 }
 
+/// Turn a call that names a role directly into the arguments
+/// [`DELEGATE`] takes.
+///
+/// Models that have just been told about a role often call it as if it were a
+/// tool: `scout({"task": "find the README"})`. The task is usually under
+/// `task`, but `prompt`, `description`, `input`, `query` and `message` all
+/// occur. A bare string is a task. When none of those is present, the whole
+/// argument object becomes the task rather than being discarded — the model
+/// wrote it for a reason, and a downstream role can still use it.
+///
+/// An unusable call is an error the manager reads as a tool result and can
+/// correct; it is never forwarded to the harness, which has no such tool.
+pub fn role_arguments(role: &str, arguments: &str) -> Result<Value, String> {
+    let parsed: Value = serde_json::from_str(arguments).map_err(|e| {
+        format!(
+            "the arguments were not valid JSON ({e}). Call `{role}` with \
+             {{\"task\": \"...\"}}, or call `{DELEGATE}` with `role` and `task`."
+        )
+    })?;
+
+    let (task, context) = match parsed {
+        Value::String(task) => (task, None),
+        Value::Object(mut object) => {
+            let context = object
+                .remove("context")
+                .and_then(|v| v.as_str().map(str::to_string));
+            let task = ["task", "prompt", "description", "input", "query", "message"]
+                .iter()
+                .find_map(|key| object.get(*key).and_then(Value::as_str).map(str::to_string))
+                .or_else(|| {
+                    (!object.is_empty()).then(|| Value::Object(object.clone()).to_string())
+                });
+            match task {
+                Some(task) => (task, context),
+                None => return Err(no_task(role)),
+            }
+        }
+        other => {
+            return Err(format!(
+                "the arguments must be a JSON object or a string; got {other}. {}",
+                no_task(role)
+            ));
+        }
+    };
+
+    if task.trim().is_empty() {
+        return Err(format!(
+            "`{role}` was given an empty task — there is nothing to do. Call it with \
+             {{\"task\": \"what to do\"}}."
+        ));
+    }
+
+    let mut out = json!({ "role": role, "task": task });
+    if let Some(context) = context {
+        out["context"] = Value::String(context);
+    }
+    Ok(out)
+}
+
+fn no_task(role: &str) -> String {
+    format!(
+        "no task: call `{role}` with {{\"task\": \"what to do\"}}, or call `{DELEGATE}` \
+         with `role` and `task`."
+    )
+}
+
 /// Run one of the ensemble's own tools.
 pub fn call(ensemble: &Ensemble, name: &str, args: &Value) -> ToolResult {
     match name {
@@ -293,5 +359,47 @@ mod tests {
         let out = first_line(&format!("{long}\nsecond line"));
         assert!(out.ends_with('…'), "{out}");
         assert!(out.chars().count() <= 161, "{}", out.chars().count());
+    }
+
+    #[test]
+    fn a_role_named_directly_becomes_a_delegation_with_task_and_context() {
+        let args = role_arguments(
+            "scout",
+            r#"{"task":"find the README","context":"the project root"}"#,
+        )
+        .unwrap();
+        assert_eq!(args["role"], "scout");
+        assert_eq!(args["task"], "find the README");
+        assert_eq!(args["context"], "the project root");
+    }
+
+    #[test]
+    fn the_task_aliases_models_use_are_accepted() {
+        for key in ["task", "prompt", "description", "input", "query", "message"] {
+            let call = format!(r#"{{"{key}":"do the work"}}"#);
+            let args = role_arguments("scout", &call).unwrap();
+            assert_eq!(args["task"], "do the work", "alias {key}");
+        }
+    }
+
+    #[test]
+    fn a_bare_string_is_the_task() {
+        let args = role_arguments("scout", r#""find the README""#).unwrap();
+        assert_eq!(args["role"], "scout");
+        assert_eq!(args["task"], "find the README");
+    }
+
+    #[test]
+    fn an_unrecognised_argument_object_is_kept_as_the_task() {
+        let args = role_arguments("scout", r#"{"filePath":"src/main.rs"}"#).unwrap();
+        assert_eq!(args["role"], "scout");
+        assert_eq!(args["task"], r#"{"filePath":"src/main.rs"}"#);
+    }
+
+    #[test]
+    fn a_direct_role_call_with_no_task_says_how_to_call_it() {
+        let err = role_arguments("scout", "{}").unwrap_err();
+        assert!(err.contains("no task"), "{err}");
+        assert!(err.contains(DELEGATE), "{err}");
     }
 }

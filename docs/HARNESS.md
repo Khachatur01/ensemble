@@ -164,7 +164,12 @@ Two endpoints: `GET /v1/models`, which lists exactly `ensemble/manager`, and
    `ensemble_health` **and** every tool the harness sent.
 4. An ensemble tool call runs immediately, through the same
    `Ensemble::delegate` the MCP surface uses, and the result goes back to the
-   manager. The loop continues. The harness never learns it happened.
+   manager. The loop continues. The harness never learns it happened. A model
+   that names a role directly — `scout({"task": …})` — is making the same
+   request, and Ensemble treats it as the delegation it means rather than
+   forwarding a tool the harness does not have. If the harness happens to offer
+   a tool with that name, the harness tool wins; the role stays reachable
+   through `ensemble_delegate`.
 5. A harness tool call ends the turn and comes back as an ordinary
    `tool_calls` completion, so the harness runs it and posts the result next
    time.
@@ -180,10 +185,17 @@ answer.
 
 Step 4 creates a problem step 5 exposes: the delegation turns are not in the
 transcript the harness holds, so the next request is missing them. Ensemble
-keeps its own copy, keyed on a canonical form of the harness-visible messages
-up to the last assistant turn that carried tool calls. A 64-bit hash picks a
-bucket and full equality of those lines decides, so a collision costs a
-comparison and never returns another conversation's turns.
+keeps its own copy, keyed on a canonical form of the whole harness-visible
+transcript at the end of every completed turn — an answer, or a turn carrying
+tool calls. On the next request the longest stored prefix the request still
+begins with is restored, followed by the messages the harness has added since.
+Full equality of those lines decides, so no collision can return another
+conversation's turns.
+
+Keying on every completed turn, not only on tool calls, is what lets an
+internal delegation survive into the next *prompt*. A turn that delegated and
+then answered hands the harness no tool call at all, but it did hand back an
+answer, and the hidden delegation belongs behind it.
 
 The store is bounded — 64 entries, 32 MiB, 30 minutes — and holds one live
 entry per conversation. A miss is safe: the manager forgets it delegated, and
@@ -222,12 +234,12 @@ tokens from the front — system prompt first.
 }
 ```
 
-> **Not verified.** OpenCode is still not installed on the machine this was
-> built on, so this block is written from its schema. The server behind it is
-> verified: `tests/serve_api.rs` drives the real binary over a real socket
-> through model discovery, a delegation, a two-request harness tool round
-> trip, conversation isolation, SSE, authentication and the failure paths.
-> `ensemble serve` prints this block on startup, so it tracks the real port.
+> **Verified with OpenCode 2.1.4.** This exact provider block ran
+> `ensemble/manager` end to end: model discovery, streaming, a delegated role,
+> a two-request harness tool round trip, and a hidden delegation carried into
+> the next prompt. `tests/serve_api.rs` covers the same paths against the real
+> binary over a real socket. `ensemble serve` prints this block on startup, so
+> it tracks the real port.
 
 ### Limitations of this surface specifically
 
@@ -319,10 +331,10 @@ In `opencode.json`:
 { "mcp": { "ensemble": { "type": "local", "command": ["/path/to/ensemble", "mcp"] } } }
 ```
 
-> **Not verified.** OpenCode is not installed on the machine this was built on,
-> so this block is written from its schema and from prior notes rather than
-> from a run. The MCP server itself is verified — against Claude Code, and by
-> `tests/end_to_end.rs` driving the protocol over real pipes — so what is
+> **Not verified against OpenCode.** OpenCode 2.1.4 is installed and the HTTP
+> provider block above was verified with it, but this MCP registration snippet
+> has not been run. The MCP server itself is verified — against Claude Code, and
+> by `tests/end_to_end.rs` driving the protocol over real pipes — so what is
 > unverified is this config block, not the server behind it.
 
 On OpenCode 2.0.32 specifically, two further things are worth knowing, both

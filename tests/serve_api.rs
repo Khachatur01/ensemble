@@ -638,6 +638,99 @@ fn an_internal_delegation_before_a_harness_tool_call_is_not_repeated_on_the_seco
 }
 
 #[test]
+fn a_role_named_directly_is_delegated_instead_of_forwarded_to_the_harness() {
+    let up = start_upstream(
+        vec![
+            tool_call_completion("d1", "planner", r#"{"task":"outline"}"#),
+            completion("THE PLAN"),
+            completion("The planner proposed two steps."),
+        ],
+        completion("x"),
+    );
+    let scratch = project("direct-role", &up);
+    let server = Server::start(&scratch, &[]);
+
+    let reply = post(
+        &server,
+        serde_json::json!({"model": "ensemble/manager", "tools": read_tools(),
+                           "messages": [{"role": "user", "content": "plan it"}]}),
+    );
+    assert_eq!(reply.status, 200);
+    let v = reply.json();
+    assert_eq!(
+        v["choices"][0]["message"]["content"],
+        "The planner proposed two steps."
+    );
+    assert_eq!(v["choices"][0]["finish_reason"], "stop");
+    assert!(
+        v["choices"][0]["message"].get("tool_calls").is_none(),
+        "the role call never reaches the harness: {}",
+        reply.body
+    );
+
+    let seen = up.seen.lock().unwrap();
+    assert_eq!(seen.len(), 3, "manager, planner, manager");
+    let planner: serde_json::Value = serde_json::from_str(&seen[1]).unwrap();
+    assert_eq!(planner["model"], "planner-model");
+    assert_eq!(
+        planner["messages"].as_array().unwrap().last().unwrap()["content"],
+        "outline"
+    );
+}
+
+#[test]
+fn an_internal_delegation_survives_into_the_next_prompt() {
+    let up = start_upstream(
+        vec![
+            tool_call_completion(
+                "d1",
+                "ensemble_delegate",
+                r#"{"role":"planner","task":"outline"}"#,
+            ),
+            completion("THE HIDDEN PLAN"),
+            completion("Two steps."),
+            completion("The planner's outline is still here."),
+        ],
+        completion("x"),
+    );
+    let scratch = project("next-prompt", &up);
+    let server = Server::start(&scratch, &[]);
+
+    let first = post(
+        &server,
+        serde_json::json!({"model": "ensemble/manager",
+                           "messages": [{"role": "user", "content": "plan it"}]}),
+    );
+    assert_eq!(
+        first.json()["choices"][0]["message"]["content"],
+        "Two steps."
+    );
+
+    // The harness posts the transcript it holds — which has the answer but
+    // never the delegation — plus the next prompt.
+    let second = post(
+        &server,
+        serde_json::json!({"model": "ensemble/manager", "messages": [
+            {"role": "user", "content": "plan it"},
+            {"role": "assistant", "content": "Two steps."},
+            {"role": "user", "content": "what did the planner say?"}]}),
+    );
+    assert_eq!(second.status, 200);
+    assert_eq!(
+        second.json()["choices"][0]["message"]["content"],
+        "The planner's outline is still here."
+    );
+
+    let seen = up.seen.lock().unwrap();
+    assert_eq!(seen.len(), 4, "manager, planner, manager, manager");
+    let last: serde_json::Value = serde_json::from_str(seen.last().unwrap()).unwrap();
+    assert!(
+        last.to_string().contains("THE HIDDEN PLAN"),
+        "the delegation from the previous prompt came back"
+    );
+}
+
+#[test]
 fn two_interleaved_conversations_do_not_leak_turns_into_each_other() {
     let mixed = |delegate_id: &str, read_id: &str, file: &str| {
         serde_json::json!({

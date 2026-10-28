@@ -1038,6 +1038,164 @@ roles:
     }
 
     #[test]
+    fn a_role_named_directly_is_run_inside_and_never_forwarded() {
+        // The manager read the role list and called `planner` as if it were a
+        // tool. The harness has no such tool; forwarding it ends the harness's
+        // loop. It has to become the delegation it means.
+        let f = harness(
+            vec![
+                Scripted::call("d1", "planner", r#"{"task":"outline"}"#),
+                Scripted::text("The planner did it."),
+            ],
+            "THE PLAN",
+        );
+        let (status, v) = body_of(f.handler.handle(&post(
+            "/v1/chat/completions",
+            json!({"model": MODEL_ID, "messages": [{"role":"user","content":"plan it"}],
+                   "tools": read_tool()}),
+        )));
+
+        assert_eq!(status, 200);
+        assert_eq!(v["choices"][0]["finish_reason"], "stop");
+        assert_eq!(v["choices"][0]["message"]["content"], "The planner did it.");
+        assert!(
+            v["choices"][0]["message"].get("tool_calls").is_none(),
+            "the role call never reaches the harness: {v}"
+        );
+        assert_eq!(f.pool.call_count(), 1, "the role really ran");
+        assert_eq!(
+            f.pool.last().unwrap().messages.last().unwrap().content,
+            "outline"
+        );
+
+        // The manager's own copy pairs the result to the id it used.
+        let second = f.manager.nth(1).unwrap();
+        let turn = second
+            .messages
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("the role's result is in the history");
+        assert_eq!(turn.tool_call_id.as_deref(), Some("d1"));
+        assert_eq!(turn.content, "THE PLAN");
+    }
+
+    #[test]
+    fn a_direct_role_call_mixed_with_a_harness_tool_forwards_only_the_harness_one() {
+        let f = harness(
+            vec![Scripted::calls(vec![
+                call("d1", "planner", r#"{"task":"x"}"#),
+                call("call_r", "read", r#"{"filePath":"a"}"#),
+            ])],
+            "THE PLAN",
+        );
+        let (_, v) = body_of(f.handler.handle(&post(
+            "/v1/chat/completions",
+            json!({"model": MODEL_ID, "messages": [{"role":"user","content":"go"}],
+                   "tools": read_tool()}),
+        )));
+
+        let calls = v["choices"][0]["message"]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1, "only the harness's: {v}");
+        assert_eq!(calls[0]["id"], "call_r");
+        assert_eq!(f.pool.call_count(), 1, "the internal one still ran");
+    }
+
+    #[test]
+    fn a_harness_tool_with_a_role_name_wins_over_the_role() {
+        // A config may name a role `read`; if the harness offers `read`, the
+        // manager was shown that tool and means it. The role remains reachable
+        // through `ensemble_delegate`.
+        let f = harness(
+            vec![Scripted::call("call_r", "planner", r#"{"filePath":"a"}"#)],
+            "x",
+        );
+        let (_, v) = body_of(f.handler.handle(&post(
+            "/v1/chat/completions",
+            json!({"model": MODEL_ID, "messages": [{"role":"user","content":"go"}],
+                   "tools": [{"type":"function","function":{
+                       "name":"planner","parameters":{"type":"object"}}}]}),
+        )));
+
+        assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(
+            v["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "planner"
+        );
+        assert_eq!(f.pool.call_count(), 0, "the role was not run");
+    }
+
+    #[test]
+    fn a_direct_role_call_with_no_task_is_fed_back_and_the_loop_continues() {
+        let f = harness(
+            vec![
+                Scripted::call("d1", "planner", "{}"),
+                Scripted::text("I need to say what the work is."),
+            ],
+            "x",
+        );
+        let (status, v) = body_of(f.handler.handle(&post(
+            "/v1/chat/completions",
+            chat(json!([{"role":"user","content":"go"}])),
+        )));
+
+        assert_eq!(status, 200);
+        assert_eq!(
+            v["choices"][0]["message"]["content"],
+            "I need to say what the work is."
+        );
+        let second = f.manager.nth(1).unwrap();
+        let turns = tool_turns(&second);
+        assert!(turns[0].contains("no task"), "{turns:?}");
+        assert_eq!(f.pool.call_count(), 0, "nothing was dispatched");
+    }
+
+    #[test]
+    fn an_internal_delegation_survives_into_the_next_user_prompt() {
+        // The first turn delegates and then answers, so the harness is handed
+        // no tool call at all — only the answer. The delegation is nonetheless
+        // part of what the manager knows, and the next prompt must see it.
+        let f = harness(
+            vec![
+                Scripted::call(
+                    "d1",
+                    "ensemble_delegate",
+                    r#"{"role":"planner","task":"outline"}"#,
+                ),
+                Scripted::text("Two steps."),
+                Scripted::text("The planner's outline is still here."),
+            ],
+            "THE HIDDEN PLAN",
+        );
+
+        body_of(f.handler.handle(&post(
+            "/v1/chat/completions",
+            chat(json!([{"role":"user","content":"plan it"}])),
+        )));
+
+        let (status, v) = body_of(f.handler.handle(&post(
+            "/v1/chat/completions",
+            chat(json!([
+                {"role":"user","content":"plan it"},
+                {"role":"assistant","content":"Two steps."},
+                {"role":"user","content":"what did the planner say?"}
+            ])),
+        )));
+
+        assert_eq!(status, 200);
+        assert_eq!(
+            v["choices"][0]["message"]["content"],
+            "The planner's outline is still here."
+        );
+        let last = f.manager.last().unwrap();
+        let turns = tool_turns(&last);
+        assert!(
+            turns.contains(&"THE HIDDEN PLAN"),
+            "the hidden delegation came back: {turns:?}"
+        );
+        assert_eq!(f.pool.call_count(), 1, "the delegation is not run again");
+    }
+
+    #[test]
     fn malformed_delegation_arguments_are_reported_to_the_manager_not_corrected() {
         let f = harness(
             vec![

@@ -24,41 +24,33 @@
 //!
 //! HOW THIS ONE WORKS
 //! ------------------
-//! Each harness-visible message reduces to one canonical line. The key is
-//! every line up to and including the last assistant message that carried tool
-//! calls — the exact transcript the harness held when it was handed those
-//! calls. A 64-bit hash picks a bucket and **full equality of the lines
-//! decides**, so a collision costs one comparison and can never hand back
-//! another conversation's turns.
+//! Each harness-visible message reduces to one canonical line. Every turn ends
+//! with an assistant message the harness will hold — an answer, or the harness
+//! tool calls it was asked to run — and the key is the whole transcript at that
+//! moment. On the next request, the longest stored transcript the request
+//! still begins with is the conversation it continues; the manager's richer
+//! history is restored and the messages the harness added since are appended.
 //!
-//! Two distinct conversations differ in at least one visible message, so in at
-//! least one line, so they never match. Two byte-identical conversations are
-//! the same prompt sequence, and reusing the entry is a cache hit rather than
-//! a leak — said here rather than pretended impossible.
+//! Keying on every completed turn, not only on a tool-call turn, is what makes
+//! an internal delegation survive into the next *prompt*. A turn that delegated
+//! and then answered hands back no tool call at all, but it did hand back an
+//! answer, and the hidden delegation belongs behind it. Keying only on tool
+//! calls made that delegation vanish the moment the harness sent its next
+//! user message.
+//!
+//! **Full equality of the lines decides.** Two conversations that diverge never
+//! match past the divergence. Two byte-identical conversations are the same
+//! prompt sequence, and reusing the entry is a cache hit rather than a leak.
 //!
 //! A miss is safe. The manager simply forgets it delegated, and the transcript
 //! is still well-formed, because the assistant message the harness holds
 //! contains only the calls it was asked to run and it answered all of them.
 
-use crate::port::Message;
+use crate::port::{Message, Role};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::wire::message_signature;
-
-/// FNV-1a. A bucket hint, never the decision — see the module note.
-fn fingerprint(lines: &[String]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for line in lines {
-        for b in line.as_bytes() {
-            h ^= *b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-        h ^= 0xff;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
-}
 
 fn signatures(messages: &[Message]) -> Vec<String> {
     messages.iter().map(message_signature).collect()
@@ -79,8 +71,7 @@ fn weigh(lines: &[String], history: &[Message]) -> usize {
 }
 
 struct Entry {
-    fingerprint: u64,
-    /// The canonical visible transcript. The proof, not the hash.
+    /// The canonical visible transcript this turn ended with.
     prefix: Vec<String>,
     /// The conversation as the *manager* should see it, system turns and
     /// internal delegation included.
@@ -125,31 +116,27 @@ impl ConversationStore {
         }
     }
 
-    /// Where the stored part of a transcript ends and this turn's new messages
-    /// begin: the index just past the last assistant turn bearing tool calls.
-    fn split_at(visible: &[Message]) -> Option<usize> {
-        visible
-            .iter()
-            .rposition(|m| !m.tool_calls.is_empty())
-            .map(|i| i + 1)
-    }
-
     /// The manager's view of this conversation, if it was stored.
     ///
     /// Returns the stored history and the messages the harness has added since
-    /// — its tool results — for the caller to append.
+    /// the stored turn — its tool results, and any later user prompts — for the
+    /// caller to append.
+    ///
+    /// The longest matching prefix wins. A request may contain several
+    /// completed turns, and the newest stored one is the one whose hidden
+    /// delegation is most recent.
     pub fn restore(&self, visible: &[Message]) -> Option<(Vec<Message>, Vec<Message>)> {
-        let split = Self::split_at(visible)?;
-        let prefix = signatures(&visible[..split]);
-        let fp = fingerprint(&prefix);
+        let lines = signatures(visible);
 
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let hit = inner
             .entries
             .iter_mut()
-            .find(|e| e.fingerprint == fp && e.prefix == prefix)?;
+            .filter(|e| e.prefix.len() <= lines.len() && lines[..e.prefix.len()] == e.prefix[..])
+            .max_by_key(|e| e.prefix.len())?;
         hit.last_used = now;
+        let split = hit.prefix.len();
         Some((hit.history.clone(), visible[split..].to_vec()))
     }
 
@@ -157,32 +144,37 @@ impl ConversationStore {
     /// hold next time.
     ///
     /// `projected` is what the harness ends up with: the messages it sent, plus
-    /// the assistant turn carrying only the calls it was asked to run.
+    /// the assistant turn it was given — a final answer, or the calls it must
+    /// run.
     pub fn remember(&self, projected: &[Message], history: Vec<Message>) {
-        if Self::split_at(projected).is_none() {
-            // Nothing was handed back for the harness to answer, so there is
-            // no follow-up request to match. Storing it would only be litter.
+        // An empty answer with no tool call is not a message a harness will
+        // keep. Storing a prefix that ends there would only hide the previous,
+        // still-matchable turn behind an entry that can never match.
+        if let Some(last) = projected.last()
+            && last.role == Role::Assistant
+            && last.tool_calls.is_empty()
+            && last.content.trim().is_empty()
+        {
             return;
         }
         let prefix = signatures(projected);
-        let fp = fingerprint(&prefix);
         let bytes = weigh(&prefix, &history);
         let now = Instant::now();
 
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.entries.retain(|e| {
             let expired = now.duration_since(e.created) > self.max_age;
-            // The same conversation, one round trip further on. Keeping the
-            // older step would only grow the store; the harness will never ask
-            // for it again.
-            let superseded = e.prefix.len() < prefix.len() && prefix.starts_with(&e.prefix);
-            let same = e.fingerprint == fp && e.prefix == prefix;
-            !(expired || superseded || same)
+            // The same conversation, one turn further on. The old transcript
+            // is a prefix of the new one (or identical), so it can never be
+            // the longest match while the new entry is present; keeping it
+            // would only grow the store.
+            let superseded =
+                e.prefix.len() <= prefix.len() && prefix[..e.prefix.len()] == e.prefix[..];
+            !(expired || superseded)
         });
         inner.bytes = inner.entries.iter().map(|e| e.bytes).sum();
 
         inner.entries.push(Entry {
-            fingerprint: fp,
             prefix,
             history,
             bytes,
@@ -299,31 +291,101 @@ mod tests {
         assert!(!h2.iter().any(|m| m.content.contains("task one")));
     }
 
+    /// A turn that produced only an answer, not a tool call: the shape that
+    /// used to vanish from the store and take an internal delegation with it.
+    fn plain_turn(seed: &str) -> (Vec<Message>, Vec<Message>, Vec<Message>) {
+        let sent = vec![Message::user(seed)];
+        let mut projected = sent.clone();
+        projected.push(Message::assistant(format!("answer to {seed}")));
+        let mut next = projected.clone();
+        next.push(Message::user("follow-up"));
+        (sent, projected, next)
+    }
+
     #[test]
-    fn a_fingerprint_collision_is_ruled_out_by_comparing_the_prefix_itself() {
-        // Force the collision rather than hunting for one: two entries sharing
-        // a bucket must still be told apart by the lines themselves.
+    fn a_finished_turn_with_no_tool_calls_is_remembered_for_the_next_prompt() {
         let store = ConversationStore::new();
-        let (_, p1, _) = conversation("alpha");
-        store.remember(&p1, hidden_history("alpha"));
+        let (_, projected, next) = plain_turn("find the readme");
+        let history = vec![
+            Message::system("You are the manager."),
+            Message::user("find the readme"),
+            Message::assistant_calling("", vec![call("hidden")]),
+            Message::tool_result("hidden", "the scout said README.md"),
+            Message::assistant("answer to find the readme"),
+        ];
+        store.remember(&projected, history);
+
+        let (restored, trailing) = store.restore(&next).expect("the finished turn is there");
+        assert!(
+            restored
+                .iter()
+                .any(|m| m.content.contains("the scout said")),
+            "the delegation behind the answer is back"
+        );
+        assert_eq!(trailing.len(), 1);
+        assert_eq!(trailing[0].content, "follow-up");
+        assert_eq!(trailing[0].role, Role::User);
+    }
+
+    #[test]
+    fn an_empty_answer_does_not_hide_the_previous_turn_from_the_next_request() {
+        // A harness is not expected to keep an empty assistant message. If one
+        // were stored as the newest prefix, the turn before it could no longer
+        // be found; skipping it leaves the real transcript matchable.
+        let store = ConversationStore::new();
+        let (_, p1, _) = plain_turn("go");
+        store.remember(&p1, hidden_history("go"));
+
+        let mut empty = p1.clone();
+        empty.push(Message::assistant(""));
+        store.remember(&empty, hidden_history("go"));
+        assert_eq!(store.len(), 1, "the empty turn was not inserted");
+
+        let mut next = p1.clone();
+        next.push(Message::user("still there?"));
+        let (history, trailing) = store.restore(&next).expect("the real turn still matches");
+        assert!(
+            history
+                .iter()
+                .any(|m| m.content.contains("the planner said"))
+        );
+        assert_eq!(trailing[0].content, "still there?");
+    }
+
+    #[test]
+    fn the_longest_matching_prefix_is_the_turn_restored() {
+        // Two conversations can share a beginning. Whichever stored turn the
+        // request has actually reached is the one whose hidden work belongs in
+        // front of the new messages.
+        let store = ConversationStore::new();
+        let (_, short, _) = plain_turn("go");
+        let mut long = short.clone();
+        long.push(Message::user("more"));
+        long.push(Message::assistant("answer to more"));
+
         {
             let mut inner = store.inner.lock().unwrap();
-            let fp = inner.entries[0].fingerprint;
-            let mut forged = Entry {
-                fingerprint: fp,
-                prefix: signatures(&conversation("beta").1),
-                history: hidden_history("beta"),
+            inner.entries.push(Entry {
+                prefix: signatures(&short),
+                history: vec![Message::assistant("short history")],
                 bytes: 1,
                 last_used: Instant::now(),
                 created: Instant::now(),
-            };
-            forged.fingerprint = fp;
-            inner.entries.insert(0, forged);
+            });
+            inner.entries.push(Entry {
+                prefix: signatures(&long),
+                history: vec![Message::assistant("long history")],
+                bytes: 1,
+                last_used: Instant::now(),
+                created: Instant::now(),
+            });
         }
-        let (_, _, n1) = conversation("alpha");
-        let (history, _) = store.restore(&n1).unwrap();
-        assert!(history.iter().any(|m| m.content.contains("alpha")));
-        assert!(!history.iter().any(|m| m.content.contains("beta")));
+
+        let mut next = long.clone();
+        next.push(Message::user("next"));
+        let (history, trailing) = store.restore(&next).expect("the longest prefix matches");
+        assert_eq!(history[0].content, "long history");
+        assert_eq!(trailing.len(), 1);
     }
 
     #[test]
@@ -390,12 +452,19 @@ mod tests {
     }
 
     #[test]
-    fn a_first_turn_with_no_tool_calls_is_not_stored_and_not_looked_up() {
+    fn a_request_with_no_completed_turn_is_still_not_looked_up() {
+        // Restore is asked before the manager answers, so the last message is
+        // normally the user's. No stored turn can end there, and the lookup
+        // must be a miss rather than matching some earlier user prompt.
         let store = ConversationStore::new();
-        let plain = vec![Message::user("hello")];
-        store.remember(&plain, vec![Message::user("hello")]);
-        assert!(store.is_empty(), "nothing to match a follow-up against");
-        assert!(store.restore(&plain).is_none());
+        let (_, projected, _) = plain_turn("hello");
+        store.remember(
+            &projected,
+            vec![Message::user("hello"), Message::assistant("hi")],
+        );
+
+        let unanswered = vec![Message::user("hello")];
+        assert!(store.restore(&unanswered).is_none());
     }
 
     #[test]
