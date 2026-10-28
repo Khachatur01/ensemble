@@ -1,0 +1,90 @@
+# ensemble.yaml — the agent team, and what runs each member.
+#
+# This is the shipped example. Copy it to your project root and edit the
+# `manager` and `roles` blocks; the backends are already pointed at the
+# environment variables listed at the bottom.
+#
+# Validate it at any time with:   ensemble check
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# Backends — *how* a model is reached. Two types ship.
+# ---------------------------------------------------------------------------
+backends:
+  # The official `claude` CLI, run as a subprocess on your own subscription.
+  # Needs no environment: the login lives in Claude Code's own config and the
+  # working directory comes from the session.
+  claude:
+    type: claude-code-cli
+    # Optional. Defaults shown.
+    # command: claude              # the binary, if it is not on PATH
+    # allowed_tools: Read,Grep,Glob  # what Claude Code may run on its own
+    # permission_mode: dontAsk
+    # max_turns: 12
+    # timeout_seconds: 600
+
+  # Anything speaking POST /chat/completions — llama-server, vLLM, Ollama,
+  # a hosted API.
+  openai-local:
+    type: openai-compatible-api
+    base_url_env: OPENAI_LOCAL_BASE_URL
+    base_url_default: "http://127.0.0.1:8000/v1"
+    api_key_env: OPENAI_LOCAL_API_KEY
+
+  openai-remote:
+    type: openai-compatible-api
+    base_url_env: OPENAI_REMOTE_BASE_URL
+    base_url_default: "http://10.10.10.5:8000/v1"
+    api_key_env: OPENAI_REMOTE_API_KEY
+
+# ---------------------------------------------------------------------------
+# The manager — mandatory. Validation fails if it is missing, names a backend
+# that is not defined, or has an empty model.
+# ---------------------------------------------------------------------------
+manager:
+  backend: claude
+  model: claude-sonnet
+  prompt: |
+    You coordinate a team. Break the request into self-contained pieces of
+    work, say who should do each and why, and report the result.
+
+# ---------------------------------------------------------------------------
+# The rest of the team — optional, and entirely yours to name. These are a
+# starting kit, not a fixed set: add, remove or rename freely.
+#
+# Moving a role to a different model is two words, and nothing else changes.
+# ---------------------------------------------------------------------------
+roles:
+  planner:
+    backend: openai-local
+    model: qwen3-coder
+    prompt: |
+      You turn a goal into an ordered plan of small, verifiable steps. State
+      what you are unsure about rather than guessing.
+
+  coder:
+    backend: openai-remote
+    model: qwen3-coder
+    prompt: |
+      You implement exactly what is asked, in the style of the surrounding
+      code. Return the code and nothing else.
+
+  reviewer:
+    backend: openai-local
+    model: qwen3-coder
+    prompt: |
+      You review code for correctness and report findings. You do not rewrite
+      it; you say what is wrong and where.
+
+# ---------------------------------------------------------------------------
+# Environment
+#
+#   OPENAI_LOCAL_BASE_URL    overrides base_url_default above
+#   OPENAI_LOCAL_API_KEY     only if that server wants one
+#   OPENAI_REMOTE_BASE_URL   overrides base_url_default above
+#   OPENAI_REMOTE_API_KEY    only if that server wants one
+#
+# API keys are read from the environment and never from this file. A literal
+# `api_key:` key is rejected at load time rather than ignored.
+# ---------------------------------------------------------------------------
