@@ -123,6 +123,18 @@ Small local models are the weak point. A 9B model that handles a read-and-edit
 task fine can still ignore tools when its prompt is large, so keep role prompts
 short and give a role only the tools it needs.
 
+### Progress
+
+An agent role can run for minutes on a local model. While it does, `ensemble mcp`
+sends two notifications per step and tool call, before the final reply:
+`notifications/progress` (the client's `progressToken`, a rising counter and a
+`message` such as `coder · step 2 · edit_file {"path":"a.txt",…}`) and the same
+line as a `notifications/message` log at `info` level. Raise the level with
+`logging/setLevel` to silence the logs; progress is not filtered. A request
+without a `progressToken` gets its request id as the token. Claude Code sends a
+token on tool calls. Neither notification reaches the model: they go to the
+client program, so they cost the manager no tokens.
+
 ## Installation
 
 ### With Nix

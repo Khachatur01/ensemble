@@ -531,13 +531,19 @@ impl McpSession {
         writeln!(stdin, "{msg}").unwrap();
         stdin.flush().unwrap();
 
-        let mut line = String::new();
-        self.reader.read_line(&mut line).expect("read a reply");
-        assert!(!line.trim().is_empty(), "server closed the stream");
-        let v: serde_json::Value = serde_json::from_str(line.trim())
-            .unwrap_or_else(|e| panic!("reply was not JSON ({e}): {line}"));
-        assert_eq!(v["id"], id, "replies must match requests: {v}");
-        v
+        // Notifications (progress, log messages) may arrive before the reply.
+        loop {
+            let mut line = String::new();
+            self.reader.read_line(&mut line).expect("read a reply");
+            assert!(!line.trim().is_empty(), "server closed the stream");
+            let v: serde_json::Value = serde_json::from_str(line.trim())
+                .unwrap_or_else(|e| panic!("reply was not JSON ({e}): {line}"));
+            if v.get("id").is_none() && v.get("method").is_some() {
+                continue;
+            }
+            assert_eq!(v["id"], id, "replies must match requests: {v}");
+            return v;
+        }
     }
 
     fn notify(&mut self, method: &str) {

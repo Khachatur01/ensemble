@@ -163,9 +163,21 @@ impl Ensemble {
         task: &str,
         context: Option<&str>,
     ) -> Result<Outcome, RouteError> {
+        self.delegate_reporting(role, task, context, &|_| {})
+    }
+
+    /// [`Self::delegate`], telling `progress` what an agent role is doing as it
+    /// goes. A think-only role makes one call and reports nothing.
+    pub fn delegate_reporting(
+        &self,
+        role: &str,
+        task: &str,
+        context: Option<&str>,
+        progress: &dyn Fn(&str),
+    ) -> Result<Outcome, RouteError> {
         let (assignment, port) = self.resolve(role)?;
         if !assignment.tools.is_empty() {
-            return self.delegate_agent(assignment, port.as_ref(), task, context);
+            return self.delegate_agent(assignment, port.as_ref(), task, context, progress);
         }
 
         let mut messages = Vec::new();
@@ -206,6 +218,7 @@ impl Ensemble {
         port: &dyn ModelPort,
         task: &str,
         context: Option<&str>,
+        progress: &dyn Fn(&str),
     ) -> Result<Outcome, RouteError> {
         let workdir = match &self.workdir {
             Some(dir) => dir.clone(),
@@ -216,7 +229,7 @@ impl Ensemble {
                 })
             })?,
         };
-        let run = crate::agent::run(port, assignment, task, context, &workdir)
+        let run = crate::agent::run(port, assignment, task, context, &workdir, progress)
             .map_err(RouteError::Backend)?;
         Ok(Outcome {
             role: assignment.role.clone(),

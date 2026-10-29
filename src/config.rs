@@ -801,7 +801,9 @@ roles:
             panic!("expected invalid");
         };
         assert!(
-            problems.iter().any(|p| p.contains("needs `context_window`")),
+            problems
+                .iter()
+                .any(|p| p.contains("needs `context_window`")),
             "{problems:?}"
         );
 
@@ -822,7 +824,9 @@ roles:
             panic!("expected invalid");
         };
         assert!(
-            problems.iter().any(|p| p.contains("only applies to roles with")),
+            problems
+                .iter()
+                .any(|p| p.contains("only applies to roles with")),
             "{problems:?}"
         );
     }

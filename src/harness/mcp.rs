@@ -23,6 +23,7 @@
 use super::delegation;
 use crate::router::Ensemble;
 use serde_json::{Value, json};
+use std::cell::{Cell, RefCell};
 use std::io::{BufRead, Write};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -52,12 +53,59 @@ pub fn call_tool(ensemble: &Ensemble, name: &str, args: &Value) -> ToolResult {
     delegation::call(ensemble, name, args)
 }
 
+/// MCP log levels, lowest first. A client that sets a level asks to hear only
+/// that level and above.
+const LEVELS: [&str; 8] = [
+    "debug",
+    "info",
+    "notice",
+    "warning",
+    "error",
+    "critical",
+    "alert",
+    "emergency",
+];
+
+/// Progress goes out as `info` log messages.
+const PROGRESS_LEVEL: &str = "info";
+
+fn rank(level: &str) -> Option<usize> {
+    LEVELS.iter().position(|l| *l == level)
+}
+
+/// `notifications/progress`: a counter that rises with each line, and the line.
+fn progress_message(token: &Value, progress: u64, text: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": { "progressToken": token, "progress": progress, "message": text }
+    })
+}
+
+fn log_message(text: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/message",
+        "params": { "level": PROGRESS_LEVEL, "logger": SERVER_NAME, "data": text }
+    })
+}
+
 /// Handle one JSON-RPC message.
 ///
 /// `None` means "send nothing" — which is required, not merely allowed, for
 /// notifications: a notification carries no id, and answering one is a protocol
 /// violation that some clients treat as fatal.
 pub fn handle(ensemble: &Ensemble, request: &Value) -> Option<Value> {
+    handle_reporting(ensemble, request, &|_| {})
+}
+
+/// [`handle`], with `notify` called for each notification to send to the client
+/// before the reply, such as what a delegated agent is doing.
+pub fn handle_reporting(
+    ensemble: &Ensemble,
+    request: &Value,
+    notify: &dyn Fn(Value),
+) -> Option<Value> {
     let id = request.get("id").cloned();
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
 
@@ -74,7 +122,7 @@ pub fn handle(ensemble: &Ensemble, request: &Value) -> Option<Value> {
                 .unwrap_or(PROTOCOL_VERSION);
             reply(json!({
                 "protocolVersion": version,
-                "capabilities": { "tools": { "listChanged": false } },
+                "capabilities": { "tools": { "listChanged": false }, "logging": {} },
                 "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") }
             }))
         }
@@ -88,7 +136,20 @@ pub fn handle(ensemble: &Ensemble, request: &Value) -> Option<Value> {
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            let result = call_tool(ensemble, name, &args);
+            // The client's own token when it sent one; otherwise one made from
+            // the request id, so the notification still names its call.
+            let token = params
+                .get("_meta")
+                .and_then(|m| m.get("progressToken"))
+                .cloned()
+                .or_else(|| id.clone())
+                .unwrap_or_else(|| json!("ensemble"));
+            let count = Cell::new(0u64);
+            let result = delegation::call_reporting(ensemble, name, &args, &|line| {
+                count.set(count.get() + 1);
+                notify(progress_message(&token, count.get(), line));
+                notify(log_message(line));
+            });
             reply(json!({
                 "content": [{ "type": "text", "text": result.text }],
                 "isError": result.is_error
@@ -96,6 +157,9 @@ pub fn handle(ensemble: &Ensemble, request: &Value) -> Option<Value> {
         }
 
         "ping" => reply(json!({})),
+
+        // The level itself is applied by `serve`, which owns the output.
+        "logging/setLevel" => reply(json!({})),
 
         // Notifications: no id, no answer.
         m if m.starts_with("notifications/") => None,
@@ -114,18 +178,42 @@ pub fn handle(ensemble: &Ensemble, request: &Value) -> Option<Value> {
 }
 
 /// Run the server until stdin closes.
-pub fn serve(
-    ensemble: &Ensemble,
-    input: impl BufRead,
-    mut output: impl Write,
-) -> std::io::Result<()> {
+pub fn serve(ensemble: &Ensemble, input: impl BufRead, output: impl Write) -> std::io::Result<()> {
+    let output = RefCell::new(output);
+    let min_level = Cell::new(rank(PROGRESS_LEVEL).unwrap_or(0));
+    // Flush per message. A buffered reply is a reply the harness is still
+    // waiting for, and it looks exactly like a hung server.
+    let send = |message: &Value| -> std::io::Result<()> {
+        let mut out = output.borrow_mut();
+        writeln!(out, "{message}")?;
+        out.flush()
+    };
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
         let response = match serde_json::from_str::<Value>(&line) {
-            Ok(request) => handle(ensemble, &request),
+            Ok(request) => {
+                if request.get("method").and_then(Value::as_str) == Some("logging/setLevel")
+                    && let Some(level) = request
+                        .get("params")
+                        .and_then(|p| p.get("level"))
+                        .and_then(Value::as_str)
+                        .and_then(rank)
+                {
+                    min_level.set(level);
+                }
+                handle_reporting(ensemble, &request, &|n| {
+                    // The level only filters log messages; progress is not one.
+                    let wanted = n["params"]["level"].as_str().and_then(rank);
+                    if wanted.is_none_or(|w| w >= min_level.get()) {
+                        // A write that fails here fails again on the reply,
+                        // which ends the session with the error.
+                        let _ = send(&n);
+                    }
+                })
+            }
             Err(e) => Some(json!({
                 "jsonrpc": "2.0",
                 "id": Value::Null,
@@ -133,10 +221,7 @@ pub fn serve(
             })),
         };
         if let Some(response) = response {
-            writeln!(output, "{response}")?;
-            // Flush per message. A buffered reply is a reply the harness is
-            // still waiting for, and it looks exactly like a hung server.
-            output.flush()?;
+            send(&response)?;
         }
     }
     Ok(())
@@ -249,6 +334,115 @@ roles:
             text.ends_with("[scout ran as an agent: 2 step(s), 1 tool call(s)]"),
             "{text}"
         );
+    }
+
+    /// An ensemble whose `scout` is an agent that reads a file, then answers.
+    fn scouting() -> (Ensemble, crate::agent::sandbox::testing::TempDir) {
+        let yaml = YAML.replace(
+            "  reviewer:",
+            "  scout:\n    backend: local\n    model: m\n    tools: [read]\n    context_window: 8000\n  reviewer:",
+        );
+        let cfg = config::parse(
+            &yaml,
+            std::path::Path::new("ensemble.yaml"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let tmp = crate::agent::sandbox::testing::TempDir::new();
+        std::fs::write(tmp.0.join("a.txt"), "hello").unwrap();
+        let local = Arc::new(FakePort::scripted(
+            "local",
+            "unused",
+            vec![
+                crate::port::testing::Scripted::call("c1", "read_file", r#"{"path":"a.txt"}"#),
+                crate::port::testing::Scripted::text("it says hello"),
+            ],
+        ));
+        let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
+        ports.insert("local".into(), local);
+        ports.insert("claude".into(), Arc::new(FakePort::ok("claude", "r")));
+        let e = Ensemble::with_ports(cfg, ports, Some(tmp.0.clone()));
+        (e, tmp)
+    }
+
+    fn served(e: &Ensemble, input: &str) -> Vec<Value> {
+        let mut out = Vec::new();
+        serve(e, std::io::Cursor::new(input.to_string()), &mut out).unwrap();
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    const SCOUT_CALL: &str = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"ensemble_delegate","arguments":{"role":"scout","task":"look"},"_meta":{"progressToken":"tok"}}}"#;
+
+    #[test]
+    fn a_delegation_streams_progress_and_log_messages_before_its_reply() {
+        let (e, _tmp) = scouting();
+        let out = served(&e, &format!("{SCOUT_CALL}\n"));
+
+        let (reply, before) = out.split_last().unwrap();
+        assert_eq!(reply["id"], 7, "the reply comes last");
+
+        let progress: Vec<&Value> = before
+            .iter()
+            .filter(|m| m["method"] == "notifications/progress")
+            .collect();
+        assert_eq!(progress.len(), 4, "{before:?}");
+        assert!(
+            progress
+                .iter()
+                .all(|m| m["params"]["progressToken"] == "tok")
+        );
+        let counters: Vec<u64> = progress
+            .iter()
+            .map(|m| m["params"]["progress"].as_u64().unwrap())
+            .collect();
+        assert_eq!(counters, [1, 2, 3, 4], "the counter rises");
+        assert_eq!(
+            progress[1]["params"]["message"],
+            r#"scout · step 1 · read_file({"path":"a.txt"})"#
+        );
+
+        let logs: Vec<&Value> = before
+            .iter()
+            .filter(|m| m["method"] == "notifications/message")
+            .collect();
+        assert_eq!(logs.len(), 4);
+        assert_eq!(logs[3]["params"]["data"], "scout · step 2 · done");
+        assert_eq!(logs[3]["params"]["level"], "info");
+    }
+
+    #[test]
+    fn without_a_client_token_progress_is_keyed_by_the_request_id() {
+        let (e, _tmp) = scouting();
+        let call = SCOUT_CALL.replace(r#","_meta":{"progressToken":"tok"}"#, "");
+        let out = served(&e, &format!("{call}\n"));
+        let first = out
+            .iter()
+            .find(|m| m["method"] == "notifications/progress")
+            .unwrap();
+        assert_eq!(first["params"]["progressToken"], 7);
+    }
+
+    #[test]
+    fn set_level_above_info_silences_log_messages_but_not_progress() {
+        let (e, _tmp) = scouting();
+        let input = format!(
+            "{}\n{SCOUT_CALL}\n",
+            r#"{"jsonrpc":"2.0","id":1,"method":"logging/setLevel","params":{"level":"warning"}}"#
+        );
+        let out = served(&e, &input);
+        assert_eq!(out[0]["id"], 1, "setLevel is answered");
+        assert!(out.iter().all(|m| m["method"] != "notifications/message"));
+        assert!(out.iter().any(|m| m["method"] == "notifications/progress"));
+    }
+
+    #[test]
+    fn initialize_advertises_logging() {
+        let r = handle(&working(), &rpc("initialize", json!({}))).unwrap();
+        assert!(r["result"]["capabilities"]["logging"].is_object());
     }
 
     #[test]

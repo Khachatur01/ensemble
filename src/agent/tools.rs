@@ -519,8 +519,15 @@ mod tests {
     #[test]
     fn a_tool_outside_the_roles_permissions_is_refused() {
         let (_t, sb) = project();
-        let err =
-            execute(&sb, &[AgentTool::Read], NO_NET, "write_file", "{}", TEST_CAP).unwrap_err();
+        let err = execute(
+            &sb,
+            &[AgentTool::Read],
+            NO_NET,
+            "write_file",
+            "{}",
+            TEST_CAP,
+        )
+        .unwrap_err();
         assert!(err.contains("Available tools: read_file"), "{err}");
     }
 

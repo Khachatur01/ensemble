@@ -33,12 +33,15 @@ pub struct AgentRun {
     pub trimmed: u32,
 }
 
+/// Run a role's tool loop. `progress` hears one short line per model call and
+/// per tool call, as they happen, so a slow run can be told from a hung one.
 pub fn run(
     port: &dyn ModelPort,
     assignment: &Assignment,
     task: &str,
     context: Option<&str>,
     workdir: &Path,
+    progress: &dyn Fn(&str),
 ) -> Result<AgentRun, Error> {
     let sandbox = Sandbox::new(workdir).map_err(|detail| Error::Unsupported {
         backend: port.name().to_string(),
@@ -99,8 +102,19 @@ pub fn run(
         r
     };
 
-    for _ in 0..assignment.max_steps {
-        out.trimmed += trim_history(&mut messages, budget, defs_bytes);
+    let say =
+        |step: u32, what: &str| progress(&format!("{} · step {step} · {what}", assignment.role));
+
+    for step in 1..=assignment.max_steps {
+        let dropped = trim_history(&mut messages, budget, defs_bytes);
+        if dropped > 0 {
+            say(
+                step,
+                &format!("dropped {dropped} old tool output(s) to fit the context"),
+            );
+        }
+        out.trimmed += dropped;
+        say(step, "waiting for the model");
         let response = port.complete(&request(&messages, true))?;
         out.steps += 1;
         out.usage.prompt_tokens += response.usage.prompt_tokens;
@@ -108,6 +122,7 @@ pub fn run(
         out.model = response.model;
 
         if response.tool_calls.is_empty() {
+            say(step, "done");
             out.text = response.text;
             return Ok(out);
         }
@@ -117,6 +132,7 @@ pub fn run(
             response.tool_calls.clone(),
         ));
         for call in &response.tool_calls {
+            say(step, &format!("{}({})", call.name, brief(&call.arguments)));
             out.tool_calls += 1;
             let result = tools::execute(
                 &sandbox,
@@ -134,6 +150,10 @@ pub fn run(
     // Out of steps. One last call with no tools on offer, so the work done so
     // far is reported instead of discarded.
     messages.push(Message::user(OUT_OF_STEPS));
+    say(
+        assignment.max_steps + 1,
+        "out of steps; asking for a report",
+    );
     out.trimmed += trim_history(&mut messages, budget, defs_bytes);
     let response = port.complete(&request(&messages, false))?;
     out.steps += 1;
@@ -145,6 +165,16 @@ pub fn run(
         assignment.max_steps, response.text
     );
     Ok(out)
+}
+
+/// A tool call's arguments squeezed onto one short line.
+fn brief(arguments: &str) -> String {
+    let one_line = arguments.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut shown: String = one_line.chars().take(70).collect();
+    if shown.len() < one_line.len() {
+        shown.push('…');
+    }
+    shown
 }
 
 /// Rough bytes per token. There is no tokenizer here; this errs toward
@@ -241,7 +271,35 @@ mod tests {
     }
 
     fn go(port: &FakePort, a: &Assignment, dir: &Path) -> Result<AgentRun, Error> {
-        run(port, a, "do it", None, dir)
+        run(port, a, "do it", None, dir, &|_| {})
+    }
+
+    #[test]
+    fn progress_reports_each_model_call_and_tool_call_as_it_happens() {
+        let tmp = project();
+        let port = FakePort::scripted(
+            "b",
+            "unused",
+            vec![
+                Scripted::call("c1", "read_file", r#"{"path":"a.txt"}"#),
+                Scripted::text("ok"),
+            ],
+        );
+        let seen = std::cell::RefCell::new(Vec::new());
+        let a = assignment(vec![AgentTool::Read], 5);
+        run(&port, &a, "do it", None, &tmp.0, &|line| {
+            seen.borrow_mut().push(line.to_string())
+        })
+        .unwrap();
+        assert_eq!(
+            seen.into_inner(),
+            vec![
+                "coder · step 1 · waiting for the model",
+                r#"coder · step 1 · read_file({"path":"a.txt"})"#,
+                "coder · step 2 · waiting for the model",
+                "coder · step 2 · done",
+            ]
+        );
     }
 
     #[test]

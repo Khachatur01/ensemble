@@ -195,6 +195,16 @@ fn no_task(role: &str) -> String {
 
 /// Run one of the ensemble's own tools.
 pub fn call(ensemble: &Ensemble, name: &str, args: &Value) -> ToolResult {
+    call_reporting(ensemble, name, args, &|_| {})
+}
+
+/// [`call`], passing along what a delegated agent is doing as it does it.
+pub fn call_reporting(
+    ensemble: &Ensemble,
+    name: &str,
+    args: &Value,
+    progress: &dyn Fn(&str),
+) -> ToolResult {
     match name {
         DELEGATE => {
             let Some(role) = args.get("role").and_then(Value::as_str) else {
@@ -214,7 +224,7 @@ pub fn call(ensemble: &Ensemble, name: &str, args: &Value) -> ToolResult {
             }
             let context = args.get("context").and_then(Value::as_str);
 
-            match ensemble.delegate(role, task, context) {
+            match ensemble.delegate_reporting(role, task, context, progress) {
                 Ok(out) => ToolResult {
                     text: match out.agent {
                         Some(a) => format!(
