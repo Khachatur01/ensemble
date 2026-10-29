@@ -206,7 +206,7 @@ roles:
     fn an_agent_role_is_labelled_and_its_delegation_reports_what_it_did() {
         let yaml = YAML.replace(
             "  reviewer:",
-            "  scout:\n    backend: local\n    model: m\n    tools: [read]\n  fixer:\n    backend: local\n    model: m\n    tools: [read, edit]\n  reviewer:",
+            "  scout:\n    backend: local\n    model: m\n    tools: [read]\n    context_window: 8000\n  fixer:\n    backend: local\n    model: m\n    tools: [read, edit]\n    context_window: 8000\n  reviewer:",
         );
         let cfg = config::parse(
             &yaml,

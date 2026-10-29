@@ -93,11 +93,12 @@ struct RawAssignment {
     /// [`DEFAULT_MAX_STEPS`].
     #[serde(default)]
     max_steps: Option<u32>,
-    /// Most tokens the agent's conversation may hold in one model call.
-    /// Defaults to [`DEFAULT_CONTEXT_TOKENS`]. Keep it at or below the context
-    /// the server really runs the model with.
+    /// Tokens of context the server really runs the model with. Required for
+    /// a role with `tools`, whose conversation grows with every step; the agent
+    /// keeps it within this, because a server that overflows silently drops the
+    /// start of the conversation.
     #[serde(default)]
-    context_tokens: Option<u32>,
+    context_window: Option<u32>,
     /// Let the role's `bash` commands open outbound TCP connections. Off by
     /// default: a command that can read the filesystem and reach the network
     /// can send what it reads anywhere.
@@ -201,7 +202,6 @@ impl AgentTool {
 }
 
 pub const DEFAULT_MAX_STEPS: u32 = 20;
-pub const DEFAULT_CONTEXT_TOKENS: u32 = 16_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
@@ -213,8 +213,8 @@ pub struct Assignment {
     /// Empty: a think-only role. See [`RawAssignment::tools`].
     pub tools: Vec<AgentTool>,
     pub max_steps: u32,
-    /// See [`RawAssignment::context_tokens`].
-    pub context_tokens: u32,
+    /// See [`RawAssignment::context_window`]. Always set for a role with tools.
+    pub context_window: Option<u32>,
     /// Outbound TCP for `bash`. Meaningless without that tool.
     pub network: bool,
 }
@@ -405,7 +405,7 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             temperature: ra.temperature,
             tools: parse_tools(name, &ra.tools, &mut problems),
             max_steps: ra.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
-            context_tokens: ra.context_tokens.unwrap_or(DEFAULT_CONTEXT_TOKENS),
+            context_window: ra.context_window,
             network: ra.network.unwrap_or(false),
         };
         if ra.network.is_some() && !a.tools.contains(&AgentTool::Bash) {
@@ -416,9 +416,19 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
         if ra.max_steps == Some(0) {
             problems.push(format!("roles.{name}: `max_steps` must be greater than 0"));
         }
-        if ra.context_tokens == Some(0) {
+        if ra.context_window == Some(0) {
             problems.push(format!(
-                "roles.{name}: `context_tokens` must be greater than 0"
+                "roles.{name}: `context_window` must be greater than 0"
+            ));
+        }
+        if a.tools.is_empty() && ra.context_window.is_some() {
+            problems.push(format!(
+                "roles.{name}: `context_window` only applies to roles with `tools`"
+            ));
+        }
+        if !a.tools.is_empty() && ra.context_window.is_none() {
+            problems.push(format!(
+                "roles.{name}: a role with `tools` needs `context_window`, the tokens of context your server runs the model with (Ollama: OLLAMA_CONTEXT_LENGTH, default 4096)"
             ));
         }
         if !a.tools.is_empty()
@@ -744,6 +754,7 @@ roles:
     model: m
     tools: [read, grep, edit]
     max_steps: 5
+    context_window: 8000
   thinker:
     backend: openai-local
     model: m
@@ -759,7 +770,8 @@ roles:
         assert_eq!(c.roles["coder"].max_steps, 5);
         assert!(c.roles["thinker"].tools.is_empty());
         assert_eq!(c.roles["thinker"].max_steps, DEFAULT_MAX_STEPS);
-        assert_eq!(c.roles["coder"].context_tokens, DEFAULT_CONTEXT_TOKENS);
+        assert_eq!(c.roles["coder"].context_window, Some(8000));
+        assert_eq!(c.roles["thinker"].context_window, None);
     }
 
     #[test]
@@ -783,17 +795,34 @@ roles:
     }
 
     #[test]
-    fn context_tokens_is_read_and_zero_is_rejected() {
-        let doc = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    context_tokens: 4000");
-        let c = parse(&doc, &p(), &env(&[])).unwrap();
-        assert_eq!(c.roles["coder"].context_tokens, 4000);
+    fn context_window_is_required_for_tools_and_refused_without_them() {
+        let missing = AGENT_DOC.replace("    context_window: 8000\n", "");
+        let Err(ConfigError::Invalid { problems, .. }) = parse(&missing, &p(), &env(&[])) else {
+            panic!("expected invalid");
+        };
+        assert!(
+            problems.iter().any(|p| p.contains("needs `context_window`")),
+            "{problems:?}"
+        );
 
-        let zero = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    context_tokens: 0");
+        let zero = AGENT_DOC.replace("context_window: 8000", "context_window: 0");
         let Err(ConfigError::Invalid { problems, .. }) = parse(&zero, &p(), &env(&[])) else {
             panic!("expected invalid");
         };
         assert!(
-            problems.iter().any(|p| p.contains("context_tokens")),
+            problems.iter().any(|p| p.contains("greater than 0")),
+            "{problems:?}"
+        );
+
+        let think_only = AGENT_DOC.replace(
+            "  thinker:\n    backend: openai-local\n    model: m\n",
+            "  thinker:\n    backend: openai-local\n    model: m\n    context_window: 8000\n",
+        );
+        let Err(ConfigError::Invalid { problems, .. }) = parse(&think_only, &p(), &env(&[])) else {
+            panic!("expected invalid");
+        };
+        assert!(
+            problems.iter().any(|p| p.contains("only applies to roles with")),
             "{problems:?}"
         );
     }

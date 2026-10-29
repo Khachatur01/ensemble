@@ -61,7 +61,8 @@ backends:
 #                                               project and /tmp)
 #   network:   false                           (bash may open outbound TCP)
 #   max_steps: 20                              (model calls per delegation)
-#   context_tokens: 16000                      (keep at or below the server's real context)
+#   context_window: 16384                      (required: tokens of context the server runs the
+#                                               model with; Ollama: OLLAMA_CONTEXT_LENGTH)
 #
 # No `tools:` means a think-only role: one model call, text back. Roles with
 # tools need a backend with tool calling (openai-compatible-api).
@@ -90,6 +91,7 @@ roles:
     backend: openai-remote
     model: qwen3-coder
     tools: [read, glob, grep, edit, write]
+    context_window: 16384
     prompt: |
       You implement exactly what is asked, in the style of the surrounding
       code. Read the relevant files first, make the change, and report what
@@ -99,6 +101,7 @@ roles:
     backend: openai-local
     model: qwen3-coder
     tools: [read, glob, grep]
+    context_window: 16384
     prompt: |
       You review code for correctness and report findings. You do not rewrite
       it; you say what is wrong and where.

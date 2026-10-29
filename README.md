@@ -66,7 +66,7 @@ roles:
     model: qwen3-coder
     tools: [read, glob, grep, edit, write, bash]
     max_steps: 20
-    context_tokens: 16000 # most tokens the conversation may hold (the default)
+    context_window: 16384 # tokens your server runs the model with (required)
     network: false        # bash may not open outbound TCP (the default)
 ```
 
@@ -84,13 +84,16 @@ results back, and repeats until the model answers without asking for a tool or
 `max_steps` (default 20) model calls have been made. At the limit it gets one
 last call with no tools to report what it did and what is unfinished.
 
-The conversation is kept within `context_tokens` (default 16000; set it at or
-below the context the server really runs the model with). Over that, the oldest
-tool results are replaced by a one-line note, never the system prompt, the task
-or the latest step, and the delegation result says how many were dropped. One
-result may take at most 1/8 of the budget; longer output is cut and the model
-is told to ask for less (`offset`/`limit`, a narrower pattern). Tokens are
-estimated at 4 bytes each, with no tokenizer.
+`context_window` is required for a role with tools: the tokens of context your
+server really runs the model with (Ollama: `OLLAMA_CONTEXT_LENGTH`, 4096 unless
+raised). A server that overflows does not complain; Ollama silently drops the
+oldest messages, keeping the system prompt and the newest one, so the task
+itself can vanish. Ensemble keeps the conversation inside the window instead:
+over it, the oldest tool results are replaced by a one-line note (never the
+system prompt, the task or the latest step) and the delegation result says how
+many were dropped. A single tool result may take at most 1/8 of the window;
+longer output is cut and the model is told to ask for less (`offset`/`limit`,
+a narrower pattern). Tokens are estimated at 4 bytes each, with no tokenizer.
 
 - **Confined to the project.** Every path is resolved through the filesystem
   and must land inside the project directory. `..`, absolute paths elsewhere and
@@ -186,7 +189,7 @@ A **backend** is how a model is reached. A **role** is a member of the team,
 and assigning one to a different model is two words with nothing else to
 change. No model is hardcoded as planner, coder or reviewer, and the role names
 are yours. A role takes `backend`, `model`, and optionally `prompt`,
-`temperature`, `tools`, `max_steps` and `context_tokens`.
+`temperature`, `tools`, `max_steps` and `context_window`.
 
 There is no `manager:` block. The agent that calls Ensemble is the manager; an
 old config that still has one is rejected with a message saying so.

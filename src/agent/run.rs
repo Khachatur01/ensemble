@@ -29,7 +29,7 @@ pub struct AgentRun {
     pub steps: u32,
     /// Tool calls executed, whether or not they succeeded.
     pub tool_calls: u32,
-    /// Old tool results replaced by a note to keep within `context_tokens`.
+    /// Old tool results replaced by a note to keep within `context_window`.
     pub trimmed: u32,
 }
 
@@ -76,7 +76,13 @@ pub fn run(
         trimmed: 0,
     };
 
-    let budget = assignment.context_tokens as usize;
+    let Some(window) = assignment.context_window else {
+        return Err(Error::Unsupported {
+            backend: port.name().to_string(),
+            detail: format!("role '{}' has no context_window", assignment.role),
+        });
+    };
+    let budget = window as usize;
     let result_cap = budget / RESULT_SHARE * BYTES_PER_TOKEN;
     let defs_bytes: usize = defs
         .iter()
@@ -223,7 +229,7 @@ mod tests {
             temperature: Some(0.1),
             tools,
             max_steps,
-            context_tokens: crate::config::DEFAULT_CONTEXT_TOKENS,
+            context_window: Some(16_000),
             network: false,
         }
     }
@@ -409,7 +415,7 @@ mod tests {
         std::fs::write(tmp.0.join("big.txt"), "x".repeat(1_400)).unwrap();
         let port = FakePort::scripted("b", "x", reads_of_a_big_file(10));
         let mut a = assignment(vec![AgentTool::Read], 12);
-        a.context_tokens = 3_000; // results are ~350 tokens each; ten overflow it
+        a.context_window = Some(3_000); // results are ~350 tokens each; ten overflow it
         let r = go(&port, &a, &tmp.0).unwrap();
         assert!(r.trimmed >= 1, "trimmed {}", r.trimmed);
 
@@ -433,7 +439,7 @@ mod tests {
         let tmp = big_project();
         let port = FakePort::scripted("b", "x", reads_of_a_big_file(1));
         let mut a = assignment(vec![AgentTool::Read], 5);
-        a.context_tokens = 1_000; // a result may take 1/8: 500 bytes
+        a.context_window = Some(1_000); // a result may take 1/8: 500 bytes
         go(&port, &a, &tmp.0).unwrap();
         let last = port.last().unwrap();
         let result = last.messages.iter().find(|m| m.role == Role::Tool).unwrap();

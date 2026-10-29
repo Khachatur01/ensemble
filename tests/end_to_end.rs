@@ -882,7 +882,7 @@ fn a_role_with_tools_edits_the_project_through_its_own_loop_over_mcp() {
             "version: 1\nbackends:\n  local:\n    type: openai-compatible-api\n    \
              base_url_env: ENSEMBLE_TEST_LOCAL_URL\n    base_url_default: \"{url}\"\n    \
              timeout_seconds: 20\nroles:\n  coder:\n    backend: local\n    model: coder-model\n    \
-             tools: [read, edit]\n"
+             tools: [read, edit]\n    context_window: 8000\n"
         ),
     );
     s.write("a.txt", "foo\n");
