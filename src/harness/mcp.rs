@@ -2,7 +2,7 @@
 //!
 //! The agent that calls Ensemble (Claude Code, OpenCode, ...) is the manager.
 //! It spawns `ensemble mcp` with the project as its working directory and sees
-//! the team as tools: `ensemble_roles`, `ensemble_delegate`, `ensemble_health`.
+//! the team as tools: `roles`, `delegate`, `health`.
 //!
 //! Ensemble is a subprocess the harness spawns, speaking JSON-RPC 2.0 as
 //! newline-delimited JSON on stdin/stdout. **Nothing but protocol goes to
@@ -314,7 +314,7 @@ roles:
         ports.insert("claude".into(), Arc::new(FakePort::ok("claude", "r")));
         let e = Ensemble::with_ports(cfg, ports, Some(tmp.0.clone()));
 
-        let roles = call(&e, "ensemble_roles", json!({}));
+        let roles = call(&e, "roles", json!({}));
         let listing = text_of(&roles);
         assert!(listing.contains("scout [agent, read-only]"), "{listing}");
         assert!(
@@ -323,11 +323,7 @@ roles:
         );
         assert!(listing.starts_with("coder:"), "{listing}");
 
-        let r = call(
-            &e,
-            "ensemble_delegate",
-            json!({"role": "scout", "task": "look"}),
-        );
+        let r = call(&e, "delegate", json!({"role": "scout", "task": "look"}));
         let text = text_of(&r);
         assert!(text.starts_with("it says hello"), "{text}");
         assert!(
@@ -375,7 +371,7 @@ roles:
             .collect()
     }
 
-    const SCOUT_CALL: &str = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"ensemble_delegate","arguments":{"role":"scout","task":"look"},"_meta":{"progressToken":"tok"}}}"#;
+    const SCOUT_CALL: &str = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"delegate","arguments":{"role":"scout","task":"look"},"_meta":{"progressToken":"tok"}}}"#;
 
     #[test]
     fn a_delegation_streams_progress_and_log_messages_before_its_reply() {
@@ -468,10 +464,7 @@ roles:
         let r = handle(&working(), &rpc("tools/list", json!({}))).unwrap();
         let tools = r["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(
-            names,
-            vec!["ensemble_delegate", "ensemble_roles", "ensemble_health"]
-        );
+        assert_eq!(names, vec!["delegate", "roles", "health"]);
 
         let enum_ = &tools[0]["inputSchema"]["properties"]["role"]["enum"];
         let roles: Vec<&str> = enum_
@@ -501,7 +494,7 @@ roles:
 
         let r = call(
             &e,
-            "ensemble_delegate",
+            "delegate",
             json!({"role": "coder", "task": "write a parser"}),
         );
         assert_eq!(text_of(&r), "work done");
@@ -511,7 +504,7 @@ roles:
 
         let r = call(
             &e,
-            "ensemble_delegate",
+            "delegate",
             json!({"role": "reviewer", "task": "review it"}),
         );
         assert_eq!(text_of(&r), "reviewed");
@@ -524,7 +517,7 @@ roles:
         let e = ensemble_with(local.clone(), Arc::new(FakePort::ok("claude", "ok")));
         call(
             &e,
-            "ensemble_delegate",
+            "delegate",
             json!({"role": "coder", "task": "fix it", "context": "the test fails on line 9"}),
         );
         let sent = local.last().unwrap();
@@ -543,11 +536,7 @@ roles:
             Arc::new(FakePort::failing("local", "Connection refused")),
             Arc::new(FakePort::ok("claude", "ok")),
         );
-        let r = call(
-            &e,
-            "ensemble_delegate",
-            json!({"role": "coder", "task": "t"}),
-        );
+        let r = call(&e, "delegate", json!({"role": "coder", "task": "t"}));
         assert!(r.get("error").is_none(), "{r}");
         assert_eq!(r["result"]["isError"], true);
         let text = text_of(&r);
@@ -561,11 +550,7 @@ roles:
     #[test]
     fn a_permanent_failure_tells_the_model_not_to_loop() {
         let e = working();
-        let r = call(
-            &e,
-            "ensemble_delegate",
-            json!({"role": "architect", "task": "t"}),
-        );
+        let r = call(&e, "delegate", json!({"role": "architect", "task": "t"}));
         assert_eq!(r["result"]["isError"], true);
         let text = text_of(&r);
         assert!(text.contains("architect"), "{text}");
@@ -581,14 +566,14 @@ roles:
             json!({"role": "coder"}),
             json!({"role": "coder", "task": "   "}),
         ] {
-            let r = call(&e, "ensemble_delegate", args.clone());
+            let r = call(&e, "delegate", args.clone());
             assert_eq!(r["result"]["isError"], true, "{args}");
         }
     }
 
     #[test]
     fn roles_lists_the_team_without_naming_backends_or_models() {
-        let r = call(&working(), "ensemble_roles", json!({}));
+        let r = call(&working(), "roles", json!({}));
         let text = text_of(&r);
         assert!(
             text.contains("coder") && text.contains("reviewer"),
@@ -607,7 +592,7 @@ roles:
 
     #[test]
     fn health_reports_each_backend_and_flags_a_broken_one() {
-        let good = call(&working(), "ensemble_health", json!({}));
+        let good = call(&working(), "health", json!({}));
         assert_eq!(good["result"]["isError"], false);
         assert!(text_of(&good).contains("local: ok"), "{}", text_of(&good));
 
@@ -622,7 +607,7 @@ roles:
         let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
         ports.insert("local".into(), Arc::new(FakePort::ok("local", "ok")));
         let e = Ensemble::with_ports(cfg, ports, None);
-        let bad = call(&e, "ensemble_health", json!({}));
+        let bad = call(&e, "health", json!({}));
         assert_eq!(bad["result"]["isError"], true);
         assert!(text_of(&bad).contains("UNREACHABLE"), "{}", text_of(&bad));
     }
@@ -631,7 +616,7 @@ roles:
     fn an_unknown_tool_names_the_ones_that_exist() {
         let r = call(&working(), "ensemble_do_everything", json!({}));
         assert_eq!(r["result"]["isError"], true);
-        assert!(text_of(&r).contains("ensemble_delegate"), "{}", text_of(&r));
+        assert!(text_of(&r).contains("delegate"), "{}", text_of(&r));
     }
 
     #[test]

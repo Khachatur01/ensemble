@@ -607,10 +607,7 @@ fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
         .iter()
         .map(|t| t["name"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(
-        names,
-        vec!["ensemble_delegate", "ensemble_roles", "ensemble_health"]
-    );
+    assert_eq!(names, vec!["delegate", "roles", "health"]);
 }
 
 #[test]
@@ -625,7 +622,7 @@ fn a_harness_can_delegate_through_mcp_and_get_the_work_back() {
     session.request("initialize", serde_json::json!({}));
 
     let reply = session.call(
-        "ensemble_delegate",
+        "delegate",
         serde_json::json!({"role": "reviewer", "task": "review src/main.rs", "context": "it is new"}),
     );
     assert_eq!(reply["result"]["isError"], false, "{reply}");
@@ -649,7 +646,7 @@ fn an_unknown_role_comes_back_as_a_readable_tool_error_and_the_session_survives(
     session.request("initialize", serde_json::json!({}));
 
     let reply = session.call(
-        "ensemble_delegate",
+        "delegate",
         serde_json::json!({"role": "architect", "task": "design it"}),
     );
     assert!(
@@ -662,7 +659,7 @@ fn an_unknown_role_comes_back_as_a_readable_tool_error_and_the_session_survives(
     assert!(text.contains("reviewer"), "lists the real roles: {text}");
 
     // The session continues — the point of returning this as a result.
-    let after = session.call("ensemble_roles", serde_json::json!({}));
+    let after = session.call("roles", serde_json::json!({}));
     assert_eq!(after["result"]["isError"], false, "{after}");
 }
 
@@ -678,7 +675,7 @@ fn a_backend_failure_reaches_the_model_as_a_readable_reason() {
     session.request("initialize", serde_json::json!({}));
 
     let reply = session.call(
-        "ensemble_delegate",
+        "delegate",
         serde_json::json!({"role": "coder", "task": "write a function"}),
     );
     assert_eq!(reply["result"]["isError"], true);
@@ -707,7 +704,7 @@ fn the_tools_never_offer_a_way_to_pick_a_model_or_a_backend() {
     assert!(!schema.contains("\"backend\""), "{schema}");
 
     // And the role listing does not leak them either.
-    let roles = tool_text(&session.call("ensemble_roles", serde_json::json!({})));
+    let roles = tool_text(&session.call("roles", serde_json::json!({})));
     assert!(!roles.contains("qwen3-coder"), "{roles}");
     assert!(!roles.contains("claude-sonnet"), "{roles}");
 }
@@ -734,10 +731,10 @@ printf '{"result":"fine","modelUsage":{"claude-sonnet-5":{}}}'
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
     session.call(
-        "ensemble_delegate",
+        "delegate",
         serde_json::json!({"role": "reviewer", "task": "look"}),
     );
-    session.call("ensemble_health", serde_json::json!({}));
+    session.call("health", serde_json::json!({}));
     let last = session.request("ping", serde_json::json!({}));
     // Every read in `request` already asserted the line parsed as JSON with a
     // matching id; reaching here with the stream still aligned is the result.
@@ -898,11 +895,11 @@ fn a_role_with_tools_edits_the_project_through_its_own_loop_over_mcp() {
         serde_json::json!({"protocolVersion": "2025-06-18"}),
     );
 
-    let roles = tool_text(&session.call("ensemble_roles", serde_json::json!({})));
+    let roles = tool_text(&session.call("roles", serde_json::json!({})));
     assert!(roles.contains("coder [agent, can change files]"), "{roles}");
 
     let reply = session.call(
-        "ensemble_delegate",
+        "delegate",
         serde_json::json!({"role": "coder", "task": "rename foo to bar in a.txt"}),
     );
     let text = tool_text(&reply);

@@ -10,9 +10,9 @@ use crate::port::Usage;
 use crate::router::{Ensemble, RouteError};
 use serde_json::{Value, json};
 
-pub const DELEGATE: &str = "ensemble_delegate";
-pub const ROLES: &str = "ensemble_roles";
-pub const HEALTH: &str = "ensemble_health";
+pub const DELEGATE: &str = "delegate";
+pub const ROLES: &str = "roles";
+pub const HEALTH: &str = "health";
 
 /// Every name this module owns. A harness tool that collides with one of these
 /// is a configuration problem, not something to silently shadow.

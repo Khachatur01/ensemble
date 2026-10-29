@@ -40,7 +40,7 @@ in a loop until the task is done. Any OpenAI-compatible model can be the brain
    `CLAUDE.md` (Claude Code):
 
    > Delegate implementation to the `coder` role and review to `reviewer` with
-   > the `ensemble_delegate` tool. Check `ensemble_roles` for what each can do.
+   > the `delegate` tool. Check `roles` for what each can do.
 
 Ensemble runs per project: the agent spawns it with the project as its working
 directory, and that directory is where agent roles work. There is no path
@@ -124,7 +124,7 @@ a narrower pattern). Tokens are estimated at 4 bytes each, with no tokenizer.
   symlinks that lead out are refused, and a refusal goes back to the model as an
   error it can correct. Results are size-capped.
 - **Writing is opt-in.** `edit` and `write` change files, so a role gets them
-  only by listing them. `ensemble_roles` marks roles as `[agent, read-only]` or
+  only by listing them. `roles` marks roles as `[agent, read-only]` or
   `[agent, can change files]`.
 - **`bash` is sandboxed, not safe.** It runs `sh -c` in the project root with
   a timeout (default 120 s, at most 600), size-capped output and an environment
