@@ -7,6 +7,7 @@
 //! itself. Every result is size-capped, with a marker where it was cut.
 
 use super::sandbox::Sandbox;
+use super::shell;
 use crate::config::AgentTool;
 use crate::port::ToolDef;
 use serde_json::{Value, json};
@@ -29,6 +30,7 @@ pub fn wire_name(tool: AgentTool) -> &'static str {
         AgentTool::Grep => "grep",
         AgentTool::Edit => "edit_file",
         AgentTool::Write => "write_file",
+        AgentTool::Bash => "bash",
     }
 }
 
@@ -97,6 +99,21 @@ fn definition(tool: AgentTool) -> ToolDef {
                 "required": ["path", "content"]
             }),
         ),
+        AgentTool::Bash => (
+            "Run a shell command (sh -c) in the project root. Returns stdout, then \
+             stderr, then the exit code. It is sandboxed: it can write only inside \
+             the project and /tmp, it has no secrets in its environment, and it \
+             is killed at the timeout. Use it to build, test and run things; use \
+             the file tools to read and edit.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "timeout_seconds": {"type": "integer", "description": "Default 120, at most 600."}
+                },
+                "required": ["command"]
+            }),
+        ),
     };
     ToolDef {
         name: wire_name(tool).into(),
@@ -110,6 +127,7 @@ fn definition(tool: AgentTool) -> ToolDef {
 pub fn execute(
     sandbox: &Sandbox,
     allowed: &[AgentTool],
+    shell_policy: shell::Policy,
     name: &str,
     arguments: &str,
 ) -> Result<String, String> {
@@ -129,6 +147,7 @@ pub fn execute(
         AgentTool::Grep => grep(sandbox, &args)?,
         AgentTool::Edit => edit(sandbox, &args)?,
         AgentTool::Write => write(sandbox, &args)?,
+        AgentTool::Bash => bash(sandbox, &args, shell_policy)?,
     };
     Ok(cap(out))
 }
@@ -272,6 +291,15 @@ fn edit(sb: &Sandbox, args: &Value) -> Result<String, String> {
     }
 }
 
+fn bash(sb: &Sandbox, args: &Value, policy: shell::Policy) -> Result<String, String> {
+    let command = str_arg(args, "command")?;
+    let timeout = match uint_arg(args, "timeout_seconds")? {
+        Some(s) => std::time::Duration::from_secs(s as u64).min(shell::MAX_TIMEOUT),
+        None => shell::DEFAULT_TIMEOUT,
+    };
+    shell::run(sb.root(), command, timeout, policy)
+}
+
 fn write(sb: &Sandbox, args: &Value) -> Result<String, String> {
     let rel = str_arg(args, "path")?;
     let content = str_arg(args, "content")?;
@@ -352,7 +380,16 @@ mod tests {
     use super::super::sandbox::testing::TempDir;
     use super::*;
 
-    const ALL: [AgentTool; 5] = AgentTool::ALL;
+    const ALL: [AgentTool; 5] = [
+        AgentTool::Read,
+        AgentTool::Glob,
+        AgentTool::Grep,
+        AgentTool::Edit,
+        AgentTool::Write,
+    ];
+    const NO_NET: shell::Policy = shell::Policy {
+        allow_network: false,
+    };
 
     fn project() -> (TempDir, Sandbox) {
         let tmp = TempDir::new();
@@ -368,7 +405,7 @@ mod tests {
     }
 
     fn run(sb: &Sandbox, name: &str, args: Value) -> Result<String, String> {
-        execute(sb, &ALL, name, &args.to_string())
+        execute(sb, &ALL, NO_NET, name, &args.to_string())
     }
 
     #[test]
@@ -477,7 +514,7 @@ mod tests {
     #[test]
     fn a_tool_outside_the_roles_permissions_is_refused() {
         let (_t, sb) = project();
-        let err = execute(&sb, &[AgentTool::Read], "write_file", "{}").unwrap_err();
+        let err = execute(&sb, &[AgentTool::Read], NO_NET, "write_file", "{}").unwrap_err();
         assert!(err.contains("Available tools: read_file"), "{err}");
     }
 
@@ -485,7 +522,7 @@ mod tests {
     fn bad_arguments_come_back_as_text_for_the_model() {
         let (_t, sb) = project();
         assert!(
-            execute(&sb, &ALL, "read_file", "{oops")
+            execute(&sb, &ALL, NO_NET, "read_file", "{oops")
                 .unwrap_err()
                 .contains("not valid JSON")
         );

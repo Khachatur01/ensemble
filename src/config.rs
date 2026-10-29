@@ -93,6 +93,11 @@ struct RawAssignment {
     /// [`DEFAULT_MAX_STEPS`].
     #[serde(default)]
     max_steps: Option<u32>,
+    /// Let the role's `bash` commands open outbound TCP connections. Off by
+    /// default: a command that can read the filesystem and reach the network
+    /// can send what it reads anywhere.
+    #[serde(default)]
+    network: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -155,15 +160,18 @@ pub enum AgentTool {
     Grep,
     Edit,
     Write,
+    /// Run a shell command in the project, inside a Landlock sandbox.
+    Bash,
 }
 
 impl AgentTool {
-    pub const ALL: [AgentTool; 5] = [
+    pub const ALL: [AgentTool; 6] = [
         AgentTool::Read,
         AgentTool::Glob,
         AgentTool::Grep,
         AgentTool::Edit,
         AgentTool::Write,
+        AgentTool::Bash,
     ];
 
     pub fn parse(name: &str) -> Option<AgentTool> {
@@ -177,12 +185,13 @@ impl AgentTool {
             AgentTool::Grep => "grep",
             AgentTool::Edit => "edit",
             AgentTool::Write => "write",
+            AgentTool::Bash => "bash",
         }
     }
 
-    /// Does this tool change files?
+    /// Can this tool change files?
     pub fn writes(self) -> bool {
-        matches!(self, AgentTool::Edit | AgentTool::Write)
+        matches!(self, AgentTool::Edit | AgentTool::Write | AgentTool::Bash)
     }
 }
 
@@ -198,6 +207,8 @@ pub struct Assignment {
     /// Empty: a think-only role. See [`RawAssignment::tools`].
     pub tools: Vec<AgentTool>,
     pub max_steps: u32,
+    /// Outbound TCP for `bash`. Meaningless without that tool.
+    pub network: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -391,7 +402,13 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             temperature: ra.temperature,
             tools: parse_tools(name, &ra.tools, &mut problems),
             max_steps: ra.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
+            network: ra.network.unwrap_or(false),
         };
+        if ra.network.is_some() && !a.tools.contains(&AgentTool::Bash) {
+            problems.push(format!(
+                "roles.{name}: `network` only applies to the `bash` tool, which this role does not have"
+            ));
+        }
         if ra.max_steps == Some(0) {
             problems.push(format!("roles.{name}: `max_steps` must be greater than 0"));
         }
@@ -738,7 +755,7 @@ roles:
     #[test]
     fn an_unknown_tool_or_zero_steps_is_rejected() {
         let doc = AGENT_DOC
-            .replace("[read, grep, edit]", "[read, bash]")
+            .replace("[read, grep, edit]", "[read, sudo]")
             .replace("max_steps: 5", "max_steps: 0");
         let Err(ConfigError::Invalid { problems, .. }) = parse(&doc, &p(), &env(&[])) else {
             panic!("expected invalid");
@@ -746,11 +763,35 @@ roles:
         assert!(
             problems
                 .iter()
-                .any(|p| p.contains("tool 'bash' is unknown")),
+                .any(|p| p.contains("tool 'sudo' is unknown")),
             "{problems:?}"
         );
         assert!(
             problems.iter().any(|p| p.contains("max_steps")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn bash_is_a_writing_tool_and_network_is_off_unless_asked_for() {
+        let doc = AGENT_DOC.replace("[read, grep, edit]", "[read, bash]");
+        let c = parse(&doc, &p(), &env(&[])).unwrap();
+        assert!(c.roles["coder"].tools.contains(&AgentTool::Bash));
+        assert!(AgentTool::Bash.writes());
+        assert!(!c.roles["coder"].network);
+
+        let on = doc.replace("max_steps: 5", "max_steps: 5\n    network: true");
+        assert!(parse(&on, &p(), &env(&[])).unwrap().roles["coder"].network);
+    }
+
+    #[test]
+    fn network_without_bash_is_rejected() {
+        let doc = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    network: true");
+        let Err(ConfigError::Invalid { problems, .. }) = parse(&doc, &p(), &env(&[])) else {
+            panic!("expected invalid");
+        };
+        assert!(
+            problems.iter().any(|p| p.contains("`network`")),
             "{problems:?}"
         );
     }

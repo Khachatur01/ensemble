@@ -64,8 +64,9 @@ roles:
   coder:
     backend: openai-local
     model: qwen3-coder
-    tools: [read, glob, grep, edit, write]
+    tools: [read, glob, grep, edit, write, bash]
     max_steps: 20
+    network: false        # bash may not open outbound TCP (the default)
 ```
 
 | tool | what it does |
@@ -75,6 +76,7 @@ roles:
 | `grep` | find a literal string in files, `path:line: text` |
 | `edit` | replace one exact, unique occurrence in a file |
 | `write` | create or replace a file |
+| `bash` | run a shell command in the project, sandboxed (below) |
 
 The model is offered these tools, Ensemble runs the calls it makes, feeds the
 results back, and repeats until the model answers without asking for a tool or
@@ -88,8 +90,16 @@ last call with no tools to report what it did and what is unfinished.
 - **Writing is opt-in.** `edit` and `write` change files, so a role gets them
   only by listing them. `ensemble_roles` marks roles as `[agent, read-only]` or
   `[agent, can change files]`.
-- **No shell.** There is no `bash` tool. A role can read, search and edit; it
-  cannot run commands.
+- **`bash` is sandboxed, not safe.** It runs `sh -c` in the project root with
+  a timeout (default 120 s, at most 600), size-capped output and an environment
+  rebuilt from an allowlist, so your API keys never reach a command. On Linux
+  the command runs under Landlock: it can **write** only inside the project,
+  `/tmp` and `/dev`, and it cannot open **outbound TCP** connections unless the
+  role sets `network: true` (kernel 6.7+; older kernels cannot restrict the
+  network). It can still **read** any file your user can, including `~/.ssh` —
+  fencing reads would break compilers and package managers — so give `bash` only
+  to roles you trust that far. Without Landlock (other OSes, old kernels) the
+  tool refuses to run; there is no unconfined fallback.
 - **Audited.** A delegation's result ends with how many steps and tool calls
   the agent used.
 - **Think-only roles.** A role without `tools:` is one model call, text back.
@@ -295,8 +305,8 @@ None of the tests need the network, a model server or a Claude subscription.
 
 - **Delegation is single-shot.** A role cannot ask a clarifying question; the
   caller must pass everything in `task` and `context`.
-- **No shell, no regex.** Agent roles cannot run commands, and `grep` is a
-  literal-string search.
+- **`bash` reads everything and is Linux-only.** See above. `grep` is a
+  literal-string search, not a regex.
 - **No context management.** An agent that reads a lot can outgrow its model's
   context window; there is no compaction yet.
 - **Weak models can ignore tools.** See above.

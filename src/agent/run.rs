@@ -1,6 +1,7 @@
 //! The agent loop.
 
 use super::sandbox::Sandbox;
+use super::shell;
 use super::tools;
 use crate::config::Assignment;
 use crate::port::{Error, Message, ModelPort, Request, Usage};
@@ -45,6 +46,9 @@ pub fn run(
         ),
     })?;
     let defs = tools::definitions(&assignment.tools);
+    let policy = shell::Policy {
+        allow_network: assignment.network,
+    };
 
     let mut system = PREAMBLE.to_string();
     if let Some(p) = assignment
@@ -97,8 +101,14 @@ pub fn run(
         ));
         for call in &response.tool_calls {
             out.tool_calls += 1;
-            let result = tools::execute(&sandbox, &assignment.tools, &call.name, &call.arguments)
-                .unwrap_or_else(|e| format!("error: {e}"));
+            let result = tools::execute(
+                &sandbox,
+                &assignment.tools,
+                policy,
+                &call.name,
+                &call.arguments,
+            )
+            .unwrap_or_else(|e| format!("error: {e}"));
             messages.push(Message::tool_result(call.id.clone(), result));
         }
     }
@@ -135,6 +145,7 @@ mod tests {
             temperature: Some(0.1),
             tools,
             max_steps,
+            network: false,
         }
     }
 
@@ -204,6 +215,31 @@ mod tests {
                 ("c2".to_string(), "edited a.txt".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn a_bash_call_runs_in_the_project_and_its_output_goes_back_to_the_model() {
+        let tmp = project();
+        let port = FakePort::scripted(
+            "b",
+            "x",
+            vec![
+                Scripted::call("c1", "bash", r#"{"command":"cat a.txt && echo extra"}"#),
+                Scripted::text("done"),
+            ],
+        );
+        let r = go(&port, &assignment(vec![AgentTool::Bash], 5), &tmp.0).unwrap();
+        assert_eq!(r.text, "done");
+        let result = port
+            .last()
+            .unwrap()
+            .messages
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .unwrap()
+            .content
+            .clone();
+        assert_eq!(result, "old\nextra\n[exit 0]");
     }
 
     #[test]

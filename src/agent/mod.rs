@@ -9,6 +9,7 @@
 
 pub mod run;
 pub mod sandbox;
+pub mod shell;
 pub mod tools;
 
 pub use run::{AgentRun, run};

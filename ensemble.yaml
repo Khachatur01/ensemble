@@ -53,8 +53,13 @@ backends:
 # itself, inside the project directory (fixed when the server starts; the model
 # can name paths inside it and nothing else):
 #
-#   tools:     read, glob, grep, edit, write   (edit/write change files, so a
-#                                               role gets them only by name)
+#   tools:     read, glob, grep, edit, write, bash
+#                                              (edit, write and bash change
+#                                               things, so a role gets them
+#                                               only by name; bash is
+#                                               sandboxed to write only in the
+#                                               project and /tmp)
+#   network:   false                           (bash may open outbound TCP)
 #   max_steps: 20                              (model calls per delegation)
 #
 # No `tools:` means a think-only role: one model call, text back. Roles with
