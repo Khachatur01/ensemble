@@ -138,7 +138,10 @@ and nothing else is: there is no runtime service, no daemon and no port.
 
 ## Configuration
 
-Ensemble reads `ensemble.yaml`, searching upward from the working directory. The
+Ensemble reads `ensemble.yaml` from the project directory (the working
+directory your agent spawned it in, or `--dir`) and nowhere else: parent
+directories are not searched and there is no user-level config. Each project
+defines its own team; to share one, copy the file. The
 shipped [`ensemble.yaml`](ensemble.yaml) is a working example.
 
 ```yaml

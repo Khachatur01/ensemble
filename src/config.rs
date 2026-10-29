@@ -313,20 +313,15 @@ impl Env for BTreeMap<String, String> {
     }
 }
 
-/// Search for `ensemble.yaml` from `start` upward to the filesystem root.
+/// The project's own `ensemble.yaml`, and nothing else.
 ///
-/// Walking up means a delegate invoked deep in a tree finds the same config the
-/// harness did, without every caller having to compute a path.
-pub fn discover(start: &Path) -> Option<PathBuf> {
-    let mut dir = Some(start);
-    while let Some(d) = dir {
-        let candidate = d.join(CONFIG_FILENAME);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        dir = d.parent();
-    }
-    None
+/// Parent directories are deliberately not searched: a team is a property of
+/// one project, and a file in `~/projects/` silently configuring every
+/// checkout below it is exactly the shared, out-of-sight config this rules
+/// out. There is no user-level fallback either.
+pub fn discover(project: &Path) -> Option<PathBuf> {
+    let candidate = project.join(CONFIG_FILENAME);
+    candidate.is_file().then_some(candidate)
 }
 
 pub fn load(path: &Path, env: &dyn Env) -> Result<Config, ConfigError> {

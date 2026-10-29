@@ -30,8 +30,8 @@ COMMANDS:
 
 OPTIONS:
     -c, --config <PATH>     Path to ensemble.yaml.
-                            Default: the nearest one, searching upward from
-                            --dir (or the current directory).
+                            Default: ensemble.yaml in the project directory.
+                            Parent directories are not searched.
     -d, --dir <PATH>        The project directory roles work in.
                             Default: the current directory.
         --context <TEXT>    Extra context for `run`.
@@ -125,7 +125,7 @@ fn run() -> Result<ExitCode, String> {
         Some(p) => p.clone(),
         None => config::discover(&dir).ok_or_else(|| {
             format!(
-                "no {} found in {} or any parent directory. Create one, or pass --config <path>.",
+                "no {} in the project directory {}. Create one there (parent directories are not searched), or pass --config <path>.",
                 config::CONFIG_FILENAME,
                 dir.display()
             )

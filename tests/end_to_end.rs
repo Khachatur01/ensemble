@@ -216,7 +216,7 @@ backends:
 }
 
 #[test]
-fn the_config_is_found_by_searching_upward() {
+fn a_config_in_a_parent_directory_is_not_used() {
     let s = Scratch::new("discover");
     let (claude, _) = claude_stub(&s, "ok");
     s.write(
@@ -232,7 +232,15 @@ fn the_config_is_found_by_searching_upward() {
         .env_remove("ENSEMBLE_TEST_LOCAL_URL")
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        !out.status.success(),
+        "a parent's ensemble.yaml must not configure a subfolder"
+    );
+    assert!(
+        stderr_of(&out).contains("parent directories are not searched"),
+        "{}",
+        stderr_of(&out)
+    );
 }
 
 #[test]
