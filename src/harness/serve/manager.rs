@@ -12,9 +12,12 @@
 //! difference is who runs them:
 //!
 //! * An **ensemble tool** runs here, immediately, and the loop continues. The
-//!   harness never learns it happened. That is the point: the harness selected
-//!   one model and should not have to know, or be able to steer, how the work
-//!   is divided behind it.
+//!   harness is never offered it as a `tool_calls` completion and can never
+//!   run, choose, or steer one — the manager picked it, not the harness. On
+//!   a streaming request the text around the call (the manager's own
+//!   narration, a delegated role's answer) still goes out live on
+//!   `on_content`; only the call itself — its name and arguments — stays out
+//!   of the wire protocol.
 //! * A **harness tool** ends the turn. It comes back as an ordinary
 //!   `tool_calls` completion, the harness runs it, and the result arrives on
 //!   the next request.
@@ -250,12 +253,20 @@ fn warn_if_a_call_was_written_out(outcome: &TurnOutcome) {
 
 /// Run one manager turn to the point where the harness has something to do, or
 /// the manager has an answer.
+///
+/// `on_content`, when given, is called with each fragment of text as it is
+/// produced — the manager's own, and a delegated role's — and every model
+/// call this turn makes asks its backend to stream so there is something to
+/// call it with. `None` is a blocking caller: every call stays exactly the
+/// single-response request it always was, asking nothing extra of an
+/// upstream that may not have anything more to offer than that.
 pub fn run(
     ensemble: &Ensemble,
     store: &ConversationStore,
     request: &ChatRequest,
     max_steps: u32,
     progress: &dyn Fn(&str),
+    on_content: Option<&dyn Fn(&str)>,
 ) -> Result<Outcome, ApiError> {
     // The conversation as the manager should see it: either what we kept from
     // the previous round trip plus what the harness has added since, or — on a
@@ -308,17 +319,17 @@ pub fn run(
     for step in 0..max_steps.max(1) {
         progress(&format!("manager thinking (step {})", step + 1));
 
-        let outcome = ensemble
-            .turn(
-                crate::config::Config::MANAGER,
-                &Turn {
-                    messages: history.clone(),
-                    tools: tools.clone(),
-                    max_tokens: request.max_tokens,
-                    temperature: request.temperature,
-                },
-            )
-            .map_err(|e| upstream_error(&e))?;
+        let turn = Turn {
+            messages: history.clone(),
+            tools: tools.clone(),
+            max_tokens: request.max_tokens,
+            temperature: request.temperature,
+        };
+        let outcome = match on_content {
+            Some(on_content) => ensemble.turn_streaming(crate::config::Config::MANAGER, &turn, on_content),
+            None => ensemble.turn(crate::config::Config::MANAGER, &turn),
+        }
+        .map_err(|e| upstream_error(&e))?;
         add(&mut usage, outcome.usage);
         last_prompt_tokens = outcome.usage.prompt_tokens;
         if super::logging() {
@@ -420,11 +431,15 @@ pub fn run(
             // The one path a delegation takes. No second router, no second
             // prompt assembly, and the same failure text the MCP surface
             // produces.
-            let result = delegation::call(ensemble, tool, &args);
+            let result = match on_content {
+                Some(on_content) => delegation::call_streaming(ensemble, tool, &args, on_content),
+                None => delegation::call(ensemble, tool, &args),
+            };
             add(&mut usage, result.usage);
             if result.usage.total() > 0 {
-                // Provenance to stderr, as `ensemble run` does. Never into the
-                // response: the harness must not learn the shape of the team.
+                // Provenance to stderr too, as `ensemble run` does — on top
+                // of `on_content`, which already carried the role's own text
+                // out live.
                 eprintln!(
                     "ensemble: serve: {} ({} in, {} out){}",
                     call.name,
@@ -462,17 +477,17 @@ pub fn run(
         "You have used this reply's budget for internal steps. Answer now, with what you \
          have, and say plainly what is still unresolved.",
     ));
-    let outcome = ensemble
-        .turn(
-            crate::config::Config::MANAGER,
-            &Turn {
-                messages: history.clone(),
-                tools: Vec::new(),
-                max_tokens: request.max_tokens,
-                temperature: request.temperature,
-            },
-        )
-        .map_err(|e| upstream_error(&e))?;
+    let turn = Turn {
+        messages: history.clone(),
+        tools: Vec::new(),
+        max_tokens: request.max_tokens,
+        temperature: request.temperature,
+    };
+    let outcome = match on_content {
+        Some(on_content) => ensemble.turn_streaming(crate::config::Config::MANAGER, &turn, on_content),
+        None => ensemble.turn(crate::config::Config::MANAGER, &turn),
+    }
+    .map_err(|e| upstream_error(&e))?;
     add(&mut usage, outcome.usage);
     last_prompt_tokens = outcome.usage.prompt_tokens;
 

@@ -238,6 +238,48 @@ impl Ensemble {
         })
     }
 
+    /// Like [`delegate`](Self::delegate), but `on_delta` is called with each
+    /// fragment of the role's text as it arrives.
+    pub fn delegate_streaming(
+        &self,
+        role: &str,
+        task: &str,
+        context: Option<&str>,
+        on_delta: &dyn Fn(&str),
+    ) -> Result<Outcome, RouteError> {
+        let (assignment, port) = self.resolve(role)?;
+
+        let mut messages = Vec::new();
+        if let Some(prompt) = assignment
+            .prompt
+            .as_deref()
+            .filter(|p| !p.trim().is_empty())
+        {
+            messages.push(Message::system(prompt));
+        }
+        if let Some(ctx) = context.filter(|c| !c.trim().is_empty()) {
+            messages.push(Message::user(format!("Context:\n{ctx}")));
+        }
+        messages.push(Message::user(task.to_string()));
+
+        let mut request = Request::new(assignment.model.clone(), messages);
+        request.workdir = self.workdir.as_ref().map(|p| p.display().to_string());
+        request.temperature = assignment.temperature;
+
+        let response: Response = port
+            .complete_streaming(&request, on_delta)
+            .map_err(RouteError::Backend)?;
+
+        Ok(Outcome {
+            role: assignment.role.clone(),
+            backend: assignment.backend.clone(),
+            model: response.model,
+            text: response.text,
+            prompt_tokens: response.usage.prompt_tokens,
+            completion_tokens: response.usage.completion_tokens,
+        })
+    }
+
     /// Send one turn to a role and return what the model said, tool calls and
     /// all. Nothing is executed here; running a tool is the caller's business.
     ///
@@ -258,6 +300,37 @@ impl Ensemble {
         request.workdir = self.workdir.as_ref().map(|p| p.display().to_string());
 
         let response = port.complete(&request).map_err(RouteError::Backend)?;
+
+        Ok(TurnOutcome {
+            role: assignment.role.clone(),
+            backend: assignment.backend.clone(),
+            model: response.model,
+            text: response.text,
+            tool_calls: response.tool_calls,
+            usage: response.usage,
+            finish_reason: response.finish_reason,
+        })
+    }
+
+    /// Like [`turn`](Self::turn), but `on_delta` is called with each fragment
+    /// of the model's text as it arrives.
+    pub fn turn_streaming(
+        &self,
+        role: &str,
+        turn: &Turn,
+        on_delta: &dyn Fn(&str),
+    ) -> Result<TurnOutcome, RouteError> {
+        let (assignment, port) = self.resolve(role)?;
+
+        let mut request = Request::new(assignment.model.clone(), turn.messages.clone());
+        request.tools = turn.tools.clone();
+        request.max_tokens = turn.max_tokens;
+        request.temperature = assignment.temperature.or(turn.temperature);
+        request.workdir = self.workdir.as_ref().map(|p| p.display().to_string());
+
+        let response = port
+            .complete_streaming(&request, on_delta)
+            .map_err(RouteError::Backend)?;
 
         Ok(TurnOutcome {
             role: assignment.role.clone(),

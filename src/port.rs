@@ -226,12 +226,13 @@ pub struct Response {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
     pub tool_calling: bool,
-    /// Not consulted anywhere today. `ensemble serve` synthesises SSE from a
-    /// completed response, so streaming is a property of the transport rather
-    /// than of the backend, and enforcing this flag would refuse requests that
-    /// work. It stays declared because the only thing that would read it — a
-    /// streaming port method — is the known next step, and removing then
-    /// re-adding it would churn both adapters and the fake.
+    /// Still not consulted anywhere. Every adapter answers
+    /// [`ModelPort::complete_streaming`] correctly whether or not it sets
+    /// this — one real delta per fragment if it has them, one synthetic
+    /// delta with the whole answer if it does not — so there is nothing for
+    /// a caller to gate on. It stays declared as documentation of which
+    /// adapters stream for real (`openai-compatible-api`) and which only
+    /// simulate it (`claude-code-cli`).
     pub streaming: bool,
 }
 
@@ -388,6 +389,27 @@ pub trait ModelPort: Send + Sync {
     fn capabilities(&self) -> Capabilities;
 
     fn complete(&self, request: &Request) -> Result<Response, Error>;
+
+    /// Like [`complete`](Self::complete), but `on_delta` is called with each
+    /// fragment of the answer's text as it arrives, rather than once at the
+    /// end.
+    ///
+    /// Default-implemented in terms of `complete`: an adapter with nothing
+    /// better to offer (a CLI that prints one JSON blob at exit) still
+    /// behaves correctly, firing `on_delta` once with the whole answer. Only
+    /// a backend that actually receives the answer incrementally — today,
+    /// `openai-compatible-api` — needs to override this.
+    fn complete_streaming(
+        &self,
+        request: &Request,
+        on_delta: &dyn Fn(&str),
+    ) -> Result<Response, Error> {
+        let response = self.complete(request)?;
+        if !response.text.is_empty() {
+            on_delta(&response.text);
+        }
+        Ok(response)
+    }
 
     /// Cheap reachability check. Must not spend a model call.
     fn health(&self) -> Result<(), Error>;

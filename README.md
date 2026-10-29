@@ -403,10 +403,10 @@ Read [`docs/HARNESS.md`](docs/HARNESS.md) for the full list. The short version:
   across requests and spending the subscription limit.
 - **The project directory is fixed when the server starts.** `--dir`, else the
   working directory. It cannot vary per call or per request, deliberately.
-- **`serve` does not stream token by token.** The reply arrives in one burst
-  once the turn finishes; SSE comments are the only progress until then.
-  Forwarding real deltas would stream the manager's internal delegation to a
-  harness that must not see it.
+- **A delegation is visible in a streaming reply.** The manager's own text and
+  a delegated role's answer both stream live, in the order they're produced —
+  the harness still never sees the delegation tool call itself (its name or
+  arguments), only the text that comes out of it.
 - **A client disconnect does not cancel an in-flight backend call.** The call
   runs to completion and its result is discarded.
 - **`serve` holds one workspace and no persistence.** Conversation state lives

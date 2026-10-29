@@ -208,6 +208,26 @@ fn no_task(role: &str) -> String {
 
 /// Run one of the ensemble's own tools.
 pub fn call(ensemble: &Ensemble, name: &str, args: &Value) -> ToolResult {
+    call_inner(ensemble, name, args, None)
+}
+
+/// Like [`call`], but a [`DELEGATE`] call streams the role's text live
+/// through `on_delta` rather than only returning it once finished.
+pub fn call_streaming(
+    ensemble: &Ensemble,
+    name: &str,
+    args: &Value,
+    on_delta: &dyn Fn(&str),
+) -> ToolResult {
+    call_inner(ensemble, name, args, Some(on_delta))
+}
+
+fn call_inner(
+    ensemble: &Ensemble,
+    name: &str,
+    args: &Value,
+    on_delta: Option<&dyn Fn(&str)>,
+) -> ToolResult {
     match name {
         DELEGATE => {
             let Some(role) = args.get("role").and_then(Value::as_str) else {
@@ -227,7 +247,12 @@ pub fn call(ensemble: &Ensemble, name: &str, args: &Value) -> ToolResult {
             }
             let context = args.get("context").and_then(Value::as_str);
 
-            match ensemble.delegate(role, task, context) {
+            let outcome = match on_delta {
+                Some(on_delta) => ensemble.delegate_streaming(role, task, context, on_delta),
+                None => ensemble.delegate(role, task, context),
+            };
+
+            match outcome {
                 Ok(out) => ToolResult {
                     text: out.text,
                     is_error: false,

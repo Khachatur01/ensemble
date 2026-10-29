@@ -77,6 +77,54 @@ fn completion(content: &str) -> String {
     .to_string()
 }
 
+/// Render a non-streaming completion body (as `completion`/`tool_call_completion`
+/// produce it) as the SSE chunks a real streaming server would send for the
+/// same answer, so one fixture serves a request whichever way it asks.
+fn as_sse(body: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    let choice = &v["choices"][0];
+    let message = &choice["message"];
+    let mut chunks = vec![serde_json::json!({
+        "id": v["id"], "object": "chat.completion.chunk", "model": v["model"],
+        "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}]
+    })];
+
+    if let Some(content) = message["content"].as_str().filter(|c| !c.is_empty()) {
+        chunks.push(serde_json::json!({
+            "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": null}]
+        }));
+    }
+    if let Some(calls) = message["tool_calls"].as_array().filter(|c| !c.is_empty()) {
+        let delta_calls: Vec<_> = calls
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                serde_json::json!({
+                    "index": i, "id": c["id"], "type": "function",
+                    "function": {"name": c["function"]["name"],
+                                 "arguments": c["function"]["arguments"]}
+                })
+            })
+            .collect();
+        chunks.push(serde_json::json!({
+            "choices": [{"index": 0, "delta": {"tool_calls": delta_calls}, "finish_reason": null}]
+        }));
+    }
+    chunks.push(serde_json::json!({
+        "choices": [{"index": 0, "delta": {}, "finish_reason": choice["finish_reason"]}]
+    }));
+    chunks.push(serde_json::json!({ "choices": [], "usage": v["usage"] }));
+
+    let mut out = String::new();
+    for c in chunks {
+        out.push_str("data: ");
+        out.push_str(&c.to_string());
+        out.push_str("\n\n");
+    }
+    out.push_str("data: [DONE]\n\n");
+    out
+}
+
 fn tool_call_completion(id: &str, name: &str, arguments: &str) -> String {
     serde_json::json!({
         "id": "chatcmpl-up", "object": "chat.completion", "model": "stub-model",
@@ -132,10 +180,12 @@ fn start_upstream_with(script: Vec<String>, fallback: String, answer_probe: bool
             let mut body = vec![0u8; length];
             let _ = reader.read_exact(&mut body);
 
+            let mut wants_stream = false;
             let reply = if path.ends_with("/models") {
                 r#"{"object":"list","data":[]}"#.to_string()
             } else {
                 let text = String::from_utf8_lossy(&body).to_string();
+                wants_stream = text.contains("\"stream\":true");
                 // `ensemble serve` proves the manager can return a tool call
                 // before it binds. That is a real request on the wire and it
                 // has to be answered, but it is startup rather than a turn, so
@@ -153,11 +203,17 @@ fn start_upstream_with(script: Vec<String>, fallback: String, answer_probe: bool
                 }
             };
 
+            let (content_type, body_out) = if wants_stream {
+                ("text/event-stream", as_sse(&reply))
+            } else {
+                ("application/json", reply)
+            };
             let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-                reply.len(),
-                reply
+                "HTTP/1.1 200 OK\r\ncontent-type: {}\r\ncontent-length: {}\r\n\r\n{}",
+                content_type,
+                body_out.len(),
+                body_out
             );
             let _ = stream.flush();
             let _ = stream.shutdown(Shutdown::Write);

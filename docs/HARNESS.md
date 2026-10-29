@@ -283,14 +283,19 @@ written-out call in an otherwise finished reply and says so on stderr; it
 does not change the turn, because it cannot tell the two apart with enough
 confidence to act.
 
-**Replies do not stream token by token.** `ModelPort::complete` returns a
-finished answer, so the SSE stream is synthesised: correct chunk sequence,
-correct `finish_reason`, correct `usage`, but the text arrives in one burst
-when the turn completes. Comments (`: keep-alive`, `: ensemble: …`) go out
-every ten seconds so the client does not time out. This is not only an
-implementation shortcut — forwarding real upstream deltas would stream the
-manager's internal delegation calls to a harness that must not see them, so
-most of it would have to be filtered back out.
+**Replies stream for real on `openai-compatible-api`.** `ModelPort` has a
+`complete_streaming` method; the OpenAI-compatible adapter parses the
+upstream SSE body and calls back with each content fragment as it arrives,
+which `ensemble serve` forwards to the client as its own content delta —
+including a delegated role's own text, which streams live too. A backend
+that cannot do this (`claude-code-cli`'s CLI prints one JSON blob at exit)
+gets a default implementation that calls the blocking `complete` and fires
+one delta with the whole answer, so it is still correct, just not granular.
+Progress notes (`: ensemble: …`) and an idle `: keep-alive` every ten seconds
+still go out as SSE comments alongside the content. The only thing kept out
+of the wire protocol is the delegation tool call itself — its name and
+arguments never appear as a harness-visible `tool_calls` entry, since the
+harness has no such tool to answer it with.
 
 **A client disconnect does not cancel an in-flight backend call.** The
 orchestration runs on its own thread and a blocking `complete` cannot be

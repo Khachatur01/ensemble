@@ -31,6 +31,7 @@ pub mod state;
 pub mod wire;
 
 use crate::harness::http;
+use crate::port::Usage;
 use crate::router::{Ensemble, ToolCallProbe};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
@@ -41,11 +42,8 @@ use state::ConversationStore;
 use wire::{ApiError, ChatRequest, Completion, MODEL_ID};
 
 /// How often an idle stream gets a comment, so the client does not time out
-/// waiting on a delegation that is still running.
+/// while the manager is still thinking between deltas.
 const HEARTBEAT: Duration = Duration::from_secs(10);
-
-/// SSE content is sent in pieces this size rather than one large delta.
-const PIECE_BYTES: usize = 512;
 
 pub const DEFAULT_PORT: u16 = 8787;
 
@@ -345,6 +343,7 @@ impl ApiHandler {
             request,
             self.max_steps,
             &|_| {},
+            None,
         ) {
             Ok(o) => o,
             Err(e) => return Self::error(&e),
@@ -364,42 +363,70 @@ impl ApiHandler {
     /// Serve the turn as SSE.
     ///
     /// The orchestration runs on its own thread and the connection thread owns
-    /// the only writer — two threads on one socket would interleave bytes. The
-    /// text is not streamed token by token; `ModelPort::complete` returns a
-    /// finished answer, and forwarding real deltas would stream the manager's
-    /// internal delegation calls to a harness that must not see them. What the
-    /// client gets instead is a protocol-correct stream whose content arrives
-    /// in one burst, with comments in the meantime so the connection does not
-    /// idle out. Documented as a limitation; the sink below does not change
-    /// when real streaming lands.
+    /// the only writer — two threads on one socket would interleave bytes.
+    /// Everything the worker thread produces — the manager's own text, a
+    /// delegated role's text, and progress notes — arrives on one channel as
+    /// a tagged message, so a content fragment is written to the socket the
+    /// moment it is received rather than waiting for the next heartbeat tick
+    /// or for the turn to finish.
     fn chat_streaming(&self, request: ChatRequest) -> http::Response {
         let ensemble = Arc::clone(&self.ensemble);
         let store = Arc::clone(&self.store);
         let max_steps = self.max_steps;
         let model = request.model.clone();
         let include_usage = request.include_usage;
+        let id = wire::completion_id();
+        let created = wire::now_secs();
 
         http::Response::sse(move |sink| {
             // First bytes out immediately, before any model is asked
             // anything, so the client knows the stream is live.
             sink.comment("ensemble: working")?;
 
-            let (tx, rx) = channel();
-            let (ptx, prx) = channel::<String>();
+            // Carries no text or tool calls of its own; `chunk_role` and
+            // `chunk_content` read only `id`/`created`/`model`, so this one
+            // instance serves the role chunk and every content delta.
+            let head = Completion {
+                id: id.clone(),
+                created,
+                model: model.clone(),
+                text: String::new(),
+                tool_calls: Vec::new(),
+                finish_reason: String::new(),
+                usage: Usage::default(),
+            };
+            sink.event(&head.chunk_role())?;
+
+            let (tx, rx) = channel::<StreamMsg>();
+            let delta_tx = tx.clone();
+            let note_tx = tx.clone();
             std::thread::spawn(move || {
-                let result = manager::run(&ensemble, &store, &request, max_steps, &|note| {
-                    let _ = ptx.send(note.to_string());
-                });
-                let _ = tx.send(result);
+                let on_content = |piece: &str| {
+                    let _ = delta_tx.send(StreamMsg::Delta(piece.to_string()));
+                };
+                let result = manager::run(
+                    &ensemble,
+                    &store,
+                    &request,
+                    max_steps,
+                    &|note| {
+                        let _ = note_tx.send(StreamMsg::Note(note.to_string()));
+                    },
+                    Some(&on_content),
+                );
+                let _ = tx.send(StreamMsg::Done(result));
             });
 
             let outcome = loop {
                 match rx.recv_timeout(HEARTBEAT) {
-                    Ok(result) => break result,
+                    Ok(StreamMsg::Delta(piece)) => {
+                        sink.event(&head.chunk_content(&piece))?;
+                    }
+                    Ok(StreamMsg::Note(note)) => {
+                        sink.comment(&format!("ensemble: {note}"))?;
+                    }
+                    Ok(StreamMsg::Done(result)) => break result,
                     Err(RecvTimeoutError::Timeout) => {
-                        while let Ok(note) = prx.try_recv() {
-                            sink.comment(&format!("ensemble: {note}"))?;
-                        }
                         sink.comment("keep-alive")?;
                     }
                     Err(RecvTimeoutError::Disconnected) => {
@@ -414,19 +441,18 @@ impl ApiHandler {
 
             match outcome {
                 Ok(outcome) => {
+                    // The text already went out live, piece by piece, as
+                    // `StreamMsg::Delta`; only what arrives with the finished
+                    // turn is left to send.
                     let c = Completion {
-                        id: wire::completion_id(),
-                        created: wire::now_secs(),
+                        id,
+                        created,
                         model,
-                        text: outcome.text,
+                        text: String::new(),
                         tool_calls: outcome.tool_calls,
                         finish_reason: outcome.finish_reason,
                         usage: outcome.usage,
                     };
-                    sink.event(&c.chunk_role())?;
-                    for piece in wire::content_pieces(&c.text, PIECE_BYTES) {
-                        sink.event(&c.chunk_content(&piece))?;
-                    }
                     for (i, call) in c.tool_calls.iter().enumerate() {
                         sink.event(&c.chunk_tool_call(i, call))?;
                     }
@@ -446,6 +472,18 @@ impl ApiHandler {
             sink.event("[DONE]")
         })
     }
+}
+
+/// What the manager's worker thread sends the connection thread, in the order
+/// it happened. `Delta` and `Note` can arrive any number of times before
+/// exactly one `Done`.
+enum StreamMsg {
+    /// A fragment of content — the manager's own, or a delegated role's.
+    Delta(String),
+    /// A progress note, sent out as an SSE comment rather than content.
+    Note(String),
+    /// The turn is over, successfully or not.
+    Done(Result<manager::Outcome, ApiError>),
 }
 
 impl http::Handler for ApiHandler {
@@ -568,8 +606,8 @@ fn banner(ensemble: &Ensemble, addr: SocketAddr, options: &Options) {
         }
     );
     eprintln!(
-        "ensemble: note: replies are streamed as one block once the turn completes; \
-         progress appears as SSE comments."
+        "ensemble: note: a streaming request gets real content as the manager (and any role \
+         it delegates to) produces it; step-level progress still arrives as SSE comments."
     );
     eprintln!("ensemble: opencode.json:");
     eprintln!(
@@ -1598,16 +1636,23 @@ roles:
                    "messages": [{"role":"user","content":"hi"}]}),
         )));
         assert!(done);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["error"]["code"], "upstream_error");
+        // The role delta goes out immediately, before the manager is even
+        // asked anything, so it is not a claim the turn finished — it is
+        // the error chunk right behind it that this test is really about.
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(events[1]["error"]["code"], "upstream_error");
         assert!(
-            events[0]["error"]["message"]
+            events[1]["error"]["message"]
                 .as_str()
                 .unwrap()
                 .contains("Connection refused")
         );
         assert!(
-            events.iter().all(|e| e.get("choices").is_none()),
+            events.iter().all(|e| match e["choices"].as_array() {
+                Some(choices) => choices.iter().all(|c| c["finish_reason"].is_null()),
+                None => true,
+            }),
             "never claims the turn finished"
         );
     }
@@ -1625,7 +1670,12 @@ roles:
     }
 
     #[test]
-    fn a_streamed_delegation_is_as_invisible_as_a_blocking_one() {
+    fn a_streamed_delegations_tool_call_stays_hidden_but_its_answer_streams() {
+        // The harness still has no `ensemble_delegate` tool and must never be
+        // offered one — that structural invariant does not change. What does
+        // change on purpose: the delegated role's own text is no longer kept
+        // out of the stream, since there is nothing sensitive about it and
+        // seeing a delegation happen live is, if anything, preferred.
         let f = harness(
             vec![
                 Scripted::call(
@@ -1644,7 +1694,12 @@ roles:
         )));
         let rendered = serde_json::to_string(&events).unwrap();
         assert!(!rendered.contains("ensemble_delegate"), "{rendered}");
-        assert!(!rendered.contains("SECRET PLAN"), "{rendered}");
+        assert!(rendered.contains("SECRET PLAN"), "{rendered}");
+        let text: String = events
+            .iter()
+            .filter_map(|e| e["choices"][0]["delta"]["content"].as_str())
+            .collect();
+        assert_eq!(text, "SECRET PLANdone");
         assert_eq!(f.pool.call_count(), 1);
     }
 
