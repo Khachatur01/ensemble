@@ -33,7 +33,7 @@ whether to.
 ## Quick start
 
 ```console
-$ nix shell github:you/ensemble-rs   # ensemble on PATH, nothing installed
+$ nix shell github:Khachatur01/ensemble   # ensemble on PATH, nothing installed
 $ cp ensemble.yaml /your/project/    # then edit the roles
 $ cd /your/project && ensemble check
 ```
@@ -44,7 +44,7 @@ and the harness needs a path that outlives the shell and survives a garbage
 collection:
 
 ```console
-$ nix profile install github:you/ensemble-rs
+$ nix profile install github:Khachatur01/ensemble
 ```
 
 ### As your model provider (recommended)
@@ -118,9 +118,9 @@ harness, how the two surfaces differ, and the limitations of each.
 ### With Nix
 
 ```console
-$ nix run github:you/ensemble-rs -- check     # one command, nothing kept
-$ nix shell github:you/ensemble-rs            # a shell with ensemble on PATH
-$ nix profile install github:you/ensemble-rs  # install it for good
+$ nix run github:Khachatur01/ensemble -- check     # one command, nothing kept
+$ nix shell github:Khachatur01/ensemble            # a shell with ensemble on PATH
+$ nix profile install github:Khachatur01/ensemble  # install it for good
 ```
 
 `nix run` is for a single invocation, `nix shell` for a session of them.
