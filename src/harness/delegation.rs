@@ -218,8 +218,15 @@ pub fn call(ensemble: &Ensemble, name: &str, args: &Value) -> ToolResult {
                 Ok(out) => ToolResult {
                     text: match out.agent {
                         Some(a) => format!(
-                            "{}\n\n[{role} ran as an agent: {} step(s), {} tool call(s)]",
-                            out.text, a.steps, a.tool_calls
+                            "{}\n\n[{role} ran as an agent: {} step(s), {} tool call(s){}]",
+                            out.text,
+                            a.steps,
+                            a.tool_calls,
+                            if a.trimmed > 0 {
+                                format!(", {} old tool output(s) dropped", a.trimmed)
+                            } else {
+                                String::new()
+                            }
                         ),
                         None => out.text,
                     },

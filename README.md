@@ -66,6 +66,7 @@ roles:
     model: qwen3-coder
     tools: [read, glob, grep, edit, write, bash]
     max_steps: 20
+    context_tokens: 16000 # most tokens the conversation may hold (the default)
     network: false        # bash may not open outbound TCP (the default)
 ```
 
@@ -82,6 +83,14 @@ The model is offered these tools, Ensemble runs the calls it makes, feeds the
 results back, and repeats until the model answers without asking for a tool or
 `max_steps` (default 20) model calls have been made. At the limit it gets one
 last call with no tools to report what it did and what is unfinished.
+
+The conversation is kept within `context_tokens` (default 16000; set it at or
+below the context the server really runs the model with). Over that, the oldest
+tool results are replaced by a one-line note, never the system prompt, the task
+or the latest step, and the delegation result says how many were dropped. One
+result may take at most 1/8 of the budget; longer output is cut and the model
+is told to ask for less (`offset`/`limit`, a narrower pattern). Tokens are
+estimated at 4 bytes each, with no tokenizer.
 
 - **Confined to the project.** Every path is resolved through the filesystem
   and must land inside the project directory. `..`, absolute paths elsewhere and
@@ -177,7 +186,7 @@ A **backend** is how a model is reached. A **role** is a member of the team,
 and assigning one to a different model is two words with nothing else to
 change. No model is hardcoded as planner, coder or reviewer, and the role names
 are yours. A role takes `backend`, `model`, and optionally `prompt`,
-`temperature`, `tools` and `max_steps`.
+`temperature`, `tools`, `max_steps` and `context_tokens`.
 
 There is no `manager:` block. The agent that calls Ensemble is the manager; an
 old config that still has one is rejected with a message saying so.

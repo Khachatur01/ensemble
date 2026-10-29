@@ -14,7 +14,6 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 
-const MAX_RESULT_BYTES: usize = 32_000;
 const DEFAULT_READ_LINES: usize = 2000;
 const MAX_GLOB_RESULTS: usize = 200;
 const MAX_GREP_MATCHES: usize = 100;
@@ -123,13 +122,15 @@ fn definition(tool: AgentTool) -> ToolDef {
 }
 
 /// Run one tool call. `allowed` is the role's permission set: a call to a tool
-/// outside it is refused here, whatever the model was offered.
+/// outside it is refused here, whatever the model was offered. A result longer
+/// than `max_bytes` is cut, so one call cannot fill the model's context.
 pub fn execute(
     sandbox: &Sandbox,
     allowed: &[AgentTool],
     shell_policy: shell::Policy,
     name: &str,
     arguments: &str,
+    max_bytes: usize,
 ) -> Result<String, String> {
     let tool = allowed
         .iter()
@@ -149,7 +150,7 @@ pub fn execute(
         AgentTool::Write => write(sandbox, &args)?,
         AgentTool::Bash => bash(sandbox, &args, shell_policy)?,
     };
-    Ok(cap(out))
+    Ok(cap(out, max_bytes))
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -168,14 +169,16 @@ fn uint_arg(args: &Value, key: &str) -> Result<Option<usize>, String> {
     }
 }
 
-fn cap(mut s: String) -> String {
-    if s.len() > MAX_RESULT_BYTES {
-        let mut end = MAX_RESULT_BYTES;
+fn cap(mut s: String, max_bytes: usize) -> String {
+    if s.len() > max_bytes {
+        let mut end = max_bytes;
         while !s.is_char_boundary(end) {
             end -= 1;
         }
         s.truncate(end);
-        s.push_str("\n[output truncated]");
+        s.push_str(
+            "\n[output truncated to save context; ask for less: read_file takes offset and limit, grep and glob take narrower patterns]",
+        );
     }
     s
 }
@@ -387,6 +390,8 @@ mod tests {
         AgentTool::Edit,
         AgentTool::Write,
     ];
+    const TEST_CAP: usize = 8_000;
+
     const NO_NET: shell::Policy = shell::Policy {
         allow_network: false,
     };
@@ -405,7 +410,7 @@ mod tests {
     }
 
     fn run(sb: &Sandbox, name: &str, args: Value) -> Result<String, String> {
-        execute(sb, &ALL, NO_NET, name, &args.to_string())
+        execute(sb, &ALL, NO_NET, name, &args.to_string(), TEST_CAP)
     }
 
     #[test]
@@ -514,7 +519,8 @@ mod tests {
     #[test]
     fn a_tool_outside_the_roles_permissions_is_refused() {
         let (_t, sb) = project();
-        let err = execute(&sb, &[AgentTool::Read], NO_NET, "write_file", "{}").unwrap_err();
+        let err =
+            execute(&sb, &[AgentTool::Read], NO_NET, "write_file", "{}", TEST_CAP).unwrap_err();
         assert!(err.contains("Available tools: read_file"), "{err}");
     }
 
@@ -522,7 +528,7 @@ mod tests {
     fn bad_arguments_come_back_as_text_for_the_model() {
         let (_t, sb) = project();
         assert!(
-            execute(&sb, &ALL, NO_NET, "read_file", "{oops")
+            execute(&sb, &ALL, NO_NET, "read_file", "{oops", TEST_CAP)
                 .unwrap_err()
                 .contains("not valid JSON")
         );
@@ -544,7 +550,7 @@ mod tests {
         )
         .unwrap();
         let out = run(&sb, "read_file", json!({"path": "big.txt"})).unwrap();
-        assert!(out.ends_with("[output truncated]"));
-        assert!(out.len() < MAX_RESULT_BYTES + 50);
+        assert!(out.contains("[output truncated"));
+        assert!(out.len() < TEST_CAP + 200);
     }
 }

@@ -34,6 +34,8 @@ pub struct Outcome {
 pub struct AgentStats {
     pub steps: u32,
     pub tool_calls: u32,
+    /// Old tool results the agent lost to stay within its context budget.
+    pub trimmed: u32,
 }
 
 #[derive(Debug)]
@@ -226,6 +228,7 @@ impl Ensemble {
             agent: Some(AgentStats {
                 steps: run.steps,
                 tool_calls: run.tool_calls,
+                trimmed: run.trimmed,
             }),
         })
     }

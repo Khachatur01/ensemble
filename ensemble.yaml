@@ -61,6 +61,7 @@ backends:
 #                                               project and /tmp)
 #   network:   false                           (bash may open outbound TCP)
 #   max_steps: 20                              (model calls per delegation)
+#   context_tokens: 16000                      (keep at or below the server's real context)
 #
 # No `tools:` means a think-only role: one model call, text back. Roles with
 # tools need a backend with tool calling (openai-compatible-api).

@@ -4,7 +4,7 @@ use super::sandbox::Sandbox;
 use super::shell;
 use super::tools;
 use crate::config::Assignment;
-use crate::port::{Error, Message, ModelPort, Request, Usage};
+use crate::port::{Error, Message, ModelPort, Request, Role, Usage};
 use std::path::Path;
 
 const PREAMBLE: &str = "\
@@ -29,6 +29,8 @@ pub struct AgentRun {
     pub steps: u32,
     /// Tool calls executed, whether or not they succeeded.
     pub tool_calls: u32,
+    /// Old tool results replaced by a note to keep within `context_tokens`.
+    pub trimmed: u32,
 }
 
 pub fn run(
@@ -71,7 +73,15 @@ pub fn run(
         usage: Usage::default(),
         steps: 0,
         tool_calls: 0,
+        trimmed: 0,
     };
+
+    let budget = assignment.context_tokens as usize;
+    let result_cap = budget / RESULT_SHARE * BYTES_PER_TOKEN;
+    let defs_bytes: usize = defs
+        .iter()
+        .map(|d| d.name.len() + d.description.len() + d.parameters.to_string().len())
+        .sum();
 
     let request = |messages: &[Message], offer_tools: bool| {
         let mut r = Request::new(assignment.model.clone(), messages.to_vec());
@@ -84,6 +94,7 @@ pub fn run(
     };
 
     for _ in 0..assignment.max_steps {
+        out.trimmed += trim_history(&mut messages, budget, defs_bytes);
         let response = port.complete(&request(&messages, true))?;
         out.steps += 1;
         out.usage.prompt_tokens += response.usage.prompt_tokens;
@@ -107,6 +118,7 @@ pub fn run(
                 policy,
                 &call.name,
                 &call.arguments,
+                result_cap,
             )
             .unwrap_or_else(|e| format!("error: {e}"));
             messages.push(Message::tool_result(call.id.clone(), result));
@@ -116,6 +128,7 @@ pub fn run(
     // Out of steps. One last call with no tools on offer, so the work done so
     // far is reported instead of discarded.
     messages.push(Message::user(OUT_OF_STEPS));
+    out.trimmed += trim_history(&mut messages, budget, defs_bytes);
     let response = port.complete(&request(&messages, false))?;
     out.steps += 1;
     out.usage.prompt_tokens += response.usage.prompt_tokens;
@@ -126,6 +139,71 @@ pub fn run(
         assignment.max_steps, response.text
     );
     Ok(out)
+}
+
+/// Rough bytes per token. There is no tokenizer here; this errs toward
+/// trimming a little early.
+const BYTES_PER_TOKEN: usize = 4;
+
+/// One tool result may take at most this share of the context budget.
+const RESULT_SHARE: usize = 8;
+
+fn estimate_tokens(messages: &[Message], defs_bytes: usize) -> usize {
+    let bytes: usize = messages
+        .iter()
+        .map(|m| {
+            m.content.len()
+                + m.tool_calls
+                    .iter()
+                    .map(|c| c.name.len() + c.arguments.len())
+                    .sum::<usize>()
+        })
+        .sum();
+    (bytes + defs_bytes) / BYTES_PER_TOKEN
+}
+
+/// Replace the oldest tool results with a one-line note until the history
+/// fits `budget` tokens. The system prompt, the task, the model's own turns and
+/// the results of its latest step are never touched, so every call keeps its
+/// answer. Returns how many results were replaced.
+fn trim_history(messages: &mut [Message], budget: usize, defs_bytes: usize) -> u32 {
+    let protect_from = messages
+        .iter()
+        .rposition(|m| !m.tool_calls.is_empty())
+        .unwrap_or(messages.len());
+    let mut dropped = 0;
+    for i in 0..protect_from {
+        if estimate_tokens(messages, defs_bytes) <= budget {
+            break;
+        }
+        if messages[i].role != Role::Tool {
+            continue;
+        }
+        let Some(id) = messages[i].tool_call_id.as_deref() else {
+            continue;
+        };
+        let what = messages[..i]
+            .iter()
+            .flat_map(|m| &m.tool_calls)
+            .find(|c| c.id == id)
+            .map(|c| {
+                let mut args: String = c.arguments.chars().take(80).collect();
+                if args.len() < c.arguments.len() {
+                    args.push('…');
+                }
+                format!("{}({args})", c.name)
+            })
+            .unwrap_or_else(|| "a tool call".to_string());
+        let note = format!(
+            "[output of {what} removed to save context; call the tool again if you need it]"
+        );
+        if messages[i].content.len() <= note.len() {
+            continue;
+        }
+        messages[i].content = note;
+        dropped += 1;
+    }
+    dropped
 }
 
 #[cfg(test)]
@@ -145,6 +223,7 @@ mod tests {
             temperature: Some(0.1),
             tools,
             max_steps,
+            context_tokens: crate::config::DEFAULT_CONTEXT_TOKENS,
             network: false,
         }
     }
@@ -299,5 +378,66 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("role 'coder'"), "{err}");
+    }
+
+    fn reads_of_a_big_file(steps: usize) -> Vec<Scripted> {
+        (0..steps)
+            .map(|i| Scripted::call(&format!("c{i}"), "read_file", r#"{"path":"big.txt"}"#))
+            .chain([Scripted::text("done")])
+            .collect()
+    }
+
+    fn big_project() -> TempDir {
+        let tmp = project();
+        std::fs::write(tmp.0.join("big.txt"), "x".repeat(6_000)).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn under_budget_nothing_is_dropped() {
+        let tmp = big_project();
+        let port = FakePort::scripted("b", "x", reads_of_a_big_file(2));
+        let r = go(&port, &assignment(vec![AgentTool::Read], 5), &tmp.0).unwrap();
+        assert_eq!(r.trimmed, 0);
+        let last = port.last().unwrap();
+        assert!(last.messages.iter().all(|m| !m.content.contains("removed")));
+    }
+
+    #[test]
+    fn over_budget_the_oldest_results_go_first_and_the_latest_stay() {
+        let tmp = big_project();
+        std::fs::write(tmp.0.join("big.txt"), "x".repeat(1_400)).unwrap();
+        let port = FakePort::scripted("b", "x", reads_of_a_big_file(10));
+        let mut a = assignment(vec![AgentTool::Read], 12);
+        a.context_tokens = 3_000; // results are ~350 tokens each; ten overflow it
+        let r = go(&port, &a, &tmp.0).unwrap();
+        assert!(r.trimmed >= 1, "trimmed {}", r.trimmed);
+
+        let last = port.last().unwrap();
+        let results: Vec<&Message> = last
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .collect();
+        assert_eq!(results.len(), 10, "every call keeps its answer");
+        assert!(results[0].content.starts_with("[output of read_file("));
+        assert!(results[0].content.contains("big.txt"));
+        assert_eq!(results[9].content.len(), 1_400, "the latest is intact");
+        assert_eq!(last.messages[0].role, Role::System);
+        assert!(last.messages[0].content.contains("autonomous agent"));
+        assert_eq!(last.messages[1].content, "do it");
+    }
+
+    #[test]
+    fn one_oversized_result_is_cut_to_its_share_of_the_budget() {
+        let tmp = big_project();
+        let port = FakePort::scripted("b", "x", reads_of_a_big_file(1));
+        let mut a = assignment(vec![AgentTool::Read], 5);
+        a.context_tokens = 1_000; // a result may take 1/8: 500 bytes
+        go(&port, &a, &tmp.0).unwrap();
+        let last = port.last().unwrap();
+        let result = last.messages.iter().find(|m| m.role == Role::Tool).unwrap();
+        assert!(result.content.contains("[output truncated"));
+        assert!(result.content.len() < 800, "{}", result.content.len());
     }
 }

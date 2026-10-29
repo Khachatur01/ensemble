@@ -93,6 +93,11 @@ struct RawAssignment {
     /// [`DEFAULT_MAX_STEPS`].
     #[serde(default)]
     max_steps: Option<u32>,
+    /// Most tokens the agent's conversation may hold in one model call.
+    /// Defaults to [`DEFAULT_CONTEXT_TOKENS`]. Keep it at or below the context
+    /// the server really runs the model with.
+    #[serde(default)]
+    context_tokens: Option<u32>,
     /// Let the role's `bash` commands open outbound TCP connections. Off by
     /// default: a command that can read the filesystem and reach the network
     /// can send what it reads anywhere.
@@ -196,6 +201,7 @@ impl AgentTool {
 }
 
 pub const DEFAULT_MAX_STEPS: u32 = 20;
+pub const DEFAULT_CONTEXT_TOKENS: u32 = 16_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
@@ -207,6 +213,8 @@ pub struct Assignment {
     /// Empty: a think-only role. See [`RawAssignment::tools`].
     pub tools: Vec<AgentTool>,
     pub max_steps: u32,
+    /// See [`RawAssignment::context_tokens`].
+    pub context_tokens: u32,
     /// Outbound TCP for `bash`. Meaningless without that tool.
     pub network: bool,
 }
@@ -397,6 +405,7 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             temperature: ra.temperature,
             tools: parse_tools(name, &ra.tools, &mut problems),
             max_steps: ra.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
+            context_tokens: ra.context_tokens.unwrap_or(DEFAULT_CONTEXT_TOKENS),
             network: ra.network.unwrap_or(false),
         };
         if ra.network.is_some() && !a.tools.contains(&AgentTool::Bash) {
@@ -406,6 +415,11 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
         }
         if ra.max_steps == Some(0) {
             problems.push(format!("roles.{name}: `max_steps` must be greater than 0"));
+        }
+        if ra.context_tokens == Some(0) {
+            problems.push(format!(
+                "roles.{name}: `context_tokens` must be greater than 0"
+            ));
         }
         if !a.tools.is_empty()
             && backends
@@ -745,6 +759,7 @@ roles:
         assert_eq!(c.roles["coder"].max_steps, 5);
         assert!(c.roles["thinker"].tools.is_empty());
         assert_eq!(c.roles["thinker"].max_steps, DEFAULT_MAX_STEPS);
+        assert_eq!(c.roles["coder"].context_tokens, DEFAULT_CONTEXT_TOKENS);
     }
 
     #[test]
@@ -763,6 +778,22 @@ roles:
         );
         assert!(
             problems.iter().any(|p| p.contains("max_steps")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn context_tokens_is_read_and_zero_is_rejected() {
+        let doc = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    context_tokens: 4000");
+        let c = parse(&doc, &p(), &env(&[])).unwrap();
+        assert_eq!(c.roles["coder"].context_tokens, 4000);
+
+        let zero = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    context_tokens: 0");
+        let Err(ConfigError::Invalid { problems, .. }) = parse(&zero, &p(), &env(&[])) else {
+            panic!("expected invalid");
+        };
+        assert!(
+            problems.iter().any(|p| p.contains("context_tokens")),
             "{problems:?}"
         );
     }
