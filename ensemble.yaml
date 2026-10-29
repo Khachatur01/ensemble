@@ -66,6 +66,17 @@ manager:
     work, say who should do each and why, and report the result.
 
 # ---------------------------------------------------------------------------
+# Agent roles — a role with `tools:` is an agent. Ensemble runs the tool loop
+# itself, inside the project directory (fixed when the server starts; the model
+# can name paths inside it and nothing else):
+#
+#   tools:     read, glob, grep, edit, write   (edit/write change files, so a
+#                                               role gets them only by name)
+#   max_steps: 20                              (model calls per delegation)
+#
+# No `tools:` means a think-only role: one model call, text back. Roles with
+# tools need a backend with tool calling (openai-compatible-api).
+#
 # The rest of the team — optional, and entirely yours to name. These are a
 # starting kit, not a fixed set: add, remove or rename freely.
 #
@@ -89,13 +100,16 @@ roles:
   coder:
     backend: openai-remote
     model: qwen3-coder
+    tools: [read, glob, grep, edit, write]
     prompt: |
       You implement exactly what is asked, in the style of the surrounding
-      code. Return the code and nothing else.
+      code. Read the relevant files first, make the change, and report what
+      you changed.
 
   reviewer:
     backend: openai-local
     model: qwen3-coder
+    tools: [read, glob, grep]
     prompt: |
       You review code for correctness and report findings. You do not rewrite
       it; you say what is wrong and where.

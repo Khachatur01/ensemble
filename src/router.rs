@@ -59,6 +59,14 @@ pub struct Outcome {
     pub text: String,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// Set when the role ran as an agent: how much it did to get there.
+    pub agent: Option<AgentStats>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentStats {
+    pub steps: u32,
+    pub tool_calls: u32,
 }
 
 #[derive(Debug)]
@@ -208,6 +216,9 @@ impl Ensemble {
         context: Option<&str>,
     ) -> Result<Outcome, RouteError> {
         let (assignment, port) = self.resolve(role)?;
+        if !assignment.tools.is_empty() {
+            return self.delegate_agent(assignment, port.as_ref(), task, context, &|_| {});
+        }
 
         let mut messages = Vec::new();
         if let Some(prompt) = assignment
@@ -235,6 +246,7 @@ impl Ensemble {
             text: response.text,
             prompt_tokens: response.usage.prompt_tokens,
             completion_tokens: response.usage.completion_tokens,
+            agent: None,
         })
     }
 
@@ -248,6 +260,9 @@ impl Ensemble {
         on_delta: &dyn Fn(&str),
     ) -> Result<Outcome, RouteError> {
         let (assignment, port) = self.resolve(role)?;
+        if !assignment.tools.is_empty() {
+            return self.delegate_agent(assignment, port.as_ref(), task, context, on_delta);
+        }
 
         let mut messages = Vec::new();
         if let Some(prompt) = assignment
@@ -277,6 +292,42 @@ impl Ensemble {
             text: response.text,
             prompt_tokens: response.usage.prompt_tokens,
             completion_tokens: response.usage.completion_tokens,
+            agent: None,
+        })
+    }
+
+    /// A role with tools is an agent: it loops over its tools inside the
+    /// project directory instead of answering in one call.
+    fn delegate_agent(
+        &self,
+        assignment: &Assignment,
+        port: &dyn ModelPort,
+        task: &str,
+        context: Option<&str>,
+        on_delta: &dyn Fn(&str),
+    ) -> Result<Outcome, RouteError> {
+        let workdir = match &self.workdir {
+            Some(dir) => dir.clone(),
+            None => std::env::current_dir().map_err(|e| {
+                RouteError::Backend(Error::Unsupported {
+                    backend: assignment.backend.clone(),
+                    detail: format!("no working directory for role '{}': {e}", assignment.role),
+                })
+            })?,
+        };
+        let run = crate::agent::run(port, assignment, task, context, &workdir, on_delta)
+            .map_err(RouteError::Backend)?;
+        Ok(Outcome {
+            role: assignment.role.clone(),
+            backend: assignment.backend.clone(),
+            model: run.model,
+            text: run.text,
+            prompt_tokens: run.usage.prompt_tokens,
+            completion_tokens: run.usage.completion_tokens,
+            agent: Some(AgentStats {
+                steps: run.steps,
+                tool_calls: run.tool_calls,
+            }),
         })
     }
 
@@ -613,10 +664,12 @@ roles:
         )
         .unwrap();
         let fake = Arc::new(FakePort::ok("openai-local", "ok"));
-        let ports: BTreeMap<String, Arc<dyn ModelPort>> =
-            [("openai-local".to_string(), fake.clone() as Arc<dyn ModelPort>)]
-                .into_iter()
-                .collect();
+        let ports: BTreeMap<String, Arc<dyn ModelPort>> = [(
+            "openai-local".to_string(),
+            fake.clone() as Arc<dyn ModelPort>,
+        )]
+        .into_iter()
+        .collect();
         let e = Ensemble::with_ports(cfg, ports, None);
 
         e.delegate("manager", "t", None).unwrap();
@@ -648,10 +701,12 @@ manager:
         )
         .unwrap();
         let fake = Arc::new(FakePort::ok("openai-local", "ok"));
-        let ports: BTreeMap<String, Arc<dyn ModelPort>> =
-            [("openai-local".to_string(), fake.clone() as Arc<dyn ModelPort>)]
-                .into_iter()
-                .collect();
+        let ports: BTreeMap<String, Arc<dyn ModelPort>> = [(
+            "openai-local".to_string(),
+            fake.clone() as Arc<dyn ModelPort>,
+        )]
+        .into_iter()
+        .collect();
         let e = Ensemble::with_ports(cfg, ports, None);
 
         let turn = Turn {

@@ -30,6 +30,7 @@
 //! with the caller's own conversation and tools. Who runs a tool, and what the
 //! tools mean, is the harness's business.
 
+pub mod agent;
 pub mod backend;
 pub mod config;
 pub mod harness;

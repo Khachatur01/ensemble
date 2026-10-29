@@ -202,6 +202,12 @@ pub fn request_body(request: &Request, stream: bool) -> String {
         "messages": messages,
         "stream": stream,
     });
+    if stream {
+        // Several servers (Ollama among them) omit `usage` from an SSE
+        // stream unless this is set, and a caller that paid for the call
+        // deserves to know what it cost.
+        body["stream_options"] = serde_json::json!({ "include_usage": true });
+    }
     if let Some(n) = request.max_tokens {
         body["max_tokens"] = serde_json::json!(n);
     }
@@ -576,7 +582,8 @@ fn read_sse(
                 }
                 if let Some(calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                     for call in calls {
-                        let index = call.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                        let index =
+                            call.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
                         let acc = tool_calls.entry(index).or_default();
                         if let Some(id) = call.get("id").and_then(|i| i.as_str()) {
                             acc.id = id.to_string();
@@ -698,7 +705,11 @@ impl ModelPort for OpenAiAdapter {
         parse_completion(&resp.body, &self.name, request.offers_tools())
     }
 
-    fn complete_streaming(&self, request: &Request, on_delta: &dyn Fn(&str)) -> Result<Response, Error> {
+    fn complete_streaming(
+        &self,
+        request: &Request,
+        on_delta: &dyn Fn(&str),
+    ) -> Result<Response, Error> {
         check_serviceable(&self.name, request)?;
 
         let url = self.endpoint("chat/completions");
@@ -920,9 +931,11 @@ mod tests {
 
     #[test]
     fn optional_parameters_are_omitted_when_unset() {
-        let v: serde_json::Value =
-            serde_json::from_str(&request_body(&Request::new("m", vec![Message::user("x")]), false))
-                .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&request_body(
+            &Request::new("m", vec![Message::user("x")]),
+            false,
+        ))
+        .unwrap();
         assert!(v.get("max_tokens").is_none());
         assert!(v.get("temperature").is_none());
     }
@@ -1283,6 +1296,20 @@ mod tests {
             .unwrap();
         let posted: serde_json::Value = serde_json::from_str(&http.last_post().2).unwrap();
         assert_eq!(posted["stream"], true);
+        // Several servers (Ollama among them) omit `usage` from the stream
+        // without this, and a caller that paid for the call should learn
+        // what it cost.
+        assert_eq!(posted["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn the_blocking_body_does_not_ask_for_stream_options() {
+        let v: serde_json::Value = serde_json::from_str(&request_body(
+            &Request::new("m", vec![Message::user("x")]),
+            false,
+        ))
+        .unwrap();
+        assert!(v.get("stream_options").is_none());
     }
 
     #[test]
@@ -1354,7 +1381,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(r.text, "Here are the roles: coder, planner.");
-        assert!(seen.lock().unwrap().is_empty(), "reasoning is not a live delta");
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "reasoning is not a live delta"
+        );
     }
 
     #[test]

@@ -326,7 +326,9 @@ pub fn run(
             temperature: request.temperature,
         };
         let outcome = match on_content {
-            Some(on_content) => ensemble.turn_streaming(crate::config::Config::MANAGER, &turn, on_content),
+            Some(on_content) => {
+                ensemble.turn_streaming(crate::config::Config::MANAGER, &turn, on_content)
+            }
             None => ensemble.turn(crate::config::Config::MANAGER, &turn),
         }
         .map_err(|e| upstream_error(&e))?;
@@ -484,7 +486,9 @@ pub fn run(
         temperature: request.temperature,
     };
     let outcome = match on_content {
-        Some(on_content) => ensemble.turn_streaming(crate::config::Config::MANAGER, &turn, on_content),
+        Some(on_content) => {
+            ensemble.turn_streaming(crate::config::Config::MANAGER, &turn, on_content)
+        }
         None => ensemble.turn(crate::config::Config::MANAGER, &turn),
     }
     .map_err(|e| upstream_error(&e))?;

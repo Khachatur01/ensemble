@@ -1241,3 +1241,62 @@ fn two_requests_can_share_one_connection() {
     );
     assert!(raw.contains("connection: keep-alive"), "{raw}");
 }
+
+#[test]
+fn a_role_with_tools_reads_and_edits_the_project_through_its_own_loop() {
+    let up = start_upstream(
+        vec![
+            tool_call_completion(
+                "d1",
+                "ensemble_delegate",
+                r#"{"role":"coder","task":"rename foo to bar in a.txt"}"#,
+            ),
+            tool_call_completion("t1", "read_file", r#"{"path":"a.txt"}"#),
+            tool_call_completion(
+                "t2",
+                "edit_file",
+                r#"{"path":"a.txt","old_string":"foo","new_string":"bar"}"#,
+            ),
+            completion("renamed it"),
+            completion("The coder renamed it."),
+        ],
+        completion("x"),
+    );
+    let scratch = Scratch::new("agent");
+    scratch.write(
+        "ensemble.yaml",
+        &format!(
+            "{}  coder:\n    backend: local\n    model: coder-model\n    tools: [read, edit]\n",
+            config_yaml(&up.url)
+        ),
+    );
+    scratch.write("a.txt", "foo\n");
+    let server = Server::start(&scratch, &[]);
+
+    let reply = post(
+        &server,
+        serde_json::json!({"model": "ensemble/manager",
+                           "messages": [{"role": "user", "content": "do it"}]}),
+    );
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(
+        reply.json()["choices"][0]["message"]["content"],
+        "The coder renamed it."
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("a.txt")).unwrap(),
+        "bar\n"
+    );
+
+    let seen = up.seen.lock().unwrap();
+    assert_eq!(seen.len(), 5, "manager, three coder calls, manager");
+    let coder: serde_json::Value = serde_json::from_str(&seen[1]).unwrap();
+    assert_eq!(coder["model"], "coder-model");
+    let offered: Vec<&str> = coder["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(offered, ["read_file", "edit_file"]);
+}

@@ -229,6 +229,55 @@ roles:
     }
 
     #[test]
+    fn an_agent_role_is_labelled_and_its_delegation_reports_what_it_did() {
+        let yaml = YAML.replace(
+            "  reviewer:",
+            "  scout:\n    backend: local\n    model: m\n    tools: [read]\n  fixer:\n    backend: local\n    model: m\n    tools: [read, edit]\n  reviewer:",
+        );
+        let cfg = config::parse(
+            &yaml,
+            std::path::Path::new("ensemble.yaml"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let tmp = crate::agent::sandbox::testing::TempDir::new();
+        std::fs::write(tmp.0.join("a.txt"), "hello").unwrap();
+        let local = Arc::new(FakePort::scripted(
+            "local",
+            "unused",
+            vec![
+                crate::port::testing::Scripted::call("c1", "read_file", r#"{"path":"a.txt"}"#),
+                crate::port::testing::Scripted::text("it says hello"),
+            ],
+        ));
+        let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
+        ports.insert("local".into(), local);
+        ports.insert("claude".into(), Arc::new(FakePort::ok("claude", "r")));
+        let e = Ensemble::with_ports(cfg, ports, Some(tmp.0.clone()));
+
+        let roles = call(&e, "ensemble_roles", json!({}));
+        let listing = text_of(&roles);
+        assert!(listing.contains("scout [agent, read-only]"), "{listing}");
+        assert!(
+            listing.contains("fixer [agent, can change files]"),
+            "{listing}"
+        );
+        assert!(listing.contains("\ncoder:"), "{listing}");
+
+        let r = call(
+            &e,
+            "ensemble_delegate",
+            json!({"role": "scout", "task": "look"}),
+        );
+        let text = text_of(&r);
+        assert!(text.starts_with("it says hello"), "{text}");
+        assert!(
+            text.ends_with("[scout ran as an agent: 2 step(s), 1 tool call(s)]"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn initialize_reports_the_server_and_echoes_the_clients_protocol_version() {
         let r = handle(
             &working(),

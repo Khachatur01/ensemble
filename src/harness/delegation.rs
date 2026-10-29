@@ -254,7 +254,13 @@ fn call_inner(
 
             match outcome {
                 Ok(out) => ToolResult {
-                    text: out.text,
+                    text: match out.agent {
+                        Some(a) => format!(
+                            "{}\n\n[{role} ran as an agent: {} step(s), {} tool call(s)]",
+                            out.text, a.steps, a.tool_calls
+                        ),
+                        None => out.text,
+                    },
                     is_error: false,
                     usage: Usage {
                         prompt_tokens: out.prompt_tokens,
@@ -290,7 +296,12 @@ fn call_inner(
                     .and_then(|a| a.prompt.as_deref())
                     .map(first_line)
                     .unwrap_or_else(|| "(no description configured)".to_string());
-                lines.push(format!("{role}: {purpose}"));
+                let kind = match ensemble.config().assignment(role) {
+                    Some(a) if a.tools.iter().any(|t| t.writes()) => " [agent, can change files]",
+                    Some(a) if !a.tools.is_empty() => " [agent, read-only]",
+                    _ => "",
+                };
+                lines.push(format!("{role}{kind}: {purpose}"));
             }
             ToolResult::ok(lines.join("\n"))
         }

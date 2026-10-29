@@ -80,6 +80,16 @@ struct RawAssignment {
     /// business tuning a role's reliability-critical sampling.
     #[serde(default)]
     temperature: Option<f32>,
+    /// What the role may do on its own, inside the project directory. Empty or
+    /// absent is a think-only role: one model call, text back. Anything listed
+    /// turns the role into an agent that loops over these tools; write access
+    /// has to be asked for by name.
+    #[serde(default)]
+    tools: Vec<String>,
+    /// Cap on model calls within one delegation. Defaults to
+    /// [`DEFAULT_MAX_STEPS`].
+    #[serde(default)]
+    max_steps: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +147,47 @@ impl Backend {
     }
 }
 
+/// One capability of ensemble's own agent loop. Names are the config spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AgentTool {
+    Read,
+    Glob,
+    Grep,
+    Edit,
+    Write,
+}
+
+impl AgentTool {
+    pub const ALL: [AgentTool; 5] = [
+        AgentTool::Read,
+        AgentTool::Glob,
+        AgentTool::Grep,
+        AgentTool::Edit,
+        AgentTool::Write,
+    ];
+
+    pub fn parse(name: &str) -> Option<AgentTool> {
+        AgentTool::ALL.into_iter().find(|t| t.as_str() == name)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentTool::Read => "read",
+            AgentTool::Glob => "glob",
+            AgentTool::Grep => "grep",
+            AgentTool::Edit => "edit",
+            AgentTool::Write => "write",
+        }
+    }
+
+    /// Does this tool change files?
+    pub fn writes(self) -> bool {
+        matches!(self, AgentTool::Edit | AgentTool::Write)
+    }
+}
+
+pub const DEFAULT_MAX_STEPS: u32 = 20;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
     pub role: String,
@@ -144,6 +195,9 @@ pub struct Assignment {
     pub model: String,
     pub prompt: Option<String>,
     pub temperature: Option<f32>,
+    /// Empty: a think-only role. See [`RawAssignment::tools`].
+    pub tools: Vec<AgentTool>,
+    pub max_steps: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -346,7 +400,15 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
         model: raw.manager.model.clone(),
         prompt: raw.manager.prompt.clone(),
         temperature: raw.manager.temperature,
+        tools: Vec::new(),
+        max_steps: DEFAULT_MAX_STEPS,
     };
+    if !raw.manager.tools.is_empty() || raw.manager.max_steps.is_some() {
+        problems.push(
+            "manager: `tools` and `max_steps` are for roles under `roles:`; the manager only routes"
+                .into(),
+        );
+    }
     check_assignment(&manager, &backends, &raw.backends, &mut problems);
 
     let mut roles: BTreeMap<String, Assignment> = BTreeMap::new();
@@ -364,7 +426,22 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             model: ra.model.clone(),
             prompt: ra.prompt.clone(),
             temperature: ra.temperature,
+            tools: parse_tools(name, &ra.tools, &mut problems),
+            max_steps: ra.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
         };
+        if ra.max_steps == Some(0) {
+            problems.push(format!("roles.{name}: `max_steps` must be greater than 0"));
+        }
+        if !a.tools.is_empty()
+            && backends
+                .get(&a.backend)
+                .is_some_and(|b| !b.supports_tool_calling())
+        {
+            problems.push(format!(
+                "roles.{name}: `tools` needs a backend that supports tool calling; '{}' does not",
+                a.backend
+            ));
+        }
         check_assignment(&a, &backends, &raw.backends, &mut problems);
         roles.insert(name.clone(), a);
     }
@@ -393,6 +470,24 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             problems,
         })
     }
+}
+
+fn parse_tools(role: &str, names: &[String], problems: &mut Vec<String>) -> Vec<AgentTool> {
+    let mut tools = Vec::new();
+    for name in names {
+        match AgentTool::parse(name) {
+            Some(t) if !tools.contains(&t) => tools.push(t),
+            Some(_) => {}
+            None => {
+                let known: Vec<&str> = AgentTool::ALL.iter().map(|t| t.as_str()).collect();
+                problems.push(format!(
+                    "roles.{role}: tool '{name}' is unknown. Known tools: {}.",
+                    known.join(", ")
+                ));
+            }
+        }
+    }
+    tools
 }
 
 /// Does this assignment name a backend that exists, with a non-empty model?
@@ -657,6 +752,76 @@ roles:
         assert_eq!(
             c.role_names(),
             vec!["manager", "coder", "planner", "reviewer"]
+        );
+    }
+
+    const AGENT_DOC: &str = r#"
+version: 1
+backends:
+  openai-local:
+    type: openai-compatible-api
+    base_url_env: OPENAI_LOCAL_BASE_URL
+    base_url_default: "http://127.0.0.1:11434/v1"
+  claude:
+    type: claude-code-cli
+manager:
+  backend: openai-local
+  model: m
+roles:
+  coder:
+    backend: openai-local
+    model: m
+    tools: [read, grep, edit]
+    max_steps: 5
+  thinker:
+    backend: openai-local
+    model: m
+"#;
+
+    #[test]
+    fn a_role_with_tools_is_an_agent_and_one_without_is_think_only() {
+        let c = parse(AGENT_DOC, &p(), &env(&[])).unwrap();
+        assert_eq!(
+            c.roles["coder"].tools,
+            vec![AgentTool::Read, AgentTool::Grep, AgentTool::Edit]
+        );
+        assert_eq!(c.roles["coder"].max_steps, 5);
+        assert!(c.roles["thinker"].tools.is_empty());
+        assert_eq!(c.roles["thinker"].max_steps, DEFAULT_MAX_STEPS);
+    }
+
+    #[test]
+    fn an_unknown_tool_or_zero_steps_is_rejected() {
+        let doc = AGENT_DOC
+            .replace("[read, grep, edit]", "[read, bash]")
+            .replace("max_steps: 5", "max_steps: 0");
+        let Err(ConfigError::Invalid { problems, .. }) = parse(&doc, &p(), &env(&[])) else {
+            panic!("expected invalid");
+        };
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("tool 'bash' is unknown")),
+            "{problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("max_steps")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn tools_on_a_backend_that_cannot_call_tools_are_rejected() {
+        let doc = AGENT_DOC.replace(
+            "  coder:\n    backend: openai-local",
+            "  coder:\n    backend: claude",
+        );
+        let Err(ConfigError::Invalid { problems, .. }) = parse(&doc, &p(), &env(&[])) else {
+            panic!("expected invalid");
+        };
+        assert!(
+            problems.iter().any(|p| p.contains("supports tool calling")),
+            "{problems:?}"
         );
     }
 

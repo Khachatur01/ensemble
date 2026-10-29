@@ -113,6 +113,33 @@ For OpenCode, in `opencode.json`:
 See [`docs/HARNESS.md`](docs/HARNESS.md) for what was verified against which
 harness, how the two surfaces differ, and the limitations of each.
 
+### Roles that do the work themselves
+
+A role with `tools:` is an agent: Ensemble runs the tool loop itself, on any
+`openai-compatible-api` model, with nothing else installed.
+
+```yaml
+roles:
+  coder:
+    backend: openai-local
+    model: qwen3-coder
+    tools: [read, glob, grep, edit, write]
+    max_steps: 20
+```
+
+The tools act inside the project directory fixed at start (`--dir`, or the
+directory the MCP client spawned `ensemble mcp` in). A model can name paths
+inside it and nothing else: `..`, absolute paths outside it and symlinks that
+lead out are refused. `edit` and `write` change files, so a role gets them only
+by listing them. `grep` matches a literal string. A delegation's result ends
+with how many steps and tool calls the agent used, and `ensemble_roles` marks
+which roles are agents and which can change files. A role without `tools:` is
+one model call, text back.
+
+To make your own agent use them, add a line to its `CLAUDE.md` / `AGENTS.md`:
+"Delegate implementation to the `coder` role and review to `reviewer` with the
+`ensemble_delegate` tool."
+
 ## Installation
 
 ### With Nix
