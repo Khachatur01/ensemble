@@ -96,11 +96,6 @@ backends:
     base_url_default: "{url}"
     timeout_seconds: 20
 
-manager:
-  backend: openai-local
-  model: qwen3-coder
-  prompt: "Coordinates the team."
-
 roles:
   reviewer:
     backend: claude
@@ -151,21 +146,22 @@ fn check_accepts_a_valid_config_and_reports_the_team() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(text.contains("ok (version 1)"), "{text}");
-    assert!(text.contains("manager (mandatory)"), "{text}");
+    assert!(text.contains("mcp: ready"), "{text}");
     assert!(text.contains("reviewer"), "{text}");
     assert!(text.contains("claude-code-cli"), "{text}");
     assert!(text.contains("openai-compatible-api"), "{text}");
 }
 
 #[test]
-fn check_fails_loudly_on_a_config_with_no_manager() {
-    let s = Scratch::new("check-no-manager");
+fn check_refuses_an_old_config_that_still_has_a_manager() {
+    let s = Scratch::new("check-old-manager");
     s.write(
         "ensemble.yaml",
         r#"
 version: 1
 backends:
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
+manager: { backend: x, model: m }
 roles:
   coder: { backend: x, model: m }
 "#,
@@ -173,7 +169,7 @@ roles:
     let out = ensemble(&s, &["check"]);
     assert!(
         !out.status.success(),
-        "a config with no manager must not pass"
+        "a manager block must not load any more"
     );
     assert!(stderr_of(&out).contains("manager"), "{}", stderr_of(&out));
 }
@@ -187,7 +183,8 @@ fn check_reports_several_problems_at_once() {
 version: 4
 backends:
   x: { type: made-up-backend }
-manager: { backend: nowhere, model: "" }
+roles:
+  r: { backend: nowhere, model: "" }
 "#,
     );
     let out = ensemble(&s, &["check"]);
@@ -211,7 +208,6 @@ backends:
     base_url_env: U
     base_url_default: "http://127.0.0.1:1/v1"
     api_key: "sk-should-never-be-here"
-manager: { backend: x, model: m }
 "#,
     );
     let out = ensemble(&s, &["check"]);
@@ -263,10 +259,7 @@ fn roles_prints_the_routing_table() {
     let out = ensemble(&s, &["roles"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
-    assert!(
-        text.contains("manager\topenai-local\tqwen3-coder"),
-        "{text}"
-    );
+    assert!(text.contains("coder\topenai-local\tqwen3-coder"), "{text}");
     assert!(text.contains("reviewer\tclaude\tclaude-sonnet"), "{text}");
 }
 
@@ -786,5 +779,136 @@ fn an_invalid_config_stops_the_mcp_server_before_it_serves_anything() {
     s.write("ensemble.yaml", "version: 1\nbackends: {}\n");
     let out = ensemble(&s, &["mcp"]);
     assert!(!out.status.success());
-    assert!(stderr_of(&out).contains("manager"), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("backend"), "{}", stderr_of(&out));
+}
+
+// ---------------------------------------------------------------------------
+// A role that is an agent, end to end
+// ---------------------------------------------------------------------------
+
+/// Answer one POST per entry of `bodies` (a chat-completions JSON body each),
+/// in order, and record every request body.
+fn openai_stub(bodies: Vec<String>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen_for_thread = std::sync::Arc::clone(&seen);
+    std::thread::spawn(move || {
+        for body in bodies {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut reader = BufReader::new(&stream);
+            let mut length = 0usize;
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).is_err() || header.trim().is_empty() {
+                    break;
+                }
+                if let Some(v) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut buf = vec![0u8; length];
+            if reader.read_exact(&mut buf).is_err() {
+                return;
+            }
+            seen_for_thread
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buf).to_string());
+            let mut stream = &stream;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.flush();
+        }
+    });
+    (url, seen)
+}
+
+fn tool_call_body(id: &str, name: &str, arguments: &str) -> String {
+    serde_json::json!({
+        "id": "c", "object": "chat.completion", "model": "stub",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": null,
+            "tool_calls": [{"id": id, "type": "function",
+                            "function": {"name": name, "arguments": arguments}}]},
+            "finish_reason": "tool_calls"}],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 6}
+    })
+    .to_string()
+}
+
+fn text_body(text: &str) -> String {
+    serde_json::json!({
+        "id": "c", "object": "chat.completion", "model": "stub",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 6}
+    })
+    .to_string()
+}
+
+#[test]
+fn a_role_with_tools_edits_the_project_through_its_own_loop_over_mcp() {
+    let (url, seen) = openai_stub(vec![
+        tool_call_body("t1", "read_file", r#"{"path":"a.txt"}"#),
+        tool_call_body(
+            "t2",
+            "edit_file",
+            r#"{"path":"a.txt","old_string":"foo","new_string":"bar"}"#,
+        ),
+        tool_call_body("t3", "read_file", r#"{"path":"../outside"}"#),
+        text_body("renamed it"),
+    ]);
+    let s = Scratch::new("agent-mcp");
+    s.write(
+        "ensemble.yaml",
+        &format!(
+            "version: 1\nbackends:\n  local:\n    type: openai-compatible-api\n    \
+             base_url_env: ENSEMBLE_TEST_LOCAL_URL\n    base_url_default: \"{url}\"\n    \
+             timeout_seconds: 20\nroles:\n  coder:\n    backend: local\n    model: coder-model\n    \
+             tools: [read, edit]\n"
+        ),
+    );
+    s.write("a.txt", "foo\n");
+    let mut session = McpSession::start(&s);
+    session.request(
+        "initialize",
+        serde_json::json!({"protocolVersion": "2025-06-18"}),
+    );
+
+    let roles = tool_text(&session.call("ensemble_roles", serde_json::json!({})));
+    assert!(roles.contains("coder [agent, can change files]"), "{roles}");
+
+    let reply = session.call(
+        "ensemble_delegate",
+        serde_json::json!({"role": "coder", "task": "rename foo to bar in a.txt"}),
+    );
+    let text = tool_text(&reply);
+    assert!(text.starts_with("renamed it"), "{text}");
+    assert!(
+        text.ends_with("[coder ran as an agent: 4 step(s), 3 tool call(s)]"),
+        "{text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(s.path().join("a.txt")).unwrap(),
+        "bar\n"
+    );
+
+    // The escape attempt reached the model as an error, not as file content.
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen[3].contains("outside the project") || seen[3].contains("'..'"),
+        "{}",
+        seen[3]
+    );
+    let first: serde_json::Value = serde_json::from_str(&seen[0]).unwrap();
+    assert_eq!(first["model"], "coder-model");
 }

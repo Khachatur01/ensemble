@@ -108,40 +108,14 @@ impl Message {
     }
 }
 
-/// Whether the model is free to answer instead of calling a tool.
-///
-/// `Auto` is what every real request asks for: a manager that has finished has
-/// to be able to simply answer, and forcing a call would turn the end of a turn
-/// into a loop. `Required` exists for one caller, the startup probe in
-/// `serve`, which is not asking what the model would do — it is asking whether
-/// a tool call from this model on this server arrives as one.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ToolChoice {
-    #[default]
-    Auto,
-    Required,
-}
-
-impl ToolChoice {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ToolChoice::Auto => "auto",
-            ToolChoice::Required => "required",
-        }
-    }
-}
-
 /// One completion request, in the only shape the port understands.
 ///
 /// `tools` is what the *caller* can run, offered to the model. It is empty for
-/// every delegation: a role is asked for finished work and produces it with its
-/// own backend's tooling — Claude Code runs its own Read/Grep/Edit and reports
-/// back. It is non-empty for exactly one caller, `ensemble serve`, where a
-/// harness drives the manager over the chat API, so the harness's tools have to
-/// reach the model and their results have to come back.
+/// a think-only role and for a `claude-code-cli` role, which uses Claude Code's
+/// own Read/Grep/Edit and reports back. It is non-empty for a role with
+/// `tools:`, where Ensemble's own agent loop runs the calls the model makes.
 ///
-/// The objection that once kept this field out still stands; it is now a rule
-/// rather than an absence. A silently dropped `tools` array is worse than no
+/// A silently dropped `tools` array is worse than no
 /// field at all, because the caller believes it was honoured. So no adapter may
 /// drop it: one whose [`Capabilities::tool_calling`] is false must *fail* a
 /// request that offers tools, naming the backend and the fix.
@@ -158,8 +132,6 @@ pub struct Request {
     pub workdir: Option<String>,
     /// Tools the *caller* can run. See the note on this struct.
     pub tools: Vec<ToolDef>,
-    /// Ignored when `tools` is empty: there is nothing to choose from.
-    pub tool_choice: ToolChoice,
 }
 
 impl Request {
@@ -171,7 +143,6 @@ impl Request {
             temperature: None,
             workdir: None,
             tools: Vec::new(),
-            tool_choice: ToolChoice::default(),
         }
     }
 
@@ -219,21 +190,13 @@ pub struct Response {
 
 /// What a backend *type* can do. Declared, never inferred.
 ///
-/// `tool_calling` is load-bearing: the manager coordinates by calling tools, so
-/// a manager on a backend that cannot call them would answer in prose while the
-/// delegation never happens. Config validation refuses that outright rather than
-/// letting it fail silently at run time.
+/// `tool_calling` is load-bearing: a role with `tools:` runs Ensemble's own
+/// agent loop, which needs the model to answer with structured tool calls.
+/// Config validation refuses that on a backend that cannot, rather than letting
+/// it fail silently at run time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
     pub tool_calling: bool,
-    /// Still not consulted anywhere. Every adapter answers
-    /// [`ModelPort::complete_streaming`] correctly whether or not it sets
-    /// this — one real delta per fragment if it has them, one synthetic
-    /// delta with the whole answer if it does not — so there is nothing for
-    /// a caller to gate on. It stays declared as documentation of which
-    /// adapters stream for real (`openai-compatible-api`) and which only
-    /// simulate it (`claude-code-cli`).
-    pub streaming: bool,
 }
 
 /// Everything that can go wrong between asking a role for work and getting it.
@@ -390,27 +353,6 @@ pub trait ModelPort: Send + Sync {
 
     fn complete(&self, request: &Request) -> Result<Response, Error>;
 
-    /// Like [`complete`](Self::complete), but `on_delta` is called with each
-    /// fragment of the answer's text as it arrives, rather than once at the
-    /// end.
-    ///
-    /// Default-implemented in terms of `complete`: an adapter with nothing
-    /// better to offer (a CLI that prints one JSON blob at exit) still
-    /// behaves correctly, firing `on_delta` once with the whole answer. Only
-    /// a backend that actually receives the answer incrementally — today,
-    /// `openai-compatible-api` — needs to override this.
-    fn complete_streaming(
-        &self,
-        request: &Request,
-        on_delta: &dyn Fn(&str),
-    ) -> Result<Response, Error> {
-        let response = self.complete(request)?;
-        if !response.text.is_empty() {
-            on_delta(&response.text);
-        }
-        Ok(response)
-    }
-
     /// Cheap reachability check. Must not spend a model call.
     fn health(&self) -> Result<(), Error>;
 }
@@ -426,9 +368,9 @@ pub mod testing {
 
     /// One scripted answer, for a test that needs several turns in a row.
     ///
-    /// A manager loop is several model calls, and each one has to be able to
+    /// An agent loop is several model calls, and each one has to be able to
     /// say something different; a single canned reply cannot express
-    /// "delegate, then answer".
+    /// "read a file, then answer".
     #[derive(Debug, Clone)]
     pub enum Scripted {
         Text(String),
@@ -488,10 +430,7 @@ pub mod testing {
         fn build(name: &str, reply: Result<String, String>) -> Self {
             FakePort {
                 name: name.into(),
-                caps: Capabilities {
-                    tool_calling: true,
-                    streaming: true,
-                },
+                caps: Capabilities { tool_calling: true },
                 reply: Mutex::new(reply),
                 script: Mutex::new(VecDeque::new()),
                 seen: Mutex::new(Vec::new()),

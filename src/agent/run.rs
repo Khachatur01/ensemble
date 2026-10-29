@@ -36,7 +36,6 @@ pub fn run(
     task: &str,
     context: Option<&str>,
     workdir: &Path,
-    on_delta: &dyn Fn(&str),
 ) -> Result<AgentRun, Error> {
     let sandbox = Sandbox::new(workdir).map_err(|detail| Error::Unsupported {
         backend: port.name().to_string(),
@@ -81,7 +80,7 @@ pub fn run(
     };
 
     for _ in 0..assignment.max_steps {
-        let response = port.complete_streaming(&request(&messages, true), on_delta)?;
+        let response = port.complete(&request(&messages, true))?;
         out.steps += 1;
         out.usage.prompt_tokens += response.usage.prompt_tokens;
         out.usage.completion_tokens += response.usage.completion_tokens;
@@ -107,7 +106,7 @@ pub fn run(
     // Out of steps. One last call with no tools on offer, so the work done so
     // far is reported instead of discarded.
     messages.push(Message::user(OUT_OF_STEPS));
-    let response = port.complete_streaming(&request(&messages, false), on_delta)?;
+    let response = port.complete(&request(&messages, false))?;
     out.steps += 1;
     out.usage.prompt_tokens += response.usage.prompt_tokens;
     out.usage.completion_tokens += response.usage.completion_tokens;
@@ -146,7 +145,7 @@ mod tests {
     }
 
     fn go(port: &FakePort, a: &Assignment, dir: &Path) -> Result<AgentRun, Error> {
-        run(port, a, "do it", None, dir, &|_| {})
+        run(port, a, "do it", None, dir)
     }
 
     #[test]

@@ -2,8 +2,8 @@
 //!
 //! Validation is deliberately loud and early. Every check here corresponds to a
 //! failure that would otherwise surface much later and much less clearly — as a
-//! 404 on the first request to a role, as a manager that quietly never
-//! delegates, or as an empty base URL that turns into a connection refused.
+//! 404 on the first request to a role, as a role that quietly runs with
+//! default settings, or as an empty base URL that turns into a connection refused.
 //!
 //! Secrets never live in this file. An API key is named by the *variable* that
 //! holds it (`api_key_env`), and the value is read from the environment at load
@@ -35,7 +35,10 @@ struct RawConfig {
     version: u32,
     #[serde(default)]
     backends: BTreeMap<String, RawBackend>,
-    manager: RawAssignment,
+    /// Removed. Kept only so an old config gets a pointed error instead of
+    /// "unknown field".
+    #[serde(default)]
+    manager: Option<serde_norway::Value>,
     #[serde(default)]
     roles: BTreeMap<String, RawAssignment>,
 }
@@ -136,12 +139,9 @@ impl Backend {
     /// schema we supplied. So the answer is no, and it is declared rather than
     /// discovered.
     ///
-    /// This does **not** restrict which backend may run the manager. Ensemble
-    /// is the tool the harness calls; roles — the manager included — are asked
-    /// for work and answer with it. A role on this backend still does real
-    /// work, with Claude Code's own tools, and reports back in prose. What it
-    /// cannot do is drive a tool schema *this* process supplied, which no role
-    /// is asked to do. See `port::Request` on why there is no `tools` field.
+    /// A role on this backend still does real work, with Claude Code's own
+    /// tools, and reports back in prose. What it cannot do is drive the tool
+    /// loop in `agent`, which needs a schema *this* process supplies.
     pub fn supports_tool_calling(&self) -> bool {
         matches!(self.settings, BackendSettings::OpenAiCompatible { .. })
     }
@@ -204,25 +204,15 @@ pub struct Assignment {
 pub struct Config {
     pub version: u32,
     pub backends: BTreeMap<String, Backend>,
-    pub manager: Assignment,
-    /// Every role *except* the manager. The manager is not in here because it
-    /// is not optional and not replaceable; it has its own field so no code can
-    /// iterate roles and accidentally treat it as one of them.
+    /// The team. There is no manager: the agent that calls Ensemble is it.
     pub roles: BTreeMap<String, Assignment>,
     /// Where it was loaded from, for error messages.
     pub source: PathBuf,
 }
 
 impl Config {
-    pub const MANAGER: &'static str = "manager";
-
-    /// Look up any assignment by role name, manager included.
     pub fn assignment(&self, role: &str) -> Option<&Assignment> {
-        if role == Self::MANAGER {
-            Some(&self.manager)
-        } else {
-            self.roles.get(role)
-        }
+        self.roles.get(role)
     }
 
     pub fn backend_for(&self, role: &str) -> Option<&Backend> {
@@ -230,12 +220,8 @@ impl Config {
             .and_then(|a| self.backends.get(&a.backend))
     }
 
-    /// Every role name, manager first. The manager leads because it is the
-    /// entry point, not because of where it sorts.
     pub fn role_names(&self) -> Vec<&str> {
-        let mut names = vec![Self::MANAGER];
-        names.extend(self.roles.keys().map(String::as_str));
-        names
+        self.roles.keys().map(String::as_str).collect()
     }
 }
 
@@ -382,40 +368,17 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
 
     // --- roles ---
     //
-    // `roles.manager` is itself an error. The manager has its own top-level
-    // block and is mandatory; a second definition under `roles:` would be
-    // ambiguous about which one wins, and whichever answer we picked would be
-    // wrong half the time.
-    if raw.roles.contains_key(Config::MANAGER) {
+    if raw.manager.is_some() {
         problems.push(
-            "roles.manager: the manager is configured in the top-level `manager:` block, \
-             not under `roles:`. Remove this entry."
+            "manager: there is no manager block any more. The agent that calls Ensemble \
+             (Claude Code, OpenCode, ...) is the manager; delete this block and give the \
+             work to `roles:`."
                 .into(),
         );
     }
-
-    let manager = Assignment {
-        role: Config::MANAGER.into(),
-        backend: raw.manager.backend.clone(),
-        model: raw.manager.model.clone(),
-        prompt: raw.manager.prompt.clone(),
-        temperature: raw.manager.temperature,
-        tools: Vec::new(),
-        max_steps: DEFAULT_MAX_STEPS,
-    };
-    if !raw.manager.tools.is_empty() || raw.manager.max_steps.is_some() {
-        problems.push(
-            "manager: `tools` and `max_steps` are for roles under `roles:`; the manager only routes"
-                .into(),
-        );
-    }
-    check_assignment(&manager, &backends, &raw.backends, &mut problems);
 
     let mut roles: BTreeMap<String, Assignment> = BTreeMap::new();
     for (name, ra) in &raw.roles {
-        if name == Config::MANAGER {
-            continue; // already reported above
-        }
         if name.trim().is_empty() {
             problems.push("roles: a role name cannot be empty".into());
             continue;
@@ -450,7 +413,7 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
     // from a shared config is how you break someone else's profile. Say so once
     // and carry on.
     for name in backends.keys() {
-        let used = manager.backend == *name || roles.values().any(|a| a.backend == *name);
+        let used = roles.values().any(|a| a.backend == *name);
         if !used {
             eprintln!("ensemble: note: backend '{name}' is defined but no role uses it");
         }
@@ -460,7 +423,6 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
         Ok(Config {
             version: raw.version,
             backends,
-            manager,
             roles,
             source: path.to_path_buf(),
         })
@@ -497,11 +459,7 @@ fn check_assignment(
     declared: &BTreeMap<String, RawBackend>,
     problems: &mut Vec<String>,
 ) {
-    let where_ = if a.role == Config::MANAGER {
-        "manager".to_string()
-    } else {
-        format!("roles.{}", a.role)
-    };
+    let where_ = format!("roles.{}", a.role);
 
     if a.backend.trim().is_empty() {
         problems.push(format!("{where_}: `backend` is empty"));
@@ -717,9 +675,6 @@ backends:
     base_url_env: OPENAI_REMOTE_BASE_URL
     base_url_default: "http://10.10.10.5:8000/v1"
     api_key_env: OPENAI_REMOTE_API_KEY
-manager:
-  backend: claude
-  model: claude-sonnet
 roles:
   planner:
     backend: openai-local
@@ -744,15 +699,8 @@ roles:
         let c = parse(REFERENCE, &p(), &env(&[])).expect("reference config must load");
         assert_eq!(c.version, 1);
         assert_eq!(c.backends.len(), 3);
-        assert_eq!(c.manager.backend, "claude");
-        assert_eq!(c.manager.model, "claude-sonnet");
-        // The manager is not one of the roles.
         assert_eq!(c.roles.len(), 3);
-        assert!(!c.roles.contains_key("manager"));
-        assert_eq!(
-            c.role_names(),
-            vec!["manager", "coder", "planner", "reviewer"]
-        );
+        assert_eq!(c.role_names(), vec!["coder", "planner", "reviewer"]);
     }
 
     const AGENT_DOC: &str = r#"
@@ -764,9 +712,6 @@ backends:
     base_url_default: "http://127.0.0.1:11434/v1"
   claude:
     type: claude-code-cli
-manager:
-  backend: openai-local
-  model: m
 roles:
   coder:
     backend: openai-local
@@ -834,20 +779,20 @@ backends:
     type: openai-compatible-api
     base_url_env: OPENAI_LOCAL_BASE_URL
     base_url_default: "http://127.0.0.1:11434/v1"
-manager:
-  backend: openai-local
-  model: qwen3.5:9b
-  temperature: 0.2
 roles:
   scout:
     backend: openai-local
     model: qwen3.5:9b
+    temperature: 0.2
+  plain:
+    backend: openai-local
+    model: qwen3.5:9b
 "#;
         let c = parse(doc, &p(), &env(&[])).unwrap();
-        assert_eq!(c.manager.temperature, Some(0.2));
+        assert_eq!(c.roles["scout"].temperature, Some(0.2));
         // Unset is unset, not defaulted to something: the backend's own
         // default still applies.
-        assert_eq!(c.roles["scout"].temperature, None);
+        assert_eq!(c.roles["plain"].temperature, None);
     }
 
     #[test]
@@ -858,10 +803,12 @@ backends:
   openai-local:
     type: openai-compatible-api
     base_url_env: OPENAI_LOCAL_BASE_URL
-manager:
-  backend: openai-local
-  model: qwen3.5:9b
-  temperature: 3.5
+    base_url_default: "http://127.0.0.1:11434/v1"
+roles:
+  scout:
+    backend: openai-local
+    model: m
+    temperature: 3.5
 "#;
         let err = parse(doc, &p(), &env(&[])).unwrap_err();
         let problems = problems_of(err);
@@ -939,7 +886,6 @@ backends:
     base_url_env: X_URL
     base_url_default: "http://127.0.0.1:1/v1"
     api_key: "sk-oops"
-manager: { backend: x, model: m }
 "#;
         let err = parse(yaml, &p(), &env(&[])).unwrap_err();
         let msg = err.to_string();
@@ -952,25 +898,30 @@ manager: { backend: x, model: m }
     }
 
     #[test]
-    fn a_missing_manager_is_fatal() {
+    fn an_old_manager_block_is_refused_with_a_pointer() {
         let yaml = r#"
 version: 1
 backends:
   x: { type: openai-compatible-api, base_url_env: X, base_url_default: "http://127.0.0.1:1/v1" }
+manager: { backend: x, model: m }
 roles:
   coder: { backend: x, model: m }
 "#;
-        let err = parse(yaml, &p(), &env(&[])).unwrap_err();
-        assert!(err.to_string().contains("manager"), "{err}");
+        let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
+        assert!(
+            problems.iter().any(|p| p.contains("no manager block")),
+            "{problems:?}"
+        );
     }
 
     #[test]
-    fn a_manager_naming_an_undefined_backend_is_fatal_and_lists_the_real_ones() {
+    fn a_role_naming_an_undefined_backend_is_fatal_and_lists_the_real_ones() {
         let yaml = r#"
 version: 1
 backends:
   openai-local: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
-manager: { backend: opanai-local, model: m }
+roles:
+  coder: { backend: opanai-local, model: m }
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
         let joined = problems.join("\n");
@@ -982,47 +933,30 @@ manager: { backend: opanai-local, model: m }
     }
 
     #[test]
-    fn a_manager_with_an_empty_model_is_fatal() {
+    fn a_role_with_an_empty_model_is_fatal() {
         let yaml = r#"
 version: 1
 backends:
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
-manager: { backend: x, model: "  " }
+roles:
+  coder: { backend: x, model: "  " }
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
         assert!(
             problems
                 .iter()
-                .any(|p| p.contains("manager") && p.contains("model")),
+                .any(|p| p.contains("roles.coder") && p.contains("model")),
             "{problems:?}"
         );
     }
 
     #[test]
-    fn the_manager_may_sit_on_any_backend_type() {
-        // Ensemble is the tool the *harness* calls; roles are asked for work
-        // and answer with it. So a manager does not need to drive a tool schema
-        // this process supplied, and claude-code-cli — which cannot — is a
-        // perfectly good manager that uses Claude Code's own tools instead.
-        let yaml = r#"
-version: 1
-backends:
-  claude: { type: claude-code-cli }
-manager: { backend: claude, model: claude-sonnet }
-"#;
-        let c = parse(yaml, &p(), &env(&[])).expect("a claude-backed manager is valid");
-        assert_eq!(c.manager.backend, "claude");
-        assert!(!c.backends["claude"].supports_tool_calling());
-    }
-
-    #[test]
-    fn a_non_manager_role_on_claude_code_is_fine() {
+    fn a_role_on_claude_code_is_fine() {
         let yaml = r#"
 version: 1
 backends:
   claude: { type: claude-code-cli }
   local: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
-manager: { backend: local, model: m }
 roles:
   reviewer: { backend: claude, model: claude-sonnet }
 "#;
@@ -1032,29 +966,11 @@ roles:
     }
 
     #[test]
-    fn redefining_the_manager_under_roles_is_an_error() {
-        let yaml = r#"
-version: 1
-backends:
-  x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
-manager: { backend: x, model: a }
-roles:
-  manager: { backend: x, model: b }
-"#;
-        let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
-        assert!(
-            problems.iter().any(|p| p.contains("roles.manager")),
-            "{problems:?}"
-        );
-    }
-
-    #[test]
     fn an_unknown_backend_type_lists_the_known_ones() {
         let yaml = r#"
 version: 1
 backends:
   x: { type: ollama }
-manager: { backend: x, model: m }
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
         let joined = problems.join("\n");
@@ -1071,7 +987,6 @@ manager: { backend: x, model: m }
 version: 1
 backends:
   remote: { type: openai-compatible-api, base_url_env: OPENAI_REMOTE_BASE_URL }
-manager: { backend: remote, model: m }
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
         let joined = problems.join("\n");
@@ -1085,7 +1000,6 @@ manager: { backend: remote, model: m }
 version: 1
 backends:
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "127.0.0.1:8000/v1" }
-manager: { backend: x, model: m }
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
         assert!(
@@ -1100,7 +1014,6 @@ manager: { backend: x, model: m }
 version: 1
 backends:
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:8000/v1/" }
-manager: { backend: x, model: m }
 "#;
         let c = parse(yaml, &p(), &env(&[])).unwrap();
         match &c.backends["x"].settings {
@@ -1118,7 +1031,6 @@ version: 1
 backends:
   claude: { type: claude-code-cli, base_url_env: NOPE }
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1", max_turns: 3 }
-manager: { backend: x, model: m }
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
         let joined = problems.join("\n");
@@ -1132,7 +1044,6 @@ manager: { backend: x, model: m }
 version: 2
 backends:
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
-manager: { backend: x, model: m }
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
         assert!(
@@ -1147,7 +1058,6 @@ manager: { backend: x, model: m }
 version: 1
 backends:
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
-manager: { backend: x, model: m }
 roles:
   coder: { backend: x, modle: m }
 "#;
@@ -1162,7 +1072,8 @@ roles:
 version: 9
 backends:
   x: { type: nonsense }
-manager: { backend: missing, model: "" }
+roles:
+  r: { backend: missing, model: "" }
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
         assert!(problems.len() >= 4, "expected several, got: {problems:#?}");
@@ -1174,7 +1085,6 @@ manager: { backend: missing, model: "" }
 version: 1
 backends:
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1", timeout_seconds: 0 }
-manager: { backend: x, model: m }
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
         assert!(
@@ -1190,7 +1100,6 @@ version: 1
 backends:
   claude: { type: claude-code-cli }
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
-manager: { backend: x, model: m }
 roles:
   planner: { backend: claude, model: claude-sonnet }
 "#;
@@ -1215,11 +1124,11 @@ roles:
     }
 
     #[test]
-    fn assignment_and_backend_lookup_cover_the_manager() {
+    fn assignment_and_backend_lookup_find_roles() {
         let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
-        assert_eq!(c.assignment("manager").unwrap().role, "manager");
-        assert_eq!(c.backend_for("manager").unwrap().name, "claude");
+        assert_eq!(c.assignment("coder").unwrap().role, "coder");
         assert_eq!(c.backend_for("coder").unwrap().name, "openai-remote");
         assert!(c.assignment("nope").is_none());
+        assert!(c.assignment("manager").is_none());
     }
 }

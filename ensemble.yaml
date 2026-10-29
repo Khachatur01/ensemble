@@ -1,7 +1,7 @@
 # ensemble.yaml — the agent team, and what runs each member.
 #
 # This is the shipped example. Copy it to your project root and edit the
-# `manager` and `roles` blocks; the backends are already pointed at the
+# `roles` block; the backends are already pointed at the
 # environment variables listed at the bottom.
 #
 # Validate it at any time with:   ensemble check
@@ -39,31 +39,14 @@ backends:
     api_key_env: OPENAI_REMOTE_API_KEY
 
 # ---------------------------------------------------------------------------
-# The manager — mandatory. Validation fails if it is missing, names a backend
-# that is not defined, or has an empty model.
+# There is no manager block. The agent that calls Ensemble over MCP (Claude
+# Code, OpenCode, ...) is the manager: it sees the roles below as tools and
+# decides what to delegate. Register it with:
 #
-# `claude` is a fine manager for `ensemble mcp` and for `ensemble run`: it is
-# asked for work and answers with it, using Claude Code's own tools.
+#   claude mcp add --scope local ensemble -- /path/to/ensemble mcp
 #
-# `ensemble serve` needs more than that. There the manager has to drive a tool
-# schema Ensemble supplies — the internal delegation tool, plus whatever the
-# harness offered — and `claude -p` never returns one. So `serve` refuses to
-# start with the manager below; point it at `openai-local` (or any other
-# openai-compatible-api backend) first. `ensemble check` says which you have.
-#
-# Pointing it at one is necessary and not sufficient: the server also has to be
-# started with tool-call parsing for the model it serves (llama-server --jinja,
-# vLLM --enable-auto-tool-choice --tool-call-parser, an Ollama template with a
-# .Tools branch). Without it the manager's delegation comes back as prose and
-# nothing runs it. `serve` proves this with one small model call at startup and
-# refuses to bind if it fails, naming the flag to look at.
+# and tell it, in CLAUDE.md / AGENTS.md, which roles to use for what.
 # ---------------------------------------------------------------------------
-manager:
-  backend: claude
-  model: claude-sonnet
-  prompt: |
-    You coordinate a team. Break the request into self-contained pieces of
-    work, say who should do each and why, and report the result.
 
 # ---------------------------------------------------------------------------
 # Agent roles — a role with `tools:` is an agent. Ensemble runs the tool loop
@@ -77,16 +60,16 @@ manager:
 # No `tools:` means a think-only role: one model call, text back. Roles with
 # tools need a backend with tool calling (openai-compatible-api).
 #
-# The rest of the team — optional, and entirely yours to name. These are a
+# The team — entirely yours to name. These are a
 # starting kit, not a fixed set: add, remove or rename freely.
 #
 # Moving a role to a different model is two words, and nothing else changes.
 #
-# Any role (the manager included) may also set `temperature: <0.0-2.0>` to
+# Any role may also set `temperature: <0.0-2.0>` to
 # override the backend's own default. Mainly for a server whose baked-in
 # sampling is too hot for reliable tool calling (an Ollama Modelfile's
 # `temperature`/`presence_penalty`, for instance) — `ensemble check` cannot
-# see that, only a manager that narrates calling a role instead of calling it
+# see that, only a role that narrates calling a tool instead of calling it
 # shows it.
 # ---------------------------------------------------------------------------
 roles:

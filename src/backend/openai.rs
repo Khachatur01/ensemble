@@ -2,7 +2,7 @@
 //!
 //! Anything that speaks `POST /chat/completions` — llama.cpp's `llama-server`,
 //! vLLM, Ollama, a hosted API. This is the backend type that *can* call the
-//! caller's tools, which is why the manager has to sit on one.
+//! caller's tools, which is why a role with `tools:` has to sit on one.
 //!
 //! The HTTP transport is injected behind [`Http`] so every branch below — a
 //! 500, a 429, a body that is 2xx but malformed, a refused connection — is
@@ -12,8 +12,6 @@ use crate::config::{Backend, BackendSettings};
 use crate::port::{
     Capabilities, Error, Message, ModelPort, Request, Response, Role, ToolCall, Usage,
 };
-use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read};
 use std::time::Duration;
 
 /// A completed HTTP exchange. Status plus body is all this adapter needs.
@@ -40,21 +38,6 @@ pub trait Http: Send + Sync {
         bearer: Option<&str>,
         timeout: Duration,
     ) -> Result<HttpResponse, String>;
-
-    /// Like [`post_json`](Self::post_json), but the body is handed back as a
-    /// reader rather than read to completion first — the caller wants to
-    /// parse Server-Sent Events off it as they arrive, not after the whole
-    /// response has buffered.
-    ///
-    /// A non-2xx status is still `Ok`, same as `post_json`: the caller reads
-    /// the error body off the reader itself.
-    fn post_json_streaming(
-        &self,
-        url: &str,
-        bearer: Option<&str>,
-        body: &str,
-        timeout: Duration,
-    ) -> Result<(u16, Box<dyn Read>), String>;
 }
 
 pub struct UreqHttp;
@@ -125,31 +108,6 @@ impl Http for UreqHttp {
         }
         Self::finish(req.call())
     }
-
-    fn post_json_streaming(
-        &self,
-        url: &str,
-        bearer: Option<&str>,
-        body: &str,
-        timeout: Duration,
-    ) -> Result<(u16, Box<dyn Read>), String> {
-        let agent = Self::agent(timeout);
-        let mut req = agent.post(url).header("content-type", "application/json");
-        if let Some(key) = bearer {
-            req = req.header("authorization", &format!("Bearer {key}"));
-        }
-        match req.send(body) {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let reader = resp.into_body().into_reader();
-                Ok((status, Box::new(reader)))
-            }
-            // Defensive, as in `finish`: unreachable with
-            // `http_status_as_error(false)` set above.
-            Err(ureq::Error::StatusCode(code)) => Ok((code, Box::new(std::io::empty()))),
-            Err(e) => Err(e.to_string()),
-        }
-    }
 }
 
 /// One message, in the shape `/chat/completions` wants it.
@@ -188,26 +146,16 @@ fn message_json(m: &Message) -> serde_json::Value {
 
 /// Build the `/chat/completions` request body.
 ///
-/// `stream` picks which of the two response shapes is asked for: a plain
-/// delegation (`complete`) wants one finished object, `complete_streaming`
-/// wants Server-Sent Events.
-///
 /// `tools` is sent only when the caller offered some. A request that offers
 /// none must look exactly as it did before this field existed.
-pub fn request_body(request: &Request, stream: bool) -> String {
+pub fn request_body(request: &Request) -> String {
     let messages: Vec<serde_json::Value> = request.messages.iter().map(message_json).collect();
 
     let mut body = serde_json::json!({
         "model": request.model,
         "messages": messages,
-        "stream": stream,
+        "stream": false,
     });
-    if stream {
-        // Several servers (Ollama among them) omit `usage` from an SSE
-        // stream unless this is set, and a caller that paid for the call
-        // deserves to know what it cost.
-        body["stream_options"] = serde_json::json!({ "include_usage": true });
-    }
     if let Some(n) = request.max_tokens {
         body["max_tokens"] = serde_json::json!(n);
     }
@@ -230,12 +178,8 @@ pub fn request_body(request: &Request, stream: bool) -> String {
             })
             .collect();
         body["tools"] = serde_json::Value::Array(tools);
-        // `auto` for everything the manager does: a manager that has finished
-        // must be able to simply answer. `required` only for the startup probe,
-        // which asks a question `auto` cannot answer — a model that chose not
-        // to call a tool and a server that dropped the call it made look
-        // identical from here.
-        body["tool_choice"] = serde_json::json!(request.tool_choice.as_str());
+        // `auto`: a model that has finished must be able to simply answer.
+        body["tool_choice"] = serde_json::json!("auto");
     }
     body.to_string()
 }
@@ -384,7 +328,7 @@ pub fn parse_completion(body: &str, backend: &str, tools_offered: bool) -> Resul
 }
 
 /// What a reply boils down to, whichever shape it arrived in — one blocking
-/// response, or a stream of deltas assembled into the equivalent values.
+/// response.
 struct Parsed<'a> {
     content: &'a str,
     reasoning: &'a str,
@@ -395,9 +339,7 @@ struct Parsed<'a> {
 }
 
 /// The validation and text-selection a reply goes through once it is reduced
-/// to a [`Parsed`] — the same whether it arrived in one blocking response or
-/// was assembled from a stream of deltas, so both paths call this rather than
-/// drifting apart.
+/// to a [`Parsed`].
 fn finish(parsed: Parsed, tools_offered: bool, backend: &str) -> Result<Response, Error> {
     let Parsed {
         content,
@@ -486,155 +428,6 @@ fn api_error(backend: &str, status: u16, body: &str) -> Error {
     }
 }
 
-/// A tool call as it arrives over a stream: `id` and `function.name` appear
-/// once, on the delta that introduces the call; `arguments` is a JSON string
-/// built one fragment at a time across however many deltas it takes.
-#[derive(Default)]
-struct ToolCallAcc {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-/// Read a chat-completion SSE body to the same [`Response`] `parse_completion`
-/// would produce from the equivalent blocking reply, calling `on_delta` with
-/// each content fragment as it is read rather than only once at the end.
-///
-/// Framing per the SSE chat-completions convention: `data: {json}` lines carry
-/// one chunk each, a blank line separates events, and `data: [DONE]` ends the
-/// stream. Anything else (an `event:`/`id:` line, a `:` comment) is ignored —
-/// this endpoint only ever sends `data:` lines, but a proxy in front of it
-/// might add more.
-fn read_sse(
-    reader: Box<dyn Read>,
-    backend: &str,
-    tools_offered: bool,
-    on_delta: &dyn Fn(&str),
-) -> Result<Response, Error> {
-    let mut content = String::new();
-    let mut reasoning = String::new();
-    let mut tool_calls: BTreeMap<usize, ToolCallAcc> = BTreeMap::new();
-    let mut finish_reason: Option<String> = None;
-    let mut model = "unknown".to_string();
-    let mut usage = Usage::default();
-
-    for line in BufReader::new(reader).lines() {
-        let line = line.map_err(|e| Error::Protocol {
-            backend: backend.into(),
-            detail: format!("could not read the stream: {e}"),
-        })?;
-        let Some(rest) = line.trim_end_matches('\r').strip_prefix("data:") else {
-            continue;
-        };
-        let payload = rest.trim();
-        if payload.is_empty() {
-            continue;
-        }
-        if payload == "[DONE]" {
-            break;
-        }
-
-        let v: serde_json::Value = serde_json::from_str(payload).map_err(|e| Error::Protocol {
-            backend: backend.into(),
-            detail: format!("not JSON ({e}): {payload}"),
-        })?;
-
-        // Same as `parse_completion`: a 200 that carries an `error` object
-        // instead of a chunk is a failure wearing a success status.
-        if let Some(err) = v.get("error") {
-            let message = err
-                .get("message")
-                .and_then(|m| m.as_str())
-                .map(str::to_string)
-                .unwrap_or_else(|| err.to_string());
-            return Err(Error::Api {
-                backend: backend.into(),
-                status: 200,
-                message,
-            });
-        }
-
-        if let Some(m) = v.get("model").and_then(|m| m.as_str()) {
-            model = m.to_string();
-        }
-
-        if let Some(choice) = v
-            .get("choices")
-            .and_then(|c| c.as_array())
-            .and_then(|a| a.first())
-        {
-            if let Some(fr) = choice.get("finish_reason").and_then(|f| f.as_str()) {
-                finish_reason = Some(fr.to_string());
-            }
-            if let Some(delta) = choice.get("delta") {
-                if let Some(piece) = delta.get("content").and_then(|c| c.as_str())
-                    && !piece.is_empty()
-                {
-                    content.push_str(piece);
-                    on_delta(piece);
-                }
-                let reasoning_piece = delta
-                    .get("reasoning")
-                    .or_else(|| delta.get("reasoning_content"))
-                    .and_then(|r| r.as_str());
-                if let Some(piece) = reasoning_piece {
-                    reasoning.push_str(piece);
-                }
-                if let Some(calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
-                    for call in calls {
-                        let index =
-                            call.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                        let acc = tool_calls.entry(index).or_default();
-                        if let Some(id) = call.get("id").and_then(|i| i.as_str()) {
-                            acc.id = id.to_string();
-                        }
-                        if let Some(f) = call.get("function") {
-                            if let Some(name) = f.get("name").and_then(|n| n.as_str()) {
-                                acc.name = name.to_string();
-                            }
-                            match f.get("arguments") {
-                                Some(serde_json::Value::String(s)) => acc.arguments.push_str(s),
-                                Some(other) => acc.arguments.push_str(&other.to_string()),
-                                None => {}
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(u) = v.get("usage") {
-            let num = |k: &str| u.get(k).and_then(|n| n.as_u64()).unwrap_or(0) as u32;
-            usage = Usage {
-                prompt_tokens: num("prompt_tokens"),
-                completion_tokens: num("completion_tokens"),
-            };
-        }
-    }
-
-    let tool_calls: Vec<ToolCall> = tool_calls
-        .into_values()
-        .map(|acc| ToolCall {
-            id: acc.id,
-            name: acc.name,
-            arguments: acc.arguments,
-        })
-        .collect();
-
-    finish(
-        Parsed {
-            content: &content,
-            reasoning: &reasoning,
-            tool_calls,
-            finish_reason,
-            model,
-            usage,
-        },
-        tools_offered,
-        backend,
-    )
-}
-
 pub struct OpenAiAdapter {
     name: String,
     base_url: String,
@@ -682,17 +475,14 @@ impl ModelPort for OpenAiAdapter {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            tool_calling: true,
-            streaming: true,
-        }
+        Capabilities { tool_calling: true }
     }
 
     fn complete(&self, request: &Request) -> Result<Response, Error> {
         check_serviceable(&self.name, request)?;
 
         let url = self.endpoint("chat/completions");
-        let body = request_body(request, false);
+        let body = request_body(request);
 
         let resp = self
             .http
@@ -703,29 +493,6 @@ impl ModelPort for OpenAiAdapter {
             return Err(api_error(&self.name, resp.status, &resp.body));
         }
         parse_completion(&resp.body, &self.name, request.offers_tools())
-    }
-
-    fn complete_streaming(
-        &self,
-        request: &Request,
-        on_delta: &dyn Fn(&str),
-    ) -> Result<Response, Error> {
-        check_serviceable(&self.name, request)?;
-
-        let url = self.endpoint("chat/completions");
-        let body = request_body(request, true);
-
-        let (status, mut reader) = self
-            .http
-            .post_json_streaming(&url, self.api_key.as_deref(), &body, self.timeout)
-            .map_err(|detail| classify_transport(&self.name, detail, self.timeout))?;
-
-        if !(200..300).contains(&status) {
-            let mut body = String::new();
-            let _ = reader.read_to_string(&mut body);
-            return Err(api_error(&self.name, status, &body));
-        }
-        read_sse(reader, &self.name, request.offers_tools(), on_delta)
     }
 
     fn health(&self) -> Result<(), Error> {
@@ -837,27 +604,6 @@ mod tests {
                 None => Err("no scripted reply".into()),
             }
         }
-
-        fn post_json_streaming(
-            &self,
-            url: &str,
-            bearer: Option<&str>,
-            body: &str,
-            _t: Duration,
-        ) -> Result<(u16, Box<dyn Read>), String> {
-            self.posts
-                .lock()
-                .unwrap()
-                .push((url.into(), bearer.map(str::to_string), body.into()));
-            match &*self.reply.lock().unwrap() {
-                Some(Ok(r)) => Ok((
-                    r.status,
-                    Box::new(std::io::Cursor::new(r.body.clone().into_bytes())),
-                )),
-                Some(Err(e)) => Err(e.clone()),
-                None => Err("no scripted reply".into()),
-            }
-        }
     }
 
     fn backend(api_key: Option<&str>) -> Backend {
@@ -917,7 +663,7 @@ mod tests {
         );
         req.max_tokens = Some(256);
         req.temperature = Some(0.2);
-        let v: serde_json::Value = serde_json::from_str(&request_body(&req, false)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&request_body(&req)).unwrap();
         assert_eq!(v["model"], "qwen3-coder");
         assert_eq!(v["stream"], false);
         assert_eq!(v["max_tokens"], 256);
@@ -931,11 +677,9 @@ mod tests {
 
     #[test]
     fn optional_parameters_are_omitted_when_unset() {
-        let v: serde_json::Value = serde_json::from_str(&request_body(
-            &Request::new("m", vec![Message::user("x")]),
-            false,
-        ))
-        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&request_body(&Request::new("m", vec![Message::user("x")])))
+                .unwrap();
         assert!(v.get("max_tokens").is_none());
         assert!(v.get("temperature").is_none());
     }
@@ -1166,7 +910,7 @@ mod tests {
     fn tools_are_sent_only_when_the_caller_offers_them() {
         let mut req = Request::new("m", vec![Message::user("go")]);
         req.tools = vec![read_tool()];
-        let v: serde_json::Value = serde_json::from_str(&request_body(&req, false)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&request_body(&req)).unwrap();
         assert_eq!(v["tools"][0]["type"], "function");
         assert_eq!(v["tools"][0]["function"]["name"], "read");
         // The schema travels verbatim rather than being re-modelled.
@@ -1175,15 +919,6 @@ mod tests {
             read_tool().parameters
         );
         assert_eq!(v["tool_choice"], "auto");
-    }
-
-    #[test]
-    fn a_probe_asks_for_a_tool_call_rather_than_leaving_it_to_the_model() {
-        let mut req = Request::new("m", vec![Message::user("probe")]);
-        req.tools = vec![read_tool()];
-        req.tool_choice = crate::port::ToolChoice::Required;
-        let v: serde_json::Value = serde_json::from_str(&request_body(&req, false)).unwrap();
-        assert_eq!(v["tool_choice"], "required");
     }
 
     #[test]
@@ -1201,7 +936,7 @@ mod tests {
                 }],
             )],
         );
-        let v: serde_json::Value = serde_json::from_str(&request_body(&req, false)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&request_body(&req)).unwrap();
         assert!(v["messages"][0]["content"].is_null());
         assert_eq!(v["messages"][0]["tool_calls"][0]["id"], "call_abc");
         assert_eq!(v["messages"][0]["tool_calls"][0]["type"], "function");
@@ -1214,7 +949,7 @@ mod tests {
     #[test]
     fn a_tool_result_turn_carries_the_id_it_answers() {
         let req = Request::new("m", vec![Message::tool_result("call_abc", "ok")]);
-        let v: serde_json::Value = serde_json::from_str(&request_body(&req, false)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&request_body(&req)).unwrap();
         assert_eq!(v["messages"][0]["role"], "tool");
         assert_eq!(v["messages"][0]["tool_call_id"], "call_abc");
         assert_eq!(v["messages"][0]["content"], "ok");
@@ -1244,7 +979,6 @@ mod tests {
 
     #[test]
     fn the_same_reply_is_an_error_when_no_tools_were_offered() {
-        // The delegation path is unchanged by the serve path existing.
         let err = parse_completion(CALLED, "b", false).unwrap_err();
         assert!(matches!(err, Error::Unsupported { .. }), "{err}");
         assert!(err.to_string().contains("delegates whole tasks"), "{err}");
@@ -1272,131 +1006,5 @@ mod tests {
         let r = parse_completion(body, "b", true).unwrap();
         assert_eq!(r.text, "Reading it now.");
         assert_eq!(r.tool_calls.len(), 1);
-    }
-
-    // --- streaming -------------------------------------------------------
-
-    /// Render chat-completion chunks as the SSE body a server would send.
-    fn sse(chunks: &[serde_json::Value]) -> String {
-        let mut out = String::new();
-        for c in chunks {
-            out.push_str("data: ");
-            out.push_str(&c.to_string());
-            out.push_str("\n\n");
-        }
-        out.push_str("data: [DONE]\n\n");
-        out
-    }
-
-    #[test]
-    fn the_streaming_body_asks_for_stream() {
-        let http = FakeHttp::ok(&sse(&[]));
-        let a = adapter(http.clone(), None);
-        a.complete_streaming(&Request::new("m", vec![Message::user("hi")]), &|_| {})
-            .unwrap();
-        let posted: serde_json::Value = serde_json::from_str(&http.last_post().2).unwrap();
-        assert_eq!(posted["stream"], true);
-        // Several servers (Ollama among them) omit `usage` from the stream
-        // without this, and a caller that paid for the call should learn
-        // what it cost.
-        assert_eq!(posted["stream_options"]["include_usage"], true);
-    }
-
-    #[test]
-    fn the_blocking_body_does_not_ask_for_stream_options() {
-        let v: serde_json::Value = serde_json::from_str(&request_body(
-            &Request::new("m", vec![Message::user("x")]),
-            false,
-        ))
-        .unwrap();
-        assert!(v.get("stream_options").is_none());
-    }
-
-    #[test]
-    fn a_streamed_completion_fires_each_delta_and_assembles_the_whole_text() {
-        let body = sse(&[
-            serde_json::json!({"model":"qwen3-coder","choices":[
-                {"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}),
-            serde_json::json!({"choices":[{"index":0,"delta":{"content":"do"},"finish_reason":null}]}),
-            serde_json::json!({"choices":[{"index":0,"delta":{"content":"ne"},"finish_reason":null}]}),
-            serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
-            serde_json::json!({"choices":[],
-                "usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}),
-        ]);
-        let a = adapter(FakeHttp::ok(&body), None);
-        let seen = Mutex::new(Vec::new());
-        let r = a
-            .complete_streaming(
-                &Request::new("qwen3-coder", vec![Message::user("hi")]),
-                &|piece| seen.lock().unwrap().push(piece.to_string()),
-            )
-            .unwrap();
-        assert_eq!(seen.lock().unwrap().join(""), "done");
-        assert_eq!(r.text, "done");
-        assert_eq!(r.model, "qwen3-coder");
-        assert_eq!(r.usage.total(), 13);
-        assert_eq!(r.finish_reason.as_deref(), Some("stop"));
-    }
-
-    #[test]
-    fn a_streamed_tool_call_split_across_deltas_is_assembled() {
-        let body = sse(&[
-            serde_json::json!({"model":"qwen3-coder","choices":[{"index":0,"delta":{"tool_calls":[
-                {"index":0,"id":"call_abc","type":"function","function":{"name":"read","arguments":""}}
-            ]},"finish_reason":null}]}),
-            serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[
-                {"index":0,"function":{"arguments":"{\"filePath\":"}}
-            ]},"finish_reason":null}]}),
-            serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[
-                {"index":0,"function":{"arguments":"\"src/main.rs\"}"}}
-            ]},"finish_reason":null}]}),
-            serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}),
-        ]);
-        let a = adapter(FakeHttp::ok(&body), None);
-        let mut req = Request::new("m", vec![Message::user("go")]);
-        req.tools = vec![read_tool()];
-        let r = a.complete_streaming(&req, &|_| {}).unwrap();
-        assert_eq!(r.tool_calls.len(), 1);
-        assert_eq!(r.tool_calls[0].id, "call_abc");
-        assert_eq!(r.tool_calls[0].name, "read");
-        assert_eq!(r.tool_calls[0].arguments, "{\"filePath\":\"src/main.rs\"}");
-        assert_eq!(r.finish_reason.as_deref(), Some("tool_calls"));
-    }
-
-    #[test]
-    fn a_streamed_reply_that_finishes_in_the_reasoning_channel_is_still_an_answer() {
-        // The reasoning channel is not forwarded live — only known to be the
-        // answer once the stream ends with no content at all.
-        let body = sse(&[
-            serde_json::json!({"choices":[{"index":0,
-                "delta":{"reasoning":"Here are the roles: coder, planner."},
-                "finish_reason":null}]}),
-            serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
-        ]);
-        let a = adapter(FakeHttp::ok(&body), None);
-        let seen = Mutex::new(Vec::new());
-        let r = a
-            .complete_streaming(&Request::new("m", vec![Message::user("hi")]), &|piece| {
-                seen.lock().unwrap().push(piece.to_string())
-            })
-            .unwrap();
-        assert_eq!(r.text, "Here are the roles: coder, planner.");
-        assert!(
-            seen.lock().unwrap().is_empty(),
-            "reasoning is not a live delta"
-        );
-    }
-
-    #[test]
-    fn a_streaming_request_with_a_non_2xx_status_is_an_api_error_same_as_blocking() {
-        let a = adapter(
-            FakeHttp::status(503, r#"{"error":{"message":"model is loading"}}"#),
-            None,
-        );
-        let err = a
-            .complete_streaming(&Request::new("m", vec![Message::user("hi")]), &|_| {})
-            .unwrap_err();
-        assert!(matches!(err, Error::Api { status: 503, .. }), "{err}");
-        assert!(err.to_string().contains("model is loading"), "{err}");
     }
 }

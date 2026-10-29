@@ -1,31 +1,10 @@
-//! One harness interface: MCP over stdio.
+//! The harness interface: MCP over stdio.
 //!
-//! This is the *optional* surface. `ensemble serve` (see `serve/`) is the one a
-//! harness reaches by selecting `ensemble/manager` as its model, and it needs
-//! nothing registered. MCP remains because it is not OpenCode-specific, it
-//! opens no port, and it works with a `claude-code-cli` manager, which the HTTP
-//! surface cannot.
+//! The agent that calls Ensemble (Claude Code, OpenCode, ...) is the manager.
+//! It spawns `ensemble mcp` with the project as its working directory and sees
+//! the team as tools: `ensemble_roles`, `ensemble_delegate`, `ensemble_health`.
 //!
-//! WHY MCP, AND NOT A PLUGIN OR A PROVIDER
-//! ---------------------------------------
-//! Three extension points were probed against OpenCode 2.0.32 (see
-//! `docs/HARNESS.md` for the evidence):
-//!
-//! * A **plugin-registered tool** registers and is hookable, but is never put
-//!   in the tool array the model is offered — the model calling it is told
-//!   `No tool named "..." is currently available`. Unusable as the surface for
-//!   a tool the manager must call.
-//! * A **provider module** named by `providers.<id>.package` is imported and
-//!   its `model(modelID, settings)` is called, but the returned object is then
-//!   validated against an internal, unpublished schema that a plain AI SDK
-//!   model does not satisfy. Guessing at it would invent a capability and break
-//!   on the next release.
-//! * An **MCP server** declared as `mcp.<name> = {type:"local", command:[...]}`
-//!   connects, and its tools become reachable by the model. This is the one
-//!   that works, and it is also the integration every other MCP-speaking
-//!   harness already supports.
-//!
-//! So Ensemble is a subprocess the harness spawns, speaking JSON-RPC 2.0 as
+//! Ensemble is a subprocess the harness spawns, speaking JSON-RPC 2.0 as
 //! newline-delimited JSON on stdin/stdout. **Nothing but protocol goes to
 //! stdout** — one stray `println!` corrupts the stream and the harness sees a
 //! parse error instead of a tool. Diagnostics go to stderr, which the harness
@@ -37,9 +16,9 @@
 //! decides what runs it — that is the whole point of the indirection, and a
 //! `model` parameter would quietly undo it at the first opportunity.
 //!
-//! The tools themselves live in `super::delegation`, shared with the HTTP
-//! surface so the two can never drift on what a role is or what a failed
-//! delegation says. This module owns only the JSON-RPC envelope.
+//! The tools themselves live in `super::delegation`, kept apart from the
+//! transport so what a role is and what a failed delegation says do not depend
+//! on how it was asked. This module owns only the JSON-RPC envelope.
 
 use super::delegation;
 use crate::router::Ensemble;
@@ -51,8 +30,7 @@ pub const SERVER_NAME: &str = "ensemble";
 
 /// The shared tool catalogue, wrapped in MCP's envelope.
 ///
-/// Over MCP the caller sits outside the ensemble, so the manager is a
-/// legitimate delegation target and `roles` is the whole team.
+/// `roles` is the whole team.
 pub fn tool_definitions(roles: &[&str]) -> Value {
     Value::Array(
         delegation::tools(roles)
@@ -178,10 +156,6 @@ version: 1
 backends:
   local: { type: openai-compatible-api, base_url_env: L, base_url_default: "http://127.0.0.1:8000/v1" }
   claude: { type: claude-code-cli }
-manager:
-  backend: local
-  model: qwen3-coder
-  prompt: "Coordinates the team and delegates work."
 roles:
   coder:
     backend: local
@@ -262,7 +236,7 @@ roles:
             listing.contains("fixer [agent, can change files]"),
             "{listing}"
         );
-        assert!(listing.contains("\ncoder:"), "{listing}");
+        assert!(listing.starts_with("coder:"), "{listing}");
 
         let r = call(
             &e,
@@ -312,7 +286,7 @@ roles:
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert_eq!(roles, vec!["manager", "coder", "reviewer"]);
+        assert_eq!(roles, vec!["coder", "reviewer"]);
     }
 
     #[test]
@@ -422,7 +396,10 @@ roles:
     fn roles_lists_the_team_without_naming_backends_or_models() {
         let r = call(&working(), "ensemble_roles", json!({}));
         let text = text_of(&r);
-        assert!(text.contains("manager"), "{text}");
+        assert!(
+            text.contains("coder") && text.contains("reviewer"),
+            "{text}"
+        );
         assert!(text.contains("Writes code to a stated spec."), "{text}");
         assert!(
             !text.contains("qwen3-coder"),

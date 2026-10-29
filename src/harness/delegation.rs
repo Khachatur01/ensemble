@@ -1,15 +1,6 @@
-//! The ensemble's own tools, shared by every harness surface.
-//!
-//! Both surfaces offer the same three tools and must keep offering the same
-//! three tools. A harness talking MCP and a manager driven over the chat API
-//! are asking for the same thing — give this role this task — and if the two
-//! descriptions, schemas or failure messages drifted apart, a config that
-//! worked through one would mysteriously not work through the other.
-//!
-//! So the schemas and the execution live here, and `mcp.rs` and `serve/`
-//! compose them rather than each writing their own. The only thing that
-//! differs is the envelope: MCP wants `inputSchema`, the chat API wants
-//! `parameters`.
+//! The tools an agent calls to use the ensemble: delegate, list roles, check
+//! health. The schemas and the execution live here; `mcp.rs` wraps them in
+//! its JSON-RPC envelope (`inputSchema`).
 //!
 //! No tool takes a backend or a model. The caller names a *role* and Ensemble
 //! decides what runs it — that is the whole point of the indirection, and a
@@ -41,10 +32,7 @@ pub struct Tool {
 
 /// The catalogue, for a given set of delegable roles.
 ///
-/// `roles` is what the *caller* may delegate to, which is not the same list on
-/// every surface: over MCP the caller is outside the ensemble and the manager
-/// is a legitimate target, while over the chat API the caller *is* the manager
-/// and would only be recursing into itself.
+/// `roles` is what the caller may delegate to.
 ///
 /// With no delegable roles there is no delegation tool. Offering one whose
 /// enum is empty invites a call that cannot succeed.
@@ -117,9 +105,8 @@ pub struct ToolResult {
     pub text: String,
     pub is_error: bool,
     /// What the call spent, when it spent anything. Zero for the two tools that
-    /// only read configuration. The chat API sums this into the usage it
-    /// reports, because a delegation is a real model call the caller paid for
-    /// even though it never saw it happen.
+    /// only read configuration. A delegation is a real model call (or
+    /// several, for an agent) the caller paid for.
     pub usage: Usage,
 }
 
@@ -150,8 +137,8 @@ impl ToolResult {
 /// argument object becomes the task rather than being discarded — the model
 /// wrote it for a reason, and a downstream role can still use it.
 ///
-/// An unusable call is an error the manager reads as a tool result and can
-/// correct; it is never forwarded to the harness, which has no such tool.
+/// An unusable call is an error the caller reads as a tool result and can
+/// correct.
 pub fn role_arguments(role: &str, arguments: &str) -> Result<Value, String> {
     let parsed: Value = serde_json::from_str(arguments).map_err(|e| {
         format!(
@@ -208,26 +195,6 @@ fn no_task(role: &str) -> String {
 
 /// Run one of the ensemble's own tools.
 pub fn call(ensemble: &Ensemble, name: &str, args: &Value) -> ToolResult {
-    call_inner(ensemble, name, args, None)
-}
-
-/// Like [`call`], but a [`DELEGATE`] call streams the role's text live
-/// through `on_delta` rather than only returning it once finished.
-pub fn call_streaming(
-    ensemble: &Ensemble,
-    name: &str,
-    args: &Value,
-    on_delta: &dyn Fn(&str),
-) -> ToolResult {
-    call_inner(ensemble, name, args, Some(on_delta))
-}
-
-fn call_inner(
-    ensemble: &Ensemble,
-    name: &str,
-    args: &Value,
-    on_delta: Option<&dyn Fn(&str)>,
-) -> ToolResult {
     match name {
         DELEGATE => {
             let Some(role) = args.get("role").and_then(Value::as_str) else {
@@ -247,12 +214,7 @@ fn call_inner(
             }
             let context = args.get("context").and_then(Value::as_str);
 
-            let outcome = match on_delta {
-                Some(on_delta) => ensemble.delegate_streaming(role, task, context, on_delta),
-                None => ensemble.delegate(role, task, context),
-            };
-
-            match outcome {
+            match ensemble.delegate(role, task, context) {
                 Ok(out) => ToolResult {
                     text: match out.agent {
                         Some(a) => format!(

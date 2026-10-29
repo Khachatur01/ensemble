@@ -18,12 +18,10 @@
 //! `capabilities().tool_calling` is `false`, and a [`Request`] that offers
 //! tools is refused outright rather than answered as though none were offered.
 //!
-//! `config.rs` does *not* refuse to put the manager here, and should not: over
-//! MCP the manager is asked for work and answers with it, using Claude Code's
-//! own tools, which is exactly right for a planner, a reviewer or a manager.
-//! What this backend cannot do is drive a tool schema this process supplied,
-//! which is only ever asked of the manager under `ensemble serve` — and that
-//! command refuses to start rather than letting it fail per request.
+//! A role on this backend still does real work, using Claude Code's own tools,
+//! and reports back in prose. What it cannot do is run Ensemble's agent loop
+//! (`tools:` in the config), which needs a schema this process supplies;
+//! `config.rs` refuses that combination at load time.
 
 use crate::config::Backend;
 use crate::port::{Capabilities, Error, ModelPort, Request, Response, Role, Usage};
@@ -396,7 +394,6 @@ impl ModelPort for ClaudeCodeAdapter {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             tool_calling: false,
-            streaming: false,
         }
     }
 
@@ -410,9 +407,8 @@ impl ModelPort for ClaudeCodeAdapter {
                 detail: format!(
                     "{} tool(s) were offered and this backend cannot call them: `claude -p` runs \
                      Claude Code's own tools and never returns a tool_calls array against a \
-                     schema we supplied. Put the manager on an openai-compatible-api backend to \
-                     drive a harness's tools, or use `ensemble mcp`, where this backend is a \
-                     perfectly good manager.",
+                     schema we supplied. Roles with `tools:` need an openai-compatible-api \
+                     backend; this one already has Claude Code's own tools.",
                     request.tools.len()
                 ),
             });
@@ -556,7 +552,6 @@ mod tool_calling_tests {
         let err = a.complete(&req).unwrap_err();
         assert!(matches!(err, Error::Unsupported { .. }), "{err}");
         assert!(err.to_string().contains("openai-compatible-api"), "{err}");
-        assert!(err.to_string().contains("ensemble mcp"), "{err}");
         assert!(!err.is_retryable(), "the same request fails the same way");
     }
 
