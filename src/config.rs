@@ -73,6 +73,13 @@ struct RawAssignment {
     /// prompt is a model with a name, which is a legitimate thing to want.
     #[serde(default)]
     prompt: Option<String>,
+    /// Overrides the backend's own default for this role. Needed when a
+    /// model's baked-in sampling (Ollama's `temperature`/`presence_penalty`
+    /// Modelfile defaults, for instance) is too hot for reliable tool calling.
+    /// Takes precedence over whatever a caller asked for: a chat client has no
+    /// business tuning a role's reliability-critical sampling.
+    #[serde(default)]
+    temperature: Option<f32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -130,12 +137,13 @@ impl Backend {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
     pub role: String,
     pub backend: String,
     pub model: String,
     pub prompt: Option<String>,
+    pub temperature: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -337,6 +345,7 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
         backend: raw.manager.backend.clone(),
         model: raw.manager.model.clone(),
         prompt: raw.manager.prompt.clone(),
+        temperature: raw.manager.temperature,
     };
     check_assignment(&manager, &backends, &raw.backends, &mut problems);
 
@@ -354,6 +363,7 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             backend: ra.backend.clone(),
             model: ra.model.clone(),
             prompt: ra.prompt.clone(),
+            temperature: ra.temperature,
         };
         check_assignment(&a, &backends, &raw.backends, &mut problems);
         roles.insert(name.clone(), a);
@@ -418,6 +428,14 @@ fn check_assignment(
 
     if a.model.trim().is_empty() {
         problems.push(format!("{where_}: `model` is empty"));
+    }
+
+    if let Some(t) = a.temperature {
+        if !(0.0..=2.0).contains(&t) {
+            problems.push(format!(
+                "{where_}: `temperature` is {t}; must be between 0.0 and 2.0"
+            ));
+        }
     }
 }
 
@@ -639,6 +657,52 @@ roles:
         assert_eq!(
             c.role_names(),
             vec!["manager", "coder", "planner", "reviewer"]
+        );
+    }
+
+    #[test]
+    fn a_role_may_override_the_backends_default_temperature() {
+        let doc = r#"
+version: 1
+backends:
+  openai-local:
+    type: openai-compatible-api
+    base_url_env: OPENAI_LOCAL_BASE_URL
+    base_url_default: "http://127.0.0.1:11434/v1"
+manager:
+  backend: openai-local
+  model: qwen3.5:9b
+  temperature: 0.2
+roles:
+  scout:
+    backend: openai-local
+    model: qwen3.5:9b
+"#;
+        let c = parse(doc, &p(), &env(&[])).unwrap();
+        assert_eq!(c.manager.temperature, Some(0.2));
+        // Unset is unset, not defaulted to something: the backend's own
+        // default still applies.
+        assert_eq!(c.roles["scout"].temperature, None);
+    }
+
+    #[test]
+    fn a_temperature_outside_zero_to_two_is_rejected() {
+        let doc = r#"
+version: 1
+backends:
+  openai-local:
+    type: openai-compatible-api
+    base_url_env: OPENAI_LOCAL_BASE_URL
+manager:
+  backend: openai-local
+  model: qwen3.5:9b
+  temperature: 3.5
+"#;
+        let err = parse(doc, &p(), &env(&[])).unwrap_err();
+        let problems = problems_of(err);
+        assert!(
+            problems.iter().any(|p| p.contains("temperature")),
+            "{problems:?}"
         );
     }
 

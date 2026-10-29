@@ -224,6 +224,7 @@ impl Ensemble {
 
         let mut request = Request::new(assignment.model.clone(), messages);
         request.workdir = self.workdir.as_ref().map(|p| p.display().to_string());
+        request.temperature = assignment.temperature;
 
         let response: Response = port.complete(&request).map_err(RouteError::Backend)?;
 
@@ -250,7 +251,10 @@ impl Ensemble {
         let mut request = Request::new(assignment.model.clone(), turn.messages.clone());
         request.tools = turn.tools.clone();
         request.max_tokens = turn.max_tokens;
-        request.temperature = turn.temperature;
+        // The role's own setting wins: it exists to correct a backend's
+        // default sampling (Ollama's Modelfile temperature, say), and a
+        // caller's generic request-level value has no say over that.
+        request.temperature = assignment.temperature.or(turn.temperature);
         request.workdir = self.workdir.as_ref().map(|p| p.display().to_string());
 
         let response = port.complete(&request).map_err(RouteError::Backend)?;
@@ -509,6 +513,81 @@ roles:
         assert_eq!(req.system_text(), "You are the manager.");
         // And the task is the last turn, so it is what the model answers.
         assert_eq!(req.messages.last().unwrap().content, "do the thing");
+    }
+
+    #[test]
+    fn a_configured_temperature_is_sent_with_a_delegation() {
+        const YAML_WITH_TEMP: &str = r#"
+version: 1
+backends:
+  openai-local:
+    type: openai-compatible-api
+    base_url_env: L
+    base_url_default: "http://127.0.0.1:8000/v1"
+manager:
+  backend: openai-local
+  model: qwen3.5:9b
+  temperature: 0.2
+roles:
+  scout:
+    backend: openai-local
+    model: qwen3.5:9b
+"#;
+        let cfg = config::parse(
+            YAML_WITH_TEMP,
+            std::path::Path::new("ensemble.yaml"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let fake = Arc::new(FakePort::ok("openai-local", "ok"));
+        let ports: BTreeMap<String, Arc<dyn ModelPort>> =
+            [("openai-local".to_string(), fake.clone() as Arc<dyn ModelPort>)]
+                .into_iter()
+                .collect();
+        let e = Ensemble::with_ports(cfg, ports, None);
+
+        e.delegate("manager", "t", None).unwrap();
+        assert_eq!(fake.last().unwrap().temperature, Some(0.2));
+
+        // No override configured: the backend's own default still applies.
+        e.delegate("scout", "t", None).unwrap();
+        assert_eq!(fake.last().unwrap().temperature, None);
+    }
+
+    #[test]
+    fn a_configured_temperature_overrides_what_the_caller_asked_for_in_a_turn() {
+        const YAML_WITH_TEMP: &str = r#"
+version: 1
+backends:
+  openai-local:
+    type: openai-compatible-api
+    base_url_env: L
+    base_url_default: "http://127.0.0.1:8000/v1"
+manager:
+  backend: openai-local
+  model: qwen3.5:9b
+  temperature: 0.2
+"#;
+        let cfg = config::parse(
+            YAML_WITH_TEMP,
+            std::path::Path::new("ensemble.yaml"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let fake = Arc::new(FakePort::ok("openai-local", "ok"));
+        let ports: BTreeMap<String, Arc<dyn ModelPort>> =
+            [("openai-local".to_string(), fake.clone() as Arc<dyn ModelPort>)]
+                .into_iter()
+                .collect();
+        let e = Ensemble::with_ports(cfg, ports, None);
+
+        let turn = Turn {
+            messages: vec![Message::user("hi")],
+            temperature: Some(1.0),
+            ..Default::default()
+        };
+        e.turn("manager", &turn).unwrap();
+        assert_eq!(fake.last().unwrap().temperature, Some(0.2));
     }
 
     #[test]

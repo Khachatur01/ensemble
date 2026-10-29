@@ -70,6 +70,13 @@ manager:
 # starting kit, not a fixed set: add, remove or rename freely.
 #
 # Moving a role to a different model is two words, and nothing else changes.
+#
+# Any role (the manager included) may also set `temperature: <0.0-2.0>` to
+# override the backend's own default. Mainly for a server whose baked-in
+# sampling is too hot for reliable tool calling (an Ollama Modelfile's
+# `temperature`/`presence_penalty`, for instance) — `ensemble check` cannot
+# see that, only a manager that narrates calling a role instead of calling it
+# shows it.
 # ---------------------------------------------------------------------------
 roles:
   planner:
