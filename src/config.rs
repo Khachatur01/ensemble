@@ -83,6 +83,12 @@ struct RawAssignment {
     /// business tuning a role's reliability-critical sampling.
     #[serde(default)]
     temperature: Option<f32>,
+    /// How much a reasoning model thinks before it answers: `none`, `low`,
+    /// `medium` or `high`. Thinking costs tokens, and in a small context
+    /// window it can use the whole reply budget before any answer or tool call
+    /// appears; `none` turns it off.
+    #[serde(default)]
+    reasoning_effort: Option<String>,
     /// What the role may do on its own, inside the project directory. Empty or
     /// absent is a think-only role: one model call, text back. Anything listed
     /// turns the role into an agent that loops over these tools; write access
@@ -202,6 +208,7 @@ impl AgentTool {
 }
 
 pub const DEFAULT_MAX_STEPS: u32 = 20;
+const REASONING_EFFORTS: [&str; 4] = ["none", "low", "medium", "high"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
@@ -210,6 +217,8 @@ pub struct Assignment {
     pub model: String,
     pub prompt: Option<String>,
     pub temperature: Option<f32>,
+    /// See [`RawAssignment::reasoning_effort`].
+    pub reasoning_effort: Option<String>,
     /// Empty: a think-only role. See [`RawAssignment::tools`].
     pub tools: Vec<AgentTool>,
     pub max_steps: u32,
@@ -403,6 +412,7 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             model: ra.model.clone(),
             prompt: ra.prompt.clone(),
             temperature: ra.temperature,
+            reasoning_effort: ra.reasoning_effort.clone(),
             tools: parse_tools(name, &ra.tools, &mut problems),
             max_steps: ra.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
             context_window: ra.context_window,
@@ -425,6 +435,23 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             problems.push(format!(
                 "roles.{name}: `context_window` only applies to roles with `tools`"
             ));
+        }
+        if let Some(effort) = &ra.reasoning_effort {
+            if !REASONING_EFFORTS.contains(&effort.as_str()) {
+                problems.push(format!(
+                    "roles.{name}: `reasoning_effort` is '{effort}'; must be one of {}",
+                    REASONING_EFFORTS.join(", ")
+                ));
+            }
+            if backends
+                .get(&a.backend)
+                .is_some_and(|b| !b.supports_tool_calling())
+            {
+                problems.push(format!(
+                    "roles.{name}: `reasoning_effort` needs an openai-compatible-api backend; '{}' is not one",
+                    a.backend
+                ));
+            }
         }
         if !a.tools.is_empty() && ra.context_window.is_none() {
             problems.push(format!(
@@ -790,6 +817,23 @@ roles:
         );
         assert!(
             problems.iter().any(|p| p.contains("max_steps")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_is_read_and_checked() {
+        let doc = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    reasoning_effort: none");
+        let c = parse(&doc, &p(), &env(&[])).unwrap();
+        assert_eq!(c.roles["coder"].reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(c.roles["thinker"].reasoning_effort, None);
+
+        let bad = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    reasoning_effort: lots");
+        let Err(ConfigError::Invalid { problems, .. }) = parse(&bad, &p(), &env(&[])) else {
+            panic!("expected invalid");
+        };
+        assert!(
+            problems.iter().any(|p| p.contains("must be one of")),
             "{problems:?}"
         );
     }

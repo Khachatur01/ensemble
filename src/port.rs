@@ -127,6 +127,9 @@ pub struct Request {
     pub messages: Vec<Message>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    /// How hard a reasoning model should think before answering (`none`,
+    /// `low`, `medium`, `high`). Left to the server's default when unset.
+    pub reasoning_effort: Option<String>,
     /// Working directory for backends that act on a checkout. Ignored by
     /// adapters that have no notion of one.
     pub workdir: Option<String>,
@@ -141,6 +144,7 @@ impl Request {
             messages,
             max_tokens: None,
             temperature: None,
+            reasoning_effort: None,
             workdir: None,
             tools: Vec::new(),
         }

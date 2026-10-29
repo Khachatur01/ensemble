@@ -85,7 +85,9 @@ pub fn run(
             detail: format!("role '{}' has no context_window", assignment.role),
         });
     };
-    let budget = window as usize;
+    // A quarter of the window stays free for the reply: a history that fills
+    // it leaves the model nowhere to write, and the server cuts it off.
+    let budget = (window - window / 4) as usize;
     let result_cap = budget / RESULT_SHARE * BYTES_PER_TOKEN;
     let defs_bytes: usize = defs
         .iter()
@@ -95,6 +97,7 @@ pub fn run(
     let request = |messages: &[Message], offer_tools: bool| {
         let mut r = Request::new(assignment.model.clone(), messages.to_vec());
         r.temperature = assignment.temperature;
+        r.reasoning_effort = assignment.reasoning_effort.clone();
         r.workdir = Some(sandbox.root().display().to_string());
         if offer_tools {
             r.tools = defs.clone();
@@ -257,6 +260,7 @@ mod tests {
             model: "m".into(),
             prompt: Some("Be careful.".into()),
             temperature: Some(0.1),
+            reasoning_effort: None,
             tools,
             max_steps,
             context_window: Some(16_000),
@@ -458,6 +462,19 @@ mod tests {
     }
 
     #[test]
+    fn the_reasoning_effort_reaches_every_request() {
+        let tmp = project();
+        let port = FakePort::ok("b", "done");
+        let mut a = assignment(vec![AgentTool::Read], 5);
+        a.reasoning_effort = Some("none".into());
+        go(&port, &a, &tmp.0).unwrap();
+        assert_eq!(
+            port.last().unwrap().reasoning_effort.as_deref(),
+            Some("none")
+        );
+    }
+
+    #[test]
     fn under_budget_nothing_is_dropped() {
         let tmp = big_project();
         let port = FakePort::scripted("b", "x", reads_of_a_big_file(2));
@@ -470,10 +487,10 @@ mod tests {
     #[test]
     fn over_budget_the_oldest_results_go_first_and_the_latest_stay() {
         let tmp = big_project();
-        std::fs::write(tmp.0.join("big.txt"), "x".repeat(1_400)).unwrap();
+        std::fs::write(tmp.0.join("big.txt"), "x".repeat(1_000)).unwrap();
         let port = FakePort::scripted("b", "x", reads_of_a_big_file(10));
         let mut a = assignment(vec![AgentTool::Read], 12);
-        a.context_window = Some(3_000); // results are ~350 tokens each; ten overflow it
+        a.context_window = Some(3_000); // results are ~250 tokens each; ten overflow the 2250 left for history
         let r = go(&port, &a, &tmp.0).unwrap();
         assert!(r.trimmed >= 1, "trimmed {}", r.trimmed);
 
@@ -486,7 +503,7 @@ mod tests {
         assert_eq!(results.len(), 10, "every call keeps its answer");
         assert!(results[0].content.starts_with("[output of read_file("));
         assert!(results[0].content.contains("big.txt"));
-        assert_eq!(results[9].content.len(), 1_400, "the latest is intact");
+        assert_eq!(results[9].content.len(), 1_000, "the latest is intact");
         assert_eq!(last.messages[0].role, Role::System);
         assert!(last.messages[0].content.contains("autonomous agent"));
         assert_eq!(last.messages[1].content, "do it");

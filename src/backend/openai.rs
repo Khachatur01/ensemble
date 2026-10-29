@@ -162,6 +162,9 @@ pub fn request_body(request: &Request) -> String {
     if let Some(t) = request.temperature {
         body["temperature"] = serde_json::json!(t);
     }
+    if let Some(effort) = &request.reasoning_effort {
+        body["reasoning_effort"] = serde_json::json!(effort);
+    }
     if request.offers_tools() {
         let tools: Vec<serde_json::Value> = request
             .tools
@@ -378,7 +381,8 @@ fn finish(parsed: Parsed, tools_offered: bool, backend: &str) -> Result<Response
         return Err(Error::Protocol {
             backend: backend.into(),
             detail: "the reply was cut off at the token limit before any content \
-                     was produced; raise max_tokens"
+                     was produced. Thinking may have used it up, or the context is full: \
+                     raise max_tokens or the server's context, or set `reasoning_effort: none` on the role"
                 .into(),
         });
     }
@@ -682,6 +686,15 @@ mod tests {
                 .unwrap();
         assert!(v.get("max_tokens").is_none());
         assert!(v.get("temperature").is_none());
+        assert!(v.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn reasoning_effort_is_sent_when_set() {
+        let mut req = Request::new("m", vec![Message::user("x")]);
+        req.reasoning_effort = Some("none".into());
+        let v: serde_json::Value = serde_json::from_str(&request_body(&req)).unwrap();
+        assert_eq!(v["reasoning_effort"], "none");
     }
 
     #[test]

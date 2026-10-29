@@ -196,6 +196,7 @@ impl Ensemble {
         let mut request = Request::new(assignment.model.clone(), messages);
         request.workdir = self.workdir.as_ref().map(|p| p.display().to_string());
         request.temperature = assignment.temperature;
+        request.reasoning_effort = assignment.reasoning_effort.clone();
 
         let response: Response = port.complete(&request).map_err(RouteError::Backend)?;
 

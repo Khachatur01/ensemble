@@ -201,7 +201,7 @@ A **backend** is how a model is reached. A **role** is a member of the team,
 and assigning one to a different model is two words with nothing else to
 change. No model is hardcoded as planner, coder or reviewer, and the role names
 are yours. A role takes `backend`, `model`, and optionally `prompt`,
-`temperature`, `tools`, `max_steps` and `context_window`.
+`temperature`, `reasoning_effort` (`none` turns thinking off), `tools`, `max_steps` and `context_window`.
 
 There is no `manager:` block. The agent that calls Ensemble is the manager; an
 old config that still has one is rejected with a message saying so.
