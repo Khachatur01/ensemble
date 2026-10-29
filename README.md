@@ -25,35 +25,59 @@ in a loop until the task is done. Any OpenAI-compatible model can be the brain
 
 ## Quick start
 
-```console
-$ nix profile install github:Khachatur01/ensemble   # or: cargo install --path .
-$ cp ensemble.yaml /your/project/                    # then edit the roles
-$ cd /your/project && ensemble check
-```
+1. [Install](#installation) Ensemble so that `ensemble` is on your `PATH`.
+2. Give the project a team, then check it:
 
-`check` validates the config, prints the team and says whether the backends can
-be built. Register Ensemble with your agent, from the project directory:
+   ```console
+   $ cp ensemble.yaml /your/project/      # the shipped example; edit the roles
+   $ cd /your/project && ensemble check
+   ```
 
-```console
-$ claude mcp add --scope local ensemble -- /path/to/ensemble mcp
-$ claude mcp list
-ensemble: /path/to/ensemble mcp - ✔ Connected
-```
+   `check` validates the config, prints the team and says whether the backends
+   can be built.
+3. [Connect your agent](#connect-your-agent) from the project directory.
+4. Tell the agent when to use the team, in `AGENTS.md` (OpenCode) or
+   `CLAUDE.md` (Claude Code):
 
-For OpenCode, in `opencode.json`:
-
-```json
-{ "mcp": { "ensemble": { "type": "local", "command": ["/path/to/ensemble", "mcp"] } } }
-```
-
-Then tell the agent when to use the team, in its `CLAUDE.md` / `AGENTS.md`:
-
-> Delegate implementation to the `coder` role and review to `reviewer` with the
-> `ensemble_delegate` tool. Check `ensemble_roles` for what each can do.
+   > Delegate implementation to the `coder` role and review to `reviewer` with
+   > the `ensemble_delegate` tool. Check `ensemble_roles` for what each can do.
 
 Ensemble runs per project: the agent spawns it with the project as its working
 directory, and that directory is where agent roles work. There is no path
 argument on any tool, deliberately.
+
+## Connect your agent
+
+Ensemble is a standard MCP server on stdio. Any agent that can spawn one can
+use it; nothing in it is specific to one harness. Register it from the project
+directory, the one with `ensemble.yaml`.
+
+**OpenCode**
+
+```console
+$ opencode mcp add ensemble -- ensemble mcp
+$ opencode mcp list
+✓ ensemble  connected
+```
+
+This writes the server into the project's `opencode.json`. Add `--global` to
+register it for every project instead.
+
+**Claude Code**
+
+```console
+$ claude mcp add --scope local ensemble -- ensemble mcp
+$ claude mcp list
+ensemble: ensemble mcp - ✔ Connected
+```
+
+`--scope local` keeps the registration to this project and to you;
+`--scope project` writes it to `.mcp.json` for everyone who clones the repo.
+
+A registration for every project (`--global`, `--scope user`) works too, but
+only projects that have an `ensemble.yaml` get a team: elsewhere the server
+exits at once with "no ensemble.yaml in the project directory", and the agent
+lists it as failed. Ensemble reads no user-level config.
 
 ## Agent roles
 
@@ -137,25 +161,61 @@ client program, so they cost the manager no tokens.
 
 ## Installation
 
-### With Nix
+Linux is the supported platform: the `bash` tool's sandbox is Linux Landlock
+(kernel 5.13+; 6.7+ to block network access). The rest builds on macOS too, but
+there agent roles cannot have `bash`.
 
-```console
-$ nix run github:Khachatur01/ensemble -- check     # one command, nothing kept
-$ nix shell github:Khachatur01/ensemble            # a shell with ensemble on PATH
-$ nix profile install github:Khachatur01/ensemble  # install it for good
+### NixOS
+
+The repository is a flake, so Ensemble installs like any other package. Add it
+as an input of your system flake:
+
+```nix
+# flake.nix
+inputs.ensemble = {
+  url = "github:Khachatur01/ensemble";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
 ```
 
-`nix run` is for a single invocation, `nix shell` for a session of them.
-Neither leaves anything behind, so neither gives you a path you can hand to a
-harness — use `nix profile install` for that.
+and to the packages of a module that receives `inputs` (through
+`specialArgs`):
 
-### With cargo
+```nix
+{ inputs, pkgs, ... }:
+{
+  environment.systemPackages = [
+    inputs.ensemble.packages.${pkgs.stdenv.hostPlatform.system}.default
+  ];
+}
+```
 
-Needs Rust 1.85 or newer (edition 2024) and a C linker for the TLS stack.
+After `nixos-rebuild switch`, `ensemble` is on `PATH`. With Home Manager, put
+the same expression in `home.packages`. `nix flake update ensemble` picks up
+new commits.
+
+### Nix on any Linux
 
 ```console
-$ cargo install --path .
+$ nix profile install github:Khachatur01/ensemble  # installed, on PATH
+$ nix shell github:Khachatur01/ensemble            # on PATH for this shell only
+$ nix run github:Khachatur01/ensemble -- check     # one command
 ```
+
+An agent spawns `ensemble mcp` by name, so it has to find `ensemble` on the
+`PATH` it was started with: install it, or start the agent from inside
+`nix shell`.
+
+### Other Linux: cargo
+
+Needs Rust 1.85 or newer (edition 2024) and a C linker.
+
+```console
+$ cargo install --git https://github.com/Khachatur01/ensemble
+```
+
+This puts `ensemble` in `~/.cargo/bin`, which must be on `PATH`. Run the same
+command again to update.
 
 The `claude` CLI is needed only if you configure a `claude-code-cli` backend,
 and nothing else is: there is no runtime service, no daemon and no port.
@@ -334,8 +394,8 @@ None of the tests need the network, a model server or a Claude subscription.
   caller must pass everything in `task` and `context`.
 - **`bash` reads everything and is Linux-only.** See above. `grep` is a
   literal-string search, not a regex.
-- **No context management.** An agent that reads a lot can outgrow its model's
-  context window; there is no compaction yet.
+- **Context is trimmed, not summarised.** Old tool output is replaced by a note
+  to stay within `context_window`; the agent loses that detail.
 - **Weak models can ignore tools.** See above.
 - **Claude-backed roles return prose, never tool calls.** Right for a planner or
   a reviewer; they cannot run Ensemble's agent loop.
@@ -345,8 +405,6 @@ None of the tests need the network, a model server or a Claude subscription.
   directory of the process (or `--dir`). It cannot vary per call.
 - **Process-group kill is Unix-only.** Elsewhere a timeout still returns on
   time, but an orphan may survive it.
-- **The OpenCode MCP config block is unverified.** The MCP server is verified
-  against Claude Code, over real pipes.
 
 ## On the Claude Code backend
 

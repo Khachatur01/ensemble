@@ -52,10 +52,10 @@
       apps = forAll (pkgs: {
         default = {
           type = "app";
-          program = "${self.packages.${pkgs.system}.ensemble}/bin/ensemble";
+          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.ensemble}/bin/ensemble";
         };
       });
 
-      checks = forAll (pkgs: { inherit (self.packages.${pkgs.system}) ensemble; });
+      checks = forAll (pkgs: { inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) ensemble; });
     };
 }

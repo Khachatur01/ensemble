@@ -41,9 +41,10 @@ backends:
 # ---------------------------------------------------------------------------
 # There is no manager block. The agent that calls Ensemble over MCP (Claude
 # Code, OpenCode, ...) is the manager: it sees the roles below as tools and
-# decides what to delegate. Register it with:
+# decides what to delegate. Register it from the project directory with:
 #
-#   claude mcp add --scope local ensemble -- /path/to/ensemble mcp
+#   opencode mcp add ensemble -- ensemble mcp
+#   claude mcp add --scope local ensemble -- ensemble mcp
 #
 # and tell it, in CLAUDE.md / AGENTS.md, which roles to use for what.
 # ---------------------------------------------------------------------------
