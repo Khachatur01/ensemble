@@ -209,7 +209,15 @@ fn cmd_check(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
         let a = config
             .assignment(role)
             .expect("role_names only yields configured roles");
-        let kind = if a.tools.is_empty() {
+        let claude_tools = match config.backends.get(&a.backend).map(|b| &b.settings) {
+            Some(config::BackendSettings::ClaudeCodeCli { allowed_tools, .. }) => {
+                Some(allowed_tools)
+            }
+            _ => None,
+        };
+        let kind = if let Some(allowed) = claude_tools {
+            format!("Claude Code's own tools: {allowed}")
+        } else if a.tools.is_empty() {
             "think-only".to_string()
         } else {
             let names: Vec<&str> = a.tools.iter().map(|t| t.as_str()).collect();
