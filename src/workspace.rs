@@ -8,8 +8,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Directories a snapshot does not look into: they are large and the agent's
-/// changes there are not what a caller wants listed.
-const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules"];
+/// changes there are not what a caller wants listed. `.ensemble` is
+/// Ensemble's own, where runs write their logs as they go.
+const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".ensemble"];
 
 /// Above this many files a snapshot is not taken; changes then go unreported
 /// rather than every run paying for a huge walk.

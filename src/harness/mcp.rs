@@ -2,7 +2,8 @@
 //!
 //! The agent that calls Ensemble (Claude Code, OpenCode, ...) is the manager.
 //! It spawns `ensemble mcp` with the project as its working directory and sees
-//! the team as tools: `agents`, `delegate`, `health`.
+//! the team as tools: `agents`, `delegate`, `submit` and the tools that follow
+//! tasks, `health`. While it runs, agents work through the project's tasks.
 //!
 //! Ensemble is a subprocess the harness spawns, speaking JSON-RPC 2.0 as
 //! newline-delimited JSON on stdin/stdout. **Nothing but protocol goes to
@@ -21,7 +22,9 @@
 //! on how it was asked. This module owns only the JSON-RPC envelope.
 
 use super::delegation;
+use super::queue::{Queue, Task};
 use crate::router::Ensemble;
+use crate::tasks::Store;
 use serde_json::{Value, json};
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -92,18 +95,32 @@ fn log_message(text: &str) -> Value {
 /// `None` means "send nothing" — which is required, not merely allowed, for
 /// notifications: a notification carries no id, and answering one is a protocol
 /// violation that some clients treat as fatal.
+///
+/// With no session around it, a background delegation runs to its end before
+/// this returns and there are no tasks; [`serve`] is what runs them alongside
+/// the rest.
 pub fn handle(ensemble: &Ensemble, request: &Value) -> Option<Value> {
-    handle_reporting(ensemble, request, &|_| {}, &AtomicBool::new(false))
+    handle_reporting(
+        ensemble,
+        request,
+        &|_| {},
+        &AtomicBool::new(false),
+        &Queue::new(ensemble, None),
+        &|task| task(),
+    )
 }
 
 /// [`handle`], with `notify` called for each notification to send to the client
 /// before the reply, such as what a delegated agent is doing. Setting `cancel`
-/// stops a delegation at its next step.
-pub fn handle_reporting(
-    ensemble: &Ensemble,
+/// stops a delegation at its next step. Tasks and background delegations are
+/// kept in `queue`, and background work is started with `spawn`.
+pub fn handle_reporting<'s>(
+    ensemble: &'s Ensemble,
     request: &Value,
     notify: &dyn Fn(Value),
     cancel: &AtomicBool,
+    queue: &'s Queue<'s>,
+    spawn: &dyn Fn(Task<'s>),
 ) -> Option<Value> {
     let id = request.get("id").cloned();
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
@@ -154,6 +171,8 @@ pub fn handle_reporting(
                     notify(log_message(line));
                 },
                 cancel,
+                queue,
+                spawn,
             );
             reply(json!({
                 "content": [{ "type": "text", "text": result.text }],
@@ -187,8 +206,12 @@ pub fn handle_reporting(
 /// Each `tools/call` runs on its own thread, so the caller can delegate to
 /// several agents at once and still get `ping` and `tools/list` answered while
 /// they work. `notifications/cancelled` stops the named call at its next step,
-/// and it gets no reply: the client has stopped waiting for one. When stdin
-/// closes, calls still running are finished before this returns.
+/// and it gets no reply: the client has stopped waiting for one.
+///
+/// Alongside, a worker runs the tasks in the project's `.ensemble/tasks/`.
+/// When stdin closes, running tasks and background delegations are stopped
+/// (tasks that had not started stay queued for the next session), and blocking
+/// calls still running are finished before this returns.
 pub fn serve<W: Write + Send>(
     ensemble: &Ensemble,
     input: impl BufRead,
@@ -214,72 +237,105 @@ pub fn serve<W: Write + Send>(
             let _ = send(&n);
         }
     };
-    let (send, notify, running) = (&send, &notify, &running);
+    let project = ensemble.workdir()?;
+    let queue = Queue::new(
+        ensemble,
+        Some(Store::new(&project.join(crate::config::CONFIG_DIR))),
+    );
+    let (send, notify, running, queue) = (&send, &notify, &running, &queue);
 
     std::thread::scope(|scope| {
-        for line in input.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let request = match serde_json::from_str::<Value>(&line) {
-                Ok(request) => request,
-                Err(e) => {
-                    send(&json!({
-                        "jsonrpc": "2.0",
-                        "id": Value::Null,
-                        "error": { "code": -32700, "message": format!("parse error: {e}") }
-                    }))?;
+        scope.spawn(move || queue.work(&spawner(scope)));
+        let result = (|| -> std::io::Result<()> {
+            for line in input.lines() {
+                let line = line?;
+                if line.trim().is_empty() {
                     continue;
                 }
-            };
-            let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-            let params = request.get("params");
-            match method {
-                "logging/setLevel" => {
-                    if let Some(level) = params
-                        .and_then(|p| p.get("level"))
-                        .and_then(Value::as_str)
-                        .and_then(rank)
-                    {
-                        min_level.store(level, Ordering::Relaxed);
+                let request = match serde_json::from_str::<Value>(&line) {
+                    Ok(request) => request,
+                    Err(e) => {
+                        send(&json!({
+                            "jsonrpc": "2.0",
+                            "id": Value::Null,
+                            "error": { "code": -32700, "message": format!("parse error: {e}") }
+                        }))?;
+                        continue;
                     }
-                }
-                "notifications/cancelled" => {
-                    if let Some(id) = params.and_then(|p| p.get("requestId"))
-                        && let Some(flag) = running.lock().unwrap().get(&id.to_string())
-                    {
-                        flag.store(true, Ordering::Relaxed);
-                    }
-                    continue;
-                }
-                "tools/call" if request.get("id").is_some_and(|id| !id.is_null()) => {
-                    let key = request["id"].to_string();
-                    let cancel = Arc::new(AtomicBool::new(false));
-                    running.lock().unwrap().insert(key.clone(), cancel.clone());
-                    scope.spawn(move || {
-                        let response = handle_reporting(ensemble, &request, notify, &cancel);
-                        running.lock().unwrap().remove(&key);
-                        if !cancel.load(Ordering::Relaxed)
-                            && let Some(response) = response
+                };
+                let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+                let params = request.get("params");
+                match method {
+                    "logging/setLevel" => {
+                        if let Some(level) = params
+                            .and_then(|p| p.get("level"))
+                            .and_then(Value::as_str)
+                            .and_then(rank)
                         {
-                            // A failed write here means the client is gone;
-                            // the reading side finds out on its own.
-                            let _ = send(&response);
+                            min_level.store(level, Ordering::Relaxed);
                         }
-                    });
-                    continue;
+                    }
+                    "notifications/cancelled" => {
+                        if let Some(id) = params.and_then(|p| p.get("requestId"))
+                            && let Some(flag) = running.lock().unwrap().get(&id.to_string())
+                        {
+                            flag.store(true, Ordering::Relaxed);
+                        }
+                        continue;
+                    }
+                    "tools/call" if request.get("id").is_some_and(|id| !id.is_null()) => {
+                        let key = request["id"].to_string();
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        running.lock().unwrap().insert(key.clone(), cancel.clone());
+                        scope.spawn(move || {
+                            let response = handle_reporting(
+                                ensemble,
+                                &request,
+                                notify,
+                                &cancel,
+                                queue,
+                                &spawner(scope),
+                            );
+                            running.lock().unwrap().remove(&key);
+                            if !cancel.load(Ordering::Relaxed)
+                                && let Some(response) = response
+                            {
+                                // A failed write here means the client is gone;
+                                // the reading side finds out on its own.
+                                let _ = send(&response);
+                            }
+                        });
+                        continue;
+                    }
+                    _ => {}
                 }
-                _ => {}
+                if let Some(response) = handle_reporting(
+                    ensemble,
+                    &request,
+                    notify,
+                    &AtomicBool::new(false),
+                    queue,
+                    &spawner(scope),
+                ) {
+                    send(&response)?;
+                }
             }
-            if let Some(response) =
-                handle_reporting(ensemble, &request, notify, &AtomicBool::new(false))
-            {
-                send(&response)?;
-            }
-        }
-        Ok(())
+            Ok(())
+        })();
+        // The caller is gone, so nobody will ask for what background work
+        // produces: stop it, or this would wait out its time limits.
+        queue.close();
+        result
     })
+}
+
+/// Runs background work on a thread of `scope`.
+fn spawner<'scope, 'env>(
+    scope: &'scope std::thread::Scope<'scope, 'env>,
+) -> impl Fn(Task<'scope>) + 'scope {
+    move |task| {
+        scope.spawn(task);
+    }
 }
 
 #[cfg(test)]
@@ -328,17 +384,22 @@ mod tests {
     /// A team of OpenCode agents, each running its own stand-in script, in a
     /// fresh project. `scripts` is (agent, tools, body).
     fn team(scripts: &[(&str, &str, &str)]) -> (Ensemble, TempDir) {
+        team_limited(scripts, 4)
+    }
+
+    /// [`team`], each agent running at most `max_concurrent` at once.
+    fn team_limited(scripts: &[(&str, &str, &str)], max_concurrent: u32) -> (Ensemble, TempDir) {
         let tmp = TempDir::new();
         let bin = tmp.0.join("bin");
         let project = tmp.0.join("project");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join("a.txt"), "hello").unwrap();
-        let mut yaml = String::from("version: 1\nagents:\n");
+        let mut yaml = String::from("version: 1\nllm_backends: {}\nagents:\n");
         for (name, tools, body) in scripts {
             let command = cli(&bin, name, body);
             yaml.push_str(&format!(
-                "  {name}:\n    prompt: \"The {name}. Second line.\"\n    adapter:\n      type: opencode\n      model: opencode/m-{name}\n      tools: [{tools}]\n      command: \"{command}\"\n"
+                "  {name}:\n    prompt: \"The {name}. Second line.\"\n    max_seconds: 1800\n    max_concurrent: {max_concurrent}\n    adapter:\n      type: opencode\n      model: {{ type: provider, name: opencode/m-{name} }}\n      tools: [{tools}]\n      max_steps: 30\n      command: \"{command}\"\n"
             ));
         }
         let cfg =
@@ -568,12 +629,17 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
     }
 
     #[test]
-    fn tools_list_advertises_the_three_tools_with_the_real_agent_names() {
+    fn tools_list_advertises_the_tools_with_the_real_agent_names() {
         let (e, _tmp) = working();
         let r = handle(&e, &rpc("tools/list", json!({}))).unwrap();
         let tools = r["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["delegate", "agents", "health"]);
+        assert_eq!(
+            names,
+            vec![
+                "delegate", "submit", "status", "wait", "cancel", "agents", "health"
+            ]
+        );
 
         let enum_ = &tools[0]["inputSchema"]["properties"]["agent"]["enum"];
         let agents: Vec<&str> = enum_
@@ -696,7 +762,7 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
         assert!(text_of(&good).contains(": ok"), "{}", text_of(&good));
 
         let cfg = config::parse(
-            "version: 1\nagents:\n  x:\n    adapter: { type: opencode, model: a/b, command: /nonexistent/opencode }\n",
+            "version: 1\nllm_backends: {}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 4\n    adapter: { type: opencode, model: { type: provider, name: a/b }, tools: [read], max_steps: 3, command: /nonexistent/opencode }\n",
             std::path::Path::new("config.yaml"),
             &BTreeMap::new(),
         )
@@ -793,5 +859,448 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
         // And the session carried on.
         let second: Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(second["id"], 2);
+    }
+
+    /// Input that arrives line by line while the server runs, ending when the
+    /// sender is dropped.
+    struct Feed {
+        lines: std::sync::mpsc::Receiver<String>,
+        pending: Vec<u8>,
+    }
+
+    impl std::io::Read for Feed {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            if self.pending.is_empty() {
+                match self.lines.recv() {
+                    Ok(line) => self.pending = line.into_bytes(),
+                    Err(_) => return Ok(0),
+                }
+            }
+            let n = out.len().min(self.pending.len());
+            out[..n].copy_from_slice(&self.pending[..n]);
+            self.pending.drain(..n);
+            Ok(n)
+        }
+    }
+
+    /// Output the test can read while the server is still writing it.
+    #[derive(Clone, Default)]
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Shared {
+        /// The text of the reply to request `id`, once it is written.
+        fn reply_text(&self, id: u64) -> String {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                let out = String::from_utf8(self.0.lock().unwrap().clone()).unwrap();
+                for line in out.lines() {
+                    let m: Value = serde_json::from_str(line).unwrap();
+                    if m["id"] == id {
+                        return m["result"]["content"][0]["text"]
+                            .as_str()
+                            .unwrap()
+                            .to_string();
+                    }
+                }
+                assert!(std::time::Instant::now() < deadline, "no reply to {id}");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+
+    fn tool_call(id: u64, name: &str, args: Value) -> String {
+        format!(
+            "{}\n",
+            json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                   "params":{"name":name,"arguments":args}})
+        )
+    }
+
+    #[test]
+    fn a_background_delegation_answers_at_once_and_is_followed_with_status_and_wait() {
+        let body = format!(
+            "{}sleep 1\n{}",
+            emit(&[json!({"type": "step_start", "part": {}})]),
+            emit(&step(vec![text("late answer")]))
+        );
+        let (e, _tmp) = team(&[("scout", "read", &body)]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let out = Shared::default();
+        std::thread::scope(|s| {
+            let server = s.spawn(|| {
+                let input = std::io::BufReader::new(Feed {
+                    lines: rx,
+                    pending: Vec::new(),
+                });
+                serve(&e, input, out.clone()).unwrap();
+            });
+
+            let started = std::time::Instant::now();
+            tx.send(tool_call(
+                1,
+                "delegate",
+                json!({"agent": "scout", "task": "look", "background": true}),
+            ))
+            .unwrap();
+            let first = out.reply_text(1);
+            assert!(first.starts_with("adhoc-1 started"), "{first}");
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(900),
+                "the reply did not wait for the agent"
+            );
+
+            tx.send(tool_call(2, "status", json!({}))).unwrap();
+            let status = out.reply_text(2);
+            assert!(status.contains("adhoc-1 · scout · running"), "{status}");
+
+            tx.send(tool_call(
+                3,
+                "wait",
+                json!({"task": "adhoc-1", "timeout_seconds": 20}),
+            ))
+            .unwrap();
+            let reply = out.reply_text(3);
+            assert!(reply.starts_with("late answer"), "{reply}");
+            assert!(reply.contains("[scout: 2 step(s)"), "{reply}");
+
+            tx.send(tool_call(4, "status", json!({"task": "adhoc-1"})))
+                .unwrap();
+            assert!(out.reply_text(4).contains("· done ·"));
+            drop(tx);
+            server.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn a_background_job_is_stopped_when_the_caller_goes_away() {
+        let body = format!(
+            "{}sleep 30\n",
+            emit(&[json!({"type": "step_start", "part": {}})])
+        );
+        let (e, _tmp) = team(&[("scout", "read", &body)]);
+        let input = tool_call(
+            1,
+            "delegate",
+            json!({"agent": "scout", "task": "look", "background": true}),
+        );
+        let started = std::time::Instant::now();
+        let out = served(&e, &input);
+        assert!(
+            out[0]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("adhoc-1 started")
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the agent was stopped, not waited for"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_background_job_is_reported_as_cancelled() {
+        let body = format!(
+            "{}sleep 30\n",
+            emit(&[json!({"type": "step_start", "part": {}})])
+        );
+        let (e, _tmp) = team(&[("scout", "read", &body)]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let out = Shared::default();
+        std::thread::scope(|s| {
+            let server = s.spawn(|| {
+                let input = std::io::BufReader::new(Feed {
+                    lines: rx,
+                    pending: Vec::new(),
+                });
+                serve(&e, input, out.clone()).unwrap();
+            });
+            tx.send(tool_call(
+                1,
+                "delegate",
+                json!({"agent": "scout", "task": "look", "background": true}),
+            ))
+            .unwrap();
+            out.reply_text(1);
+            tx.send(tool_call(2, "cancel", json!({"task": "adhoc-1"})))
+                .unwrap();
+            assert!(out.reply_text(2).contains("being cancelled"));
+            tx.send(tool_call(
+                3,
+                "wait",
+                json!({"task": "adhoc-1", "timeout_seconds": 20}),
+            ))
+            .unwrap();
+            assert!(out.reply_text(3).contains("was cancelled"));
+            drop(tx);
+            server.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn a_background_call_for_an_unknown_agent_fails_at_once_without_a_job() {
+        let (e, _tmp) = working();
+        let r = call(
+            &e,
+            "delegate",
+            json!({"agent": "architect", "task": "t", "background": true}),
+        );
+        assert_eq!(r["result"]["isError"], true);
+        assert!(text_of(&r).contains("architect"), "{}", text_of(&r));
+        let r = call(&e, "status", json!({}));
+        assert_eq!(text_of(&r), "No tasks.");
+    }
+
+    #[test]
+    fn waiting_for_a_job_that_does_not_exist_is_a_readable_error() {
+        let (e, _tmp) = working();
+        let r = call(&e, "wait", json!({"task": "9"}));
+        assert_eq!(r["result"]["isError"], true);
+        assert!(text_of(&r).contains("no task '9'"), "{}", text_of(&r));
+        let r = call(&e, "wait", json!({}));
+        assert_eq!(r["result"]["isError"], true);
+    }
+    // -----------------------------------------------------------------------
+    // Tasks
+    // -----------------------------------------------------------------------
+
+    /// Run a session on `e` while `script` talks to it; the session ends, as
+    /// when the caller goes away, when `script` returns.
+    fn session(e: &Ensemble, script: impl FnOnce(&mut dyn FnMut(&str, Value) -> String)) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let out = Shared::default();
+        std::thread::scope(|s| {
+            let output = out.clone();
+            let server = s.spawn(move || {
+                let input = std::io::BufReader::new(Feed {
+                    lines: rx,
+                    pending: Vec::new(),
+                });
+                serve(e, input, output).unwrap();
+            });
+            let mut id = 0;
+            script(&mut |name, args| {
+                id += 1;
+                tx.send(tool_call(id, name, args)).unwrap();
+                out.reply_text(id)
+            });
+            drop(tx);
+            server.join().unwrap();
+        });
+    }
+
+    /// Ask `status` until its reply contains `wanted`.
+    fn until(ask: &mut dyn FnMut(&str, Value) -> String, args: Value, wanted: &str) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let status = ask("status", args.clone());
+            if status.contains(wanted) {
+                return status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "never '{wanted}': {status}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    fn project(tmp: &TempDir) -> std::path::PathBuf {
+        tmp.0.join("project")
+    }
+
+    fn tasks(tmp: &TempDir) -> std::path::PathBuf {
+        project(tmp).join(".ensemble/tasks")
+    }
+
+    fn write_task(tmp: &TempDir, id: &str, agent: &str, text: &str) {
+        let dir = tasks(tmp).join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("task.md"),
+            format!("---\ntitle: Task {id}\nagent: {agent}\n---\n{text}\n"),
+        )
+        .unwrap();
+    }
+
+    fn store(tmp: &TempDir) -> Store {
+        Store::new(&project(tmp).join(".ensemble"))
+    }
+
+    /// Answers `alone`, or `overlap` when another run of it is going on in the
+    /// project at the same time.
+    const BUSY: &str = r#"if mkdir .busy 2>/dev/null; then t=alone; sleep 0.6; rmdir .busy; else t=overlap; sleep 0.6; fi
+printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
+"#;
+
+    fn sleeper() -> String {
+        format!(
+            "{}sleep 30\n",
+            emit(&[json!({"type": "step_start", "part": {}})])
+        )
+    }
+
+    #[test]
+    fn a_task_written_by_hand_is_run_and_its_result_written_once() {
+        let (e, tmp) = team(&[("scout", "read", &emit(&step(vec![text("found it")])))]);
+        write_task(&tmp, "0001-look", "scout", "Find the parser.");
+        std::fs::create_dir_all(tasks(&tmp).join("0002-bad")).unwrap();
+        std::fs::write(tasks(&tmp).join("0002-bad/task.md"), "no front matter").unwrap();
+        session(&e, |ask| {
+            let result = ask("wait", json!({"task": "0001-look", "timeout_seconds": 20}));
+            assert!(
+                result.starts_with("---\nstatus: done\nagent: \"scout\"\n"),
+                "{result}"
+            );
+            assert!(
+                result.contains("found it") && result.contains("[scout: 1 step(s)"),
+                "{result}"
+            );
+            let status = ask("status", json!({}));
+            assert!(
+                status.contains("0001-look · scout · done · Task 0001-look"),
+                "{status}"
+            );
+            assert!(status.contains("0002-bad · unreadable"), "{status}");
+        });
+        let written = std::fs::read_to_string(tasks(&tmp).join("0001-look/result.md")).unwrap();
+        assert!(written.contains("found it"), "{written}");
+        let ignore = project(&tmp).join(".ensemble/runs/.gitignore");
+        assert_eq!(std::fs::read_to_string(ignore).unwrap(), "*\n");
+        assert!(
+            std::fs::read_to_string(project(&tmp).join(".ensemble/runs/0001-look/log.txt"))
+                .unwrap()
+                .contains("scout"),
+        );
+    }
+
+    #[test]
+    fn a_submitted_task_is_a_ticket_on_disk_whose_result_wait_returns() {
+        let (e, tmp) = team(&[("scout", "read", &emit(&step(vec![text("found it")])))]);
+        session(&e, |ask| {
+            let r = ask(
+                "submit",
+                json!({"agent": "scout", "title": "Find the parser", "task": "Look.", "context": "src/"}),
+            );
+            assert!(r.starts_with("task 0001-find-the-parser queued"), "{r}");
+            let result = ask(
+                "wait",
+                json!({"task": "0001-find-the-parser", "timeout_seconds": 20}),
+            );
+            assert!(
+                result.contains("status: done") && result.contains("found it"),
+                "{result}"
+            );
+
+            let r = ask(
+                "submit",
+                json!({"agent": "architect", "title": "x", "task": "y"}),
+            );
+            assert!(
+                r.contains("no agent 'architect'") && r.contains("scout"),
+                "{r}"
+            );
+            let r = ask("submit", json!({"agent": "scout", "task": "y"}));
+            assert!(r.contains("`title`"), "{r}");
+        });
+        let ticket =
+            std::fs::read_to_string(tasks(&tmp).join("0001-find-the-parser/task.md")).unwrap();
+        assert_eq!(
+            ticket,
+            "---\ntitle: \"Find the parser\"\nagent: \"scout\"\ncontext: \"src/\"\n---\nLook.\n"
+        );
+    }
+
+    #[test]
+    fn an_agent_runs_no_more_tasks_at_once_than_its_max_concurrent() {
+        for (limit, expected) in [(1, ["alone", "alone"]), (2, ["alone", "overlap"])] {
+            let (e, tmp) = team_limited(&[("coder", "read", BUSY)], limit);
+            write_task(&tmp, "0001-a", "coder", "a");
+            write_task(&tmp, "0002-b", "coder", "b");
+            let mut got = Vec::new();
+            session(&e, |ask| {
+                for id in ["0001-a", "0002-b"] {
+                    let r = ask("wait", json!({"task": id, "timeout_seconds": 20}));
+                    got.push(r.lines().nth(6).unwrap_or("").to_string());
+                }
+            });
+            got.sort();
+            assert_eq!(got, expected, "max_concurrent {limit}");
+        }
+    }
+
+    #[test]
+    fn a_blocking_delegation_waits_for_a_slot_taken_by_a_background_one() {
+        let (e, _tmp) = team_limited(&[("coder", "read", BUSY)], 1);
+        session(&e, |ask| {
+            let r = ask(
+                "delegate",
+                json!({"agent": "coder", "task": "a", "background": true}),
+            );
+            assert!(r.starts_with("adhoc-1 started"), "{r}");
+            let blocking = ask("delegate", json!({"agent": "coder", "task": "b"}));
+            assert!(blocking.starts_with("alone"), "{blocking}");
+            let background = ask("wait", json!({"task": "adhoc-1", "timeout_seconds": 20}));
+            assert!(background.starts_with("alone"), "{background}");
+        });
+    }
+
+    #[test]
+    fn the_end_of_a_session_interrupts_running_tasks_and_leaves_queued_ones() {
+        let (e, tmp) = team_limited(&[("scout", "read", &sleeper())], 1);
+        write_task(&tmp, "0001-a", "scout", "a");
+        write_task(&tmp, "0002-b", "scout", "b");
+        let started = std::time::Instant::now();
+        session(&e, |ask| {
+            let status = until(ask, json!({}), "0001-a · scout · running");
+            assert!(status.contains("0002-b · scout · queued"), "{status}");
+        });
+        assert!(started.elapsed() < std::time::Duration::from_secs(15));
+        let s = store(&tmp);
+        assert!(s.outcome("0001-a").is_none() && s.outcome("0002-b").is_none());
+        assert_eq!(s.state("0001-a").as_deref(), Some("interrupted"));
+        assert_eq!(s.state("0002-b"), None);
+    }
+
+    #[test]
+    fn a_queued_task_can_be_cancelled_and_an_ended_one_does_not_run_again() {
+        let (e, tmp) = team_limited(&[("scout", "read", &sleeper())], 1);
+        write_task(&tmp, "0001-a", "scout", "a");
+        write_task(&tmp, "0002-b", "scout", "b");
+        write_task(&tmp, "0003-c", "scout", "c");
+        std::fs::write(
+            tasks(&tmp).join("0003-c/result.md"),
+            "---\nstatus: done\n---\nalready\n",
+        )
+        .unwrap();
+        session(&e, |ask| {
+            until(ask, json!({"task": "0001-a"}), "running");
+            let r = ask("cancel", json!({"task": "0002-b"}));
+            assert!(r.contains("cancelled; it had not started"), "{r}");
+            let r = ask("cancel", json!({"task": "0001-a"}));
+            assert!(r.contains("being cancelled"), "{r}");
+            let r = ask("wait", json!({"task": "0001-a", "timeout_seconds": 20}));
+            assert!(r.contains("status: cancelled"), "{r}");
+            let r = ask("cancel", json!({"task": "0003-c"}));
+            assert!(r.contains("already ended"), "{r}");
+            let r = ask("wait", json!({"task": "0003-c"}));
+            assert!(r.contains("already"), "{r}");
+        });
+        let s = store(&tmp);
+        assert_eq!(
+            s.outcome("0002-b").unwrap().status,
+            crate::tasks::Status::Cancelled
+        );
+        assert_eq!(s.state("0002-b"), None, "it never started");
+        assert_eq!(s.state("0003-c"), None, "it never ran again");
     }
 }

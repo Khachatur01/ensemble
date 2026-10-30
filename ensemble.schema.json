@@ -2,10 +2,12 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json",
   "title": ".ensemble/config.yaml",
-  "description": "The agent team for one project: the agents a calling agent can delegate to, and the LLM backends they can run on.",
+  "description": "The agent team for one project: the agents a calling agent can delegate to, and the LLM backends they can run on. Nothing has a default value: every setting is written, except the two that may be left out because leaving them out means 'not used' (an agent's `prompt` and a backend's `api_key_env`).",
   "type": "object",
   "required": [
-    "version"
+    "version",
+    "llm_backends",
+    "agents"
   ],
   "additionalProperties": false,
   "properties": {
@@ -14,7 +16,7 @@
       "const": 1
     },
     "llm_backends": {
-      "description": "Model endpoints. The key is the backend's name, which an `opencode` adapter's `llm_backend` refers to. Ensemble hands the endpoint and key to the agent's CLI for each run, so they are defined only here.",
+      "description": "Model endpoints. The key is the backend's name, which an `opencode` agent's model of type `llm_backend` refers to. Ensemble hands the endpoint and key to the agent's CLI for each run, so they are defined only here. `{}` when there are none.",
       "type": "object",
       "additionalProperties": {
         "$ref": "#/definitions/llm_backend"
@@ -30,73 +32,72 @@
   },
   "definitions": {
     "llm_backend": {
+      "description": "How the model is reached. `type` decides which other settings there are.",
+      "oneOf": [
+        {
+          "$ref": "#/definitions/openai_compatible_api_backend"
+        }
+      ]
+    },
+    "openai_compatible_api_backend": {
       "type": "object",
       "required": [
         "type",
-        "base_url_env"
+        "base_url",
+        "timeout_seconds"
       ],
       "additionalProperties": false,
       "properties": {
         "type": {
-          "description": "How the model is reached. openai-compatible-api: any /chat/completions endpoint (llama-server, vLLM, Ollama, Unsloth, a hosted API).",
-          "enum": [
-            "openai-compatible-api"
-          ]
+          "description": "openai-compatible-api: any /chat/completions endpoint (llama-server, vLLM, Ollama, Unsloth, a hosted API).",
+          "const": "openai-compatible-api"
         },
-        "base_url_env": {
-          "description": "Required. The NAME of the environment variable holding the base URL, e.g. OPENAI_LOCAL_BASE_URL. Not the URL itself.",
+        "base_url": {
+          "description": "Where the endpoint is, e.g. http://127.0.0.1:11434/v1.",
           "type": "string",
-          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
-        },
-        "base_url_default": {
-          "description": "Used when the variable named by base_url_env is unset or empty, e.g. http://127.0.0.1:11434/v1.",
-          "type": "string",
+          "pattern": "^https?://",
           "examples": [
             "http://127.0.0.1:11434/v1",
             "http://127.0.0.1:8000/v1"
           ]
         },
         "api_key_env": {
-          "description": "The NAME of the environment variable holding the API key. Keys are never written in this file.",
+          "description": "The NAME of the environment variable holding the API key. Keys are never written in this file. Leave it out when the endpoint wants none.",
           "type": "string",
           "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
         },
         "timeout_seconds": {
           "description": "Seconds one request to this backend may take before the agent's CLI gives up on it.",
           "type": "integer",
-          "minimum": 1,
-          "default": 600
+          "minimum": 1
         }
       }
     },
     "agent": {
       "type": "object",
       "required": [
+        "max_seconds",
+        "max_concurrent",
         "adapter"
       ],
       "additionalProperties": false,
       "properties": {
         "prompt": {
-          "description": "What this agent is for. Its first line is what the calling agent sees when it lists the team; the whole of it is the agent's system prompt. Keep it short for small local models.",
+          "description": "What this agent is for. Its first line is what the calling agent sees when it lists the team; the whole of it is the agent's system prompt. Keep it short for small local models. Leave it out for an agent with no system prompt.",
           "type": "string"
-        },
-        "context_window": {
-          "description": "Tokens of context the server really runs the model with (Ollama: OLLAMA_CONTEXT_LENGTH). Required for an agent on an `llm_backend`, so its CLI knows when to compact the conversation; not for other agents, whose CLIs know their models.",
-          "type": "integer",
-          "minimum": 1,
-          "examples": [
-            32768,
-            262144
-          ]
         },
         "max_seconds": {
           "description": "Wall-clock limit for one delegation. At the limit the agent's process is stopped and what it did is returned, marked unfinished.",
           "type": "integer",
-          "minimum": 1,
-          "default": 1800
+          "minimum": 1
+        },
+        "max_concurrent": {
+          "description": "Most delegations to this agent that run at once in a session, background tasks and blocking calls alike; more wait for a free slot. 1 suits a model server that serves one request at a time.",
+          "type": "integer",
+          "minimum": 1
         },
         "adapter": {
-          "description": "What runs this agent. `type` decides which other fields apply.",
+          "description": "What runs this agent. `type` decides which other settings there are.",
           "oneOf": [
             {
               "$ref": "#/definitions/claude_code_adapter"
@@ -106,36 +107,17 @@
             }
           ]
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "adapter": {
-                "required": [
-                  "llm_backend"
-                ]
-              }
-            }
-          },
-          "then": {
-            "required": [
-              "context_window"
-            ]
-          },
-          "else": {
-            "properties": {
-              "context_window": false
-            }
-          }
-        }
-      ]
+      }
     },
     "claude_code_adapter": {
       "type": "object",
       "required": [
         "type",
-        "model"
+        "model",
+        "tools",
+        "permission_mode",
+        "max_turns",
+        "command"
       ],
       "additionalProperties": false,
       "properties": {
@@ -154,7 +136,7 @@
           ]
         },
         "tools": {
-          "description": "Claude Code's own tools this agent may use, passed to --allowedTools: Read, Grep, Glob, Edit, Write, Bash, WebFetch, ..., or a rule such as Bash(git:*). With permission_mode dontAsk anything else is denied. Default: [Read, Grep, Glob], read-only.",
+          "description": "Claude Code's own tools this agent may use, passed to --allowedTools: Read, Grep, Glob, Edit, Write, Bash, WebFetch, ..., or a rule such as Bash(git:*). With permission_mode dontAsk anything else is denied. `[Read, Grep, Glob]` is read-only.",
           "type": "array",
           "uniqueItems": true,
           "items": {
@@ -162,11 +144,6 @@
             "minLength": 1,
             "pattern": "^[^,]+$"
           },
-          "default": [
-            "Read",
-            "Grep",
-            "Glob"
-          ],
           "examples": [
             [
               "Read",
@@ -186,7 +163,7 @@
         "permission_mode": {
           "description": "Claude Code's --permission-mode. dontAsk denies anything not in tools instead of waiting for a person who is not there.",
           "type": "string",
-          "default": "dontAsk",
+          "minLength": 1,
           "examples": [
             "dontAsk",
             "acceptEdits",
@@ -198,14 +175,12 @@
         "max_turns": {
           "description": "Most agent turns Claude Code may take for one delegation.",
           "type": "integer",
-          "minimum": 1,
-          "default": 30
+          "minimum": 1
         },
         "command": {
-          "description": "The claude binary, if it is not `claude` on PATH.",
+          "description": "The claude binary: `claude` if it is on PATH.",
           "type": "string",
-          "minLength": 1,
-          "default": "claude"
+          "minLength": 1
         }
       }
     },
@@ -213,7 +188,10 @@
       "type": "object",
       "required": [
         "type",
-        "model"
+        "model",
+        "tools",
+        "max_steps",
+        "command"
       ],
       "additionalProperties": false,
       "properties": {
@@ -221,34 +199,25 @@
           "description": "opencode: the OpenCode CLI (`opencode run`), run headless in the project, on one of `llm_backends` or any provider OpenCode is set up for. It brings its own tools and manages its own context.",
           "const": "opencode"
         },
-        "llm_backend": {
-          "description": "Name of a backend under `llm_backends` to run the model on. Ensemble gives OpenCode that endpoint and its key for the run; `model` is then the id the endpoint serves. Without it the model is one OpenCode is already set up for.",
-          "type": "string",
-          "minLength": 1
-        },
         "model": {
-          "description": "With `llm_backend`: the model id the endpoint serves, as its /models lists it. Without: provider/model, as `opencode models` lists it.",
-          "type": "string",
-          "minLength": 1,
-          "examples": [
-            "opencode/big-pickle",
-            "qwen3.5-9b"
+          "description": "Where the model comes from. `type` is `provider` for a model OpenCode is already set up for, or `llm_backend` for one an LLM backend of this config serves.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/opencode_provider_model"
+            },
+            {
+              "$ref": "#/definitions/opencode_llm_backend_model"
+            }
           ]
         },
         "tools": {
-          "description": "OpenCode permissions this agent is granted: read, glob, grep, list, edit, bash, webfetch, websearch, task, todowrite, ..., or a rule such as bash(git *). Everything else is denied, and OpenCode hides denied tools from the model. Default: [read, glob, grep, list], read-only.",
+          "description": "OpenCode permissions this agent is granted: read, glob, grep, list, edit, bash, webfetch, websearch, task, todowrite, ..., or a rule such as bash(git *). Everything else is denied, and OpenCode hides denied tools from the model. `[read, glob, grep, list]` is read-only.",
           "type": "array",
           "uniqueItems": true,
           "items": {
             "type": "string",
             "pattern": "^[A-Za-z0-9_*.-]+(\\([^)]+\\))?$"
           },
-          "default": [
-            "read",
-            "glob",
-            "grep",
-            "list"
-          ],
           "examples": [
             [
               "read",
@@ -269,28 +238,72 @@
         "max_steps": {
           "description": "Most agentic steps OpenCode may take for one delegation; at the limit it reports what it did.",
           "type": "integer",
-          "minimum": 1,
-          "default": 30
+          "minimum": 1
         },
         "command": {
-          "description": "The opencode binary, if it is not `opencode` on PATH.",
+          "description": "The opencode binary: `opencode` if it is on PATH.",
           "type": "string",
-          "minLength": 1,
-          "default": "opencode"
+          "minLength": 1
         }
-      },
-      "if": {
-        "not": {
-          "required": [
-            "llm_backend"
+      }
+    },
+    "opencode_provider_model": {
+      "type": "object",
+      "required": [
+        "type",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "provider: a model on a provider OpenCode is already set up for.",
+          "const": "provider"
+        },
+        "name": {
+          "description": "provider/model, as `opencode models` lists it.",
+          "type": "string",
+          "pattern": "/",
+          "examples": [
+            "opencode/big-pickle"
           ]
         }
-      },
-      "then": {
-        "properties": {
-          "model": {
-            "pattern": "/"
-          }
+      }
+    },
+    "opencode_llm_backend_model": {
+      "type": "object",
+      "required": [
+        "type",
+        "backend",
+        "name",
+        "context_window"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "llm_backend: a model that one of `llm_backends` serves. Ensemble gives OpenCode that endpoint and its key for the run.",
+          "const": "llm_backend"
+        },
+        "backend": {
+          "description": "Name of a backend under `llm_backends`.",
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "description": "The model id the endpoint serves, as its /models lists it.",
+          "type": "string",
+          "minLength": 1,
+          "examples": [
+            "qwen3.5-9b"
+          ]
+        },
+        "context_window": {
+          "description": "Tokens of context the server really runs the model with (Ollama: OLLAMA_CONTEXT_LENGTH), so OpenCode knows when to compact the conversation.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            32768,
+            262144
+          ]
         }
       }
     }

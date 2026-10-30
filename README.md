@@ -93,9 +93,10 @@ only projects that have a `.ensemble/config.yaml` get a team: elsewhere the
 server exits at once with "no .ensemble/config.yaml in the project directory",
 and the agent lists it as failed. Ensemble reads no user-level config.
 
-Your agent sees three tools: `delegate` (send a task to an agent, get the work
-back), `agents` (the team and what each is for) and `health` (every agent CLI
-starts, and every model server answers and serves its agents' models).
+Your agent sees these tools: `delegate` (send a task to an agent, get the work
+back), `submit` (write a task for an agent to work through), `status`, `wait`
+and `cancel` (follow tasks and background delegations), `agents` (the team and what each is for) and `health` (every agent
+CLI starts, and every model server answers and serves its agents' models).
 
 ## Configuration
 
@@ -107,11 +108,14 @@ directory (the working directory your agent spawned it in, or `--dir`):
 | `config.yaml` | the team. Commit it |
 | `.env` | API keys and other variables the config names. Not committed |
 | `.gitignore` | keeps `.env` out of git |
+| `tasks/` | tasks for agents to work through, one directory each. Commit them |
+| `runs/` | what tasks and background delegations did as they ran. Ignores itself |
 
-`ensemble init` writes all three; `config.yaml` is a sample with every
-setting. Ensemble reads them from the project directory and nowhere else:
-parent directories are not searched and there is no user-level config. Each
-project defines its own team; to share one, copy the folder.
+`ensemble init` writes the first three and `tasks/README.md`; `config.yaml` is
+a sample with every setting. Ensemble reads them from the project directory
+and nowhere else: parent directories are not searched and there is no
+user-level config. Each project defines its own team; to share one, copy the
+folder.
 
 ```yaml
 version: 1
@@ -119,44 +123,65 @@ version: 1
 llm_backends:
   local:
     type: openai-compatible-api
-    base_url_env: OPENAI_LOCAL_BASE_URL
-    base_url_default: "http://127.0.0.1:8888/v1"
+    base_url: "http://127.0.0.1:8888/v1"
     api_key_env: OPENAI_LOCAL_API_KEY
+    timeout_seconds: 600
 
 agents:
   coder:
     prompt: You implement exactly what is asked, in the style of the code around it.
-    context_window: 262144
+    max_seconds: 1800
+    max_concurrent: 1
     adapter:
       type: opencode
-      llm_backend: local
-      model: qwen3.5-9b
+      model:
+        type: llm_backend
+        backend: local
+        name: qwen3.5-9b
+        context_window: 262144
       tools: [read, glob, grep, list, edit, bash]
+      max_steps: 30
+      command: opencode
 
   reviewer:
     prompt: You review code for correctness and report findings as file:line — problem.
+    max_seconds: 1800
+    max_concurrent: 1
     adapter:
       type: claude-code
       model: sonnet
+      tools: [Read, Grep, Glob]
+      permission_mode: dontAsk
+      max_turns: 30
+      command: claude
 ```
+
+**Nothing has a default value.** Every setting is written in the file, and a
+missing one is refused by name (``agents.coder: `max_seconds` is required``).
+What differs between cases is a tagged variant (`type:`) carrying exactly its
+own settings, so a setting that does not apply cannot be written and one that
+does cannot be forgotten. Only two settings may be left out, because leaving
+them out means "not used": an agent's `prompt` (no system prompt) and a
+backend's `api_key_env` (no key). `llm_backends: {}` says there are none.
 
 An **agent** is a member of the team. Its names are yours; nothing is
 hardcoded as planner, coder or reviewer. It has:
 
 | key | |
 | --- | --- |
-| `prompt` | what it is for. The first line is what your agent sees in `agents`; the whole of it is the agent's system prompt |
-| `context_window` | tokens of context the model server runs the model with. Required for an agent on an `llm_backend`, and only for one |
-| `max_seconds` | wall-clock limit for one delegation (default 1800). At the limit the CLI and its whole process tree are killed and what it did is returned, marked unfinished |
+| `prompt` | what it is for. The first line is what your agent sees in `agents`; the whole of it is the agent's system prompt. Optional: without it the agent has none |
+| `max_seconds` | wall-clock limit for one delegation. At the limit the CLI and its whole process tree are killed and what it did is returned, marked unfinished |
+| `max_concurrent` | most delegations to it that run at once in a session: tasks, background and blocking delegations alike. More wait for a free slot. `1` suits a model server that serves one request at a time |
 | `adapter` | what runs it. `type` decides which other fields the adapter takes |
 
-An **LLM backend** is a model server of yours, defined once. An agent names it
-with `llm_backend`, and Ensemble hands the agent's CLI the endpoint and key for
+An **LLM backend** is a model server of yours, defined once. An OpenCode agent
+names it in its model (`type: llm_backend`), and Ensemble hands the agent's CLI the endpoint and key for
 each run, so you never configure the same server again in the CLI's own
 settings. Its one type today, `openai-compatible-api`, is any
 `/chat/completions` endpoint: llama-server, vLLM, Ollama, Unsloth, a hosted
-API. It requires `base_url_env` and takes `base_url_default`, `api_key_env`
-and `timeout_seconds` (default 600, per request). Only the `opencode` adapter
+API. It requires `base_url` (the URL itself; no variable overrides it) and
+`timeout_seconds` (per request), and takes `api_key_env`, the name of the
+variable holding the key, when the server wants one. Only the `opencode` adapter
 can run on one today; Claude Code speaks the Anthropic API, not this one.
 
 There is no manager in the file: the agent that calls Ensemble is the manager.
@@ -170,20 +195,30 @@ own tools, managing its own context.
 agents:
   coder:
     prompt: You fix exactly what is asked, then say what you changed.
-    context_window: 262144 # required with llm_backend
-    max_seconds: 1800      # the default
+    max_seconds: 1800
+    max_concurrent: 1
     adapter:
       type: opencode
-      llm_backend: local     # optional: run on one of llm_backends
-      model: qwen3.5-9b      # with llm_backend: the id the server serves
-      tools: [read, glob, grep, list, edit, "bash(git *)"]  # default: read, glob, grep, list
-      max_steps: 30          # the default
-      command: opencode      # if it is not `opencode` on PATH
+      model:
+        type: llm_backend      # one of llm_backends serves the model
+        backend: local
+        name: qwen3.5-9b       # the id the server serves
+        context_window: 262144 # what the server runs it with
+      tools: [read, glob, grep, list, edit, "bash(git *)"]
+      max_steps: 30
+      command: opencode        # `opencode` if it is on PATH
 
   explorer:
+    max_seconds: 1800
+    max_concurrent: 1
     adapter:
       type: opencode
-      model: opencode/big-pickle  # without llm_backend: provider/model, as `opencode models` lists it
+      model:
+        type: provider         # a model OpenCode is already set up for
+        name: opencode/big-pickle  # provider/model, as `opencode models` lists it
+      tools: [read, glob, grep, list]
+      max_steps: 30
+      command: opencode
 ```
 
 `opencode run` has no flags for a system prompt or allowed tools, so Ensemble
@@ -196,10 +231,10 @@ project (`external_directory`). `tools` takes OpenCode's permission names
 `task`) or a rule such as `bash(git *)`. It runs with `--standalone`, a private
 OpenCode server for the run, not the shared background service.
 
-With `llm_backend`, the same inline config also defines that backend as an
-OpenCode provider (`@ai-sdk/openai-compatible`, its base URL, its key, its
-`timeout_seconds`) serving the agent's model with `context_window` as its
-limit, so OpenCode knows when to compact. Nothing is written to disk. See it
+With a model of type `llm_backend`, the same inline config also defines that
+backend as an OpenCode provider (`@ai-sdk/openai-compatible`, its base URL, its
+key, its `timeout_seconds`) serving the agent's model with `context_window` as
+its limit, so OpenCode knows when to compact. Nothing is written to disk. See it
 with `ensemble show <agent>`:
 
 ```console
@@ -230,14 +265,15 @@ The Claude Code CLI as a member of the team, a whole agent of its own.
 agents:
   reviewer:
     prompt: You review code for correctness and report findings as file:line — problem.
-    max_seconds: 1800     # the default
+    max_seconds: 1800
+    max_concurrent: 1
     adapter:
       type: claude-code
       model: sonnet         # an alias (sonnet, opus, haiku) or a full model id
-      tools: [Read, Grep, Glob]  # Claude Code's own tools; this is the default
-      permission_mode: dontAsk   # the default
-      max_turns: 30         # the default
-      command: claude       # if it is not `claude` on PATH
+      tools: [Read, Grep, Glob]  # Claude Code's own tools; read-only
+      permission_mode: dontAsk
+      max_turns: 30
+      command: claude       # `claude` if it is on PATH
 ```
 
 Ensemble starts `claude -p` in the project with the task, the agent's prompt
@@ -245,8 +281,9 @@ Ensemble starts `claude -p` in the project with the task, the agent's prompt
 dontAsk` Claude Code denies any tool not listed instead of waiting for a person
 who is not there, and the result says which it was denied. `tools` takes
 Claude Code's names and rules (`Read`, `Edit`, `Write`, `Bash`,
-`Bash(git diff:*)`, `WebFetch`), one per entry; the default is read-only.
-`context_window` and `llm_backend` do not apply.
+`Bash(git diff:*)`, `WebFetch`), one per entry. `[Read, Grep, Glob]` is
+read-only. It has no `model` of type `llm_backend`, no `max_steps`: those
+settings belong to the `opencode` adapter and are refused here.
 
 It runs on your own subscription, through the official CLI's supported
 headless mode. Ensemble does not read, copy or replay Claude Code's
@@ -292,6 +329,65 @@ without a `progressToken` gets its request id as the token. Neither
 notification reaches the model: they go to the client program, so they cost the
 manager no tokens.
 
+### Tasks and background delegations
+
+A blocking `delegate` holds the caller's tool call open until the agent is done,
+and the caller's MCP client may give up on it first (many clients time out a
+tool call after about a minute, whatever progress notifications arrive). On a
+slow machine every delegation to a local model can hit that. Two ways around
+it both answer at once:
+
+- **`submit`** writes a **task**: a ticket in `.ensemble/tasks/<id>/task.md`,
+  meant to be committed. While `ensemble mcp` runs, agents work through the
+  tasks without a result, oldest id first, each agent at most
+  `max_concurrent` at a time, and write `result.md` beside the ticket when one
+  ends. You can write a `task.md` by hand too; it is picked up within a few
+  seconds.
+- **`delegate` with `background: true`** is a one-off: it returns an id such as
+  `adhoc-3` and writes no ticket.
+
+Then, for either:
+
+- `status` lists them (agent, queued / waiting for a slot / running / done /
+  failed / cancelled, seconds run) with each running one's last few steps and
+  tool calls, or shows one with `task`. This is the only way the manager itself
+  can see what an agent is doing.
+- `wait` with `task` returns the result: for a task, its `result.md`; for a
+  background delegation, the reply in the same form as a blocking `delegate`.
+  It waits up to `timeout_seconds` (default 30, at most 300); one still queued
+  or running by then is reported, not failed, and the manager calls `wait`
+  again.
+- `cancel` with `task` kills the agent's CLI and its process tree. A task that
+  has not started gets a `cancelled` result and never runs.
+
+A task looks like this (`context` is optional):
+
+```markdown
+---
+title: Add retry to the fetcher
+agent: coder
+context: The fetcher is src/fetch.rs.
+---
+Retry a failed request three times, waiting 1s, 2s, 4s.
+```
+
+Its `result.md` starts with `status` (`done`, `failed` or `cancelled`),
+`agent`, `started` and `ended`, then the agent's reply. A task with a result is
+over; delete `result.md` to run it again. What a run does as it goes (its
+activity log, its state) is in `.ensemble/runs/<id>/`, which ignores itself in
+git. `ensemble init` writes `.ensemble/tasks/README.md` with the format, and
+`ensemble check` reports a `task.md` that cannot be read or names an agent
+that does not exist.
+
+When the caller closes the pipe, running tasks and background delegations are
+stopped. A task stopped that way gets no result, so it runs again in the next
+session; tasks that had not started stay queued. Tasks share the project like
+any other parallel delegations, so give two tasks that change the same files to
+an agent with `max_concurrent: 1`, or one after the other. A blocking
+`delegate` takes a slot of its agent too, waiting for one if needed; raising
+the MCP timeout in the manager's config is the other fix for a client that
+times out.
+
 ### Secrets
 
 API keys are named by the **variable** that holds them (`api_key_env`), never
@@ -303,7 +399,6 @@ The values come from the environment, or from `.ensemble/.env`:
 ```sh
 # .ensemble/.env — NAME=value per line, # comments, optional quotes
 OPENAI_LOCAL_API_KEY=sk-...
-OPENAI_LOCAL_BASE_URL=http://127.0.0.1:8888/v1
 ```
 
 A variable set in the environment wins over the file. The file feeds only
@@ -315,15 +410,12 @@ CLIs log in. `ensemble show` and `ensemble check` never print a key.
 beside it keeps it out of git. With `--config <path>`, the `.env` beside that
 file is read.
 
-Environment variables override `base_url_default`. A variable that is set but
-empty falls through to the default.
-
 ### Editor support
 
 `config.yaml` has a JSON Schema, [`ensemble.schema.json`](ensemble.schema.json):
-completion for every key and value, hover descriptions, defaults, and errors for
-the mistakes `ensemble check` would also report (a missing `context_window`, a
-field the adapter type does not take). The first line of the file
+completion for every key and value, hover descriptions, and errors for the
+mistakes `ensemble check` would also report (a missing key, a setting the
+adapter type does not take). The first line of the file
 `ensemble init` writes points an editor with the YAML language server at it:
 
 ```yaml
@@ -345,10 +437,11 @@ ensemble: .ensemble/config.yaml is invalid:
   - version: 4 is not supported; this build understands version 1
   - llm_backends.x: type 'ollama' is unknown. Known types: openai-compatible-api.
   - agents.coder.adapter: LLM backend 'lcoal' is not defined. Defined LLM backends: local.
-  - agents.coder: an agent on an `llm_backend` needs `context_window`, ...
+  - agents.coder.adapter: LLM backend 'lcoal' is not defined. Defined LLM backends: local.
 ```
 
-A typo'd key is an error, never a silent default.
+A typo'd key is an error, never a silent default, and a missing key is an
+error too: ``agents.coder: `max_seconds` is required at line 12 column 5``.
 
 ## Installation
 
@@ -442,7 +535,9 @@ current directory), `--context <text>` (for `run`).
 | `src/workspace.rs` | the project directory, and what a run changed in it |
 | `src/llm_backend.rs` | asking a model server which models it serves, for `health` |
 | `src/port.rs` | the shared error type |
-| `src/harness/delegation.rs` | the three tools your agent calls: delegate, agents, health |
+| `src/tasks.rs` | tasks as files: `task.md`, `result.md`, and the git-ignored `runs/` |
+| `src/harness/delegation.rs` | the tools your agent calls: delegate, submit, status, wait, cancel, agents, health |
+| `src/harness/queue.rs` | the worker that runs tasks, background delegations, agent slots (`max_concurrent`), wait and cancel |
 | `src/harness/mcp.rs` | the MCP server, over stdio |
 | `ensemble.schema.json` | the JSON Schema for `config.yaml` |
 
@@ -476,7 +571,8 @@ scripts stand in for the CLIs.
 | `src/config.rs` | every validation rule, environment precedence, secrets, typos, the schema kept in step with the code |
 | `src/external/` | each CLI's command line, generated config and event stream, denials, limits, failures, the time limit killing the process tree |
 | `src/router.rs`, `src/llm_backend.rs` | routing, `health` and its model check |
-| `src/harness/mcp.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation |
+| `src/tasks.rs` | ticket files: reading, ids, results written once, run logs |
+| `src/harness/mcp.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session |
 | `tests/end_to_end.rs` | the real binary: CLI, `show`, `health` against a stub server, MCP over real pipes, an agent changing a file |
 
 ## Limitations
@@ -488,8 +584,10 @@ scripts stand in for the CLIs.
   caller must pass everything in `task` and `context`.
 - **No sandbox of Ensemble's own.** The agents' tools are the CLIs' own; their
   permission settings are what limit them.
-- **No concurrency cap.** Nothing stops a calling agent delegating many tasks
-  at once against one model server, or spending a Claude subscription limit in
-  a loop.
+- **Concurrency is capped per agent, not per model server.** Two agents on one
+  server each get their own `max_concurrent`. Nothing caps spending a Claude
+  subscription limit in a loop.
+- **Tasks run only while a session runs.** There is no daemon: the worker lives
+  in `ensemble mcp`.
 - **The project directory is fixed when the server starts.** The working
   directory of the process (or `--dir`). It cannot vary per call.

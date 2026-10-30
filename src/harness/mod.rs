@@ -7,3 +7,4 @@
 
 pub mod delegation;
 pub mod mcp;
+pub mod queue;

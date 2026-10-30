@@ -96,6 +96,14 @@ impl Ensemble {
         }
     }
 
+    /// The project directory agents run in.
+    pub fn workdir(&self) -> std::io::Result<PathBuf> {
+        match &self.workdir {
+            Some(dir) => Ok(dir.clone()),
+            None => std::env::current_dir(),
+        }
+    }
+
     pub fn config(&self) -> &Config {
         &self.config
     }
@@ -147,12 +155,11 @@ impl Ensemble {
             }),
             Adapter::OpenCode(oc) => {
                 let backend = oc
-                    .llm_backend
-                    .as_ref()
+                    .llm_backend()
                     .map(|b| {
                         self.config.llm_backends.get(b).ok_or_else(|| {
                             RouteError::Agent(Error::Unsupported {
-                                backend: b.clone(),
+                                backend: b.to_string(),
                                 detail: format!("LLM backend for agent '{name}' is not defined"),
                             })
                         })
@@ -299,21 +306,37 @@ version: 1
 llm_backends:
   local:
     type: openai-compatible-api
-    base_url_env: L
-    base_url_default: "http://127.0.0.1:9/v1"
+    base_url: "http://127.0.0.1:9/v1"
+    timeout_seconds: 600
 agents:
   looker:
-    adapter: {{ type: opencode, model: opencode/big-pickle, command: "{program}" }}
-  doer:
-    context_window: 32768
+    max_seconds: 1800
+    max_concurrent: 2
     adapter:
       type: opencode
-      llm_backend: local
-      model: qwen3.5-9b
+      model: {{ type: provider, name: opencode/big-pickle }}
+      tools: [read, glob, grep, list]
+      max_steps: 30
+      command: "{program}"
+  doer:
+    max_seconds: 1800
+    max_concurrent: 2
+    adapter:
+      type: opencode
+      model: {{ type: llm_backend, backend: local, name: qwen3.5-9b, context_window: 32768 }}
       tools: [read, edit]
+      max_steps: 30
       command: "{program}"
   reviewer:
-    adapter: {{ type: claude-code, model: sonnet, command: "{program}" }}
+    max_seconds: 1800
+    max_concurrent: 2
+    adapter:
+      type: claude-code
+      model: sonnet
+      tools: [Read, Grep, Glob]
+      permission_mode: dontAsk
+      max_turns: 30
+      command: "{program}"
 "#
         );
         let cfg =

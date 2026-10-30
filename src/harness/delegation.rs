@@ -1,15 +1,26 @@
-//! The tools an agent calls to use the ensemble: delegate, list agents, check
-//! health. The schemas and the execution live here; `mcp.rs` wraps them in
+//! The tools an agent calls to use the ensemble: delegate, submit and follow
+//! tasks, list agents, check health. The schemas and the execution live here; `mcp.rs` wraps them in
 //! its JSON-RPC envelope (`inputSchema`).
 //!
 //! No tool takes a backend or a model. The caller names an *agent* and Ensemble
 //! decides what runs it — that is the whole point of the indirection, and a
 //! `model` parameter would quietly undo it at the first opportunity.
 
+use super::queue::{Queue, Task};
 use crate::router::{Ensemble, RouteError};
 use serde_json::{Value, json};
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 pub const DELEGATE: &str = "delegate";
+pub const SUBMIT: &str = "submit";
+pub const STATUS: &str = "status";
+pub const WAIT: &str = "wait";
+pub const CANCEL: &str = "cancel";
+
+/// Seconds `wait` waits when the caller names no time, and the most it may.
+const DEFAULT_WAIT_SECONDS: u64 = 30;
+const MAX_WAIT_SECONDS: u64 = 300;
 pub const AGENTS: &str = "agents";
 pub const HEALTH: &str = "health";
 
@@ -41,7 +52,9 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                 "Delegate a self-contained task to an agent of the ensemble and return its \
                  work. Available agents: {agent_list}. Ensemble selects what runs the agent \
                  — you do not choose a model. Give the agent everything it needs: each \
-                 call is stateless and the agent cannot see this conversation."
+                 call is stateless and the agent cannot see this conversation. The call \
+                 blocks until the agent is done; for work that may take more than a minute, \
+                 set `background`, or `submit` it as a task, and use `status` and `wait`."
             ),
             parameters: json!({
                 "type": "object",
@@ -58,9 +71,100 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                     "context": {
                         "type": "string",
                         "description": "Optional background: prior findings, file contents, constraints."
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "Return at once with an id instead of waiting for the agent. \
+                                        See what it is doing with `status`, and get its reply with `wait`. \
+                                        Nothing is written to the project's tasks."
                     }
                 },
                 "required": ["agent", "task"],
+                "additionalProperties": false
+            }),
+        });
+
+        out.push(Tool {
+            name: SUBMIT,
+            description: format!(
+                "Write a task for an agent to the project's task list (.ensemble/tasks/, \
+                 committed like a ticket) and return its id at once. Agents work through \
+                 tasks while this session runs, as many at a time as each agent allows; a \
+                 task this session does not finish runs in the next one. Available agents: \
+                 {agent_list}. Follow it with `status`, collect its result with `wait`."
+            ),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "agent": {
+                        "type": "string",
+                        "enum": agents,
+                        "description": "Which agent of the ensemble does the work."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "One line naming the task, as a ticket title."
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "The task, stated so it can be acted on without further questions."
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Optional background: prior findings, file contents, constraints."
+                    }
+                },
+                "required": ["agent", "title", "task"],
+                "additionalProperties": false
+            }),
+        });
+
+        out.push(Tool {
+            name: STATUS,
+            description: "Show the project's tasks and this session's background delegations: \
+                          which agent, whether each is queued, running, done or failed, how long \
+                          it has run, and what it did last. Without `task`, all of them. Spends \
+                          no model tokens."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "One task id; omit for all." }
+                },
+                "additionalProperties": false
+            }),
+        });
+
+        out.push(Tool {
+            name: WAIT,
+            description: format!(
+                "Get the result of a task or background delegation, waiting up to \
+                 `timeout_seconds` (default {DEFAULT_WAIT_SECONDS}, at most {MAX_WAIT_SECONDS}) \
+                 for it to end. One still queued or running when the time is up is reported, \
+                 not failed: call `wait` again."
+            ),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "The id `submit` or `delegate` returned." },
+                    "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECONDS }
+                },
+                "required": ["task"],
+                "additionalProperties": false
+            }),
+        });
+
+        out.push(Tool {
+            name: CANCEL,
+            description: "Stop a task or background delegation: its agent's process is killed. A \
+                          task that has not started is marked cancelled and never runs."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "The id `submit` or `delegate` returned." }
+                },
+                "required": ["task"],
                 "additionalProperties": false
             }),
         });
@@ -115,13 +219,19 @@ impl ToolResult {
 
 /// Run one of the ensemble's own tools, passing along what a delegated agent
 /// is doing as it does it.
-/// Setting `cancel` stops a delegation.
-pub fn call(
-    ensemble: &Ensemble,
+/// Setting `cancel` stops a blocking delegation.
+///
+/// A background delegation is registered in `queue` and handed to `spawn`,
+/// which runs it on a thread of the session so that this call can return at
+/// once. A blocking one waits for a slot of its agent first.
+pub fn call<'s>(
+    ensemble: &'s Ensemble,
     name: &str,
     args: &Value,
     progress: &dyn Fn(&str),
-    cancel: &std::sync::atomic::AtomicBool,
+    cancel: &AtomicBool,
+    queue: &'s Queue<'s>,
+    spawn: &dyn Fn(Task<'s>),
 ) -> ToolResult {
     match name {
         DELEGATE => {
@@ -141,33 +251,84 @@ pub fn call(
                 ));
             }
             let context = args.get("context").and_then(Value::as_str);
+            let background = args
+                .get("background")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
 
-            match ensemble.delegate_reporting(role, task, context, progress, cancel) {
-                Ok(out) => ToolResult {
-                    text: format!("{}\n\n{}", out.text, agent_footer(role, &out.stats)),
-                    is_error: false,
-                },
-                Err(e) => {
-                    // Telling the model whether another attempt could work is
-                    // the difference between a useful retry and a loop against
-                    // a typo'd agent name.
-                    let timed_out =
-                        matches!(&e, RouteError::Agent(crate::port::Error::Timeout { .. }));
-                    let hint = if timed_out {
-                        " This may be transient; the same call is worth one retry."
-                    } else if e.is_retryable() {
-                        " Call `health`, and retry once what it reports is fixed."
-                    } else {
-                        " Retrying this unchanged will fail the same way."
-                    };
-                    let detail = match &e {
-                        RouteError::UnknownAgent { .. } => String::new(),
-                        RouteError::Agent(_) => format!(" (agent '{role}')"),
-                    };
-                    ToolResult::err(format!("delegation failed{detail}: {e}{hint}"))
-                }
+            // An unknown agent fails at once, so it takes the blocking path
+            // and says so now rather than inside a background run.
+            if !ensemble.agents().contains(&role) {
+                return run_delegation(ensemble, role, task, context, progress, cancel);
             }
+            if background {
+                let id = queue.start_adhoc(role, task, context, spawn);
+                return ToolResult::ok(format!(
+                    "{id} started. `status` shows what it is doing; `wait` with task {id} \
+                     returns its reply."
+                ));
+            }
+            let waiting = || progress(&format!("{role}: waiting for a free slot"));
+            let Some(_slot) = queue.slot(role, cancel, &waiting) else {
+                return ToolResult::err(format!(
+                    "delegation cancelled while it waited for a free slot of '{role}'."
+                ));
+            };
+            run_delegation(ensemble, role, task, context, progress, cancel)
         }
+
+        SUBMIT => {
+            let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::trim);
+            let (Some(role), Some(title), Some(task)) =
+                (text("agent"), text("title"), text("task"))
+            else {
+                return ToolResult::err(format!(
+                    "{SUBMIT}: `agent`, `title` and `task` are required and must be strings"
+                ));
+            };
+            if title.is_empty() || task.is_empty() {
+                return ToolResult::err(format!("{SUBMIT}: `title` and `task` cannot be empty"));
+            }
+            if title.contains('\n') {
+                return ToolResult::err(format!("{SUBMIT}: `title` is one line"));
+            }
+            if !ensemble.agents().contains(&role) {
+                return ToolResult::err(format!(
+                    "{SUBMIT}: no agent '{role}' is configured. Available agents: {}.",
+                    ensemble.agents().join(", ")
+                ));
+            }
+            queue.submit(role, title, task, text("context").filter(|c| !c.is_empty()))
+        }
+
+        STATUS => match args.get("task") {
+            None | Some(Value::Null) => queue.status(None),
+            Some(task) => match task.as_str() {
+                Some(id) => queue.status(Some(id)),
+                None => ToolResult::err(format!("{STATUS}: `task` must be a task id")),
+            },
+        },
+
+        WAIT => {
+            let Some(id) = args.get("task").and_then(Value::as_str) else {
+                return ToolResult::err(format!(
+                    "{WAIT}: `task` is required and must be a task id"
+                ));
+            };
+            let seconds = args
+                .get("timeout_seconds")
+                .and_then(Value::as_u64)
+                .unwrap_or(DEFAULT_WAIT_SECONDS)
+                .clamp(1, MAX_WAIT_SECONDS);
+            queue.wait(id, Duration::from_secs(seconds))
+        }
+
+        CANCEL => match args.get("task").and_then(Value::as_str) {
+            Some(id) => queue.cancel(id),
+            None => ToolResult::err(format!(
+                "{CANCEL}: `task` is required and must be a task id"
+            )),
+        },
 
         AGENTS => {
             let mut lines = Vec::new();
@@ -212,8 +373,45 @@ pub fn call(
 
         other => ToolResult::err(format!(
             "no such tool: '{other}'. This server provides: \
-             {DELEGATE}, {AGENTS}, {HEALTH}."
+             {DELEGATE}, {SUBMIT}, {STATUS}, {WAIT}, {CANCEL}, {AGENTS}, {HEALTH}."
         )),
+    }
+}
+
+/// Delegate and turn the outcome into a tool result: the agent's work and a
+/// footer of what it did, or why it failed and whether another attempt could
+/// work.
+pub(super) fn run_delegation(
+    ensemble: &Ensemble,
+    role: &str,
+    task: &str,
+    context: Option<&str>,
+    progress: &dyn Fn(&str),
+    cancel: &AtomicBool,
+) -> ToolResult {
+    match ensemble.delegate_reporting(role, task, context, progress, cancel) {
+        Ok(out) => ToolResult {
+            text: format!("{}\n\n{}", out.text, agent_footer(role, &out.stats)),
+            is_error: false,
+        },
+        Err(e) => {
+            // Telling the model whether another attempt could work is
+            // the difference between a useful retry and a loop against
+            // a typo'd agent name.
+            let timed_out = matches!(&e, RouteError::Agent(crate::port::Error::Timeout { .. }));
+            let hint = if timed_out {
+                " This may be transient; the same call is worth one retry."
+            } else if e.is_retryable() {
+                " Call `health`, and retry once what it reports is fixed."
+            } else {
+                " Retrying this unchanged will fail the same way."
+            };
+            let detail = match &e {
+                RouteError::UnknownAgent { .. } => String::new(),
+                RouteError::Agent(_) => format!(" (agent '{role}')"),
+            };
+            ToolResult::err(format!("delegation failed{detail}: {e}{hint}"))
+        }
     }
 }
 
@@ -311,6 +509,15 @@ mod tests {
         // succeed.
         let names: Vec<&str> = tools(&[]).iter().map(|t| t.name).collect();
         assert_eq!(names, vec![AGENTS, HEALTH]);
+    }
+
+    #[test]
+    fn the_task_tools_come_with_delegate() {
+        let names: Vec<&str> = tools(&["coder"]).iter().map(|t| t.name).collect();
+        assert_eq!(
+            names,
+            vec![DELEGATE, SUBMIT, STATUS, WAIT, CANCEL, AGENTS, HEALTH]
+        );
     }
 
     #[test]

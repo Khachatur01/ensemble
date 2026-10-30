@@ -404,8 +404,8 @@ mod tests {
         let a = AgentConfig {
             name: "reviewer".into(),
             prompt: Some("You review code.".into()),
-            context_window: None,
             max_seconds,
+            max_concurrent: 1,
             adapter: Adapter::ClaudeCode(cc.clone()),
         };
         (a, cc)

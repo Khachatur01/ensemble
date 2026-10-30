@@ -9,6 +9,7 @@ use ensemble::config::{self, Adapter, Config, SystemEnv};
 use ensemble::external::{claude_code, opencode};
 use ensemble::harness::mcp;
 use ensemble::router::Ensemble;
+use ensemble::tasks;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -157,7 +158,7 @@ fn run() -> Result<ExitCode, String> {
 
     match args.command.as_str() {
         "mcp" => cmd_mcp(config, dir),
-        "check" => cmd_check(config),
+        "check" => cmd_check(config, &dir),
         "agents" => cmd_agents(config, dir),
         "show" => cmd_show(&config, &args),
         "health" => cmd_health(config, dir),
@@ -214,17 +215,28 @@ fn cmd_init(args: &Args, dir: &std::path::Path) -> Result<ExitCode, String> {
         write(&ignore, ".env\n")?;
         println!("wrote {}: keeps .env out of git", ignore.display());
     }
+    // Tasks belong to the project, wherever its config is.
+    let tasks = dir.join(config::CONFIG_DIR).join(tasks::TASKS_DIR);
+    let readme = tasks.join("README.md");
+    if !readme.exists() {
+        std::fs::create_dir_all(&tasks)
+            .map_err(|e| format!("cannot create {}: {e}", tasks.display()))?;
+        write(&readme, tasks::TASKS_README)?;
+        println!(
+            "wrote {}: how to write a task; runs/ beside it ignores itself",
+            readme.display()
+        );
+    }
     println!("Edit the agents, then run `ensemble check`.");
     Ok(ExitCode::SUCCESS)
 }
 
 /// The `.env` `ensemble init` writes beside the sample config.
 const SAMPLE_ENV: &str = "\
-# Variables for config.yaml's base_url_env and api_key_env settings, read when
-# they are not set in the environment. A variable that is set wins over this
-# file. Keep it out of git; the .gitignore beside it does.
+# Variables for config.yaml's api_key_env settings, read when they are not set
+# in the environment. A variable that is set wins over this file. Keep it out
+# of git; the .gitignore beside it does.
 #
-# OPENAI_LOCAL_BASE_URL=http://127.0.0.1:11434/v1
 # OPENAI_LOCAL_API_KEY=
 ";
 
@@ -243,7 +255,7 @@ fn cmd_mcp(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_check(config: Config) -> Result<ExitCode, String> {
+fn cmd_check(config: Config, dir: &Path) -> Result<ExitCode, String> {
     // Reaching here means the config already loaded and validated; `load`
     // returns an error otherwise.
     println!(
@@ -262,13 +274,9 @@ fn cmd_check(config: Config) -> Result<ExitCode, String> {
     println!("llm_backends:");
     for (name, b) in &config.llm_backends {
         let detail = match &b.settings {
-            config::BackendSettings::OpenAiCompatible {
-                base_url,
-                api_key,
-                base_url_env,
-            } => {
+            config::BackendSettings::OpenAiCompatible { base_url, api_key } => {
                 format!(
-                    "{base_url} (from ${base_url_env}){}",
+                    "{base_url}{}",
                     if api_key.is_some() {
                         ", authenticated"
                     } else {
@@ -300,9 +308,43 @@ fn cmd_check(config: Config) -> Result<ExitCode, String> {
         println!("  (none — add agents under `agents:`)");
     }
 
+    // A bad ticket fails only when the worker reaches it; say so now.
+    let store = tasks::Store::new(&dir.join(config::CONFIG_DIR));
+    let entries = store.scan();
+    let mut bad = Vec::new();
+    for entry in &entries {
+        match entry {
+            tasks::Entry::Unreadable { id, error } => bad.push(format!("{id}: {error}")),
+            tasks::Entry::Task(t, None) if config.agent(&t.agent).is_none() => bad.push(format!(
+                "{}: agent '{}' is not configured; it would fail at once",
+                t.id, t.agent
+            )),
+            _ => {}
+        }
+    }
+    if !entries.is_empty() {
+        let queued = entries
+            .iter()
+            .filter(|e| matches!(e, tasks::Entry::Task(_, None)))
+            .count();
+        println!();
+        println!(
+            "tasks: {} in {}, {queued} without a result",
+            entries.len(),
+            store.tasks_dir().display()
+        );
+        for line in &bad {
+            println!("  {line}");
+        }
+    }
+
     println!();
     println!("mcp: ready. `ensemble health` checks the agent CLIs and LLM backends.");
-    Ok(ExitCode::SUCCESS)
+    Ok(if bad.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 fn cmd_agents(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
@@ -386,10 +428,7 @@ fn cmd_show(config: &Config, args: &Args) -> Result<ExitCode, String> {
             println!("{}", command_line(&cc.command, &argv));
         }
         Adapter::OpenCode(oc) => {
-            let backend = oc
-                .llm_backend
-                .as_ref()
-                .and_then(|b| config.llm_backends.get(b));
+            let backend = oc.llm_backend().and_then(|b| config.llm_backends.get(b));
             let argv = opencode::arguments(agent, oc, backend, TASK);
             println!("{}", command_line(&oc.command, &argv));
             let mut inline = opencode::config(agent, oc, backend);

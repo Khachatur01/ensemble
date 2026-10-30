@@ -127,14 +127,13 @@ pub fn config(agent: &AgentConfig, oc: &OpenCodeAdapter, backend: Option<&LlmBac
     }
     let mut cfg = json!({ "agent": { agent_id(agent): def } });
     if let Some(backend) = backend {
-        cfg["provider"] =
-            json!({ provider_id(backend): provider(backend, oc, agent.context_window) });
+        cfg["provider"] = json!({ provider_id(backend): provider(backend, oc) });
     }
     cfg
 }
 
 /// An LLM backend as an OpenCode provider serving the agent's one model.
-fn provider(backend: &LlmBackend, oc: &OpenCodeAdapter, context_window: Option<u32>) -> Value {
+fn provider(backend: &LlmBackend, oc: &OpenCodeAdapter) -> Value {
     let BackendSettings::OpenAiCompatible {
         base_url, api_key, ..
     } = &backend.settings;
@@ -145,8 +144,8 @@ fn provider(backend: &LlmBackend, oc: &OpenCodeAdapter, context_window: Option<u
     if let Some(key) = api_key {
         options["apiKey"] = json!(key);
     }
-    let mut model = json!({ "name": oc.model });
-    if let Some(context) = context_window {
+    let mut model = json!({ "name": oc.model_id() });
+    if let Some(context) = oc.context_window() {
         model["limit"] = json!({
             "context": context,
             "output": (context / 4).min(MAX_OUTPUT_TOKENS),
@@ -156,7 +155,7 @@ fn provider(backend: &LlmBackend, oc: &OpenCodeAdapter, context_window: Option<u
         "npm": OPENAI_COMPATIBLE_PACKAGE,
         "name": format!("Ensemble LLM backend '{}'", backend.name),
         "options": options,
-        "models": { oc.model.clone(): model },
+        "models": { oc.model_id(): model },
     })
 }
 
@@ -175,8 +174,8 @@ pub fn redact(cfg: &mut Value) {
 /// from the LLM backend when the agent runs on one.
 pub fn model_ref(oc: &OpenCodeAdapter, backend: Option<&LlmBackend>) -> String {
     match backend {
-        Some(b) => format!("{}/{}", provider_id(b), oc.model),
-        None => oc.model.clone(),
+        Some(b) => format!("{}/{}", provider_id(b), oc.model_id()),
+        None => oc.model_id().to_string(),
     }
 }
 
@@ -253,7 +252,7 @@ fn run_program(
 
     let mut out = AgentRun {
         text: String::new(),
-        model: oc.model.clone(),
+        model: oc.model_id().to_string(),
         usage: stream.usage,
         steps: stream.steps,
         tool_calls: stream.tool_calls,
@@ -408,22 +407,23 @@ pub fn health(command: &str) -> Result<(), Error> {
 mod tests {
     use super::process::testing::{emitting, fake};
     use super::*;
-    use crate::config::Adapter;
+    use crate::config::{Adapter, OpenCodeModel};
     use crate::workspace::testing::TempDir;
 
     fn agent(tools: &[&str], max_seconds: u32) -> (AgentConfig, OpenCodeAdapter) {
         let oc = OpenCodeAdapter {
             command: "opencode".into(),
-            model: "ollama/qwen3.5:9b".into(),
-            llm_backend: None,
+            model: OpenCodeModel::Provider {
+                model: "ollama/qwen3.5:9b".into(),
+            },
             tools: tools.iter().map(|t| t.to_string()).collect(),
             max_steps: 9,
         };
         let a = AgentConfig {
             name: "code reviewer".into(),
             prompt: Some("You review code.".into()),
-            context_window: None,
             max_seconds,
+            max_concurrent: 1,
             adapter: Adapter::OpenCode(oc.clone()),
         };
         (a, oc)
@@ -466,6 +466,14 @@ mod tests {
         (r, seen.into_inner())
     }
 
+    fn on_local_box(model: &str, context_window: u32) -> OpenCodeModel {
+        OpenCodeModel::LlmBackend {
+            backend: "local box".into(),
+            model: model.into(),
+            context_window,
+        }
+    }
+
     fn local_backend(api_key: Option<&str>) -> LlmBackend {
         LlmBackend {
             name: "local box".into(),
@@ -473,17 +481,14 @@ mod tests {
             settings: BackendSettings::OpenAiCompatible {
                 base_url: "http://127.0.0.1:8888/v1".into(),
                 api_key: api_key.map(String::from),
-                base_url_env: "L".into(),
             },
         }
     }
 
     #[test]
     fn an_agent_on_an_llm_backend_gets_it_as_its_provider() {
-        let (mut a, mut oc) = agent(&["read"], 60);
-        oc.model = "qwen3.5-9b".into();
-        oc.llm_backend = Some("local box".into());
-        a.context_window = Some(65536);
+        let (a, mut oc) = agent(&["read"], 60);
+        oc.model = on_local_box("qwen3.5-9b", 65536);
         let b = local_backend(Some("sk-secret"));
         let cfg = config(&a, &oc, Some(&b));
         assert_eq!(
@@ -511,7 +516,7 @@ mod tests {
     #[test]
     fn a_backend_without_a_key_sends_none_and_a_shown_config_hides_one() {
         let (a, mut oc) = agent(&["read"], 60);
-        oc.llm_backend = Some("local box".into());
+        oc.model = on_local_box("qwen3.5-9b", 32768);
         let keyless = config(&a, &oc, Some(&local_backend(None)));
         assert!(
             keyless

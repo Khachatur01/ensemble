@@ -93,25 +93,33 @@ version: 1
 llm_backends:
   openai-local:
     type: openai-compatible-api
-    base_url_env: ENSEMBLE_TEST_LOCAL_URL
-    base_url_default: "{backend_url}"
+    base_url: "{backend_url}"
     api_key_env: ENSEMBLE_TEST_LOCAL_KEY
     timeout_seconds: 20
 
 agents:
   reviewer:
     prompt: "Reviews code and reports findings."
+    max_seconds: 1800
+    max_concurrent: 2
     adapter:
       type: opencode
-      model: opencode/reviewer-model
+      model: {{ type: provider, name: opencode/reviewer-model }}
+      tools: [read, glob, grep, list]
+      max_steps: 30
       command: "{command}"
   coder:
-    context_window: 32768
+    max_seconds: 1800
+    max_concurrent: 2
     adapter:
       type: opencode
-      llm_backend: openai-local
-      model: qwen3-coder
+      model:
+        type: llm_backend
+        backend: openai-local
+        name: qwen3-coder
+        context_window: 32768
       tools: [read, edit]
+      max_steps: 30
       command: "{command}"
 "#
     )
@@ -198,20 +206,24 @@ fn check_reports_several_problems_at_once() {
         r#"
 version: 4
 llm_backends:
-  x: { type: made-up-backend }
+  x: { type: openai-compatible-api, base_url: "nope", timeout_seconds: 5 }
 agents:
   r:
+    max_seconds: 60
+    max_concurrent: 2
     adapter:
       type: opencode
-      llm_backend: nowhere
-      model: ""
+      model: { type: llm_backend, backend: nowhere, name: "", context_window: 8000 }
+      tools: []
+      max_steps: 3
+      command: opencode
 "#,
     );
     let out = ensemble(&s, &["check"]);
     assert!(!out.status.success());
     let err = stderr_of(&out);
     assert!(err.contains("version"), "{err}");
-    assert!(err.contains("made-up-backend"), "{err}");
+    assert!(err.contains("llm_backends.x"), "{err}");
     assert!(err.contains("nowhere"), "{err}");
 }
 
@@ -220,13 +232,13 @@ fn a_config_with_the_removed_ensemble_type_says_what_to_use_instead() {
     let s = Scratch::new("removed-type");
     s.write(
         ".ensemble/config.yaml",
-        "version: 1\nagents:\n  coder:\n    adapter: { type: ensemble, model: m }\n",
+        "version: 1\nllm_backends: {}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 2\n    adapter: { type: ensemble, model: m }\n",
     );
     let out = ensemble(&s, &["check"]);
     assert!(!out.status.success());
     let err = stderr_of(&out);
     assert!(
-        err.contains("type 'ensemble' was removed") && err.contains("llm_backend"),
+        err.contains("'ensemble' was removed") && err.contains("'llm_backend'"),
         "{err}"
     );
 }
@@ -241,8 +253,8 @@ version: 1
 llm_backends:
   x:
     type: openai-compatible-api
-    base_url_env: U
-    base_url_default: "http://127.0.0.1:1/v1"
+    base_url: "http://127.0.0.1:1/v1"
+    timeout_seconds: 5
     api_key: "sk-should-never-be-here"
 "#,
     );
@@ -305,8 +317,8 @@ fn agents_prints_the_routing_table() {
 }
 
 #[test]
-fn env_overrides_the_configured_default_base_url() {
-    let s = Scratch::new("env-override");
+fn the_base_url_is_the_one_in_the_config_and_no_variable_changes_it() {
+    let s = Scratch::new("url-from-config");
     s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
 
     let out = command(&s)
@@ -315,11 +327,8 @@ fn env_overrides_the_configured_default_base_url() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(
-        stdout_of(&out).contains("http://10.0.0.9:9999/v1"),
-        "{}",
-        stdout_of(&out)
-    );
+    assert!(stdout_of(&out).contains(NOWHERE), "{}", stdout_of(&out));
+    assert!(!stdout_of(&out).contains("10.0.0.9"), "{}", stdout_of(&out));
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +587,74 @@ fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
         .iter()
         .map(|t| t["name"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(names, vec!["delegate", "agents", "health"]);
+    assert_eq!(
+        names,
+        vec![
+            "delegate", "submit", "status", "wait", "cancel", "agents", "health"
+        ]
+    );
+}
+
+#[test]
+fn a_harness_can_delegate_in_the_background_and_collect_the_work() {
+    let s = Scratch::new("mcp-background");
+    let cli = s.opencode("renamed it", "echo bar > a.txt");
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("a.txt", "foo\n");
+    let mut session = McpSession::start(&s);
+    session.request("initialize", serde_json::json!({}));
+
+    let started = session.call(
+        "delegate",
+        serde_json::json!({"agent": "coder", "task": "rename foo to bar", "background": true}),
+    );
+    assert_eq!(started["result"]["isError"], false, "{started}");
+    assert!(tool_text(&started).starts_with("adhoc-1 started"));
+
+    let reply = session.call(
+        "wait",
+        serde_json::json!({"task": "adhoc-1", "timeout_seconds": 30}),
+    );
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let text = tool_text(&reply);
+    assert!(text.starts_with("renamed it"), "{text}");
+    assert!(text.contains("[files changed: a.txt (modified)]"), "{text}");
+
+    let status = tool_text(&session.call("status", serde_json::json!({})));
+    assert!(status.contains("adhoc-1 · coder · done"), "{status}");
+    assert!(
+        !s.path().join(".ensemble/tasks").exists(),
+        "a background delegation writes no ticket"
+    );
+}
+
+#[test]
+fn a_harness_can_submit_a_task_and_collect_its_result_from_the_ticket() {
+    let s = Scratch::new("mcp-submit");
+    let cli = s.opencode("renamed it", "echo bar > a.txt");
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("a.txt", "foo\n");
+    let mut session = McpSession::start(&s);
+    session.request("initialize", serde_json::json!({}));
+
+    let submitted = session.call(
+        "submit",
+        serde_json::json!({"agent": "coder", "title": "Rename foo", "task": "rename foo to bar"}),
+    );
+    assert_eq!(submitted["result"]["isError"], false, "{submitted}");
+    assert!(tool_text(&submitted).starts_with("task 0001-rename-foo queued"));
+
+    let reply = session.call(
+        "wait",
+        serde_json::json!({"task": "0001-rename-foo", "timeout_seconds": 30}),
+    );
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let text = tool_text(&reply);
+    assert!(text.contains("status: done"), "{text}");
+    assert!(text.contains("[files changed: a.txt (modified)]"), "{text}");
+
+    let ticket = s.path().join(".ensemble/tasks/0001-rename-foo");
+    assert!(ticket.join("task.md").is_file() && ticket.join("result.md").is_file());
 }
 
 #[test]
@@ -767,6 +843,12 @@ fn init_writes_a_sample_that_checks_and_never_overwrites_by_accident() {
         assert_eq!(mode & 0o077, 0, "only its owner may read the secrets file");
     }
 
+    assert!(
+        std::fs::read_to_string(s.path().join(".ensemble/tasks/README.md"))
+            .unwrap()
+            .contains("agent: coder")
+    );
+
     let check = ensemble(&s, &["check"]);
     assert!(check.status.success(), "{}", stderr_of(&check));
 
@@ -802,25 +884,13 @@ fn init_writes_a_sample_that_checks_and_never_overwrites_by_accident() {
 fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
     let s = Scratch::new("dotenv");
     s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
-    s.write(
-        ".ensemble/.env",
-        "ENSEMBLE_TEST_LOCAL_URL=http://10.0.0.7:7777/v1\n",
-    );
+    s.write(".ensemble/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-from-dotenv\n");
     let out = ensemble(&s, &["check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
-    assert!(text.contains("http://10.0.0.7:7777/v1"), "{text}");
+    assert!(text.contains("authenticated"), "{text}");
     assert!(text.contains(".env: read for variables"), "{text}");
-
-    let out = command(&s)
-        .arg("check")
-        .env("ENSEMBLE_TEST_LOCAL_URL", "http://10.0.0.9:9999/v1")
-        .output()
-        .unwrap();
-    assert!(
-        stdout_of(&out).contains("http://10.0.0.9:9999/v1"),
-        "the environment wins"
-    );
+    assert!(!text.contains("sk-from-dotenv"), "{text}");
 
     s.write(".ensemble/.env", "not a line\n");
     let out = ensemble(&s, &["check"]);
@@ -829,5 +899,39 @@ fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
         stderr_of(&out).contains("line 1: expected NAME=value"),
         "{}",
         stderr_of(&out)
+    );
+}
+
+#[test]
+fn check_reports_a_task_that_could_not_run() {
+    let s = Scratch::new("check-tasks");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write(
+        ".ensemble/tasks/0001-ok/task.md",
+        "---\ntitle: Ok\nagent: coder\n---\nDo it.\n",
+    );
+    let out = ensemble(&s, &["check"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("tasks: 1 in"),
+        "{}",
+        stdout_of(&out)
+    );
+
+    s.write(".ensemble/tasks/0002-bad/task.md", "Do it.\n");
+    s.write(
+        ".ensemble/tasks/0003-who/task.md",
+        "---\ntitle: Who\nagent: architect\n---\nDo it.\n",
+    );
+    let out = ensemble(&s, &["check"]);
+    assert!(!out.status.success());
+    let text = stdout_of(&out);
+    assert!(
+        text.contains("0002-bad:") && text.contains("front matter"),
+        "{text}"
+    );
+    assert!(
+        text.contains("0003-who: agent 'architect' is not configured"),
+        "{text}"
     );
 }

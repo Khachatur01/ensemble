@@ -3,7 +3,15 @@
 //! Validation is deliberately loud and early. Every check here corresponds to a
 //! failure that would otherwise surface much later and much less clearly — as a
 //! 404 on the first request to an agent, as an agent that quietly runs with
-//! default settings, or as an empty base URL that turns into a connection refused.
+//! settings nobody chose, or as an empty base URL that turns into a connection
+//! refused.
+//!
+//! There are no default values. Every setting is written in the file, and a
+//! missing one is refused by name. What differs between cases is a tagged enum
+//! (`type:`), and each variant carries exactly its own required settings, so a
+//! setting that does not apply cannot be written and one that does cannot be
+//! left out. A few settings are optional because their absence means "not
+//! used" (no system prompt, no API key), which is not a value anyone chose.
 //!
 //! Secrets never live in this file. An API key is named by the *variable* that
 //! holds it (`api_key_env`), and the value is read from the environment at load
@@ -19,7 +27,7 @@ use std::path::{Path, PathBuf};
 /// Everything Ensemble keeps in a project lives in this directory.
 pub const CONFIG_DIR: &str = ".ensemble";
 pub const CONFIG_FILENAME: &str = "config.yaml";
-/// Variables for the config's `*_env` settings, beside the config file.
+/// Variables for the config's `api_key_env` settings, beside the config file.
 pub const ENV_FILENAME: &str = ".env";
 
 /// The JSON Schema for `config.yaml`, for editors. `ensemble schema`
@@ -39,54 +47,52 @@ pub const OPENAI_COMPATIBLE_API: &str = "openai-compatible-api";
 /// agents of their own that Ensemble starts in the project.
 pub const CLAUDE_CODE_AGENT: &str = "claude-code";
 pub const OPENCODE_AGENT: &str = "opencode";
-const AGENT_TYPES: [&str; 2] = [CLAUDE_CODE_AGENT, OPENCODE_AGENT];
+
+/// Where an OpenCode agent's model comes from.
+pub const PROVIDER_MODEL: &str = "provider";
+pub const LLM_BACKEND_MODEL: &str = "llm_backend";
 
 /// The type of Ensemble's former built-in harness, which no longer exists.
 /// Named only to tell someone whose config still uses it where to go.
 const REMOVED_ENSEMBLE_AGENT: &str = "ensemble";
-
-/// OpenCode tools an `opencode` agent gets when it names none: it may look,
-/// not change anything.
-pub const OPENCODE_DEFAULT_TOOLS: [&str; 4] = ["read", "glob", "grep", "list"];
-const OPENCODE_DEFAULT_MAX_STEPS: u32 = 30;
-
-/// Claude Code tools a `claude-code` agent gets when it names none: it may
-/// look, not change anything.
-pub const CLAUDE_CODE_DEFAULT_TOOLS: [&str; 3] = ["Read", "Grep", "Glob"];
-const CLAUDE_CODE_DEFAULT_PERMISSION_MODE: &str = "dontAsk";
-const CLAUDE_CODE_DEFAULT_MAX_TURNS: u32 = 30;
 
 // ---------------------------------------------------------------------------
 // The document, as written
 // ---------------------------------------------------------------------------
 
 /// `deny_unknown_fields` throughout: a typo'd key is a key that does nothing,
-/// and an agent silently running with default settings is the failure mode
+/// and an agent silently running with settings nobody chose is the failure mode
 /// this whole module exists to prevent. `reviewr:` should be an error, not a
-/// no-op.
+/// no-op. A key that is missing is as much an error as one that is unknown.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     version: u32,
     /// Model endpoints. An agent names one with `llm_backend`, and Ensemble
     /// hands its harness the endpoint, so it is defined once, here.
-    #[serde(default)]
     llm_backends: BTreeMap<String, RawLlmBackend>,
     /// The team.
-    #[serde(default)]
     agents: BTreeMap<String, RawAgent>,
+}
+
+/// A model endpoint. `type` decides which settings it has.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum RawLlmBackend {
+    #[serde(rename = "openai-compatible-api")]
+    OpenAiCompatibleApi(RawOpenAiBackend),
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawLlmBackend {
-    #[serde(rename = "type")]
-    type_id: String,
-
-    base_url_env: Option<String>,
-    base_url_default: Option<String>,
+struct RawOpenAiBackend {
+    /// Where the endpoint is, as a URL: `http://127.0.0.1:11434/v1`.
+    base_url: String,
+    /// The *name* of the variable holding the API key. Absent: the endpoint
+    /// wants none.
     api_key_env: Option<String>,
-    timeout_seconds: Option<u64>,
+    /// Seconds one request may take.
+    timeout_seconds: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,63 +100,90 @@ struct RawLlmBackend {
 struct RawAgent {
     /// What the agent is for. Its first line is what the calling agent sees
     /// when it lists the team, and the whole of it is the agent's system
-    /// prompt. Optional: an agent with no prompt is a model with a name.
-    #[serde(default)]
+    /// prompt. Absent: the agent has no system prompt, a model with a name.
     prompt: Option<String>,
-    /// Tokens of context the model's server really runs it with. OpenCode
-    /// needs it to know when to compact the conversation, so it is required
-    /// with an `llm_backend` and does not apply without one, where OpenCode
-    /// knows its own models.
-    #[serde(default)]
-    context_window: Option<u32>,
-    /// Wall-clock cap on one delegation, in seconds. Defaults to
-    /// [`DEFAULT_MAX_SECONDS`]. A run that reaches it stops and reports what
-    /// it did, so a hung model cannot hold the caller forever.
-    #[serde(default)]
-    max_seconds: Option<u32>,
+    /// Wall-clock cap on one delegation, in seconds. A run that reaches it
+    /// stops and reports what it did, so a hung model cannot hold the caller
+    /// forever.
+    max_seconds: u32,
+    /// Most delegations to this agent that run at once in a session; more
+    /// wait for a free slot. 1 for a model server that can serve one request
+    /// at a time.
+    max_concurrent: u32,
     /// What runs the agent, and how.
     adapter: RawAdapter,
 }
 
-/// The harness behind an agent. `type` decides which of the other fields
-/// apply; one that belongs to another type is refused, not ignored.
+/// The harness behind an agent. `type` decides which settings it has.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum RawAdapter {
+    #[serde(rename = "claude-code")]
+    ClaudeCode(RawClaudeCodeAdapter),
+    #[serde(rename = "opencode")]
+    OpenCode(RawOpenCodeAdapter),
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawAdapter {
-    /// `claude-code` or `opencode`.
-    #[serde(rename = "type")]
-    kind: String,
-    /// All: the model. As Claude Code names it, as OpenCode names it
-    /// (`provider/model`), or, with an `llm_backend`, the id the endpoint
-    /// serves it under.
+struct RawClaudeCodeAdapter {
+    /// As Claude Code names it: an alias or a full model id.
     model: String,
-    /// All: what the agent may do, in its harness's own tool names: Claude
-    /// Code's (`Read`, `Bash(git:*)`) for `claude-code`, OpenCode's
-    /// permissions (`read`, `bash(git *)`) for `opencode`.
-    #[serde(default)]
-    tools: Option<Vec<String>>,
-    /// The CLI, if it is not `claude` or `opencode` on PATH.
-    #[serde(default)]
-    command: Option<String>,
-
-    // --- opencode ---
-    /// Which of `llm_backends` OpenCode runs the model on. Ensemble gives
-    /// OpenCode the endpoint and key for the run. Without it the model is
-    /// one OpenCode is already set up for.
-    #[serde(default)]
-    llm_backend: Option<String>,
-    /// Cap on steps within one delegation.
-    #[serde(default)]
-    max_steps: Option<u32>,
-
-    // --- claude-code ---
+    /// What the agent may do, in Claude Code's own tool names (`Read`,
+    /// `Bash(git:*)`).
+    tools: Vec<String>,
     /// Claude Code's `--permission-mode`. `dontAsk` denies what `tools` does
     /// not allow instead of waiting for a person who is not there.
-    #[serde(default)]
-    permission_mode: Option<String>,
+    permission_mode: String,
     /// Most agent turns Claude Code may take for one delegation.
-    #[serde(default)]
-    max_turns: Option<u32>,
+    max_turns: u32,
+    /// The CLI: `claude` if it is on PATH.
+    command: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawOpenCodeAdapter {
+    /// Where the model comes from.
+    model: RawOpenCodeModel,
+    /// What the agent may do, in OpenCode's permissions (`read`,
+    /// `bash(git *)`).
+    tools: Vec<String>,
+    /// Cap on steps within one delegation.
+    max_steps: u32,
+    /// The CLI: `opencode` if it is on PATH.
+    command: String,
+}
+
+/// The model of an OpenCode agent: one OpenCode is already set up for, or one
+/// served by an LLM backend of this config.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum RawOpenCodeModel {
+    #[serde(rename = "provider")]
+    Provider(RawProviderModel),
+    #[serde(rename = "llm_backend")]
+    LlmBackend(RawBackendModel),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProviderModel {
+    /// `provider/model`, as `opencode models` lists it.
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBackendModel {
+    /// Which of `llm_backends` serves the model. Ensemble gives OpenCode the
+    /// endpoint and key for the run.
+    backend: String,
+    /// The id the endpoint serves the model under, as its /models lists it.
+    name: String,
+    /// Tokens of context the server really runs the model with. OpenCode
+    /// needs it to know when to compact the conversation.
+    context_window: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -160,12 +193,8 @@ struct RawAdapter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendSettings {
     OpenAiCompatible {
-        /// Already resolved from the environment. Never a `{env:...}` template:
-        /// if it could not be resolved, loading failed instead.
         base_url: String,
         api_key: Option<String>,
-        /// Kept for diagnostics — which variable supplied the URL above.
-        base_url_env: String,
     },
 }
 
@@ -184,18 +213,15 @@ impl LlmBackend {
     }
 }
 
-pub const DEFAULT_MAX_SECONDS: u32 = 1800;
-
 /// One member of the team, resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentConfig {
     pub name: String,
     pub prompt: Option<String>,
-    /// See [`RawAgent::context_window`]. Set exactly when the agent runs on
-    /// one of the LLM backends.
-    pub context_window: Option<u32>,
     /// See [`RawAgent::max_seconds`].
     pub max_seconds: u32,
+    /// See [`RawAgent::max_concurrent`].
+    pub max_concurrent: u32,
     pub adapter: Adapter,
 }
 
@@ -221,15 +247,52 @@ pub struct ClaudeCodeAdapter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenCodeAdapter {
     pub command: String,
-    /// `provider/model`, as OpenCode names it; with `llm_backend`, the id
-    /// the endpoint serves the model under.
-    pub model: String,
-    /// Which of [`Config::llm_backends`] the model runs on, if any.
-    pub llm_backend: Option<String>,
+    pub model: OpenCodeModel,
     /// OpenCode permission names, each allowed; everything else is denied.
     /// `name(pattern)` allows only matching uses, such as `bash(git *)`.
     pub tools: Vec<String>,
     pub max_steps: u32,
+}
+
+/// Where an OpenCode agent's model comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenCodeModel {
+    /// `provider/model`, as OpenCode names it, on a provider it is already
+    /// set up for.
+    Provider { model: String },
+    /// A model served by one of [`Config::llm_backends`].
+    LlmBackend {
+        backend: String,
+        /// The id the endpoint serves the model under.
+        model: String,
+        context_window: u32,
+    },
+}
+
+impl OpenCodeAdapter {
+    /// The model: `provider/model`, or the id an LLM backend serves it under.
+    pub fn model_id(&self) -> &str {
+        match &self.model {
+            OpenCodeModel::Provider { model } | OpenCodeModel::LlmBackend { model, .. } => model,
+        }
+    }
+
+    /// The LLM backend its model runs on, when it runs on one.
+    pub fn llm_backend(&self) -> Option<&str> {
+        match &self.model {
+            OpenCodeModel::Provider { .. } => None,
+            OpenCodeModel::LlmBackend { backend, .. } => Some(backend),
+        }
+    }
+
+    /// Tokens of context the model's server runs it with, when it runs on an
+    /// LLM backend.
+    pub fn context_window(&self) -> Option<u32> {
+        match &self.model {
+            OpenCodeModel::Provider { .. } => None,
+            OpenCodeModel::LlmBackend { context_window, .. } => Some(*context_window),
+        }
+    }
 }
 
 impl AgentConfig {
@@ -243,7 +306,7 @@ impl AgentConfig {
     pub fn model(&self) -> &str {
         match &self.adapter {
             Adapter::ClaudeCode(c) => &c.model,
-            Adapter::OpenCode(o) => &o.model,
+            Adapter::OpenCode(o) => o.model_id(),
         }
     }
 
@@ -251,10 +314,18 @@ impl AgentConfig {
     pub fn llm_backend(&self) -> Option<&str> {
         match &self.adapter {
             Adapter::ClaudeCode(_) => None,
-            Adapter::OpenCode(o) => o.llm_backend.as_deref(),
+            Adapter::OpenCode(o) => o.llm_backend(),
         }
     }
 
+    /// Tokens of context its model's server runs it with, when it runs on an
+    /// LLM backend.
+    pub fn context_window(&self) -> Option<u32> {
+        match &self.adapter {
+            Adapter::ClaudeCode(_) => None,
+            Adapter::OpenCode(o) => o.context_window(),
+        }
+    }
     /// Where it runs: the adapter type, and the LLM backend when there is one.
     pub fn runs_on(&self) -> String {
         match self.llm_backend() {
@@ -519,12 +590,28 @@ pub fn load(path: &Path, env: &dyn Env) -> Result<Config, ConfigError> {
 pub fn parse(text: &str, path: &Path, env: &dyn Env) -> Result<Config, ConfigError> {
     let raw: RawConfig = serde_norway::from_str(text).map_err(|e| ConfigError::Syntax {
         path: path.to_path_buf(),
-        detail: e.to_string(),
+        detail: explain(&e),
     })?;
     validate(raw, path, env)
 }
 
-const DEFAULT_TIMEOUT_SECONDS: u64 = 600;
+/// What serde said, which already says where in the document, with a missing
+/// key put as the instruction it is and the removed `ensemble` type pointed to
+/// its replacement.
+fn explain(e: &serde_norway::Error) -> String {
+    let mut detail = e.to_string();
+    if let Some((before, rest)) = detail.split_once("missing field `")
+        && let Some((key, after)) = rest.split_once('`')
+    {
+        detail = format!("{before}`{key}` is required{after}");
+    }
+    if detail.contains(&format!("unknown variant `{REMOVED_ENSEMBLE_AGENT}`")) {
+        detail.push_str(&format!(
+            ". Type '{REMOVED_ENSEMBLE_AGENT}' was removed; Ensemble no longer runs agents itself. To run a model on an LLM backend, use type '{OPENCODE_AGENT}' with a `model` of type '{LLM_BACKEND_MODEL}'."
+        ));
+    }
+    detail
+}
 
 fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, ConfigError> {
     let mut problems: Vec<String> = Vec::new();
@@ -554,55 +641,23 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             problems.push("agents: an agent name cannot be empty".into());
             continue;
         }
-        let ad = &ra.adapter;
-        let at = format!("agents.{name}.adapter");
-        if ad.model.trim().is_empty() {
-            problems.push(format!("{at}: `model` is empty"));
-        }
-        if ra.max_seconds == Some(0) {
+        if ra.max_seconds == 0 {
             problems.push(format!(
                 "agents.{name}: `max_seconds` must be greater than 0"
             ));
         }
-        if ra.context_window == Some(0) {
+        if ra.max_concurrent == 0 {
             problems.push(format!(
-                "agents.{name}: `context_window` must be greater than 0"
+                "agents.{name}: `max_concurrent` must be greater than 0"
             ));
         }
-        let adapter = match ad.kind.as_str() {
-            CLAUDE_CODE_AGENT => {
-                if ra.context_window.is_some() {
-                    problems.push(format!(
-                        "agents.{name}: `context_window` does not apply to a {CLAUDE_CODE_AGENT} agent; Claude Code manages its own context"
-                    ));
-                }
-                Adapter::ClaudeCode(claude_code_adapter(&at, ad, &mut problems))
+        let at = format!("agents.{name}.adapter");
+        let adapter = match &ra.adapter {
+            RawAdapter::ClaudeCode(c) => {
+                Adapter::ClaudeCode(claude_code_adapter(&at, c, &mut problems))
             }
-            OPENCODE_AGENT => {
-                let oc = opencode_adapter(&at, ad, &raw.llm_backends, &mut problems);
-                match (&oc.llm_backend, ra.context_window) {
-                    (Some(_), None) => problems.push(format!(
-                        "agents.{name}: an agent on an `llm_backend` needs `context_window`, the tokens of context the server runs the model with, so OpenCode knows when to compact"
-                    )),
-                    (None, Some(_)) => problems.push(format!(
-                        "agents.{name}: `context_window` only applies with `llm_backend`; OpenCode knows the context of the models it is set up for"
-                    )),
-                    _ => {}
-                }
-                Adapter::OpenCode(oc)
-            }
-            REMOVED_ENSEMBLE_AGENT => {
-                problems.push(format!(
-                    "{at}: type '{REMOVED_ENSEMBLE_AGENT}' was removed; Ensemble no longer runs agents itself. To run this model, use type '{OPENCODE_AGENT}' with `llm_backend`."
-                ));
-                continue;
-            }
-            other => {
-                problems.push(format!(
-                    "{at}: type '{other}' is unknown. Known types: {}.",
-                    AGENT_TYPES.join(", ")
-                ));
-                continue;
+            RawAdapter::OpenCode(o) => {
+                Adapter::OpenCode(opencode_adapter(&at, o, &raw.llm_backends, &mut problems))
             }
         };
         agents.insert(
@@ -610,15 +665,15 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             AgentConfig {
                 name: name.clone(),
                 prompt: ra.prompt.clone(),
-                context_window: ra.context_window,
-                max_seconds: ra.max_seconds.unwrap_or(DEFAULT_MAX_SECONDS),
+                max_seconds: ra.max_seconds,
+                max_concurrent: ra.max_concurrent,
                 adapter,
             },
         );
     }
 
     // A backend nothing uses is not an error — it is a spare, and deleting it
-    // from a shared config is how you break someone else's profile. Say so once
+    // from a shared config is how you break someone else's setup. Say so once
     // and carry on.
     for name in backends.keys() {
         let used = agents.values().any(|a| a.llm_backend() == Some(name));
@@ -642,39 +697,13 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
     }
 }
 
-/// Refuse fields that belong to another adapter type rather than ignoring
-/// them: an `llm_backend` on a `claude-code` agent means someone believes a
-/// model server is being used, and it is not.
-fn reject_foreign(at: &str, kind: &str, keys: &[(&str, bool)], problems: &mut Vec<String>) {
-    for (key, present) in keys {
-        if *present {
-            problems.push(format!(
-                "{at}: `{key}` is not a field of adapter type '{kind}'"
-            ));
-        }
-    }
-}
-
 fn opencode_adapter(
     at: &str,
-    ad: &RawAdapter,
+    ad: &RawOpenCodeAdapter,
     declared: &BTreeMap<String, RawLlmBackend>,
     problems: &mut Vec<String>,
 ) -> OpenCodeAdapter {
-    reject_foreign(
-        at,
-        OPENCODE_AGENT,
-        &[
-            ("permission_mode", ad.permission_mode.is_some()),
-            ("max_turns", ad.max_turns.is_some()),
-        ],
-        problems,
-    );
-    let tools = match &ad.tools {
-        Some(list) => list.clone(),
-        None => OPENCODE_DEFAULT_TOOLS.map(String::from).to_vec(),
-    };
-    for tool in &tools {
+    for tool in &ad.tools {
         let (name, pattern) = match tool.split_once('(') {
             Some((n, rest)) => (n, rest.strip_suffix(')')),
             None => (tool.as_str(), Some("")),
@@ -689,60 +718,74 @@ fn opencode_adapter(
             ));
         }
     }
-    if ad.max_steps == Some(0) {
+    if ad.max_steps == 0 {
         problems.push(format!("{at}: `max_steps` must be greater than 0"));
     }
-    match &ad.llm_backend {
-        Some(backend) if !declared.contains_key(backend) => {
-            let known: Vec<&str> = declared.keys().map(String::as_str).collect();
-            problems.push(format!(
-                "{at}: LLM backend '{backend}' is not defined. Defined LLM backends: {}.",
-                if known.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    known.join(", ")
-                }
-            ));
+    let model = match &ad.model {
+        RawOpenCodeModel::Provider(p) => {
+            if p.name.trim().is_empty() {
+                problems.push(format!("{at}: `model.name` is empty"));
+            } else if !p.name.contains('/') {
+                problems.push(format!(
+                    "{at}: model '{}' must be provider/model, as `opencode models` lists it, or run on an LLM backend with a `model` of type '{LLM_BACKEND_MODEL}'",
+                    p.name
+                ));
+            }
+            OpenCodeModel::Provider {
+                model: p.name.clone(),
+            }
         }
-        // On a backend the model is the id the endpoint serves; Ensemble
-        // names the provider.
-        Some(_) => {}
-        None if !ad.model.contains('/') => problems.push(format!(
-            "{at}: model '{}' must be provider/model, as `opencode models` lists it, or name an `llm_backend` to run it on",
-            ad.model
-        )),
-        None => {}
-    }
-    let command = ad.command.clone().unwrap_or_else(|| "opencode".into());
-    if command.trim().is_empty() {
+        RawOpenCodeModel::LlmBackend(b) => {
+            if !declared.contains_key(&b.backend) {
+                let known: Vec<&str> = declared.keys().map(String::as_str).collect();
+                problems.push(format!(
+                    "{at}: LLM backend '{}' is not defined. Defined LLM backends: {}.",
+                    b.backend,
+                    if known.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        known.join(", ")
+                    }
+                ));
+            }
+            // On a backend the model is the id the endpoint serves; Ensemble
+            // names the provider.
+            if b.name.trim().is_empty() {
+                problems.push(format!("{at}: `model.name` is empty"));
+            }
+            if b.context_window == 0 {
+                problems.push(format!(
+                    "{at}: `model.context_window` must be greater than 0"
+                ));
+            }
+            OpenCodeModel::LlmBackend {
+                backend: b.backend.clone(),
+                model: b.name.clone(),
+                context_window: b.context_window,
+            }
+        }
+    };
+    if ad.command.trim().is_empty() {
         problems.push(format!("{at}: `command` is empty"));
     }
     OpenCodeAdapter {
-        command,
-        model: ad.model.clone(),
-        llm_backend: ad.llm_backend.clone(),
-        tools,
-        max_steps: ad.max_steps.unwrap_or(OPENCODE_DEFAULT_MAX_STEPS),
+        command: ad.command.clone(),
+        model,
+        tools: ad.tools.clone(),
+        max_steps: ad.max_steps,
     }
 }
 
-fn claude_code_adapter(at: &str, ad: &RawAdapter, problems: &mut Vec<String>) -> ClaudeCodeAdapter {
-    if ad.llm_backend.is_some() {
-        problems.push(format!(
-            "{at}: `llm_backend` does not apply to a {CLAUDE_CODE_AGENT} agent; Claude Code runs Anthropic models, not an OpenAI-compatible endpoint"
-        ));
+fn claude_code_adapter(
+    at: &str,
+    ad: &RawClaudeCodeAdapter,
+    problems: &mut Vec<String>,
+) -> ClaudeCodeAdapter {
+    if ad.model.trim().is_empty() {
+        problems.push(format!("{at}: `model` is empty"));
     }
-    reject_foreign(
-        at,
-        CLAUDE_CODE_AGENT,
-        &[("max_steps", ad.max_steps.is_some())],
-        problems,
-    );
-    let tools = match &ad.tools {
-        Some(list) => list.clone(),
-        None => CLAUDE_CODE_DEFAULT_TOOLS.map(String::from).to_vec(),
-    };
-    if let Some(bad) = tools
+    if let Some(bad) = ad
+        .tools
         .iter()
         .find(|t| t.trim().is_empty() || t.contains(','))
     {
@@ -750,22 +793,21 @@ fn claude_code_adapter(at: &str, ad: &RawAdapter, problems: &mut Vec<String>) ->
             "{at}: tool '{bad}' must be one Claude Code tool or rule per list entry, such as Read or Bash(git:*)"
         ));
     }
-    if ad.max_turns == Some(0) {
+    if ad.permission_mode.trim().is_empty() {
+        problems.push(format!("{at}: `permission_mode` is empty"));
+    }
+    if ad.max_turns == 0 {
         problems.push(format!("{at}: `max_turns` must be greater than 0"));
     }
-    let command = ad.command.clone().unwrap_or_else(|| "claude".into());
-    if command.trim().is_empty() {
+    if ad.command.trim().is_empty() {
         problems.push(format!("{at}: `command` is empty"));
     }
     ClaudeCodeAdapter {
-        command,
+        command: ad.command.clone(),
         model: ad.model.clone(),
-        tools,
-        permission_mode: ad
-            .permission_mode
-            .clone()
-            .unwrap_or_else(|| CLAUDE_CODE_DEFAULT_PERMISSION_MODE.into()),
-        max_turns: ad.max_turns.unwrap_or(CLAUDE_CODE_DEFAULT_MAX_TURNS),
+        tools: ad.tools.clone(),
+        permission_mode: ad.permission_mode.clone(),
+        max_turns: ad.max_turns,
     }
 }
 
@@ -774,97 +816,35 @@ fn resolve_backend(
     rb: &RawLlmBackend,
     env: &dyn Env,
 ) -> Result<LlmBackend, Vec<String>> {
+    match rb {
+        RawLlmBackend::OpenAiCompatibleApi(b) => resolve_openai(name, b, env),
+    }
+}
+
+/// Check the URL and timeout, and read the optional key from the environment.
+fn resolve_openai(
+    name: &str,
+    b: &RawOpenAiBackend,
+    env: &dyn Env,
+) -> Result<LlmBackend, Vec<String>> {
     let mut problems = Vec::new();
-    let timeout_seconds = rb.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS);
-    if timeout_seconds == 0 {
+    if b.timeout_seconds == 0 {
         problems.push(format!(
             "llm_backends.{name}: `timeout_seconds` must be greater than 0"
         ));
     }
-
-    let settings = match rb.type_id.as_str() {
-        OPENAI_COMPATIBLE_API => {
-            resolve_openai(name, rb, env, &mut problems).map(|(base_url, api_key, var)| {
-                BackendSettings::OpenAiCompatible {
-                    base_url,
-                    api_key,
-                    base_url_env: var,
-                }
-            })
-        }
-        other => {
-            problems.push(format!(
-                "llm_backends.{name}: type '{other}' is unknown. Known types: \
-                 {OPENAI_COMPATIBLE_API}."
-            ));
-            None
-        }
-    };
-
-    match (settings, problems.is_empty()) {
-        (Some(settings), true) => Ok(LlmBackend {
-            name: name.to_string(),
-            timeout_seconds,
-            settings,
-        }),
-        _ => Err(problems),
-    }
-}
-
-/// Resolve `base_url` and the optional key from the environment.
-///
-/// The precedence is: the variable named by `base_url_env`, then
-/// `base_url_default`. That ordering is the requirement — "environment
-/// variables override default values" — and it is why the default is allowed to
-/// be absent: a backend with no default must be configured before use, and says
-/// so at load time rather than at the first request.
-fn resolve_openai(
-    name: &str,
-    rb: &RawLlmBackend,
-    env: &dyn Env,
-    problems: &mut Vec<String>,
-) -> Option<(String, Option<String>, String)> {
-    let Some(var) = rb.base_url_env.clone() else {
-        problems.push(format!(
-            "llm_backends.{name}: `base_url_env` is required for type '{OPENAI_COMPATIBLE_API}' \
-             (the name of the variable holding the base URL, not the URL itself)"
-        ));
-        return None;
-    };
-
-    let from_env = env
-        .get(&var)
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
-    let default = rb
-        .base_url_default
-        .clone()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
-
-    let base_url = match from_env.or(default) {
-        Some(u) => u,
-        None => {
-            problems.push(format!(
-                "llm_backends.{name}: ${var} is unset and there is no `base_url_default`. \
-                 Export ${var} (for example http://127.0.0.1:8000/v1) before using this backend."
-            ));
-            return None;
-        }
-    };
-
+    let base_url = b.base_url.trim();
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
         problems.push(format!(
-            "llm_backends.{name}: base URL '{base_url}' must start with http:// or https://"
+            "llm_backends.{name}: `base_url` '{base_url}' must start with http:// or https://"
         ));
-        return None;
     }
 
     // A key is optional — a local llama-server usually wants none — but a
     // *named* variable that is empty is a different thing from no variable at
     // all: somebody expected authentication. Say so rather than sending an
     // empty bearer token and reading a 401 later.
-    let api_key = match &rb.api_key_env {
+    let api_key = match &b.api_key_env {
         None => None,
         Some(key_var) => match env.get(key_var).filter(|v| !v.trim().is_empty()) {
             Some(k) => Some(k),
@@ -878,7 +858,18 @@ fn resolve_openai(
         },
     };
 
-    Some((base_url.trim_end_matches('/').to_string(), api_key, var))
+    if problems.is_empty() {
+        Ok(LlmBackend {
+            name: name.to_string(),
+            timeout_seconds: b.timeout_seconds,
+            settings: BackendSettings::OpenAiCompatible {
+                base_url: base_url.trim_end_matches('/').to_string(),
+                api_key,
+            },
+        })
+    } else {
+        Err(problems)
+    }
 }
 
 #[cfg(test)]
@@ -903,38 +894,65 @@ mod tests {
         }
     }
 
-    /// OpenCode agents on two LLM backends, and one Claude Code agent.
+    fn claude(c: &Config, agent: &str) -> ClaudeCodeAdapter {
+        match &c.agents[agent].adapter {
+            Adapter::ClaudeCode(cc) => cc.clone(),
+            other => panic!("not a claude-code agent: {other:?}"),
+        }
+    }
+
+    /// OpenCode agents on two LLM backends, and one Claude Code agent. Every
+    /// setting is written, as it has to be.
     const REFERENCE: &str = r#"
 version: 1
 llm_backends:
   openai-local:
     type: openai-compatible-api
-    base_url_env: OPENAI_LOCAL_BASE_URL
-    base_url_default: "http://127.0.0.1:8000/v1"
+    base_url: "http://127.0.0.1:8000/v1"
     api_key_env: OPENAI_LOCAL_API_KEY
+    timeout_seconds: 600
   openai-remote:
     type: openai-compatible-api
-    base_url_env: OPENAI_REMOTE_BASE_URL
-    base_url_default: "http://10.10.10.5:8000/v1"
+    base_url: "http://10.10.10.5:8000/v1"
     api_key_env: OPENAI_REMOTE_API_KEY
+    timeout_seconds: 300
 agents:
   planner:
-    context_window: 32768
+    max_seconds: 1800
+    max_concurrent: 1
     adapter:
       type: opencode
-      llm_backend: openai-local
-      model: qwen3-coder
+      model:
+        type: llm_backend
+        backend: openai-local
+        name: qwen3-coder
+        context_window: 32768
+      tools: [read, glob, grep, list]
+      max_steps: 30
+      command: opencode
   coder:
-    context_window: 32768
+    max_seconds: 900
+    max_concurrent: 1
     adapter:
       type: opencode
-      llm_backend: openai-remote
-      model: qwen3-coder
+      model:
+        type: llm_backend
+        backend: openai-remote
+        name: qwen3-coder
+        context_window: 32768
       tools: [read, edit, bash]
+      max_steps: 30
+      command: opencode
   reviewer:
+    max_seconds: 1800
+    max_concurrent: 1
     adapter:
       type: claude-code
       model: sonnet
+      tools: [Read, Grep, Glob]
+      permission_mode: dontAsk
+      max_turns: 30
+      command: claude
 "#;
 
     fn problems_of(err: ConfigError) -> Vec<String> {
@@ -948,73 +966,173 @@ agents:
         problems_of(parse(doc, &p(), &env(&[])).unwrap_err()).join("\n")
     }
 
+    /// The message of a document that serde refuses.
+    fn refusal(doc: &str) -> String {
+        match parse(doc, &p(), &env(&[])).unwrap_err() {
+            ConfigError::Syntax { detail, .. } => detail,
+            other => panic!("expected Syntax, got: {other}"),
+        }
+    }
+
     #[test]
     fn the_reference_config_loads() {
         let c = parse(REFERENCE, &p(), &env(&[])).expect("reference config must load");
         assert_eq!(c.version, 1);
         assert_eq!(c.llm_backends.len(), 2);
+        assert_eq!(c.llm_backends["openai-remote"].timeout_seconds, 300);
         assert_eq!(c.agent_names(), vec!["coder", "planner", "reviewer"]);
         let coder = &c.agents["coder"];
         assert_eq!(coder.llm_backend(), Some("openai-remote"));
         assert_eq!(coder.runs_on(), "opencode on openai-remote");
-        assert_eq!(coder.context_window, Some(32768));
-        assert_eq!(coder.max_seconds, DEFAULT_MAX_SECONDS);
+        assert_eq!(coder.context_window(), Some(32768));
+        assert_eq!(coder.max_seconds, 900);
         assert!(coder.can_change_files());
         assert_eq!(c.agents["reviewer"].llm_backend(), None);
+        assert_eq!(c.agents["reviewer"].context_window(), None);
     }
 
     #[test]
     fn the_removed_ensemble_type_points_to_opencode() {
-        let doc = REFERENCE.replace(
-            "    adapter:\n      type: claude-code\n      model: sonnet",
-            "    adapter:\n      type: ensemble\n      model: sonnet",
-        );
-        let joined = joined_problems(&doc);
+        let doc = REFERENCE.replace("type: claude-code", "type: ensemble");
+        let detail = refusal(&doc);
         assert!(
-            joined.contains("agents.reviewer.adapter: type 'ensemble' was removed")
-                && joined.contains("type 'opencode' with `llm_backend`"),
-            "{joined}"
+            detail.contains("agents.reviewer.adapter")
+                && detail.contains("'ensemble' was removed")
+                && detail.contains("type 'opencode'"),
+            "{detail}"
         );
     }
 
     #[test]
     fn settings_of_the_removed_harness_are_unknown_fields() {
         let doc = REFERENCE.replace(
-            "      model: qwen3-coder\n      tools:",
-            "      model: qwen3-coder\n      temperature: 0.2\n      tools:",
+            "      max_steps: 30\n      command: opencode\n  coder:",
+            "      max_steps: 30\n      temperature: 0.2\n      command: opencode\n  coder:",
         );
-        let err = parse(&doc, &p(), &env(&[])).unwrap_err();
-        assert!(matches!(err, ConfigError::Syntax { .. }), "{err}");
-        assert!(err.to_string().contains("temperature"), "{err}");
+        let detail = refusal(&doc);
+        assert!(detail.contains("temperature"), "{detail}");
     }
 
     #[test]
-    fn context_window_goes_with_an_llm_backend_and_only_with_one() {
-        let missing = REFERENCE.replacen("    context_window: 32768\n", "", 1);
-        assert!(
-            joined_problems(&missing)
-                .contains("agents.planner: an agent on an `llm_backend` needs `context_window`"),
-            "{}",
-            joined_problems(&missing)
-        );
+    fn a_missing_setting_is_refused_by_name_and_place() {
+        // (the line to take out, where it belongs, its key)
+        for (line, at, key) in [
+            ("    max_seconds: 900\n", "agents.coder", "max_seconds"),
+            (
+                "      max_steps: 30\n      command: opencode\n  reviewer:",
+                "agents.coder",
+                "max_steps",
+            ),
+            ("      max_turns: 30\n", "agents.reviewer", "max_turns"),
+            ("      command: claude\n", "agents.reviewer", "command"),
+            (
+                "    timeout_seconds: 300\n",
+                "llm_backends",
+                "timeout_seconds",
+            ),
+            (
+                "    base_url: \"http://10.10.10.5:8000/v1\"\n",
+                "llm_backends",
+                "base_url",
+            ),
+            (
+                "        context_window: 32768\n      tools: [read, edit, bash]",
+                "agents.coder",
+                "context_window",
+            ),
+        ] {
+            // Put back what follows the line, so only the one key is gone.
+            let kept = match key {
+                "max_steps" => "      command: opencode\n  reviewer:",
+                "context_window" => "      tools: [read, edit, bash]",
+                _ => "",
+            };
+            let doc = REFERENCE.replacen(line, kept, 1);
+            assert_ne!(doc, REFERENCE, "the fixture lost its {key} line");
+            let detail = refusal(&doc);
+            assert!(
+                detail.contains(at) && detail.contains(&format!("`{key}` is required")),
+                "{key}: {detail}"
+            );
+        }
+    }
 
+    #[test]
+    fn a_config_without_its_agents_or_backends_is_refused() {
+        let detail = refusal("version: 1\nagents: {}\n");
+        assert!(detail.contains("`llm_backends` is required"), "{detail}");
+        let detail = refusal("version: 1\nllm_backends: {}\n");
+        assert!(detail.contains("`agents` is required"), "{detail}");
+        assert!(
+            parse(
+                "version: 1\nllm_backends: {}\nagents: {}\n",
+                &p(),
+                &env(&[])
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_setting_of_another_adapter_type_is_unknown_and_so_is_a_stray_context_window() {
+        let doc = REFERENCE.replace(
+            "      model: sonnet\n",
+            "      model: sonnet\n      max_steps: 3\n",
+        );
+        let detail = refusal(&doc);
+        assert!(detail.contains("max_steps"), "{detail}");
+
+        // The window belongs to the model on an LLM backend, nowhere else.
+        let doc = REFERENCE.replace(
+            "    max_concurrent: 1\n    adapter:\n      type: claude-code",
+            "    max_concurrent: 1\n    context_window: 8000\n    adapter:\n      type: claude-code",
+        );
+        assert!(refusal(&doc).contains("context_window"));
+
+        let provider = "model:\n        type: provider\n        name: opencode/big-pickle\n        context_window: 1\n";
+        let doc = format!(
+            "version: 1\nllm_backends: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    adapter:\n      type: opencode\n      {provider}      tools: []\n      max_steps: 3\n      command: opencode\n"
+        );
+        assert!(refusal(&doc).contains("context_window"));
+    }
+
+    #[test]
+    fn an_opencode_model_is_a_provider_model_or_an_llm_backend_model() {
+        let doc = |model: &str| {
+            format!(
+                "version: 1\nllm_backends: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      max_steps: 3\n      command: opencode\n"
+            )
+        };
+        let c = parse(
+            &doc("{ type: provider, name: opencode/big-pickle }"),
+            &p(),
+            &env(&[]),
+        )
+        .unwrap();
+        let oc = opencode(&c, "x");
+        assert_eq!(oc.model_id(), "opencode/big-pickle");
+        assert_eq!((oc.llm_backend(), oc.context_window()), (None, None));
+
+        let detail = refusal(&doc("{ type: local }"));
+        assert!(
+            detail.contains("unknown variant `local`")
+                && detail.contains("provider")
+                && detail.contains("llm_backend"),
+            "{detail}"
+        );
+        let detail = refusal(&doc("opencode/big-pickle"));
+        assert!(detail.contains("agents.x"), "{detail}");
+    }
+
+    #[test]
+    fn the_window_of_an_llm_backend_model_must_be_positive() {
         let zero = REFERENCE.replacen("context_window: 32768", "context_window: 0", 1);
         assert!(joined_problems(&zero).contains("greater than 0"));
-
-        let without_backend = format!(
-            "{REFERENCE}  looker:\n    context_window: 8000\n    adapter: {{ type: opencode, model: opencode/big-pickle }}\n"
-        );
-        assert!(
-            joined_problems(&without_backend)
-                .contains("agents.looker: `context_window` only applies with `llm_backend`"),
-            "{}",
-            joined_problems(&without_backend)
-        );
     }
 
     #[test]
     fn an_agent_naming_an_undefined_backend_is_fatal_and_lists_the_real_ones() {
-        let doc = REFERENCE.replace("llm_backend: openai-remote", "llm_backend: opanai-remote");
+        let doc = REFERENCE.replace("backend: openai-remote", "backend: opanai-remote");
         let joined = joined_problems(&doc);
         assert!(
             joined.contains("LLM backend 'opanai-remote' is not defined")
@@ -1025,7 +1143,7 @@ agents:
 
     #[test]
     fn a_backend_no_agent_uses_is_not_an_error() {
-        let doc = REFERENCE.replace("llm_backend: openai-remote", "llm_backend: openai-local");
+        let doc = REFERENCE.replace("backend: openai-remote", "backend: openai-local");
         assert!(parse(&doc, &p(), &env(&[])).is_ok());
     }
 
@@ -1050,24 +1168,30 @@ agents:
         serde_json::from_str(SCHEMA).expect("the schema is JSON")
     }
 
+    /// The keys a schema object lists, less `type`, which the enum consumes.
     fn schema_keys(node: &serde_json::Value) -> Vec<String> {
         let mut keys: Vec<String> = node["properties"]
             .as_object()
             .unwrap()
             .keys()
+            .filter(|k| *k != "type")
             .cloned()
             .collect();
         keys.sort();
         keys
     }
 
-    fn schema_enum(node: &serde_json::Value) -> Vec<String> {
-        node["enum"]
+    /// Every key of the schema object is required, but `optional` ones.
+    fn schema_required(node: &serde_json::Value) -> Vec<String> {
+        let mut keys: Vec<String> = node["required"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
-            .collect()
+            .filter(|k| k != "type")
+            .collect();
+        keys.sort();
+        keys
     }
 
     #[test]
@@ -1079,61 +1203,76 @@ agents:
             "top level"
         );
         let defs = &schema["definitions"];
-        assert_eq!(
-            schema_keys(&defs["llm_backend"]),
-            accepted_keys::<RawLlmBackend>(),
-            "llm_backends"
-        );
-        assert_eq!(
-            schema_keys(&defs["agent"]),
-            accepted_keys::<RawAgent>(),
-            "agents"
-        );
-        // Every adapter key belongs to exactly one adapter type, or to both.
-        let mut adapters = schema_keys(&defs["claude_code_adapter"]);
-        adapters.extend(schema_keys(&defs["opencode_adapter"]));
-        adapters.sort();
-        adapters.dedup();
-        assert_eq!(adapters, accepted_keys::<RawAdapter>(), "adapters");
+        for (def, keys, label) in [
+            (
+                "openai_compatible_api_backend",
+                accepted_keys::<RawOpenAiBackend>(),
+                "openai-compatible-api backend",
+            ),
+            ("agent", accepted_keys::<RawAgent>(), "agents"),
+            (
+                "claude_code_adapter",
+                accepted_keys::<RawClaudeCodeAdapter>(),
+                "claude-code adapter",
+            ),
+            (
+                "opencode_adapter",
+                accepted_keys::<RawOpenCodeAdapter>(),
+                "opencode adapter",
+            ),
+            (
+                "opencode_provider_model",
+                accepted_keys::<RawProviderModel>(),
+                "opencode provider model",
+            ),
+            (
+                "opencode_llm_backend_model",
+                accepted_keys::<RawBackendModel>(),
+                "opencode llm_backend model",
+            ),
+        ] {
+            assert_eq!(schema_keys(&defs[def]), keys, "{label}");
+        }
     }
 
     #[test]
-    fn the_schemas_choices_and_defaults_are_the_codes() {
+    fn the_schema_requires_every_key_but_the_optional_two() {
         let schema = schema();
-        let backend = &schema["definitions"]["llm_backend"]["properties"];
-        let agent = &schema["definitions"]["agent"]["properties"];
-        let claude = &schema["definitions"]["claude_code_adapter"]["properties"];
-        assert_eq!(claude["type"]["const"], CLAUDE_CODE_AGENT);
-        assert_eq!(AGENT_TYPES, [CLAUDE_CODE_AGENT, OPENCODE_AGENT]);
-        let opencode = &schema["definitions"]["opencode_adapter"]["properties"];
-        assert_eq!(opencode["type"]["const"], OPENCODE_AGENT);
+        let defs = &schema["definitions"];
         assert_eq!(
-            opencode["tools"]["default"],
-            serde_json::json!(OPENCODE_DEFAULT_TOOLS)
+            schema_required(&schema),
+            accepted_keys::<RawConfig>(),
+            "top level"
         );
-        assert_eq!(opencode["max_steps"]["default"], OPENCODE_DEFAULT_MAX_STEPS);
-        assert_eq!(
-            claude["tools"]["default"],
-            serde_json::json!(CLAUDE_CODE_DEFAULT_TOOLS)
-        );
-        assert_eq!(
-            claude["permission_mode"]["default"],
-            CLAUDE_CODE_DEFAULT_PERMISSION_MODE
-        );
-        assert_eq!(
-            claude["max_turns"]["default"],
-            CLAUDE_CODE_DEFAULT_MAX_TURNS
-        );
+        let optional = |def: &str, keys: &[&str]| {
+            let mut all = schema_keys(&defs[def]);
+            all.retain(|k| !keys.contains(&k.as_str()));
+            all
+        };
+        for (def, keys) in [
+            ("openai_compatible_api_backend", vec!["api_key_env"]),
+            ("agent", vec!["prompt"]),
+            ("claude_code_adapter", vec![]),
+            ("opencode_adapter", vec![]),
+            ("opencode_provider_model", vec![]),
+            ("opencode_llm_backend_model", vec![]),
+        ] {
+            assert_eq!(schema_required(&defs[def]), optional(def, &keys), "{def}");
+        }
+        // And nothing in it says what a missing key would have been.
+        assert!(!SCHEMA.contains("\"default\":"), "the schema has a default");
+    }
 
-        let mut types = schema_enum(&backend["type"]);
-        types.sort();
-        assert_eq!(types, [OPENAI_COMPATIBLE_API]);
-
-        assert_eq!(agent["max_seconds"]["default"], DEFAULT_MAX_SECONDS);
-        assert_eq!(
-            backend["timeout_seconds"]["default"],
-            DEFAULT_TIMEOUT_SECONDS
-        );
+    #[test]
+    fn the_schemas_choices_are_the_codes() {
+        let schema = schema();
+        let defs = &schema["definitions"];
+        let tag = |def: &str| defs[def]["properties"]["type"]["const"].clone();
+        assert_eq!(tag("openai_compatible_api_backend"), OPENAI_COMPATIBLE_API);
+        assert_eq!(tag("claude_code_adapter"), CLAUDE_CODE_AGENT);
+        assert_eq!(tag("opencode_adapter"), OPENCODE_AGENT);
+        assert_eq!(tag("opencode_provider_model"), PROVIDER_MODEL);
+        assert_eq!(tag("opencode_llm_backend_model"), LLM_BACKEND_MODEL);
         assert_eq!(schema["properties"]["version"]["const"], SUPPORTED_VERSION);
     }
 
@@ -1171,48 +1310,49 @@ agents:
         let tmp = crate::workspace::testing::TempDir::new();
         let dir = tmp.0.join(CONFIG_DIR);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(CONFIG_FILENAME),
-            REFERENCE.replace("    api_key_env: OPENAI_REMOTE_API_KEY\n", ""),
-        )
-        .unwrap();
+        std::fs::write(dir.join(CONFIG_FILENAME), REFERENCE).unwrap();
         std::fs::write(
             dir.join(ENV_FILENAME),
-            "OPENAI_LOCAL_API_KEY=from-file\nOPENAI_REMOTE_BASE_URL=http://10.0.0.1:1/v1\n",
+            "OPENAI_LOCAL_API_KEY=from-file\nOPENAI_REMOTE_API_KEY=remote-file\n",
         )
         .unwrap();
         let path = discover(&tmp.0).expect("found in .ensemble");
-        let url = |c: &Config, name: &str| match &c.llm_backends[name].settings {
-            BackendSettings::OpenAiCompatible {
-                base_url, api_key, ..
-            } => (base_url.clone(), api_key.clone()),
+        let key = |c: &Config, name: &str| match &c.llm_backends[name].settings {
+            BackendSettings::OpenAiCompatible { api_key, .. } => api_key.clone(),
         };
 
         let c = load(&path, &env(&[])).unwrap();
-        assert_eq!(url(&c, "openai-local").1.as_deref(), Some("from-file"));
-        assert_eq!(url(&c, "openai-remote").0, "http://10.0.0.1:1/v1");
+        assert_eq!(key(&c, "openai-local").as_deref(), Some("from-file"));
+        assert_eq!(key(&c, "openai-remote").as_deref(), Some("remote-file"));
 
         // A variable that is really set wins over the file.
         let c = load(&path, &env(&[("OPENAI_LOCAL_API_KEY", "from-env")])).unwrap();
-        assert_eq!(url(&c, "openai-local").1.as_deref(), Some("from-env"));
+        assert_eq!(key(&c, "openai-local").as_deref(), Some("from-env"));
     }
 
     #[test]
     fn the_sample_loads_and_sets_every_setting_the_schema_has() {
         let c = parse(SAMPLE, &p(), &env(&[])).expect("the sample is a valid config");
         let kinds: Vec<&str> = c.agents.values().map(|a| a.kind()).collect();
-        for kind in AGENT_TYPES {
+        for kind in [CLAUDE_CODE_AGENT, OPENCODE_AGENT] {
             assert!(kinds.contains(&kind), "the sample has no {kind} agent");
         }
         assert!(
             c.agents.values().any(|a| a.llm_backend().is_some()),
             "the sample has no agent on an LLM backend"
         );
+        assert!(
+            c.agents
+                .values()
+                .any(|a| a.kind() == OPENCODE_AGENT && a.llm_backend().is_none()),
+            "the sample has no agent on a provider"
+        );
 
         let doc: serde_json::Value = serde_norway::from_str(SAMPLE).unwrap();
         let schema = schema();
         let defs = &schema["definitions"];
         let missing = |def: &str, objects: Vec<&serde_json::Value>| -> Vec<String> {
+            assert!(!objects.is_empty(), "the sample has no {def}");
             schema_keys(&defs[def])
                 .into_iter()
                 .filter(|k| !objects.iter().any(|o| o.get(k).is_some()))
@@ -1228,166 +1368,109 @@ agents:
                 .filter(|a| a["type"] == kind)
                 .collect()
         };
-        assert_eq!(
-            missing("llm_backend", backends),
-            Vec::<String>::new(),
-            "llm_backends"
-        );
-        assert_eq!(
-            missing("agent", agents.clone()),
-            Vec::<String>::new(),
-            "agents"
-        );
-        assert_eq!(
-            missing("claude_code_adapter", adapters(CLAUDE_CODE_AGENT)),
-            Vec::<String>::new(),
-            "claude-code adapter"
-        );
-        assert_eq!(
-            missing("opencode_adapter", adapters(OPENCODE_AGENT)),
-            Vec::<String>::new(),
-            "opencode adapter"
-        );
+        let models = |kind: &str| -> Vec<&serde_json::Value> {
+            adapters(OPENCODE_AGENT)
+                .into_iter()
+                .map(|a| &a["model"])
+                .filter(|m| m["type"] == kind)
+                .collect()
+        };
+        for (def, objects) in [
+            ("openai_compatible_api_backend", backends),
+            ("agent", agents.clone()),
+            ("claude_code_adapter", adapters(CLAUDE_CODE_AGENT)),
+            ("opencode_adapter", adapters(OPENCODE_AGENT)),
+            ("opencode_provider_model", models(PROVIDER_MODEL)),
+            ("opencode_llm_backend_model", models(LLM_BACKEND_MODEL)),
+        ] {
+            assert_eq!(missing(def, objects), Vec::<String>::new(), "{def}");
+        }
         let id = schema["$id"].as_str().unwrap().to_string();
         assert!(SAMPLE.starts_with(&format!("# yaml-language-server: $schema={id}")));
     }
 
-    const CLAUDE_DOC: &str = r#"
-version: 1
-agents:
-  reviewer:
-    prompt: Reviews code.
-    adapter:
-      type: claude-code
-      model: sonnet
-  fixer:
-    max_seconds: 600
-    adapter:
-      type: claude-code
-      model: opus
-      tools: [Read, Edit, "Bash(git diff:*)"]
-      permission_mode: acceptEdits
-      max_turns: 9
-      command: /opt/claude
-"#;
-
-    fn claude(c: &Config, agent: &str) -> ClaudeCodeAdapter {
-        match &c.agents[agent].adapter {
-            Adapter::ClaudeCode(cc) => cc.clone(),
-            other => panic!("not a claude-code agent: {other:?}"),
-        }
-    }
-
     #[test]
-    fn a_claude_code_agent_defaults_to_read_only() {
-        let c = parse(CLAUDE_DOC, &p(), &env(&[])).unwrap();
-        let r = claude(&c, "reviewer");
-        assert_eq!(r.tools, CLAUDE_CODE_DEFAULT_TOOLS);
-        assert_eq!(r.command, "claude");
-        assert_eq!(r.permission_mode, "dontAsk");
-        assert_eq!(r.max_turns, CLAUDE_CODE_DEFAULT_MAX_TURNS);
-        assert!(!c.agents["reviewer"].can_change_files());
-        assert_eq!(c.agents["reviewer"].runs_on(), CLAUDE_CODE_AGENT);
-
-        let f = claude(&c, "fixer");
+    fn a_claude_code_agent_is_what_its_adapter_says() {
+        let doc = REFERENCE.replace(
+            "      tools: [Read, Grep, Glob]\n      permission_mode: dontAsk\n      max_turns: 30\n      command: claude",
+            "      tools: [Read, Edit, \"Bash(git diff:*)\"]\n      permission_mode: acceptEdits\n      max_turns: 9\n      command: /opt/claude",
+        );
+        let c = parse(&doc, &p(), &env(&[])).unwrap();
+        let f = claude(&c, "reviewer");
         assert_eq!(f.tools, ["Read", "Edit", "Bash(git diff:*)"]);
         assert_eq!(
             (f.permission_mode.as_str(), f.max_turns),
             ("acceptEdits", 9)
         );
         assert_eq!(f.command, "/opt/claude");
-        assert_eq!(c.agents["fixer"].max_seconds, 600);
-        assert!(c.agents["fixer"].can_change_files());
+        assert!(c.agents["reviewer"].can_change_files());
+        assert_eq!(c.agents["reviewer"].runs_on(), CLAUDE_CODE_AGENT);
+
+        // Read-only is what the config says, not something that is assumed.
+        let r = REFERENCE.replace("tools: [Read, Grep, Glob]", "tools: []");
+        let c = parse(&r, &p(), &env(&[])).unwrap();
+        assert!(!c.agents["reviewer"].has_tools());
     }
 
     #[test]
-    fn fields_of_the_other_adapter_type_are_refused() {
-        let doc = CLAUDE_DOC.replace(
-            "      model: sonnet\n",
-            "      model: sonnet\n      llm_backend: x\n      max_steps: 3\n",
-        );
+    fn a_claude_code_agent_takes_one_tool_per_entry_and_a_positive_turn_count() {
+        let doc = REFERENCE
+            .replace("[Read, Grep, Glob]", "[\"Read,Edit\", Grep]")
+            .replace("max_turns: 30", "max_turns: 0")
+            .replace("command: claude", "command: \" \"")
+            .replace("permission_mode: dontAsk", "permission_mode: \"\"");
         let joined = joined_problems(&doc);
-        assert!(
-            joined.contains(
-                "agents.reviewer.adapter: `llm_backend` does not apply to a claude-code agent"
-            ),
-            "{joined}"
-        );
-        assert!(
-            joined.contains("`max_steps` is not a field of adapter type 'claude-code'"),
-            "{joined}"
-        );
-
-        let oc = REFERENCE.replace(
-            "      tools: [read, edit, bash]\n",
-            "      tools: [read, edit, bash]\n      max_turns: 4\n",
-        );
-        assert!(
-            joined_problems(&oc).contains("`max_turns` is not a field of adapter type 'opencode'"),
-            "{}",
-            joined_problems(&oc)
-        );
+        for expected in [
+            "one Claude Code tool or rule per list entry",
+            "`max_turns` must be greater than 0",
+            "`command` is empty",
+            "`permission_mode` is empty",
+        ] {
+            assert!(joined.contains(expected), "{expected}: {joined}");
+        }
     }
 
     #[test]
-    fn a_claude_code_agent_takes_no_context_window_and_one_tool_per_entry() {
-        let doc = CLAUDE_DOC
-            .replace(
-                "    prompt: Reviews code.\n",
-                "    prompt: Reviews code.\n    context_window: 8000\n",
-            )
-            .replace("[Read, Edit, ", "[\"Read,Edit\", ");
-        let joined = joined_problems(&doc);
-        assert!(
-            joined.contains("Claude Code manages its own context"),
-            "{joined}"
-        );
-        assert!(
-            joined.contains("one Claude Code tool or rule per list entry"),
-            "{joined}"
-        );
-    }
-
-    #[test]
-    fn an_opencode_agent_defaults_to_read_only_and_checks_its_fields() {
+    fn an_opencode_agent_checks_its_fields() {
         let doc = r#"
 version: 1
+llm_backends: {}
 agents:
-  looker:
-    adapter: { type: opencode, model: opencode/big-pickle }
   doer:
     max_seconds: 600
+    max_concurrent: 1
     adapter:
       type: opencode
-      model: ollama/qwen3.5:9b
+      model: { type: provider, name: "ollama/qwen3.5:9b" }
       tools: [read, edit, "bash(git *)"]
       max_steps: 12
       command: /opt/opencode
 "#;
         let c = parse(doc, &p(), &env(&[])).unwrap();
-        let looker = opencode(&c, "looker");
-        assert_eq!(looker.tools, OPENCODE_DEFAULT_TOOLS);
-        assert_eq!(
-            (looker.command.as_str(), looker.max_steps),
-            ("opencode", OPENCODE_DEFAULT_MAX_STEPS)
-        );
-        assert_eq!(looker.llm_backend, None);
-        assert!(!c.agents["looker"].can_change_files());
         let doer = opencode(&c, "doer");
         assert_eq!(doer.tools, ["read", "edit", "bash(git *)"]);
         assert_eq!(doer.max_steps, 12);
+        assert_eq!(doer.command, "/opt/opencode");
         assert!(c.agents["doer"].can_change_files());
 
         let bad = r#"
 version: 1
+llm_backends: {}
 agents:
   x:
-    adapter: { type: opencode, model: big-pickle, tools: ["read,edit"], max_steps: 0 }
+    max_seconds: 60
+    max_concurrent: 1
+    adapter:
+      type: opencode
+      model: { type: provider, name: big-pickle }
+      tools: ["read,edit"]
+      max_steps: 0
+      command: opencode
 "#;
         let joined = joined_problems(bad);
         assert!(
             joined.contains("must be provider/model")
-                && joined.contains("or name an `llm_backend`"),
+                && joined.contains("or run on an LLM backend"),
             "{joined}"
         );
         assert!(
@@ -1404,33 +1487,39 @@ agents:
     fn on_an_llm_backend_the_model_is_the_endpoints_own_id() {
         // No provider prefix: Ensemble names the provider.
         let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
-        assert_eq!(opencode(&c, "planner").model, "qwen3-coder");
+        assert_eq!(opencode(&c, "planner").model_id(), "qwen3-coder");
     }
 
     #[test]
     fn an_unknown_adapter_type_lists_the_known_ones() {
         let doc = REFERENCE.replace("type: claude-code", "type: codex");
-        let joined = joined_problems(&doc);
+        let detail = refusal(&doc);
         assert!(
-            joined.contains("agents.reviewer.adapter: type 'codex' is unknown")
-                && joined.contains("claude-code, opencode"),
-            "{joined}"
+            detail.contains("agents.reviewer.adapter")
+                && detail.contains("unknown variant `codex`")
+                && detail.contains("claude-code")
+                && detail.contains("opencode"),
+            "{detail}"
         );
+    }
+
+    #[test]
+    fn max_concurrent_must_be_positive() {
+        let zero = REFERENCE.replacen("max_concurrent: 1", "max_concurrent: 0", 1);
+        assert!(joined_problems(&zero).contains("`max_concurrent` must be greater than 0"));
     }
 
     #[test]
     fn max_seconds_must_be_positive() {
-        let set = CLAUDE_DOC.replace("max_seconds: 600", "max_seconds: 60");
-        assert_eq!(
-            parse(&set, &p(), &env(&[])).unwrap().agents["fixer"].max_seconds,
-            60
-        );
-        let zero = CLAUDE_DOC.replace("max_seconds: 600", "max_seconds: 0");
+        let zero = REFERENCE.replace("max_seconds: 900", "max_seconds: 0");
         assert!(joined_problems(&zero).contains("`max_seconds` must be greater than 0"));
+        let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
+        assert_eq!(c.agents["coder"].max_seconds, 900);
     }
 
     #[test]
-    fn env_overrides_the_default_base_url() {
+    fn the_base_url_is_the_one_written_in_the_config() {
+        // No variable overrides it: the file is the whole truth.
         let c = parse(
             REFERENCE,
             &p(),
@@ -1439,26 +1528,7 @@ agents:
         .unwrap();
         match &c.llm_backends["openai-local"].settings {
             BackendSettings::OpenAiCompatible { base_url, .. } => {
-                assert_eq!(base_url, "http://192.168.1.9:9000/v1");
-            }
-        }
-        // The one without an override keeps its default.
-        match &c.llm_backends["openai-remote"].settings {
-            BackendSettings::OpenAiCompatible { base_url, .. } => {
-                assert_eq!(base_url, "http://10.10.10.5:8000/v1");
-            }
-        }
-    }
-
-    #[test]
-    fn an_empty_env_var_falls_through_to_the_default() {
-        // An exported-but-empty variable is the normal shape of "I meant to set
-        // this and did not". Treating "" as an override produces a request to
-        // the empty URL, which fails far from here.
-        let c = parse(REFERENCE, &p(), &env(&[("OPENAI_LOCAL_BASE_URL", "   ")])).unwrap();
-        match &c.llm_backends["openai-local"].settings {
-            BackendSettings::OpenAiCompatible { base_url, .. } => {
-                assert_eq!(base_url, "http://127.0.0.1:8000/v1")
+                assert_eq!(base_url, "http://127.0.0.1:8000/v1");
             }
         }
     }
@@ -1483,24 +1553,50 @@ agents:
     }
 
     #[test]
+    fn a_backend_may_name_no_key_at_all() {
+        let yaml = r#"
+version: 1
+llm_backends:
+  x: { type: openai-compatible-api, base_url: "http://127.0.0.1:1/v1", timeout_seconds: 5 }
+agents: {}
+"#;
+        let c = parse(yaml, &p(), &env(&[])).unwrap();
+        match &c.llm_backends["x"].settings {
+            BackendSettings::OpenAiCompatible { api_key, .. } => assert_eq!(*api_key, None),
+        }
+    }
+
+    #[test]
     fn an_inline_api_key_is_refused_by_name() {
         let yaml = r#"
 version: 1
 llm_backends:
   x:
     type: openai-compatible-api
-    base_url_env: X_URL
-    base_url_default: "http://127.0.0.1:1/v1"
+    base_url: "http://127.0.0.1:1/v1"
+    timeout_seconds: 5
     api_key: "sk-oops"
+agents: {}
 "#;
-        let err = parse(yaml, &p(), &env(&[])).unwrap_err();
-        let msg = err.to_string();
+        let detail = refusal(yaml);
         assert!(
-            msg.contains("api_key"),
-            "must name the offending key: {msg}"
+            detail.contains("api_key"),
+            "must name the offending key: {detail}"
         );
-        // And it must not be a silently-ignored field.
-        assert!(matches!(err, ConfigError::Syntax { .. }), "{err}");
+    }
+
+    #[test]
+    fn the_removed_url_settings_are_unknown() {
+        for key in [
+            "base_url_env: U",
+            "base_url_default: \"http://127.0.0.1:1/v1\"",
+        ] {
+            let yaml = format!(
+                "version: 1\nllm_backends:\n  x:\n    type: openai-compatible-api\n    base_url: \"http://127.0.0.1:1/v1\"\n    timeout_seconds: 5\n    {key}\nagents: {{}}\n"
+            );
+            let detail = refusal(&yaml);
+            assert!(detail.contains("unknown field"), "{detail}");
+        }
     }
 
     #[test]
@@ -1519,22 +1615,12 @@ llm_backends:
 version: 1
 llm_backends:
   x: { type: ollama }
+agents: {}
 "#;
-        let joined = joined_problems(yaml);
-        assert!(joined.contains("ollama"), "{joined}");
-        assert!(joined.contains(OPENAI_COMPATIBLE_API), "{joined}");
-    }
-
-    #[test]
-    fn an_unresolvable_base_url_names_the_variable_to_export() {
-        let yaml = r#"
-version: 1
-llm_backends:
-  remote: { type: openai-compatible-api, base_url_env: OPENAI_REMOTE_BASE_URL }
-"#;
-        let joined = joined_problems(yaml);
-        assert!(joined.contains("OPENAI_REMOTE_BASE_URL"), "{joined}");
-        assert!(joined.contains("Export"), "tells you the fix: {joined}");
+        let detail = refusal(yaml);
+        assert!(detail.contains("llm_backends.x"), "{detail}");
+        assert!(detail.contains("ollama"), "{detail}");
+        assert!(detail.contains(OPENAI_COMPATIBLE_API), "{detail}");
     }
 
     #[test]
@@ -1542,7 +1628,8 @@ llm_backends:
         let yaml = r#"
 version: 1
 llm_backends:
-  x: { type: openai-compatible-api, base_url_env: U, base_url_default: "127.0.0.1:8000/v1" }
+  x: { type: openai-compatible-api, base_url: "127.0.0.1:8000/v1", timeout_seconds: 5 }
+agents: {}
 "#;
         assert!(joined_problems(yaml).contains("http://"));
     }
@@ -1552,7 +1639,8 @@ llm_backends:
         let yaml = r#"
 version: 1
 llm_backends:
-  x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:8000/v1/" }
+  x: { type: openai-compatible-api, base_url: "http://127.0.0.1:8000/v1/", timeout_seconds: 5 }
+agents: {}
 "#;
         let c = parse(yaml, &p(), &env(&[])).unwrap();
         match &c.llm_backends["x"].settings {
@@ -1564,20 +1652,15 @@ llm_backends:
 
     #[test]
     fn an_unsupported_version_is_refused() {
-        let yaml = r#"
-version: 2
-llm_backends:
-  x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
-"#;
+        let yaml = "version: 2\nllm_backends: {}\nagents: {}\n";
         assert!(joined_problems(yaml).contains("version"));
     }
 
     #[test]
     fn a_typo_in_an_adapter_key_is_an_error_not_a_default() {
         let doc = REFERENCE.replace("      model: sonnet", "      modle: sonnet");
-        let err = parse(&doc, &p(), &env(&[])).unwrap_err();
-        assert!(matches!(err, ConfigError::Syntax { .. }), "{err}");
-        assert!(err.to_string().contains("modle"), "{err}");
+        let detail = refusal(&doc);
+        assert!(detail.contains("modle"), "{detail}");
     }
 
     #[test]
@@ -1585,16 +1668,20 @@ llm_backends:
         let yaml = r#"
 version: 9
 llm_backends:
-  x: { type: nonsense }
+  x: { type: openai-compatible-api, base_url: "nope", timeout_seconds: 0 }
 agents:
   r:
+    max_seconds: 0
+    max_concurrent: 1
     adapter:
       type: opencode
-      llm_backend: missing
-      model: ""
+      model: { type: llm_backend, backend: missing, name: "", context_window: 0 }
+      tools: []
+      max_steps: 1
+      command: opencode
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
-        assert!(problems.len() >= 4, "expected several, got: {problems:#?}");
+        assert!(problems.len() >= 6, "expected several, got: {problems:#?}");
     }
 
     #[test]
@@ -1602,7 +1689,8 @@ agents:
         let yaml = r#"
 version: 1
 llm_backends:
-  x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1", timeout_seconds: 0 }
+  x: { type: openai-compatible-api, base_url: "http://127.0.0.1:1/v1", timeout_seconds: 0 }
+agents: {}
 "#;
         assert!(joined_problems(yaml).contains("timeout_seconds"));
     }
@@ -1612,5 +1700,18 @@ llm_backends:
         let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
         assert_eq!(c.agent("coder").unwrap().name, "coder");
         assert!(c.agent("nope").is_none());
+    }
+
+    #[test]
+    fn a_prompt_is_optional_and_absent_means_none() {
+        let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
+        assert_eq!(c.agents["coder"].prompt, None);
+        let with = REFERENCE.replacen(
+            "  coder:\n    max_seconds: 900\n    max_concurrent: 1\n",
+            "  coder:\n    prompt: Writes code.\n    max_seconds: 900\n    max_concurrent: 1\n",
+            1,
+        );
+        let c = parse(&with, &p(), &env(&[])).unwrap();
+        assert_eq!(c.agents["coder"].prompt.as_deref(), Some("Writes code."));
     }
 }

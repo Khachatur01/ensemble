@@ -3,11 +3,13 @@
 # .ensemble/config.yaml — the agent team for this project, written by
 # `ensemble init`. API keys go in .env beside it, which git ignores.
 #
-# Every setting is here at least once, most of them at their default, so this
-# is a map of what can be set rather than a team to keep as it is: delete the
-# agents you do not want and change the rest. Check it with `ensemble check`,
-# see how an agent is started with `ensemble show <agent>`, and check that
-# everything it needs is there with `ensemble health`.
+# Nothing has a default value: every setting is written here, and one that is
+# missing is refused by name. Only two may be left out, because leaving them
+# out means "not used": an agent's `prompt` and a backend's `api_key_env`.
+# This file is a map of what can be set rather than a team to keep as it is:
+# delete the agents you do not want and change the rest. Check it with
+# `ensemble check`, see how an agent is started with `ensemble show <agent>`,
+# and check that everything it needs is there with `ensemble health`.
 #
 # Register Ensemble with your agent from this directory, which makes your
 # agent the manager of the team:
@@ -18,19 +20,19 @@ version: 1
 
 # ---------------------------------------------------------------------------
 # LLM backends: model endpoints, such as a local model server. An agent names
-# one with `llm_backend`, and Ensemble hands its CLI the endpoint and key for
-# each run, so they are set here and nowhere else.
+# one with a model of type `llm_backend`, and Ensemble hands its CLI the
+# endpoint and key for each run, so they are set here and nowhere else. `{}`
+# when there are none.
 # ---------------------------------------------------------------------------
 llm_backends:
   local:
     # Any POST /chat/completions endpoint: llama-server, vLLM, Ollama,
     # Unsloth, a hosted API.
     type: openai-compatible-api
-    # The NAME of the variable holding the base URL, not the URL itself.
-    base_url_env: OPENAI_LOCAL_BASE_URL
-    # Used when that variable is unset or empty. This is Ollama's.
-    base_url_default: "http://127.0.0.1:11434/v1"
+    # Where the endpoint is. This is Ollama's.
+    base_url: "http://127.0.0.1:11434/v1"
     # The NAME of the variable holding the API key. Keys never go in here.
+    # Leave it out when the endpoint wants none.
     api_key_env: OPENAI_LOCAL_API_KEY
     # Seconds one request may take.
     timeout_seconds: 600
@@ -43,27 +45,34 @@ agents:
   # The OpenCode CLI on a model from llm_backends.
   coder:
     # What it is for. The first line is what your agent sees in `agents`; the
-    # whole of it is the agent's system prompt.
+    # whole of it is the agent's system prompt. Leave it out for no system
+    # prompt.
     prompt: |
       You implement exactly what is asked, in the style of the surrounding
       code. Read the relevant files first, make the change, and report what
       you changed.
-    # Tokens of context the server really runs the model with. Required on an
-    # llm_backend, so OpenCode knows when to compact (Ollama:
-    # OLLAMA_CONTEXT_LENGTH).
-    context_window: 32768
     # Wall-clock limit for one delegation.
     max_seconds: 1800
+    # Most delegations to it that run at once; more wait for a free slot.
+    # 1 suits a model server that serves one request at a time.
+    max_concurrent: 1
     adapter:
       type: opencode
-      llm_backend: local
-      # The id the endpoint serves the model under, as its /models lists it.
-      model: qwen3.5:9b
+      # Where the model comes from: `llm_backend` for one an entry of
+      # llm_backends serves, `provider` for one OpenCode is already set up for.
+      model:
+        type: llm_backend
+        backend: local
+        # The id the endpoint serves the model under, as its /models lists it.
+        name: qwen3.5:9b
+        # Tokens of context the server really runs the model with, so OpenCode
+        # knows when to compact (Ollama: OLLAMA_CONTEXT_LENGTH).
+        context_window: 32768
       # OpenCode permissions, such as read, edit, bash or bash(git *);
       # everything else is denied.
       tools: [read, glob, grep, list, edit, bash]
       max_steps: 30
-      # The CLI, if it is not `opencode` on PATH.
+      # The CLI: `opencode` if it is on PATH.
       command: opencode
 
   # The OpenCode CLI on a provider OpenCode is already set up for.
@@ -71,12 +80,18 @@ agents:
     prompt: |
       You find where things are in the codebase and report file:line with a
       one-line note each. You do not edit.
+    max_seconds: 1800
+    max_concurrent: 1
     adapter:
       type: opencode
-      # provider/model, as `opencode models` lists it.
-      model: opencode/big-pickle
-      # This is the default: read-only.
+      model:
+        type: provider
+        # provider/model, as `opencode models` lists it.
+        name: opencode/big-pickle
+      # Read-only.
       tools: [read, glob, grep, list]
+      max_steps: 30
+      command: opencode
 
   # The Claude Code CLI, on your own subscription.
   reviewer:
@@ -84,15 +99,16 @@ agents:
       You review code for correctness and report findings as
       file:line — problem — fix. You do not rewrite the code.
     max_seconds: 1800
+    max_concurrent: 1
     adapter:
       type: claude-code
       # An alias (sonnet, opus, haiku) or a full model id.
       model: sonnet
       # Claude Code's own tools, one per entry, such as Read, Edit, Bash or
-      # Bash(git diff:*). This is the default: read-only.
+      # Bash(git diff:*). This is read-only.
       tools: [Read, Grep, Glob]
       # dontAsk denies anything not in tools instead of waiting for a person.
       permission_mode: dontAsk
       max_turns: 30
-      # The CLI, if it is not `claude` on PATH.
+      # The CLI: `claude` if it is on PATH.
       command: claude
