@@ -88,10 +88,12 @@ roles:
   coder:
     backend: openai-local
     model: qwen3-coder
-    tools: [read, glob, grep, edit, write, bash]
+    tools: [read, glob, grep, edit, write, bash, fetch]
     max_steps: 20
+    max_seconds: 1800     # wall-clock limit per delegation (the default)
     context_window: 16384 # tokens your server runs the model with (required)
     network: false        # bash may not open outbound TCP (the default)
+    readable: [~/.m2]     # more paths bash may read (optional)
 ```
 
 | tool | what it does |
@@ -102,11 +104,19 @@ roles:
 | `edit` | replace one exact, unique occurrence in a file |
 | `write` | create or replace a file |
 | `bash` | run a shell command in the project, sandboxed (below) |
+| `fetch` | read a public web page or text file as text (`web_fetch`) |
 
 The model is offered these tools, Ensemble runs the calls it makes, feeds the
 results back, and repeats until the model answers without asking for a tool or
 `max_steps` (default 20) model calls have been made. At the limit it gets one
 last call with no tools to report what it did and what is unfinished.
+
+A run also stops after `max_seconds` (default 1800), or when the caller cancels
+it (`notifications/cancelled`). It then returns what the model last said and
+what it changed, marked unfinished. The deadline also bounds each HTTP call and
+kills a running `bash` command. A refused connection, a 429 or a 5xx from the
+model server is retried twice (after 2 s, then 8 s) before the delegation
+fails, so a server that restarts mid-run does not lose the work.
 
 `context_window` is required for a role with tools: the tokens of context your
 server really runs the model with (Ollama: `OLLAMA_CONTEXT_LENGTH`, 4096 unless
@@ -132,12 +142,37 @@ a narrower pattern). Tokens are estimated at 4 bytes each, with no tokenizer.
   the command runs under Landlock: it can **write** only inside the project,
   `/tmp` and `/dev`, and it cannot open **outbound TCP** connections unless the
   role sets `network: true` (kernel 6.7+; older kernels cannot restrict the
-  network). It can still **read** any file your user can, including `~/.ssh` —
-  fencing reads would break compilers and package managers — so give `bash` only
-  to roles you trust that far. Without Landlock (other OSes, old kernels) the
-  tool refuses to run; there is no unconfined fallback.
+  network). It can **read** only the project, the system directories (`/nix`,
+  `/usr`, `/etc`, `/proc`, ...), the toolchain directories `~/.cargo`,
+  `~/.rustup`, `~/.npm` and `~/.nix-profile`, git's config, and paths the role
+  lists in `readable` (absolute or `~/`). The rest of your home, `~/.ssh`
+  included, is denied, and so is another process's environment under `/proc`.
+  A toolchain that keeps its cache elsewhere in the home needs that directory
+  in `readable`. Without Landlock (other OSes, old kernels) the tool refuses to
+  run; there is no unconfined fallback.
+- **`fetch` reaches only the public internet.** A host that resolves to
+  loopback, a private range or link-local (cloud metadata) is refused, and so
+  is a redirect to one, so it cannot reach your model server or router. HTML
+  is turned into plain text; binary content is refused. The URL itself can
+  still carry what the role has read to a public server: give `fetch` only as
+  far as you would let the role talk to the internet.
 - **Audited.** A delegation's result ends with how many steps and tool calls
-  the agent used.
+  the agent used, every file it added, modified or deleted, and the `bash`
+  commands it ran:
+
+  ```text
+  [coder ran as an agent: 6 step(s), 5 tool call(s)]
+  [files changed: src/lib.rs (modified), tests/new.rs (added)]
+  [commands run: cargo test]
+  ```
+
+  Edits and writes are recorded by name. What a `bash` command changed is found
+  by comparing the project before and after it (`.git`, `target` and
+  `node_modules` are not compared).
+- **Parallel.** Each delegation runs on its own thread, so the caller can send
+  several at once. They share the project: two agents editing the same file
+  will clash. When an agent with `bash` overlapped another delegation, its
+  result says some listed files may be the other run's changes.
 - **Think-only roles.** A role without `tools:` is one model call, text back.
 - **Backends.** Tools need `openai-compatible-api` (structured tool calls). A
   `claude-code-cli` role is already an agent with Claude Code's own tools, and
@@ -261,7 +296,8 @@ A **backend** is how a model is reached. A **role** is a member of the team,
 and assigning one to a different model is two words with nothing else to
 change. No model is hardcoded as planner, coder or reviewer, and the role names
 are yours. A role takes `backend`, `model`, and optionally `prompt`,
-`temperature`, `reasoning_effort` (`none` turns thinking off), `tools`, `max_steps` and `context_window`.
+`temperature`, `reasoning_effort` (`none` turns thinking off), `tools`, `max_steps`,
+`max_seconds`, `context_window`, `network` and `readable`.
 
 There is no `manager:` block. The agent that calls Ensemble is the manager; an
 old config that still has one is rejected with a message saying so.
@@ -307,7 +343,7 @@ ensemble: ensemble.yaml is invalid:
   - version: 4 is not supported; this build understands version 1
   - backends.x: type 'ollama' is unknown. Known types: claude-code-cli, openai-compatible-api.
   - roles.coder: backend 'opanai-local' is not defined. Defined backends: openai-local, x.
-  - roles.reviewer: tool 'bash' is unknown. Known tools: read, glob, grep, edit, write.
+  - roles.reviewer: tool 'shell' is unknown. Known tools: read, glob, grep, edit, write, bash, fetch.
 ```
 
 A typo'd key is an error, never a silent default.
@@ -392,15 +428,18 @@ None of the tests need the network, a model server or a Claude subscription.
 
 - **Delegation is single-shot.** A role cannot ask a clarifying question; the
   caller must pass everything in `task` and `context`.
-- **`bash` reads everything and is Linux-only.** See above. `grep` is a
-  literal-string search, not a regex.
+- **`bash` is Linux-only.** See above. `grep` is a literal-string search, not
+  a regex.
 - **Context is trimmed, not summarised.** Old tool output is replaced by a note
   to stay within `context_window`; the agent loses that detail.
 - **Weak models can ignore tools.** See above.
 - **Claude-backed roles return prose, never tool calls.** Right for a planner or
   a reviewer; they cannot run Ensemble's agent loop.
-- **No retry or concurrency cap.** Nothing stops a calling agent delegating to a
-  Claude-backed role in a loop and spending the subscription limit.
+- **No concurrency cap.** Nothing stops a calling agent delegating to a
+  Claude-backed role in a loop, or many at once, and spending the subscription
+  limit.
+- **Cancelling cannot interrupt a model call already in flight.** The run stops
+  when that call returns; `max_seconds` bounds how long that can be.
 - **The project directory is fixed when the server starts.** The working
   directory of the process (or `--dir`). It cannot vary per call.
 - **Process-group kill is Unix-only.** Elsewhere a timeout still returns on
