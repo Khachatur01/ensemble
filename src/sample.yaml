@@ -118,6 +118,25 @@ agents:
       max_steps: 30
       command: opencode
 
+  # A light agent: one request to a model from llm_backends. No CLI and no
+  # tools, so it reads and changes nothing and answers from what it is given:
+  # cheap work such as summarising, classifying or drafting.
+  summariser:
+    prompt: |
+      You summarise what you are given in five bullet points or fewer.
+    max_seconds: 600
+    max_concurrent: 1
+    isolation: shared
+    budget:
+      type: unlimited
+    adapter:
+      type: llm
+      backend: local
+      # The id the endpoint serves the model under, as its /models lists it.
+      model: qwen3.5:9b
+      # Most tokens of answer; an answer cut off there is marked unfinished.
+      max_tokens: 1000
+
   # The Claude Code CLI, on your own subscription.
   reviewer:
     prompt: |

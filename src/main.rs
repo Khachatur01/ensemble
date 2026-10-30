@@ -452,6 +452,20 @@ fn cmd_show(config: &Config, args: &Args) -> Result<ExitCode, String> {
             let argv = claude_code::arguments(agent, cc, TASK);
             println!("{}", command_line(&cc.command, &argv));
         }
+        Adapter::Llm(la) => {
+            let url = match config.llm_backends.get(&la.backend).map(|b| &b.settings) {
+                Some(config::BackendSettings::OpenAiCompatible { base_url, .. }) => {
+                    base_url.clone()
+                }
+                None => format!("<undefined backend {}>", la.backend),
+            };
+            println!("POST {url}/chat/completions");
+            let body = ensemble::external::llm::request(agent, la, TASK, None);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&body).map_err(|e| e.to_string())?
+            );
+        }
         Adapter::OpenCode(oc) => {
             let backend = oc.llm_backend().and_then(|b| config.llm_backends.get(b));
             let argv = opencode::arguments(agent, oc, backend, TASK);

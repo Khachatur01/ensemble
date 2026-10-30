@@ -188,6 +188,9 @@
             },
             {
               "$ref": "#/definitions/opencode_adapter"
+            },
+            {
+              "$ref": "#/definitions/llm_adapter"
             }
           ]
         }
@@ -328,6 +331,37 @@
           "description": "The opencode binary: `opencode` if it is on PATH.",
           "type": "string",
           "minLength": 1
+        }
+      }
+    },
+    "llm_adapter": {
+      "type": "object",
+      "required": [
+        "type",
+        "backend",
+        "model",
+        "max_tokens"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "llm: a light agent, one chat request to an LLM backend with the agent's prompt as the system prompt. No CLI and no tools: it reads and changes nothing, and answers from the task and its context. For cheap work such as summarising, classifying or drafting.",
+          "const": "llm"
+        },
+        "backend": {
+          "description": "Name of a backend under `llm_backends`.",
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "description": "The model id the endpoint serves, as its /models lists it.",
+          "type": "string",
+          "minLength": 1
+        },
+        "max_tokens": {
+          "description": "Most tokens of answer; an answer cut off there is marked unfinished.",
+          "type": "integer",
+          "minimum": 1
         }
       }
     },

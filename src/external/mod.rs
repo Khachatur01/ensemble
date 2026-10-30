@@ -3,6 +3,7 @@
 
 pub mod claude_code;
 pub mod gate;
+pub mod llm;
 pub mod opencode;
 mod process;
 

@@ -1,6 +1,7 @@
 //! Asking an LLM backend which models it serves.
 //!
-//! Ensemble does not call models itself; the agent's harness does. This is
+//! An agent's harness calls its model; only a light `llm` agent is a request
+//! Ensemble makes itself, in `external::llm`. This is
 //! only the health check: `GET /models` is the cheapest request that proves
 //! the server is up and the key is accepted, it spends no tokens, and its
 //! answer says whether the model an agent names is really there.

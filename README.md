@@ -7,15 +7,17 @@ CLI you already have, with an adapter that says how to start it. Your own agent
 (Claude Code, OpenCode, anything that speaks MCP) is the manager. It sees the
 team as tools and delegates to an agent by name.
 
-Ensemble runs no model and no agent loop of its own. It starts the agent's CLI
-headless in the project with the task, reads what it does as it works, and
-returns the answer with what it changed. Two adapters ship:
+Ensemble runs no agent loop of its own. It starts the agent's CLI headless in
+the project with the task, reads what it does as it works, and returns the
+answer with what it changed. Three adapters ship:
 
 - **`claude-code`**, the Claude Code CLI, on your own subscription, with the
   tools you allow it.
 - **`opencode`**, the OpenCode CLI, with the tools you allow it, on any
   provider OpenCode is set up for, or on a model server of yours that you
   define once in Ensemble's config.
+- **`llm`**, a light agent: one chat request to a model server of yours, with
+  no CLI and no tools, for cheap work that needs no files.
 
 A team can mix them, and your agent delegates to any of them the same way.
 Codex is meant to become a further adapter type.
@@ -281,6 +283,34 @@ OPENCODE_CONFIG_CONTENT:
 
 Your own OpenCode configuration (providers, models, the project's
 `opencode.json`) still applies; the agent and provider are added to it.
+
+### The `llm` adapter
+
+A light agent: no CLI, no tools, no loop. The task (after its context) and the
+agent's prompt (as the system prompt) go to an LLM backend as one
+`/chat/completions` request, and the answer comes back. It reads and changes
+nothing, so it suits cheap work on what it is given: summarising a log,
+classifying findings, drafting a commit message, on a small local model.
+
+```yaml
+agents:
+  summariser:
+    prompt: You summarise what you are given in five bullet points or fewer.
+    max_seconds: 600
+    max_concurrent: 1
+    isolation: shared
+    budget:
+      type: unlimited
+    adapter:
+      type: llm
+      backend: local         # one of llm_backends
+      model: qwen3.5:9b      # the id the server serves
+      max_tokens: 1000       # an answer cut off here is marked unfinished
+```
+
+The request waits up to the backend's `timeout_seconds`, and the agent's
+`max_seconds` or a cancel ends the wait sooner. `ensemble show <agent>` prints
+the request; `health` checks the backend serves the model.
 
 ### The `claude-code` adapter
 
@@ -602,7 +632,7 @@ current directory), `--context <text>` (for `run`).
 | --- | --- |
 | `src/config.rs` | `.ensemble/config.yaml` and `.env`: load, resolve the environment, validate |
 | `src/router.rs` | agents to adapters; the ensemble itself, and `health` |
-| `src/external/` | the `claude-code` and `opencode` adapters: each CLI as a subprocess, its JSON events read as it goes |
+| `src/external/` | the `claude-code` and `opencode` adapters (each CLI as a subprocess, its JSON events read as it goes), the `llm` adapter (one chat request), and gates |
 | `src/workspace.rs` | the project directory, and what a run changed in it |
 | `src/llm_backend.rs` | asking a model server which models it serves, for `health` |
 | `src/port.rs` | the shared error type |
@@ -649,7 +679,7 @@ scripts stand in for the CLIs.
 
 ## Limitations
 
-- **Two adapters so far.** `claude-code` and `opencode`. Codex is planned, not
+- **Three adapters so far.** `claude-code`, `opencode` and `llm`. Codex is planned, not
   built.
 - **Only OpenCode runs on an LLM backend.** Claude Code needs the Anthropic API.
 - **Only a task can ask.** A delegation is single-shot: the caller must pass

@@ -976,3 +976,41 @@ fn check_reports_a_task_that_can_never_start() {
         "{text}"
     );
 }
+
+#[test]
+fn a_light_agent_is_one_request_to_its_backend() {
+    let s = Scratch::new("llm-agent");
+    let url = models_stub(
+        r#"{"data":[{"id":"small"},{"id":"qwen3-coder"}],"choices":[{"message":{"content":"three bullets"},"finish_reason":"stop"}]}"#,
+    );
+    let config = format!(
+        "{}  summariser:\n    prompt: You summarise.\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: llm\n      backend: openai-local\n      model: small\n      max_tokens: 300\n",
+        config_yaml("opencode", &url)
+    );
+    s.write(".ensemble/config.yaml", &config);
+
+    let out = ensemble(&s, &["run", "summariser", "sum", "it", "up"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).starts_with("three bullets"),
+        "{}",
+        stdout_of(&out)
+    );
+
+    let out = ensemble(&s, &["show", "summariser"]);
+    let text = stdout_of(&out);
+    assert!(
+        text.starts_with(&format!("POST {url}/chat/completions\n")),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"max_tokens\": 300") && text.contains("You summarise."),
+        "{text}"
+    );
+
+    let check = stdout_of(&ensemble(&s, &["check"]));
+    assert!(
+        check.contains("summariser  ->  llm on openai-local / small"),
+        "{check}"
+    );
+}

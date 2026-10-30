@@ -174,6 +174,17 @@ impl Ensemble {
             Adapter::ClaudeCode(cc) => self.run_tracked(agent, workdir, |dir| {
                 crate::external::claude_code::run(agent, cc, task, context, dir, progress, cancel)
             }),
+            Adapter::Llm(la) => {
+                let backend = self.config.llm_backends.get(&la.backend).ok_or_else(|| {
+                    RouteError::Agent(Error::Unsupported {
+                        backend: la.backend.clone(),
+                        detail: format!("LLM backend for agent '{name}' is not defined"),
+                    })
+                })?;
+                self.run_tracked(agent, workdir, |_| {
+                    crate::external::llm::run(agent, la, backend, task, context, progress, cancel)
+                })
+            }
             Adapter::OpenCode(oc) => {
                 let backend = oc
                     .llm_backend()
@@ -248,6 +259,8 @@ impl Ensemble {
             match &a.adapter {
                 Adapter::ClaudeCode(cc) => commands.push((CLAUDE_CODE_AGENT, &cc.command)),
                 Adapter::OpenCode(oc) => commands.push((OPENCODE_AGENT, &oc.command)),
+                // No program: its backend, checked below, is all it needs.
+                Adapter::Llm(_) => {}
             }
             if let Some(b) = a.llm_backend() {
                 backends.entry(b).or_default().push(a.model());

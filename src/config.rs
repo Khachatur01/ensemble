@@ -47,6 +47,8 @@ pub const OPENAI_COMPATIBLE_API: &str = "openai-compatible-api";
 /// agents of their own that Ensemble starts in the project.
 pub const CLAUDE_CODE_AGENT: &str = "claude-code";
 pub const OPENCODE_AGENT: &str = "opencode";
+/// The light adapter: one request to an LLM backend, no CLI and no tools.
+pub const LLM_AGENT: &str = "llm";
 
 /// Where an OpenCode agent's model comes from.
 pub const PROVIDER_MODEL: &str = "provider";
@@ -161,6 +163,22 @@ enum RawAdapter {
     ClaudeCode(RawClaudeCodeAdapter),
     #[serde(rename = "opencode")]
     OpenCode(RawOpenCodeAdapter),
+    #[serde(rename = "llm")]
+    Llm(RawLlmAdapter),
+}
+
+/// A light agent: the task, and the agent's prompt as the system prompt,
+/// sent to an LLM backend as one chat request. It has no tools, so it reads
+/// and changes nothing; it answers from what it is given.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLlmAdapter {
+    /// Which of `llm_backends` serves the model.
+    backend: String,
+    /// The id the endpoint serves the model under.
+    model: String,
+    /// Most tokens of answer.
+    max_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -293,6 +311,7 @@ pub enum Budget {
 pub enum Adapter {
     ClaudeCode(ClaudeCodeAdapter),
     OpenCode(OpenCodeAdapter),
+    Llm(LlmAdapter),
 }
 
 /// The Claude Code CLI, run headless in the project.
@@ -315,6 +334,14 @@ pub struct OpenCodeAdapter {
     /// `name(pattern)` allows only matching uses, such as `bash(git *)`.
     pub tools: Vec<String>,
     pub max_steps: u32,
+}
+
+/// One chat request to an LLM backend: a light agent with no tools.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmAdapter {
+    pub backend: String,
+    pub model: String,
+    pub max_tokens: u32,
 }
 
 /// Where an OpenCode agent's model comes from.
@@ -363,6 +390,7 @@ impl AgentConfig {
         match self.adapter {
             Adapter::ClaudeCode(_) => CLAUDE_CODE_AGENT,
             Adapter::OpenCode(_) => OPENCODE_AGENT,
+            Adapter::Llm(_) => LLM_AGENT,
         }
     }
 
@@ -370,6 +398,7 @@ impl AgentConfig {
         match &self.adapter {
             Adapter::ClaudeCode(c) => &c.model,
             Adapter::OpenCode(o) => o.model_id(),
+            Adapter::Llm(l) => &l.model,
         }
     }
 
@@ -378,6 +407,7 @@ impl AgentConfig {
         match &self.adapter {
             Adapter::ClaudeCode(_) => None,
             Adapter::OpenCode(o) => o.llm_backend(),
+            Adapter::Llm(l) => Some(&l.backend),
         }
     }
 
@@ -385,7 +415,7 @@ impl AgentConfig {
     /// LLM backend.
     pub fn context_window(&self) -> Option<u32> {
         match &self.adapter {
-            Adapter::ClaudeCode(_) => None,
+            Adapter::ClaudeCode(_) | Adapter::Llm(_) => None,
             Adapter::OpenCode(o) => o.context_window(),
         }
     }
@@ -407,6 +437,7 @@ impl AgentConfig {
         match &self.adapter {
             Adapter::ClaudeCode(c) => c.tools.iter().any(|t| claude_tool_writes(t)),
             Adapter::OpenCode(o) => o.tools.iter().any(|t| opencode_tool_writes(t)),
+            Adapter::Llm(_) => false,
         }
     }
 
@@ -415,6 +446,7 @@ impl AgentConfig {
         match &self.adapter {
             Adapter::ClaudeCode(c) => c.tools.iter().map(String::as_str).collect(),
             Adapter::OpenCode(o) => o.tools.iter().map(String::as_str).collect(),
+            Adapter::Llm(_) => Vec::new(),
         }
     }
 }
@@ -763,6 +795,9 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             RawAdapter::OpenCode(o) => {
                 Adapter::OpenCode(opencode_adapter(&at, o, &raw.llm_backends, &mut problems))
             }
+            RawAdapter::Llm(l) => {
+                Adapter::Llm(llm_adapter(&at, l, &raw.llm_backends, &mut problems))
+            }
         };
         agents.insert(
             name.clone(),
@@ -802,6 +837,45 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             problems,
         })
     }
+}
+
+fn llm_adapter(
+    at: &str,
+    ad: &RawLlmAdapter,
+    declared: &BTreeMap<String, RawLlmBackend>,
+    problems: &mut Vec<String>,
+) -> LlmAdapter {
+    if !declared.contains_key(&ad.backend) {
+        problems.push(undefined_backend(at, &ad.backend, declared));
+    }
+    if ad.model.trim().is_empty() {
+        problems.push(format!("{at}: `model` is empty"));
+    }
+    if ad.max_tokens == 0 {
+        problems.push(format!("{at}: `max_tokens` must be greater than 0"));
+    }
+    LlmAdapter {
+        backend: ad.backend.clone(),
+        model: ad.model.clone(),
+        max_tokens: ad.max_tokens,
+    }
+}
+
+/// An adapter names a backend `llm_backends` does not have.
+fn undefined_backend(
+    at: &str,
+    backend: &str,
+    declared: &BTreeMap<String, RawLlmBackend>,
+) -> String {
+    let known: Vec<&str> = declared.keys().map(String::as_str).collect();
+    format!(
+        "{at}: LLM backend '{backend}' is not defined. Defined LLM backends: {}.",
+        if known.is_empty() {
+            "(none)".to_string()
+        } else {
+            known.join(", ")
+        }
+    )
 }
 
 fn opencode_adapter(
@@ -844,16 +918,7 @@ fn opencode_adapter(
         }
         RawOpenCodeModel::LlmBackend(b) => {
             if !declared.contains_key(&b.backend) {
-                let known: Vec<&str> = declared.keys().map(String::as_str).collect();
-                problems.push(format!(
-                    "{at}: LLM backend '{}' is not defined. Defined LLM backends: {}.",
-                    b.backend,
-                    if known.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        known.join(", ")
-                    }
-                ));
+                problems.push(undefined_backend(at, &b.backend, declared));
             }
             // On a backend the model is the id the endpoint serves; Ensemble
             // names the provider.
@@ -1351,6 +1416,11 @@ agents:
                 "opencode provider model",
             ),
             (
+                "llm_adapter",
+                accepted_keys::<RawLlmAdapter>(),
+                "llm adapter",
+            ),
+            (
                 "opencode_llm_backend_model",
                 accepted_keys::<RawBackendModel>(),
                 "opencode llm_backend model",
@@ -1383,6 +1453,7 @@ agents:
             ("claude_code_adapter", vec![]),
             ("opencode_adapter", vec![]),
             ("opencode_provider_model", vec![]),
+            ("llm_adapter", vec![]),
             ("opencode_llm_backend_model", vec![]),
         ] {
             assert_eq!(schema_required(&defs[def]), optional(def, &keys), "{def}");
@@ -1399,6 +1470,7 @@ agents:
         assert_eq!(tag("openai_compatible_api_backend"), OPENAI_COMPATIBLE_API);
         assert_eq!(tag("claude_code_adapter"), CLAUDE_CODE_AGENT);
         assert_eq!(tag("opencode_adapter"), OPENCODE_AGENT);
+        assert_eq!(tag("llm_adapter"), LLM_AGENT);
         assert_eq!(tag("opencode_provider_model"), PROVIDER_MODEL);
         assert_eq!(tag("opencode_llm_backend_model"), LLM_BACKEND_MODEL);
         assert_eq!(schema["properties"]["version"]["const"], SUPPORTED_VERSION);
@@ -1462,7 +1534,7 @@ agents:
     fn the_sample_loads_and_sets_every_setting_the_schema_has() {
         let c = parse(SAMPLE, &p(), &env(&[])).expect("the sample is a valid config");
         let kinds: Vec<&str> = c.agents.values().map(|a| a.kind()).collect();
-        for kind in [CLAUDE_CODE_AGENT, OPENCODE_AGENT] {
+        for kind in [CLAUDE_CODE_AGENT, OPENCODE_AGENT, LLM_AGENT] {
             assert!(kinds.contains(&kind), "the sample has no {kind} agent");
         }
         assert!(
@@ -1518,6 +1590,7 @@ agents:
             ("budget_per_hour", budgets("per_hour")),
             ("claude_code_adapter", adapters(CLAUDE_CODE_AGENT)),
             ("opencode_adapter", adapters(OPENCODE_AGENT)),
+            ("llm_adapter", adapters(LLM_AGENT)),
             ("opencode_provider_model", models(PROVIDER_MODEL)),
             ("opencode_llm_backend_model", models(LLM_BACKEND_MODEL)),
         ] {
@@ -1690,6 +1763,39 @@ agents:
             "{}",
             refusal(&missing)
         );
+    }
+
+    #[test]
+    fn an_llm_agent_is_one_request_to_a_defined_backend() {
+        let doc = format!(
+            "{REFERENCE}  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: llm\n      backend: openai-local\n      model: small\n      max_tokens: 400\n"
+        );
+        let c = parse(&doc, &p(), &env(&[])).unwrap();
+        let a = &c.agents["summariser"];
+        assert_eq!(
+            (a.kind(), a.model(), a.llm_backend()),
+            (LLM_AGENT, "small", Some("openai-local"))
+        );
+        assert_eq!(a.runs_on(), "llm on openai-local");
+        assert!(!a.has_tools() && !a.can_change_files());
+        let bad = doc.replace(
+            "backend: openai-local\n      model: small\n      max_tokens: 400",
+            "backend: nowhere\n      model: small\n      max_tokens: 0",
+        );
+        let joined = joined_problems(&bad);
+        assert!(
+            joined.contains("LLM backend 'nowhere' is not defined"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("`max_tokens` must be greater than 0"),
+            "{joined}"
+        );
+        let tools = doc.replace(
+            "      max_tokens: 400\n",
+            "      max_tokens: 400\n      tools: [read]\n",
+        );
+        assert!(refusal(&tools).contains("tools"));
     }
 
     #[test]
