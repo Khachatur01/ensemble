@@ -487,11 +487,17 @@ impl ModelPort for OpenAiAdapter {
 
         let url = self.endpoint("chat/completions");
         let body = request_body(request);
+        let Some(timeout) = request.time_left(self.timeout) else {
+            return Err(Error::Timeout {
+                backend: self.name.clone(),
+                seconds: 0,
+            });
+        };
 
         let resp = self
             .http
-            .post_json(&url, self.api_key.as_deref(), &body, self.timeout)
-            .map_err(|detail| classify_transport(&self.name, detail, self.timeout))?;
+            .post_json(&url, self.api_key.as_deref(), &body, timeout)
+            .map_err(|detail| classify_transport(&self.name, detail, timeout))?;
 
         if !(200..300).contains(&resp.status) {
             return Err(api_error(&self.name, resp.status, &resp.body));
@@ -608,6 +614,16 @@ mod tests {
                 None => Err("no scripted reply".into()),
             }
         }
+    }
+
+    #[test]
+    fn a_passed_deadline_is_a_timeout_without_a_request() {
+        let http = FakeHttp::ok(GOOD);
+        let mut req = Request::new("m", vec![Message::user("hi")]);
+        req.deadline = Some(std::time::Instant::now() - Duration::from_secs(1));
+        let err = adapter(http.clone(), None).complete(&req).unwrap_err();
+        assert!(matches!(err, Error::Timeout { .. }), "{err}");
+        assert!(http.posts.lock().unwrap().is_empty());
     }
 
     fn backend(api_key: Option<&str>) -> Backend {

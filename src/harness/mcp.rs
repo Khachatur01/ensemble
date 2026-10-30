@@ -23,8 +23,11 @@
 use super::delegation;
 use crate::router::Ensemble;
 use serde_json::{Value, json};
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 pub const SERVER_NAME: &str = "ensemble";
@@ -96,15 +99,17 @@ fn log_message(text: &str) -> Value {
 /// notifications: a notification carries no id, and answering one is a protocol
 /// violation that some clients treat as fatal.
 pub fn handle(ensemble: &Ensemble, request: &Value) -> Option<Value> {
-    handle_reporting(ensemble, request, &|_| {})
+    handle_reporting(ensemble, request, &|_| {}, &AtomicBool::new(false))
 }
 
 /// [`handle`], with `notify` called for each notification to send to the client
-/// before the reply, such as what a delegated agent is doing.
+/// before the reply, such as what a delegated agent is doing. Setting `cancel`
+/// stops a delegation at its next step.
 pub fn handle_reporting(
     ensemble: &Ensemble,
     request: &Value,
     notify: &dyn Fn(Value),
+    cancel: &AtomicBool,
 ) -> Option<Value> {
     let id = request.get("id").cloned();
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
@@ -145,11 +150,17 @@ pub fn handle_reporting(
                 .or_else(|| id.clone())
                 .unwrap_or_else(|| json!("ensemble"));
             let count = Cell::new(0u64);
-            let result = delegation::call_reporting(ensemble, name, &args, &|line| {
-                count.set(count.get() + 1);
-                notify(progress_message(&token, count.get(), line));
-                notify(log_message(line));
-            });
+            let result = delegation::call_reporting(
+                ensemble,
+                name,
+                &args,
+                &|line| {
+                    count.set(count.get() + 1);
+                    notify(progress_message(&token, count.get(), line));
+                    notify(log_message(line));
+                },
+                cancel,
+            );
             reply(json!({
                 "content": [{ "type": "text", "text": result.text }],
                 "isError": result.is_error
@@ -178,53 +189,103 @@ pub fn handle_reporting(
 }
 
 /// Run the server until stdin closes.
-pub fn serve(ensemble: &Ensemble, input: impl BufRead, output: impl Write) -> std::io::Result<()> {
-    let output = RefCell::new(output);
-    let min_level = Cell::new(rank(PROGRESS_LEVEL).unwrap_or(0));
+///
+/// Each `tools/call` runs on its own thread, so the caller can delegate to
+/// several roles at once and still get `ping` and `tools/list` answered while
+/// they work. `notifications/cancelled` stops the named call at its next step,
+/// and it gets no reply: the client has stopped waiting for one. When stdin
+/// closes, calls still running are finished before this returns.
+pub fn serve<W: Write + Send>(
+    ensemble: &Ensemble,
+    input: impl BufRead,
+    output: W,
+) -> std::io::Result<()> {
+    let output = Mutex::new(output);
+    let min_level = AtomicUsize::new(rank(PROGRESS_LEVEL).unwrap_or(0));
+    // Running calls by request id, so a cancellation can find its call.
+    let running: Mutex<HashMap<String, Arc<AtomicBool>>> = Mutex::new(HashMap::new());
     // Flush per message. A buffered reply is a reply the harness is still
     // waiting for, and it looks exactly like a hung server.
     let send = |message: &Value| -> std::io::Result<()> {
-        let mut out = output.borrow_mut();
+        let mut out = output.lock().unwrap_or_else(|e| e.into_inner());
         writeln!(out, "{message}")?;
         out.flush()
     };
-    for line in input.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+    let notify = |n: Value| {
+        // The level only filters log messages; progress is not one.
+        let wanted = n["params"]["level"].as_str().and_then(rank);
+        if wanted.is_none_or(|w| w >= min_level.load(Ordering::Relaxed)) {
+            // A write that fails here fails again on the next reply, which
+            // ends the session with the error.
+            let _ = send(&n);
         }
-        let response = match serde_json::from_str::<Value>(&line) {
-            Ok(request) => {
-                if request.get("method").and_then(Value::as_str) == Some("logging/setLevel")
-                    && let Some(level) = request
-                        .get("params")
+    };
+    let (send, notify, running) = (&send, &notify, &running);
+
+    std::thread::scope(|scope| {
+        for line in input.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let request = match serde_json::from_str::<Value>(&line) {
+                Ok(request) => request,
+                Err(e) => {
+                    send(&json!({
+                        "jsonrpc": "2.0",
+                        "id": Value::Null,
+                        "error": { "code": -32700, "message": format!("parse error: {e}") }
+                    }))?;
+                    continue;
+                }
+            };
+            let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+            let params = request.get("params");
+            match method {
+                "logging/setLevel" => {
+                    if let Some(level) = params
                         .and_then(|p| p.get("level"))
                         .and_then(Value::as_str)
                         .and_then(rank)
-                {
-                    min_level.set(level);
-                }
-                handle_reporting(ensemble, &request, &|n| {
-                    // The level only filters log messages; progress is not one.
-                    let wanted = n["params"]["level"].as_str().and_then(rank);
-                    if wanted.is_none_or(|w| w >= min_level.get()) {
-                        // A write that fails here fails again on the reply,
-                        // which ends the session with the error.
-                        let _ = send(&n);
+                    {
+                        min_level.store(level, Ordering::Relaxed);
                     }
-                })
+                }
+                "notifications/cancelled" => {
+                    if let Some(id) = params.and_then(|p| p.get("requestId"))
+                        && let Some(flag) = running.lock().unwrap().get(&id.to_string())
+                    {
+                        flag.store(true, Ordering::Relaxed);
+                    }
+                    continue;
+                }
+                "tools/call" if request.get("id").is_some_and(|id| !id.is_null()) => {
+                    let key = request["id"].to_string();
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    running.lock().unwrap().insert(key.clone(), cancel.clone());
+                    scope.spawn(move || {
+                        let response = handle_reporting(ensemble, &request, notify, &cancel);
+                        running.lock().unwrap().remove(&key);
+                        if !cancel.load(Ordering::Relaxed)
+                            && let Some(response) = response
+                        {
+                            // A failed write here means the client is gone;
+                            // the reading side finds out on its own.
+                            let _ = send(&response);
+                        }
+                    });
+                    continue;
+                }
+                _ => {}
             }
-            Err(e) => Some(json!({
-                "jsonrpc": "2.0",
-                "id": Value::Null,
-                "error": { "code": -32700, "message": format!("parse error: {e}") }
-            })),
-        };
-        if let Some(response) = response {
-            send(&response)?;
+            if let Some(response) =
+                handle_reporting(ensemble, &request, notify, &AtomicBool::new(false))
+            {
+                send(&response)?;
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -472,6 +533,154 @@ roles:
         assert_eq!(out[0]["id"], 1, "setLevel is answered");
         assert!(out.iter().all(|m| m["method"] != "notifications/message"));
         assert!(out.iter().any(|m| m["method"] == "notifications/progress"));
+    }
+
+    /// Answers once `want` calls are waiting at the same time ("met"), or
+    /// after five seconds alone ("alone"). Calls handled one at a time can
+    /// never meet.
+    struct Meeting {
+        waiting: Mutex<usize>,
+        arrived: std::sync::Condvar,
+        want: usize,
+    }
+
+    impl ModelPort for Meeting {
+        fn name(&self) -> &str {
+            "local"
+        }
+        fn type_id(&self) -> &'static str {
+            "fake"
+        }
+        fn capabilities(&self) -> crate::port::Capabilities {
+            crate::port::Capabilities { tool_calling: true }
+        }
+        fn complete(
+            &self,
+            r: &crate::port::Request,
+        ) -> Result<crate::port::Response, crate::port::Error> {
+            let mut n = self.waiting.lock().unwrap();
+            *n += 1;
+            self.arrived.notify_all();
+            let (_n, wait) = self
+                .arrived
+                .wait_timeout_while(n, std::time::Duration::from_secs(5), |n| *n < self.want)
+                .unwrap();
+            Ok(crate::port::Response {
+                text: if wait.timed_out() { "alone" } else { "met" }.into(),
+                tool_calls: Vec::new(),
+                model: r.model.clone(),
+                usage: Default::default(),
+                finish_reason: Some("stop".into()),
+            })
+        }
+        fn health(&self) -> Result<(), crate::port::Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn delegations_run_at_the_same_time() {
+        let meeting = Arc::new(Meeting {
+            waiting: Mutex::new(0),
+            arrived: std::sync::Condvar::new(),
+            want: 2,
+        });
+        let e = ensemble_with_port(meeting);
+        let call = |id: u32| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"delegate","arguments":{{"role":"coder","task":"t"}}}}}}"#
+            )
+        };
+        let out = served(&e, &format!("{}\n{}\n", call(1), call(2)));
+        let mut replies: Vec<(u64, &str)> = out
+            .iter()
+            .filter(|m| m.get("id").is_some())
+            .map(|m| {
+                (
+                    m["id"].as_u64().unwrap(),
+                    m["result"]["content"][0]["text"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        replies.sort();
+        assert_eq!(replies, vec![(1, "met"), (2, "met")]);
+    }
+
+    fn ensemble_with_port(local: Arc<dyn ModelPort>) -> Ensemble {
+        let cfg = config::parse(
+            YAML,
+            std::path::Path::new("ensemble.yaml"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
+        ports.insert("local".into(), local);
+        ports.insert("claude".into(), Arc::new(FakePort::ok("claude", "r")));
+        Ensemble::with_ports(cfg, ports, None)
+    }
+
+    /// A [`FakePort`] that takes its time over every answer.
+    struct Slow(FakePort);
+
+    impl ModelPort for Slow {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        fn type_id(&self) -> &'static str {
+            "fake"
+        }
+        fn capabilities(&self) -> crate::port::Capabilities {
+            self.0.capabilities()
+        }
+        fn complete(
+            &self,
+            r: &crate::port::Request,
+        ) -> Result<crate::port::Response, crate::port::Error> {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            self.0.complete(r)
+        }
+        fn health(&self) -> Result<(), crate::port::Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_cancelled_delegation_stops_and_gets_no_reply() {
+        let yaml = YAML.replace(
+            "  reviewer:",
+            "  scout:\n    backend: local\n    model: m\n    tools: [glob]\n    context_window: 8000\n  reviewer:",
+        );
+        let cfg = config::parse(
+            &yaml,
+            std::path::Path::new("ensemble.yaml"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let tmp = crate::agent::sandbox::testing::TempDir::new();
+        let looping = (0..20)
+            .map(|i| {
+                crate::port::testing::Scripted::call(&format!("c{i}"), "glob", r#"{"pattern":"*"}"#)
+            })
+            .collect();
+        let slow = Arc::new(Slow(FakePort::scripted("local", "x", looping)));
+        let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
+        ports.insert("local".into(), slow.clone());
+        ports.insert("claude".into(), Arc::new(FakePort::ok("claude", "r")));
+        let e = Ensemble::with_ports(cfg, ports, Some(tmp.0.clone()));
+
+        let input = format!(
+            "{SCOUT_CALL}\n{}\n{}\n",
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#,
+            r#"{"jsonrpc":"2.0","id":8,"method":"ping"}"#
+        );
+        let out = served(&e, &input);
+        assert!(out.iter().all(|m| m["id"] != 7), "no reply: {out:?}");
+        assert!(out.iter().any(|m| m["id"] == 8), "ping answered: {out:?}");
+        assert!(
+            slow.0.call_count() <= 1,
+            "stopped after {} calls",
+            slow.0.call_count()
+        );
     }
 
     #[test]

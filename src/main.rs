@@ -158,8 +158,8 @@ fn cmd_mcp(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
     }
     let ensemble = build(config, dir)?;
     let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    mcp::serve(&ensemble, stdin.lock(), stdout.lock()).map_err(|e| format!("mcp: {e}"))?;
+    // Not locked: delegations reply from their own threads.
+    mcp::serve(&ensemble, stdin.lock(), std::io::stdout()).map_err(|e| format!("mcp: {e}"))?;
     Ok(ExitCode::SUCCESS)
 }
 

@@ -41,6 +41,7 @@ pub fn run(
     _command: &str,
     _timeout: Duration,
     _policy: Policy,
+    _stop: &dyn Fn() -> bool,
 ) -> Result<String, String> {
     Err("bash needs Linux (Landlock); this platform has no sandbox, so it will not run".into())
 }
@@ -57,7 +58,8 @@ fn clip(bytes: &[u8]) -> String {
     format!("{}\n[output truncated]", &text[..end])
 }
 
-fn render(code: Option<i32>, stdout: &[u8], stderr: &[u8], timed_out: Option<Duration>) -> String {
+/// `killed` says why the command was killed, when it was.
+fn render(code: Option<i32>, stdout: &[u8], stderr: &[u8], killed: Option<String>) -> String {
     let mut out = String::new();
     if !stdout.is_empty() {
         out.push_str(&clip(stdout));
@@ -72,8 +74,8 @@ fn render(code: Option<i32>, stdout: &[u8], stderr: &[u8], timed_out: Option<Dur
             out.push('\n');
         }
     }
-    match (timed_out, code) {
-        (Some(t), _) => out.push_str(&format!("[killed: still running after {}s]", t.as_secs())),
+    match (killed, code) {
+        (Some(why), _) => out.push_str(&format!("[killed: {why}]")),
         (None, Some(c)) => out.push_str(&format!("[exit {c}]")),
         (None, None) => out.push_str("[terminated by a signal]"),
     }
@@ -242,12 +244,14 @@ mod linux {
         command: &str,
         timeout: Duration,
         policy: Policy,
+        stop: &dyn Fn() -> bool,
     ) -> Result<String, String> {
         run_with(
             project,
             command,
             timeout,
             policy,
+            stop,
             &WRITABLE_EXTRA.iter().map(Path::new).collect::<Vec<_>>(),
         )
     }
@@ -257,6 +261,7 @@ mod linux {
         command: &str,
         timeout: Duration,
         policy: Policy,
+        stop: &dyn Fn() -> bool,
         extra_writable: &[&Path],
     ) -> Result<String, String> {
         if command.trim().is_empty() {
@@ -310,19 +315,26 @@ mod linux {
         });
 
         let deadline = std::time::Instant::now() + timeout;
-        let mut timed_out = None;
+        let mut killed = None;
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break Some(status),
                 Ok(None) => {}
                 Err(e) => return Err(format!("could not wait for the command: {e}")),
             }
-            if std::time::Instant::now() >= deadline {
+            let why = if std::time::Instant::now() >= deadline {
+                Some(format!("still running after {}s", timeout.as_secs()))
+            } else if stop() {
+                Some("the delegation was stopped".to_string())
+            } else {
+                None
+            };
+            if let Some(why) = why {
                 // The whole group: a shell command is rarely one process.
                 // SAFETY: signalling the process group we created.
                 unsafe { libc::killpg(pid, libc::SIGKILL) };
                 let _ = child.wait();
-                timed_out = Some(timeout);
+                killed = Some(why);
                 break None;
             }
             std::thread::sleep(Duration::from_millis(15));
@@ -335,7 +347,7 @@ mod linux {
             status.and_then(|s| s.code()),
             &stdout,
             &stderr,
-            timed_out,
+            killed,
         ))
     }
 
@@ -381,7 +393,7 @@ mod linux {
         };
 
         fn go(d: &Dirs, cmd: &str) -> String {
-            run(&d.project, cmd, Duration::from_secs(20), OFF).unwrap()
+            run(&d.project, cmd, Duration::from_secs(20), OFF, &|| false).unwrap()
         }
 
         #[test]
@@ -447,6 +459,7 @@ mod linux {
                 "sleep 30 & sleep 30",
                 Duration::from_millis(300),
                 OFF,
+                &|| false,
             )
             .unwrap();
             assert!(
@@ -476,15 +489,35 @@ mod linux {
                 Policy {
                     allow_network: true,
                 },
+                &|| false,
             )
             .unwrap();
             assert!(allowed.contains("connected"), "{allowed}");
         }
 
         #[test]
+        fn a_stopped_delegation_kills_its_running_command() {
+            let d = Dirs::new("stop");
+            let started = std::time::Instant::now();
+            let out = run(
+                &d.project,
+                "sleep 30",
+                Duration::from_secs(60),
+                OFF,
+                &|| started.elapsed() > Duration::from_millis(200),
+            )
+            .unwrap();
+            assert!(started.elapsed() < Duration::from_secs(10));
+            assert!(
+                out.contains("[killed: the delegation was stopped]"),
+                "{out}"
+            );
+        }
+
+        #[test]
         fn an_empty_command_is_refused() {
             let d = Dirs::new("empty");
-            assert!(run(&d.project, "  ", Duration::from_secs(1), OFF).is_err());
+            assert!(run(&d.project, "  ", Duration::from_secs(1), OFF, &|| false).is_err());
         }
     }
 }

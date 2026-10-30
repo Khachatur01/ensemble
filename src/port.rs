@@ -135,6 +135,9 @@ pub struct Request {
     pub workdir: Option<String>,
     /// Tools the *caller* can run. See the note on this struct.
     pub tools: Vec<ToolDef>,
+    /// When the whole delegation must end. An adapter waits no later than
+    /// this, even if its own timeout is longer.
+    pub deadline: Option<std::time::Instant>,
 }
 
 impl Request {
@@ -147,6 +150,19 @@ impl Request {
             reasoning_effort: None,
             workdir: None,
             tools: Vec::new(),
+            deadline: None,
+        }
+    }
+
+    /// `timeout`, shortened to what is left before [`Self::deadline`]. `None`
+    /// when the deadline has already passed.
+    pub fn time_left(&self, timeout: std::time::Duration) -> Option<std::time::Duration> {
+        match self.deadline {
+            None => Some(timeout),
+            Some(d) => {
+                let left = d.saturating_duration_since(std::time::Instant::now());
+                (!left.is_zero()).then(|| left.min(timeout))
+            }
         }
     }
 
@@ -659,6 +675,18 @@ mod tests {
             }
             .is_retryable()
         );
+    }
+
+    #[test]
+    fn time_left_is_the_timeout_shortened_to_the_deadline() {
+        use std::time::{Duration, Instant};
+        let mut r = Request::new("m", vec![]);
+        let long = Duration::from_secs(600);
+        assert_eq!(r.time_left(long), Some(long));
+        r.deadline = Some(Instant::now() + Duration::from_secs(5));
+        assert!(r.time_left(long).unwrap() <= Duration::from_secs(5));
+        r.deadline = Some(Instant::now() - Duration::from_secs(1));
+        assert_eq!(r.time_left(long), None);
     }
 
     #[test]

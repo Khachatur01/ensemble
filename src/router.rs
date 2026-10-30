@@ -7,11 +7,12 @@
 //! model or a backend, and nothing the router returns has to be interpreted
 //! differently depending on which one answered.
 
-use crate::config::{Assignment, Config};
+use crate::config::{AgentTool, Assignment, Config};
 use crate::port::{Error, Message, ModelPort, Request, Response};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 /// What a delegation produced, with enough provenance to audit it.
 ///
@@ -40,6 +41,10 @@ pub struct AgentStats {
     pub changes: crate::agent::tools::Changes,
     /// `bash` commands it ran.
     pub commands: Vec<String>,
+    /// Another delegation was running at the same time and this role has
+    /// `bash`. Its changes are found by comparing the project, so `changes`
+    /// may include the other run's files.
+    pub overlapped: bool,
 }
 
 #[derive(Debug)]
@@ -82,6 +87,10 @@ pub struct Ensemble {
     /// and several copies of the same settings drifting apart.
     ports: BTreeMap<String, Arc<dyn ModelPort>>,
     workdir: Option<PathBuf>,
+    /// Agent runs in progress, and how many have ever started: together they
+    /// tell a run whether another one overlapped it.
+    active: AtomicUsize,
+    started: AtomicU64,
 }
 
 impl Ensemble {
@@ -98,11 +107,7 @@ impl Ensemble {
                 crate::backend::build(backend, workdir.clone())?,
             );
         }
-        Ok(Ensemble {
-            config,
-            ports,
-            workdir,
-        })
+        Ok(Self::with_ports(config, ports, workdir))
     }
 
     /// For tests and for the HTTP surface, which assemble their own ports.
@@ -115,6 +120,8 @@ impl Ensemble {
             config,
             ports,
             workdir,
+            active: AtomicUsize::new(0),
+            started: AtomicU64::new(0),
         }
     }
 
@@ -167,21 +174,23 @@ impl Ensemble {
         task: &str,
         context: Option<&str>,
     ) -> Result<Outcome, RouteError> {
-        self.delegate_reporting(role, task, context, &|_| {})
+        self.delegate_reporting(role, task, context, &|_| {}, &AtomicBool::new(false))
     }
 
     /// [`Self::delegate`], telling `progress` what an agent role is doing as it
-    /// goes. A think-only role makes one call and reports nothing.
+    /// goes. A think-only role makes one call and reports nothing. Setting
+    /// `cancel` stops an agent role at its next step.
     pub fn delegate_reporting(
         &self,
         role: &str,
         task: &str,
         context: Option<&str>,
         progress: &dyn Fn(&str),
+        cancel: &AtomicBool,
     ) -> Result<Outcome, RouteError> {
         let (assignment, port) = self.resolve(role)?;
         if !assignment.tools.is_empty() {
-            return self.delegate_agent(assignment, port.as_ref(), task, context, progress);
+            return self.delegate_agent(assignment, port.as_ref(), task, context, progress, cancel);
         }
 
         let mut messages = Vec::new();
@@ -202,11 +211,13 @@ impl Ensemble {
         request.temperature = assignment.temperature;
         request.reasoning_effort = assignment.reasoning_effort.clone();
 
-        let response: Response =
-            crate::port::complete_retrying(port.as_ref(), &request, &|| false, &|l| {
-                progress(&format!("{} · {l}", assignment.role))
-            })
-            .map_err(RouteError::Backend)?;
+        let response: Response = crate::port::complete_retrying(
+            port.as_ref(),
+            &request,
+            &|| cancel.load(Ordering::Relaxed),
+            &|l| progress(&format!("{} · {l}", assignment.role)),
+        )
+        .map_err(RouteError::Backend)?;
 
         Ok(Outcome {
             role: assignment.role.clone(),
@@ -228,6 +239,7 @@ impl Ensemble {
         task: &str,
         context: Option<&str>,
         progress: &dyn Fn(&str),
+        cancel: &AtomicBool,
     ) -> Result<Outcome, RouteError> {
         let workdir = match &self.workdir {
             Some(dir) => dir.clone(),
@@ -238,8 +250,12 @@ impl Ensemble {
                 })
             })?,
         };
-        let run = crate::agent::run(port, assignment, task, context, &workdir, progress)
-            .map_err(RouteError::Backend)?;
+        let me = self.started.fetch_add(1, Ordering::SeqCst) + 1;
+        let others_running = self.active.fetch_add(1, Ordering::SeqCst) > 0;
+        let run = crate::agent::run(port, assignment, task, context, &workdir, progress, cancel);
+        let overlapped = others_running || self.started.load(Ordering::SeqCst) != me;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        let run = run.map_err(RouteError::Backend)?;
         Ok(Outcome {
             role: assignment.role.clone(),
             backend: assignment.backend.clone(),
@@ -253,6 +269,7 @@ impl Ensemble {
                 trimmed: run.trimmed,
                 changes: run.changes,
                 commands: run.commands,
+                overlapped: overlapped && assignment.tools.contains(&AgentTool::Bash),
             }),
         })
     }

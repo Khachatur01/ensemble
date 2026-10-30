@@ -6,6 +6,8 @@ use super::tools::{self, Change, Changes};
 use crate::config::{AgentTool, Assignment};
 use crate::port::{Error, Message, ModelPort, Request, Role, Usage, complete_retrying};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 const PREAMBLE: &str = "\
 You are an autonomous agent working inside a project directory. Use your tools \
@@ -40,6 +42,9 @@ pub struct AgentRun {
 
 /// Run a role's tool loop. `progress` hears one short line per model call and
 /// per tool call, as they happen, so a slow run can be told from a hung one.
+///
+/// The run ends early, reporting what it did, when `cancel` is set or the
+/// role's `max_seconds` pass.
 pub fn run(
     port: &dyn ModelPort,
     assignment: &Assignment,
@@ -47,7 +52,28 @@ pub fn run(
     context: Option<&str>,
     workdir: &Path,
     progress: &dyn Fn(&str),
+    cancel: &AtomicBool,
 ) -> Result<AgentRun, Error> {
+    let deadline = Instant::now() + Duration::from_secs(u64::from(assignment.max_seconds));
+    let stopped = || cancel.load(Ordering::Relaxed) || Instant::now() >= deadline;
+    let halt = |mut out: AgentRun, last_text: &str| {
+        let why = if cancel.load(Ordering::Relaxed) {
+            "cancelled".to_string()
+        } else {
+            format!("stopped at the {}s time limit", assignment.max_seconds)
+        };
+        progress(&format!("{} · {why}", assignment.role));
+        out.text = format!(
+            "[{why} after {} step(s); the work is unfinished]",
+            out.steps
+        );
+        if !last_text.trim().is_empty() {
+            out.text.push('\n');
+            out.text.push_str(last_text);
+        }
+        out
+    };
+
     let sandbox = Sandbox::new(workdir).map_err(|detail| Error::Unsupported {
         backend: port.name().to_string(),
         detail: format!(
@@ -106,6 +132,7 @@ pub fn run(
         r.temperature = assignment.temperature;
         r.reasoning_effort = assignment.reasoning_effort.clone();
         r.workdir = Some(sandbox.root().display().to_string());
+        r.deadline = Some(deadline);
         if offer_tools {
             r.tools = defs.clone();
         }
@@ -121,7 +148,13 @@ pub fn run(
         None
     };
 
+    // What the model last said, to report if the run is stopped.
+    let mut last_text = String::new();
+
     for step in 1..=assignment.max_steps {
+        if stopped() {
+            return Ok(halt(out, &last_text));
+        }
         let dropped = trim_history(&mut messages, budget, defs_bytes);
         if dropped > 0 {
             say(
@@ -132,11 +165,18 @@ pub fn run(
         out.trimmed += dropped;
         say(step, "waiting for the model");
         let response =
-            complete_retrying(port, &request(&messages, true), &|| false, &|l| say(step, l))?;
+            match complete_retrying(port, &request(&messages, true), &stopped, &|l| say(step, l)) {
+                Ok(r) => r,
+                Err(_) if stopped() => return Ok(halt(out, &last_text)),
+                Err(e) => return Err(e),
+            };
         out.steps += 1;
         out.usage.prompt_tokens += response.usage.prompt_tokens;
         out.usage.completion_tokens += response.usage.completion_tokens;
         out.model = response.model;
+        if !response.text.trim().is_empty() {
+            last_text.clone_from(&response.text);
+        }
 
         if response.tool_calls.is_empty() {
             say(step, "done");
@@ -149,6 +189,9 @@ pub fn run(
             response.tool_calls.clone(),
         ));
         for call in &response.tool_calls {
+            if stopped() {
+                return Ok(halt(out, &last_text));
+            }
             say(step, &format!("{}({})", call.name, brief(&call.arguments)));
             out.tool_calls += 1;
             let target = tools::target(&sandbox, &call.name, &call.arguments);
@@ -160,6 +203,7 @@ pub fn run(
                 &call.name,
                 &call.arguments,
                 result_cap,
+                &stopped,
             );
             if result.is_ok() {
                 if let Some(path) = &target {
@@ -194,9 +238,16 @@ pub fn run(
         "out of steps; asking for a report",
     );
     out.trimmed += trim_history(&mut messages, budget, defs_bytes);
-    let response = complete_retrying(port, &request(&messages, false), &|| false, &|l| {
+    if stopped() {
+        return Ok(halt(out, &last_text));
+    }
+    let response = match complete_retrying(port, &request(&messages, false), &stopped, &|l| {
         say(assignment.max_steps + 1, l)
-    })?;
+    }) {
+        Ok(r) => r,
+        Err(_) if stopped() => return Ok(halt(out, &last_text)),
+        Err(e) => return Err(e),
+    };
     out.steps += 1;
     out.usage.prompt_tokens += response.usage.prompt_tokens;
     out.usage.completion_tokens += response.usage.completion_tokens;
@@ -310,6 +361,7 @@ mod tests {
             reasoning_effort: None,
             tools,
             max_steps,
+            max_seconds: 600,
             context_window: Some(16_000),
             network: false,
         }
@@ -322,7 +374,15 @@ mod tests {
     }
 
     fn go(port: &FakePort, a: &Assignment, dir: &Path) -> Result<AgentRun, Error> {
-        run(port, a, "do it", None, dir, &|_| {})
+        run(
+            port,
+            a,
+            "do it",
+            None,
+            dir,
+            &|_| {},
+            &AtomicBool::new(false),
+        )
     }
 
     #[test]
@@ -338,9 +398,15 @@ mod tests {
         );
         let seen = std::cell::RefCell::new(Vec::new());
         let a = assignment(vec![AgentTool::Read], 5);
-        run(&port, &a, "do it", None, &tmp.0, &|line| {
-            seen.borrow_mut().push(line.to_string())
-        })
+        run(
+            &port,
+            &a,
+            "do it",
+            None,
+            &tmp.0,
+            &|line| seen.borrow_mut().push(line.to_string()),
+            &AtomicBool::new(false),
+        )
         .unwrap();
         assert_eq!(
             seen.into_inner(),
@@ -450,7 +516,11 @@ mod tests {
                 ),
                 Scripted::call("c2", "write_file", r#"{"path":"b.txt","content":"b"}"#),
                 Scripted::call("c3", "bash", r#"{"command":"echo c > c.txt"}"#),
-                Scripted::call("c4", "edit_file", r#"{"path":"nope.txt","old_string":"a","new_string":"b"}"#),
+                Scripted::call(
+                    "c4",
+                    "edit_file",
+                    r#"{"path":"nope.txt","old_string":"a","new_string":"b"}"#,
+                ),
                 Scripted::text("done"),
             ],
         );
@@ -515,6 +585,69 @@ mod tests {
         assert_eq!(r.steps, 3);
         let last = port.last().unwrap();
         assert!(last.tools.is_empty(), "no tools on the closing call");
+    }
+
+    #[test]
+    fn a_cancelled_run_stops_before_its_next_step_and_reports_what_it_did() {
+        let tmp = project();
+        let cancel = AtomicBool::new(false);
+        let port = FakePort::scripted(
+            "b",
+            "never reached",
+            vec![
+                Scripted::Calls(
+                    "looking first".into(),
+                    vec![call("c1", "read_file", r#"{"path":"a.txt"}"#)],
+                ),
+                Scripted::text("unused"),
+            ],
+        );
+        let a = assignment(vec![AgentTool::Read], 5);
+        let r = run(
+            &port,
+            &a,
+            "do it",
+            None,
+            &tmp.0,
+            &|line| {
+                if line.contains("read_file") {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(port.call_count(), 1, "no model call after the cancel");
+        assert!(
+            r.text
+                .starts_with("[cancelled after 1 step(s); the work is unfinished]\nlooking first"),
+            "{}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn a_run_past_its_time_limit_stops_and_says_so() {
+        let tmp = project();
+        let port = FakePort::ok("b", "x");
+        let mut a = assignment(vec![AgentTool::Read], 5);
+        a.max_seconds = 0;
+        let r = go(&port, &a, &tmp.0).unwrap();
+        assert_eq!(port.call_count(), 0);
+        assert!(
+            r.text.starts_with("[stopped at the 0s time limit"),
+            "{}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn every_request_carries_the_runs_deadline() {
+        let tmp = project();
+        let port = FakePort::ok("b", "done");
+        go(&port, &assignment(vec![AgentTool::Read], 5), &tmp.0).unwrap();
+        let deadline = port.last().unwrap().deadline.expect("a deadline");
+        assert!(deadline > Instant::now() + Duration::from_secs(500));
     }
 
     #[test]

@@ -195,15 +195,23 @@ fn no_task(role: &str) -> String {
 
 /// Run one of the ensemble's own tools.
 pub fn call(ensemble: &Ensemble, name: &str, args: &Value) -> ToolResult {
-    call_reporting(ensemble, name, args, &|_| {})
+    call_reporting(
+        ensemble,
+        name,
+        args,
+        &|_| {},
+        &std::sync::atomic::AtomicBool::new(false),
+    )
 }
 
 /// [`call`], passing along what a delegated agent is doing as it does it.
+/// Setting `cancel` stops a delegation at its next step.
 pub fn call_reporting(
     ensemble: &Ensemble,
     name: &str,
     args: &Value,
     progress: &dyn Fn(&str),
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> ToolResult {
     match name {
         DELEGATE => {
@@ -224,7 +232,7 @@ pub fn call_reporting(
             }
             let context = args.get("context").and_then(Value::as_str);
 
-            match ensemble.delegate_reporting(role, task, context, progress) {
+            match ensemble.delegate_reporting(role, task, context, progress, cancel) {
                 Ok(out) => ToolResult {
                     text: match &out.agent {
                         Some(a) => format!("{}\n\n{}", out.text, agent_footer(role, a)),
@@ -343,6 +351,11 @@ fn agent_footer(role: &str, a: &crate::router::AgentStats) -> String {
             shown.push(&more);
         }
         out.push_str(&format!("\n[commands run: {}]", shown.join("; ")));
+    }
+    if a.overlapped && !a.changes.is_empty() {
+        out.push_str(
+            "\n[another delegation ran in the project at the same time; some of these files may be its changes]",
+        );
     }
     out
 }

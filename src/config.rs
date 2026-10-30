@@ -99,6 +99,11 @@ struct RawAssignment {
     /// [`DEFAULT_MAX_STEPS`].
     #[serde(default)]
     max_steps: Option<u32>,
+    /// Wall-clock cap on one delegation, in seconds. Defaults to
+    /// [`DEFAULT_MAX_SECONDS`]. A run that reaches it stops and reports what
+    /// it did, so a hung model cannot hold the caller forever.
+    #[serde(default)]
+    max_seconds: Option<u32>,
     /// Tokens of context the server really runs the model with. Required for
     /// a role with `tools`, whose conversation grows with every step; the agent
     /// keeps it within this, because a server that overflows silently drops the
@@ -208,6 +213,7 @@ impl AgentTool {
 }
 
 pub const DEFAULT_MAX_STEPS: u32 = 20;
+pub const DEFAULT_MAX_SECONDS: u32 = 1800;
 const REASONING_EFFORTS: [&str; 4] = ["none", "low", "medium", "high"];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -222,6 +228,8 @@ pub struct Assignment {
     /// Empty: a think-only role. See [`RawAssignment::tools`].
     pub tools: Vec<AgentTool>,
     pub max_steps: u32,
+    /// See [`RawAssignment::max_seconds`].
+    pub max_seconds: u32,
     /// See [`RawAssignment::context_window`]. Always set for a role with tools.
     pub context_window: Option<u32>,
     /// Outbound TCP for `bash`. Meaningless without that tool.
@@ -415,6 +423,7 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             reasoning_effort: ra.reasoning_effort.clone(),
             tools: parse_tools(name, &ra.tools, &mut problems),
             max_steps: ra.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
+            max_seconds: ra.max_seconds.unwrap_or(DEFAULT_MAX_SECONDS),
             context_window: ra.context_window,
             network: ra.network.unwrap_or(false),
         };
@@ -425,6 +434,16 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
         }
         if ra.max_steps == Some(0) {
             problems.push(format!("roles.{name}: `max_steps` must be greater than 0"));
+        }
+        if ra.max_seconds == Some(0) {
+            problems.push(format!(
+                "roles.{name}: `max_seconds` must be greater than 0"
+            ));
+        }
+        if a.tools.is_empty() && ra.max_seconds.is_some() {
+            problems.push(format!(
+                "roles.{name}: `max_seconds` only applies to roles with `tools`; a think-only role is bounded by its backend's `timeout_seconds`"
+            ));
         }
         if ra.context_window == Some(0) {
             problems.push(format!(
@@ -795,6 +814,7 @@ roles:
             vec![AgentTool::Read, AgentTool::Grep, AgentTool::Edit]
         );
         assert_eq!(c.roles["coder"].max_steps, 5);
+        assert_eq!(c.roles["coder"].max_seconds, DEFAULT_MAX_SECONDS);
         assert!(c.roles["thinker"].tools.is_empty());
         assert_eq!(c.roles["thinker"].max_steps, DEFAULT_MAX_STEPS);
         assert_eq!(c.roles["coder"].context_window, Some(8000));
@@ -895,6 +915,35 @@ roles:
         };
         assert!(
             problems.iter().any(|p| p.contains("`network`")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn max_seconds_must_be_positive_and_needs_tools() {
+        let set = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    max_seconds: 60");
+        assert_eq!(
+            parse(&set, &p(), &env(&[])).unwrap().roles["coder"].max_seconds,
+            60
+        );
+        let zero = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    max_seconds: 0");
+        let Err(ConfigError::Invalid { problems, .. }) = parse(&zero, &p(), &env(&[])) else {
+            panic!("expected invalid");
+        };
+        assert!(
+            problems.iter().any(|p| p.contains("`max_seconds` must be")),
+            "{problems:?}"
+        );
+        let think_only = format!(
+            "{AGENT_DOC}  idle:\n    backend: openai-local\n    model: m\n    max_seconds: 60\n"
+        );
+        let Err(ConfigError::Invalid { problems, .. }) = parse(&think_only, &p(), &env(&[])) else {
+            panic!("expected invalid");
+        };
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("roles.idle: `max_seconds` only")),
             "{problems:?}"
         );
     }

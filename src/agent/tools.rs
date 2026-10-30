@@ -124,6 +124,7 @@ fn definition(tool: AgentTool) -> ToolDef {
 /// Run one tool call. `allowed` is the role's permission set: a call to a tool
 /// outside it is refused here, whatever the model was offered. A result longer
 /// than `max_bytes` is cut, so one call cannot fill the model's context.
+/// `stop` turning true ends a long-running call early.
 pub fn execute(
     sandbox: &Sandbox,
     allowed: &[AgentTool],
@@ -131,6 +132,7 @@ pub fn execute(
     name: &str,
     arguments: &str,
     max_bytes: usize,
+    stop: &dyn Fn() -> bool,
 ) -> Result<String, String> {
     let tool = allowed
         .iter()
@@ -148,7 +150,7 @@ pub fn execute(
         AgentTool::Grep => grep(sandbox, &args)?,
         AgentTool::Edit => edit(sandbox, &args)?,
         AgentTool::Write => write(sandbox, &args)?,
-        AgentTool::Bash => bash(sandbox, &args, shell_policy)?,
+        AgentTool::Bash => bash(sandbox, &args, shell_policy, stop)?,
     };
     Ok(cap(out, max_bytes))
 }
@@ -294,13 +296,18 @@ fn edit(sb: &Sandbox, args: &Value) -> Result<String, String> {
     }
 }
 
-fn bash(sb: &Sandbox, args: &Value, policy: shell::Policy) -> Result<String, String> {
+fn bash(
+    sb: &Sandbox,
+    args: &Value,
+    policy: shell::Policy,
+    stop: &dyn Fn() -> bool,
+) -> Result<String, String> {
     let command = str_arg(args, "command")?;
     let timeout = match uint_arg(args, "timeout_seconds")? {
         Some(s) => std::time::Duration::from_secs(s as u64).min(shell::MAX_TIMEOUT),
         None => shell::DEFAULT_TIMEOUT,
     };
-    shell::run(sb.root(), command, timeout, policy)
+    shell::run(sb.root(), command, timeout, policy, stop)
 }
 
 fn write(sb: &Sandbox, args: &Value) -> Result<String, String> {
@@ -496,7 +503,9 @@ mod tests {
     }
 
     fn run(sb: &Sandbox, name: &str, args: Value) -> Result<String, String> {
-        execute(sb, &ALL, NO_NET, name, &args.to_string(), TEST_CAP)
+        execute(sb, &ALL, NO_NET, name, &args.to_string(), TEST_CAP, &|| {
+            false
+        })
     }
 
     #[test]
@@ -612,6 +621,7 @@ mod tests {
             "write_file",
             "{}",
             TEST_CAP,
+            &|| false,
         )
         .unwrap_err();
         assert!(err.contains("Available tools: read_file"), "{err}");
@@ -621,7 +631,7 @@ mod tests {
     fn bad_arguments_come_back_as_text_for_the_model() {
         let (_t, sb) = project();
         assert!(
-            execute(&sb, &ALL, NO_NET, "read_file", "{oops", TEST_CAP)
+            execute(&sb, &ALL, NO_NET, "read_file", "{oops", TEST_CAP, &|| false)
                 .unwrap_err()
                 .contains("not valid JSON")
         );
