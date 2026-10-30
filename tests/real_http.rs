@@ -117,7 +117,7 @@ fn a_completion_round_trips_over_a_real_socket() {
     assert_eq!(response.text, "hello from the stub");
     assert_eq!(response.model, "qwen3-coder");
     assert_eq!(response.usage.prompt_tokens, 7);
-    assert_eq!(response.usage.total(), 11);
+    assert_eq!(response.usage.completion_tokens, 4);
 
     let got = rx
         .recv_timeout(std::time::Duration::from_secs(5))

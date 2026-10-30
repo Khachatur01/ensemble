@@ -57,14 +57,6 @@ struct RawConfig {
     /// The team.
     #[serde(default)]
     agents: BTreeMap<String, RawAgent>,
-    /// Removed or renamed. Kept only so an old config gets a pointed error
-    /// instead of "unknown field".
-    #[serde(default)]
-    manager: Option<serde_norway::Value>,
-    #[serde(default)]
-    backends: Option<serde_norway::Value>,
-    #[serde(default)]
-    roles: Option<serde_norway::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -367,13 +359,6 @@ impl Config {
         self.agents.get(name)
     }
 
-    pub fn llm_backend_for(&self, agent: &str) -> Option<&LlmBackend> {
-        match &self.agent(agent)?.adapter {
-            Adapter::Ensemble(e) => self.llm_backends.get(&e.llm_backend),
-            Adapter::ClaudeCode(_) => None,
-        }
-    }
-
     pub fn agent_names(&self) -> Vec<&str> {
         self.agents.keys().map(String::as_str).collect()
     }
@@ -500,16 +485,6 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
         ));
     }
 
-    if raw.backends.is_some() {
-        problems.push("backends: renamed to `llm_backends`".into());
-    }
-    if raw.roles.is_some() {
-        problems.push(
-            "roles: renamed to `agents`. Each agent keeps `prompt` and `context_window`; the rest moves under `adapter:` with `type: ensemble`, and `backend` becomes `llm_backend`"
-                .into(),
-        );
-    }
-
     // --- backends ---
     let mut backends: BTreeMap<String, LlmBackend> = BTreeMap::new();
     for (name, rb) in &raw.llm_backends {
@@ -522,16 +497,6 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
     }
 
     // --- agents ---
-    //
-    if raw.manager.is_some() {
-        problems.push(
-            "manager: there is no manager block any more. The agent that calls Ensemble \
-             (Claude Code, OpenCode, ...) is the manager; delete this block and give the \
-             work to `agents:`."
-                .into(),
-        );
-    }
-
     let mut agents: BTreeMap<String, AgentConfig> = BTreeMap::new();
     for (name, ra) in &raw.agents {
         if name.trim().is_empty() {
@@ -1179,10 +1144,11 @@ agents:
     #[test]
     fn the_schema_names_exactly_the_keys_the_config_accepts() {
         let schema = schema();
-        let mut top = accepted_keys::<RawConfig>();
-        // Removed or renamed; each is refused with its own message.
-        top.retain(|k| !["manager", "backends", "roles"].contains(&k.as_str()));
-        assert_eq!(schema_keys(&schema), top, "top level");
+        assert_eq!(
+            schema_keys(&schema),
+            accepted_keys::<RawConfig>(),
+            "top level"
+        );
         let defs = &schema["definitions"];
         assert_eq!(
             schema_keys(&defs["llm_backend"]),
@@ -1255,25 +1221,6 @@ agents:
         assert!(
             example.contains(&format!("# yaml-language-server: $schema={id}")),
             "ensemble.yaml should start with the schema modeline"
-        );
-    }
-
-    #[test]
-    fn an_old_config_with_backends_and_roles_says_what_they_became() {
-        let old = r#"
-version: 1
-backends:
-  x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
-roles:
-  coder: { backend: x, model: m }
-"#;
-        let problems = problems_of(parse(old, &p(), &env(&[])).unwrap_err());
-        let joined = problems.join("\n");
-        assert!(joined.contains("renamed to `llm_backends`"), "{joined}");
-        assert!(joined.contains("renamed to `agents`"), "{joined}");
-        assert!(
-            !joined.contains("at least one LLM backend"),
-            "one message per mistake: {joined}"
         );
     }
 
@@ -1561,27 +1508,6 @@ llm_backends:
     }
 
     #[test]
-    fn an_old_manager_block_is_refused_with_a_pointer() {
-        let yaml = r#"
-version: 1
-llm_backends:
-  x: { type: openai-compatible-api, base_url_env: X, base_url_default: "http://127.0.0.1:1/v1" }
-manager: { backend: x, model: m }
-agents:
-  coder:
-    adapter:
-      type: ensemble
-      llm_backend: x
-      model: m
-"#;
-        let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
-        assert!(
-            problems.iter().any(|p| p.contains("no manager block")),
-            "{problems:?}"
-        );
-    }
-
-    #[test]
     fn a_role_naming_an_undefined_backend_is_fatal_and_lists_the_real_ones() {
         let yaml = r#"
 version: 1
@@ -1744,11 +1670,9 @@ llm_backends:
     }
 
     #[test]
-    fn assignment_and_backend_lookup_find_roles() {
+    fn agents_are_found_by_name() {
         let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
         assert_eq!(c.agent("coder").unwrap().name, "coder");
-        assert_eq!(c.llm_backend_for("coder").unwrap().name, "openai-remote");
         assert!(c.agent("nope").is_none());
-        assert!(c.agent("manager").is_none());
     }
 }

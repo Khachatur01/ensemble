@@ -130,32 +130,6 @@ fn check_accepts_a_valid_config_and_reports_the_team() {
 }
 
 #[test]
-fn check_refuses_an_old_config_that_still_has_a_manager() {
-    let s = Scratch::new("check-old-manager");
-    s.write(
-        "ensemble.yaml",
-        r#"
-version: 1
-llm_backends:
-  x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
-manager: { backend: x, model: m }
-agents:
-  coder:
-    adapter:
-      type: ensemble
-      llm_backend: x
-      model: m
-"#,
-    );
-    let out = ensemble(&s, &["check"]);
-    assert!(
-        !out.status.success(),
-        "a manager block must not load any more"
-    );
-    assert!(stderr_of(&out).contains("manager"), "{}", stderr_of(&out));
-}
-
-#[test]
 fn check_reports_several_problems_at_once() {
     let s = Scratch::new("check-many");
     s.write(

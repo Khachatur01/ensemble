@@ -83,9 +83,6 @@ impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         Self::plain(Role::User, content)
     }
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self::plain(Role::Assistant, content)
-    }
     /// An assistant turn that ended in tool calls.
     ///
     /// `content` is usually empty here, which is not the same as the turn being
@@ -114,10 +111,8 @@ impl Message {
 /// a think-only agent, and non-empty for an agent with `tools:`, where
 /// Ensemble's own agent loop runs the calls the model makes.
 ///
-/// A silently dropped `tools` array is worse than no
-/// field at all, because the caller believes it was honoured. So no adapter may
-/// drop it: one whose [`Capabilities::tool_calling`] is false must *fail* a
-/// request that offers tools, naming the backend and the fix.
+/// A silently dropped `tools` array is worse than no field at all, because
+/// the caller believes it was honoured. So no adapter may drop it.
 #[derive(Debug, Clone)]
 pub struct Request {
     /// The model id as the *backend* names it. The router fills this in from
@@ -183,12 +178,6 @@ pub struct Usage {
     pub completion_tokens: u32,
 }
 
-impl Usage {
-    pub fn total(&self) -> u32 {
-        self.prompt_tokens + self.completion_tokens
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Response {
     pub text: String,
@@ -201,17 +190,6 @@ pub struct Response {
     pub model: String,
     pub usage: Usage,
     pub finish_reason: Option<String>,
-}
-
-/// What a backend *type* can do. Declared, never inferred.
-///
-/// `tool_calling` is load-bearing: an agent with `tools:` runs Ensemble's own
-/// agent loop, which needs the model to answer with structured tool calls.
-/// Config validation refuses that on a backend that cannot, rather than letting
-/// it fail silently at run time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Capabilities {
-    pub tool_calling: bool,
 }
 
 /// Everything that can go wrong between asking an agent for work and getting it.
@@ -319,7 +297,7 @@ pub fn complete_retrying(
 }
 
 /// Sleep for `total`, waking early when `stop` turns true. False if it did.
-pub fn sleep_unless(total: std::time::Duration, stop: &dyn Fn() -> bool) -> bool {
+fn sleep_unless(total: std::time::Duration, stop: &dyn Fn() -> bool) -> bool {
     let until = std::time::Instant::now() + total;
     loop {
         if stop() {
@@ -421,8 +399,6 @@ pub trait ModelPort: Send + Sync {
     /// The backend type id — `openai-compatible-api`.
     fn type_id(&self) -> &'static str;
 
-    fn capabilities(&self) -> Capabilities;
-
     fn complete(&self, request: &Request) -> Result<Response, Error>;
 
     /// Cheap reachability check. Must not spend a model call.
@@ -492,7 +468,6 @@ pub mod testing {
     /// turns it cares about.
     pub struct FakePort {
         pub name: String,
-        pub caps: Capabilities,
         pub reply: Mutex<Result<String, String>>,
         pub script: Mutex<VecDeque<Scripted>>,
         pub seen: Mutex<Vec<Request>>,
@@ -502,7 +477,6 @@ pub mod testing {
         fn build(name: &str, reply: Result<String, String>) -> Self {
             FakePort {
                 name: name.into(),
-                caps: Capabilities { tool_calling: true },
                 reply: Mutex::new(reply),
                 script: Mutex::new(VecDeque::new()),
                 seen: Mutex::new(Vec::new()),
@@ -525,12 +499,6 @@ pub mod testing {
             p
         }
 
-        /// Declare a port that cannot drive a caller-supplied tool schema.
-        pub fn without_tool_calling(mut self) -> Self {
-            self.caps.tool_calling = false;
-            self
-        }
-
         pub fn last(&self) -> Option<Request> {
             self.seen.lock().unwrap().last().cloned()
         }
@@ -550,9 +518,6 @@ pub mod testing {
         }
         fn type_id(&self) -> &'static str {
             "fake"
-        }
-        fn capabilities(&self) -> Capabilities {
-            self.caps
         }
         fn complete(&self, request: &Request) -> Result<Response, Error> {
             self.seen.lock().unwrap().push(request.clone());

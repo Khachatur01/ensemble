@@ -35,7 +35,7 @@ pub const SERVER_NAME: &str = "ensemble";
 /// The shared tool catalogue, wrapped in MCP's envelope.
 ///
 /// `agents` is the whole team.
-pub fn tool_definitions(agents: &[&str]) -> Value {
+fn tool_definitions(agents: &[&str]) -> Value {
     Value::Array(
         delegation::tools(agents)
             .into_iter()
@@ -48,12 +48,6 @@ pub fn tool_definitions(agents: &[&str]) -> Value {
             })
             .collect(),
     )
-}
-
-pub use delegation::ToolResult;
-
-pub fn call_tool(ensemble: &Ensemble, name: &str, args: &Value) -> ToolResult {
-    delegation::call(ensemble, name, args)
 }
 
 /// MCP log levels, lowest first. A client that sets a level asks to hear only
@@ -150,7 +144,7 @@ pub fn handle_reporting(
                 .or_else(|| id.clone())
                 .unwrap_or_else(|| json!("ensemble"));
             let count = Cell::new(0u64);
-            let result = delegation::call_reporting(
+            let result = delegation::call(
                 ensemble,
                 name,
                 &args,
@@ -552,9 +546,6 @@ agents:
         fn type_id(&self) -> &'static str {
             "fake"
         }
-        fn capabilities(&self) -> crate::port::Capabilities {
-            crate::port::Capabilities { tool_calling: true }
-        }
         fn complete(
             &self,
             r: &crate::port::Request,
@@ -629,9 +620,6 @@ agents:
         }
         fn type_id(&self) -> &'static str {
             "fake"
-        }
-        fn capabilities(&self) -> crate::port::Capabilities {
-            self.0.capabilities()
         }
         fn complete(
             &self,

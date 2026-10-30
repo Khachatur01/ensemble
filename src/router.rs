@@ -108,7 +108,7 @@ impl Ensemble {
         Ok(Self::with_ports(config, ports, workdir))
     }
 
-    /// For tests and for the HTTP surface, which assemble their own ports.
+    /// With the ports already built; tests pass fakes here.
     pub fn with_ports(
         config: Config,
         ports: BTreeMap<String, Arc<dyn ModelPort>>,
@@ -297,19 +297,6 @@ impl Ensemble {
                 overlapped: overlapped && compared,
             }),
         })
-    }
-
-    /// The configured prompt for an agent, if it has one.
-    pub fn prompt_of(&self, name: &str) -> Option<&str> {
-        self.config
-            .agent(name)
-            .and_then(|a| a.prompt.as_deref())
-            .filter(|p| !p.trim().is_empty())
-    }
-
-    /// Every agent a caller may delegate to.
-    pub fn delegable_agents(&self) -> Vec<&str> {
-        self.config.agents.keys().map(String::as_str).collect()
     }
 
     /// Check everything an agent actually runs on: each LLM backend in use,

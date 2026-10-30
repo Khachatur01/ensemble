@@ -147,9 +147,7 @@ Its one type today, `openai-compatible-api`, is any `/chat/completions`
 endpoint. It requires `base_url_env` and takes `base_url_default`,
 `api_key_env` and `timeout_seconds` (default 600, per request).
 
-There is no `manager:` block. The agent that calls Ensemble is the manager. A
-config in an older layout (`manager:`, `backends:`, `roles:`) is refused with
-a message saying what each became.
+There is no manager in the file: the agent that calls Ensemble is the manager.
 
 ### The `ensemble` adapter
 
@@ -457,7 +455,6 @@ current directory), `--context <text>` (for `run`).
 | `src/harness/mcp.rs` | the MCP server, over stdio |
 | `src/config.rs` | `ensemble.yaml`: load, resolve the environment, validate |
 | `ensemble.schema.json` | the JSON Schema for `ensemble.yaml` |
-| `docs/HARNESS.md` | the record of what was verified against which harness |
 
 The layering is load-bearing in one direction: **a backend-specific detail may
 never travel upward.** The router knows agents and `ModelPort`; it does not

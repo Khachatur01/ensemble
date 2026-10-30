@@ -9,9 +9,7 @@
 //! covered by a test that neither binds a port nor needs a model server.
 
 use crate::config::{BackendSettings, LlmBackend};
-use crate::port::{
-    Capabilities, Error, Message, ModelPort, Request, Response, Role, ToolCall, Usage,
-};
+use crate::port::{Error, Message, ModelPort, Request, Response, Role, ToolCall, Usage};
 use std::time::Duration;
 
 /// A completed HTTP exchange. Status plus body is all this adapter needs.
@@ -472,10 +470,6 @@ impl ModelPort for OpenAiAdapter {
         crate::config::OPENAI_COMPATIBLE_API
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities { tool_calling: true }
-    }
-
     fn complete(&self, request: &Request) -> Result<Response, Error> {
         check_serviceable(&self.name, request)?;
 
@@ -714,7 +708,7 @@ mod tests {
         assert!(r.tool_calls.is_empty(), "none were offered, none come back");
         assert_eq!(r.model, "qwen3-coder");
         assert_eq!(r.usage.prompt_tokens, 10);
-        assert_eq!(r.usage.total(), 13);
+        assert_eq!(r.usage.prompt_tokens + r.usage.completion_tokens, 13);
         assert_eq!(r.finish_reason.as_deref(), Some("stop"));
     }
 
@@ -898,12 +892,6 @@ mod tests {
     fn health_surfaces_a_down_server() {
         let a = adapter(FakeHttp::broken("Connection refused"), None);
         assert!(a.health().is_err());
-    }
-
-    #[test]
-    fn this_backend_declares_tool_calling() {
-        let a = adapter(FakeHttp::ok(GOOD), None);
-        assert!(a.capabilities().tool_calling);
     }
 
     // --- tool calling ---------------------------------------------------
