@@ -17,21 +17,9 @@
 version: 1
 
 # ---------------------------------------------------------------------------
-# Backends — *how* a model is reached. Two types ship.
+# Backends — *how* a model is reached.
 # ---------------------------------------------------------------------------
 backends:
-  # The official `claude` CLI, run as a subprocess on your own subscription.
-  # Needs no environment: the login lives in Claude Code's own config and the
-  # working directory comes from the session.
-  claude:
-    type: claude-code-cli
-    # Optional. Defaults shown.
-    # command: claude              # the binary, if it is not on PATH
-    # allowed_tools: [Read, Grep, Glob]  # Claude Code's own tools it may run without asking
-    # permission_mode: dontAsk
-    # max_turns: 12
-    # timeout_seconds: 600
-
   # Anything speaking POST /chat/completions — llama-server, vLLM, Ollama,
   # a hosted API.
   openai-local:

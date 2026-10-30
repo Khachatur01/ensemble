@@ -17,10 +17,9 @@
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
 
-          # The integration suite spawns the built binary, binds loopback
-          # sockets and shells out to stub scripts. All of that works in the
-          # sandbox; none of it needs the network, a model server or a Claude
-          # subscription.
+          # The integration suite spawns the built binary and binds loopback
+          # sockets. All of that works in the sandbox; none of it needs the
+          # network or a model server.
           doCheck = true;
 
           meta = {
@@ -40,11 +39,6 @@
             clippy
             rust-analyzer
           ];
-          # `claude-code` is deliberately absent. It is unfree, so listing it
-          # would make `nix develop` fail for anyone who has not set
-          # allowUnfree — and it is needed at *run* time, only by the
-          # claude-code-cli backend, never to build or to test. Install it
-          # separately if you configure that backend.
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         };
       });

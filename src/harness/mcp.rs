@@ -301,18 +301,18 @@ mod tests {
 version: 1
 backends:
   local: { type: openai-compatible-api, base_url_env: L, base_url_default: "http://127.0.0.1:8000/v1" }
-  claude: { type: claude-code-cli }
+  hosted: { type: openai-compatible-api, base_url_env: H, base_url_default: "http://127.0.0.1:9000/v1" }
 roles:
   coder:
     backend: local
     model: qwen3-coder
     prompt: "Writes code to a stated spec."
   reviewer:
-    backend: claude
-    model: claude-sonnet
+    backend: hosted
+    model: hosted-model
 "#;
 
-    fn ensemble_with(local: Arc<FakePort>, claude: Arc<FakePort>) -> Ensemble {
+    fn ensemble_with(local: Arc<FakePort>, hosted: Arc<FakePort>) -> Ensemble {
         let cfg = config::parse(
             YAML,
             std::path::Path::new("ensemble.yaml"),
@@ -321,14 +321,14 @@ roles:
         .unwrap();
         let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
         ports.insert("local".into(), local);
-        ports.insert("claude".into(), claude);
+        ports.insert("hosted".into(), hosted);
         Ensemble::with_ports(cfg, ports, None)
     }
 
     fn working() -> Ensemble {
         ensemble_with(
             Arc::new(FakePort::ok("local", "work done")),
-            Arc::new(FakePort::ok("claude", "reviewed")),
+            Arc::new(FakePort::ok("hosted", "reviewed")),
         )
     }
 
@@ -372,7 +372,7 @@ roles:
         ));
         let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
         ports.insert("local".into(), local);
-        ports.insert("claude".into(), Arc::new(FakePort::ok("claude", "r")));
+        ports.insert("hosted".into(), Arc::new(FakePort::ok("hosted", "r")));
         let e = Ensemble::with_ports(cfg, ports, Some(tmp.0.clone()));
 
         let roles = call(&e, "roles", json!({}));
@@ -421,7 +421,7 @@ roles:
         ));
         let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
         ports.insert("local".into(), local);
-        ports.insert("claude".into(), Arc::new(FakePort::ok("claude", "r")));
+        ports.insert("hosted".into(), Arc::new(FakePort::ok("hosted", "r")));
         let e = Ensemble::with_ports(cfg, ports, Some(tmp.0.clone()));
 
         let r = call(&e, "delegate", json!({"role": "fixer", "task": "fix"}));
@@ -456,7 +456,7 @@ roles:
         ));
         let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
         ports.insert("local".into(), local);
-        ports.insert("claude".into(), Arc::new(FakePort::ok("claude", "r")));
+        ports.insert("hosted".into(), Arc::new(FakePort::ok("hosted", "r")));
         let e = Ensemble::with_ports(cfg, ports, Some(tmp.0.clone()));
         (e, tmp)
     }
@@ -615,7 +615,7 @@ roles:
         .unwrap();
         let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
         ports.insert("local".into(), local);
-        ports.insert("claude".into(), Arc::new(FakePort::ok("claude", "r")));
+        ports.insert("hosted".into(), Arc::new(FakePort::ok("hosted", "r")));
         Ensemble::with_ports(cfg, ports, None)
     }
 
@@ -665,7 +665,7 @@ roles:
         let slow = Arc::new(Slow(FakePort::scripted("local", "x", looping)));
         let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
         ports.insert("local".into(), slow.clone());
-        ports.insert("claude".into(), Arc::new(FakePort::ok("claude", "r")));
+        ports.insert("hosted".into(), Arc::new(FakePort::ok("hosted", "r")));
         let e = Ensemble::with_ports(cfg, ports, Some(tmp.0.clone()));
 
         let input = format!(
@@ -737,8 +737,8 @@ roles:
     #[test]
     fn delegate_returns_the_roles_work_and_routes_to_its_backend() {
         let local = Arc::new(FakePort::ok("local", "work done"));
-        let claude = Arc::new(FakePort::ok("claude", "reviewed"));
-        let e = ensemble_with(local.clone(), claude.clone());
+        let hosted = Arc::new(FakePort::ok("hosted", "reviewed"));
+        let e = ensemble_with(local.clone(), hosted.clone());
 
         let r = call(
             &e,
@@ -748,7 +748,7 @@ roles:
         assert_eq!(text_of(&r), "work done");
         assert_eq!(r["result"]["isError"], false);
         assert_eq!(local.call_count(), 1);
-        assert_eq!(claude.call_count(), 0);
+        assert_eq!(hosted.call_count(), 0);
 
         let r = call(
             &e,
@@ -756,13 +756,13 @@ roles:
             json!({"role": "reviewer", "task": "review it"}),
         );
         assert_eq!(text_of(&r), "reviewed");
-        assert_eq!(claude.call_count(), 1);
+        assert_eq!(hosted.call_count(), 1);
     }
 
     #[test]
     fn delegate_passes_context_through_to_the_backend() {
         let local = Arc::new(FakePort::ok("local", "ok"));
-        let e = ensemble_with(local.clone(), Arc::new(FakePort::ok("claude", "ok")));
+        let e = ensemble_with(local.clone(), Arc::new(FakePort::ok("hosted", "ok")));
         call(
             &e,
             "delegate",
@@ -782,7 +782,7 @@ roles:
         // handled by the harness and never reaches it.
         let e = ensemble_with(
             Arc::new(FakePort::failing("local", "Connection refused")),
-            Arc::new(FakePort::ok("claude", "ok")),
+            Arc::new(FakePort::ok("hosted", "ok")),
         );
         let r = call(&e, "delegate", json!({"role": "coder", "task": "t"}));
         assert!(r.get("error").is_none(), "{r}");
@@ -833,7 +833,7 @@ roles:
             "must not leak the model: {text}"
         );
         assert!(
-            !text.contains("claude-sonnet"),
+            !text.contains("hosted-model"),
             "must not leak the model: {text}"
         );
     }

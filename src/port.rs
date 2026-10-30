@@ -2,11 +2,11 @@
 //!
 //! Everything above this line (the router, the MCP server, the CLI) is written
 //! against `ModelPort` and the types in this module. Everything below it — how
-//! Claude Code is spawned, how an HTTP endpoint is addressed, what an API error
-//! body looks like — lives inside an adapter and is not visible from here.
+//! an HTTP endpoint is addressed, what an API error body looks like — lives
+//! inside an adapter and is not visible from here.
 //!
 //! The error type is shared rather than per-adapter on purpose. A role failing
-//! because a subprocess was killed and a role failing because an endpoint
+//! because a connection was refused and a role failing because an endpoint
 //! returned 503 are the same event to the harness: this role did not answer, and
 //! here is why in one sentence.
 
@@ -111,9 +111,8 @@ impl Message {
 /// One completion request, in the only shape the port understands.
 ///
 /// `tools` is what the *caller* can run, offered to the model. It is empty for
-/// a think-only role and for a `claude-code-cli` role, which uses Claude Code's
-/// own Read/Grep/Edit and reports back. It is non-empty for a role with
-/// `tools:`, where Ensemble's own agent loop runs the calls the model makes.
+/// a think-only role, and non-empty for a role with `tools:`, where
+/// Ensemble's own agent loop runs the calls the model makes.
 ///
 /// A silently dropped `tools` array is worse than no
 /// field at all, because the caller believes it was honoured. So no adapter may
@@ -130,9 +129,6 @@ pub struct Request {
     /// How hard a reasoning model should think before answering (`none`,
     /// `low`, `medium`, `high`). Left to the server's default when unset.
     pub reasoning_effort: Option<String>,
-    /// Working directory for backends that act on a checkout. Ignored by
-    /// adapters that have no notion of one.
-    pub workdir: Option<String>,
     /// Tools the *caller* can run. See the note on this struct.
     pub tools: Vec<ToolDef>,
     /// When the whole delegation must end. An adapter waits no later than
@@ -148,7 +144,6 @@ impl Request {
             max_tokens: None,
             temperature: None,
             reasoning_effort: None,
-            workdir: None,
             tools: Vec::new(),
             deadline: None,
         }
@@ -222,19 +217,7 @@ pub struct Capabilities {
 /// Everything that can go wrong between asking a role for work and getting it.
 #[derive(Debug)]
 pub enum Error {
-    /// The backend binary could not be started at all.
-    Spawn {
-        backend: String,
-        program: String,
-        detail: String,
-    },
-    /// It started and exited non-zero.
-    ProcessFailed {
-        backend: String,
-        code: Option<i32>,
-        stderr: String,
-    },
-    /// It was still running when the deadline passed, and was killed.
+    /// The deadline passed before the endpoint answered.
     Timeout { backend: String, seconds: u64 },
     /// The request never reached the endpoint: DNS, refused connection, TLS.
     Transport { backend: String, detail: String },
@@ -254,9 +237,7 @@ impl Error {
     /// The backend an error came from, for log lines and run records.
     pub fn backend(&self) -> &str {
         match self {
-            Error::Spawn { backend, .. }
-            | Error::ProcessFailed { backend, .. }
-            | Error::Timeout { backend, .. }
+            Error::Timeout { backend, .. }
             | Error::Transport { backend, .. }
             | Error::Api { backend, .. }
             | Error::Protocol { backend, .. }
@@ -273,10 +254,7 @@ impl Error {
         match self {
             Error::Timeout { .. } | Error::Transport { .. } => true,
             Error::Api { status, .. } => *status == 429 || *status >= 500,
-            Error::ProcessFailed { .. }
-            | Error::Spawn { .. }
-            | Error::Protocol { .. }
-            | Error::Unsupported { .. } => false,
+            Error::Protocol { .. } | Error::Unsupported { .. } => false,
         }
     }
 }
@@ -353,29 +331,6 @@ fn clip(s: &str, max: usize) -> String {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Spawn {
-                backend,
-                program,
-                detail,
-            } => write!(
-                f,
-                "backend '{backend}': could not start '{program}': {detail}. \
-                 Is it installed and on PATH?"
-            ),
-            Error::ProcessFailed {
-                backend,
-                code,
-                stderr,
-            } => {
-                let code = code
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "signal".into());
-                write!(
-                    f,
-                    "backend '{backend}': exited {code}: {}",
-                    clip(stderr, 800)
-                )
-            }
             Error::Timeout { backend, seconds } => write!(
                 f,
                 "backend '{backend}': no answer within {seconds}s, killed. \
@@ -423,7 +378,7 @@ pub trait ModelPort: Send + Sync {
     /// The backend instance name from `ensemble.yaml`, for errors and logs.
     fn name(&self) -> &str;
 
-    /// The backend type id — `claude-code-cli`, `openai-compatible-api`.
+    /// The backend type id — `openai-compatible-api`.
     fn type_id(&self) -> &'static str;
 
     fn capabilities(&self) -> Capabilities;
@@ -667,14 +622,6 @@ mod tests {
             }
             .is_retryable()
         );
-        assert!(
-            !Error::ProcessFailed {
-                backend: b(),
-                code: Some(1),
-                stderr: String::new()
-            }
-            .is_retryable()
-        );
     }
 
     #[test]
@@ -740,12 +687,11 @@ mod tests {
 
     #[test]
     fn errors_name_the_backend_they_came_from() {
-        let e = Error::Spawn {
-            backend: "claude".into(),
-            program: "claude".into(),
-            detail: "No such file".into(),
+        let e = Error::Transport {
+            backend: "local".into(),
+            detail: "refused".into(),
         };
-        assert_eq!(e.backend(), "claude");
-        assert!(e.to_string().contains("on PATH"), "says what to do: {e}");
+        assert_eq!(e.backend(), "local");
+        assert!(e.to_string().contains("'local'"), "{e}");
     }
 }

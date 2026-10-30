@@ -444,13 +444,7 @@ impl OpenAiAdapter {
     pub fn new(backend: &Backend, http: Box<dyn Http>) -> Result<Self, Error> {
         let BackendSettings::OpenAiCompatible {
             base_url, api_key, ..
-        } = &backend.settings
-        else {
-            return Err(Error::Unsupported {
-                backend: backend.name.clone(),
-                detail: "not an openai-compatible-api backend".into(),
-            });
-        };
+        } = &backend.settings;
         Ok(OpenAiAdapter {
             name: backend.name.clone(),
             base_url: base_url.clone(),

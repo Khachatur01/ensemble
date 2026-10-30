@@ -1,19 +1,20 @@
-//! End-to-end tests: the real binary, a real config file on disk, and a real
-//! subprocess for the Claude leg.
+//! End-to-end tests: the real binary, a real config file on disk, and a stub
+//! model server on loopback.
 //!
 //! The unit suites cover the request path with fakes injected. These cover what
 //! fakes cannot: that the binary parses its arguments, finds its config, speaks
-//! MCP over real pipes, and that `ProcessRunner` handles a child that is slow,
-//! chatty, or absent without deadlocking.
+//! MCP over real pipes, and talks HTTP to a real socket.
 //!
-//! No test here needs the network, a model server, or a Claude subscription.
-//! The `claude` backend is pointed at a shell script.
+//! No test here needs the network or a model server.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 const BIN: &str = env!("CARGO_BIN_EXE_ensemble");
+
+/// Port 1 is reserved and nothing listens there.
+const NOWHERE: &str = "http://127.0.0.1:1/v1";
 
 /// A scratch directory that cleans itself up.
 struct Scratch(PathBuf);
@@ -42,17 +43,6 @@ impl Scratch {
         std::fs::write(&p, contents).expect("write scratch file");
         p
     }
-
-    /// Write an executable shell script and return its path.
-    fn script(&self, name: &str, body: &str) -> PathBuf {
-        let p = self.write(name, &format!("#!/bin/sh\n{body}\n"));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        p
-    }
 }
 
 impl Drop for Scratch {
@@ -61,34 +51,19 @@ impl Drop for Scratch {
     }
 }
 
-/// A `claude` stub: answers in the CLI's JSON shape and records its argv.
-fn claude_stub(scratch: &Scratch, reply: &str) -> (PathBuf, PathBuf) {
-    let log = scratch.path().join("claude-argv.log");
-    let script = scratch.script(
-        "claude-stub",
-        &format!(
-            r#"
-if [ "$1" = "--version" ]; then echo "2.1.223 (Claude Code)"; exit 0; fi
-for a in "$@"; do printf '%s\n' "$a"; done >> '{log}'
-cat <<'JSON'
-{{"result":"{reply}","modelUsage":{{"claude-sonnet-5":{{}}}},"usage":{{"input_tokens":5,"output_tokens":2}}}}
-JSON
-"#,
-            log = log.display()
-        ),
-    );
-    (script, log)
-}
-
-fn config_yaml(claude_cmd: &Path, openai_url: &str) -> String {
+/// Two backends: `coder` on `openai-local` at `openai_url`, and `reviewer`
+/// on `hosted` at `hosted_url`. A URL nothing listens on is fine for any test
+/// that does not delegate to that role.
+fn config_yaml(hosted_url: &str, openai_url: &str) -> String {
     format!(
         r#"
 version: 1
 
 backends:
-  claude:
-    type: claude-code-cli
-    command: "{claude}"
+  hosted:
+    type: openai-compatible-api
+    base_url_env: ENSEMBLE_TEST_HOSTED_URL
+    base_url_default: "{hosted}"
     timeout_seconds: 20
   openai-local:
     type: openai-compatible-api
@@ -98,14 +73,14 @@ backends:
 
 roles:
   reviewer:
-    backend: claude
-    model: claude-sonnet
+    backend: hosted
+    model: hosted-model
     prompt: "Reviews code and reports findings."
   coder:
     backend: openai-local
     model: qwen3-coder
 "#,
-        claude = claude_cmd.display(),
+        hosted = hosted_url,
         url = openai_url,
     )
 }
@@ -136,10 +111,9 @@ fn stderr_of(out: &std::process::Output) -> String {
 #[test]
 fn check_accepts_a_valid_config_and_reports_the_team() {
     let s = Scratch::new("check-ok");
-    let (claude, _) = claude_stub(&s, "ok");
     s.write(
         "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:8000/v1"),
+        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
 
     let out = ensemble(&s, &["check"]);
@@ -148,7 +122,6 @@ fn check_accepts_a_valid_config_and_reports_the_team() {
     assert!(text.contains("ok (version 1)"), "{text}");
     assert!(text.contains("mcp: ready"), "{text}");
     assert!(text.contains("reviewer"), "{text}");
-    assert!(text.contains("claude-code-cli"), "{text}");
     assert!(text.contains("openai-compatible-api"), "{text}");
 }
 
@@ -218,10 +191,9 @@ backends:
 #[test]
 fn a_config_in_a_parent_directory_is_not_used() {
     let s = Scratch::new("discover");
-    let (claude, _) = claude_stub(&s, "ok");
     s.write(
         "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:8000/v1"),
+        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
     let deep = s.path().join("a/b/c");
     std::fs::create_dir_all(&deep).unwrap();
@@ -258,26 +230,24 @@ fn a_missing_config_says_so_rather_than_guessing() {
 #[test]
 fn roles_prints_the_routing_table() {
     let s = Scratch::new("roles");
-    let (claude, _) = claude_stub(&s, "ok");
     s.write(
         "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:8000/v1"),
+        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
 
     let out = ensemble(&s, &["roles"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(text.contains("coder\topenai-local\tqwen3-coder"), "{text}");
-    assert!(text.contains("reviewer\tclaude\tclaude-sonnet"), "{text}");
+    assert!(text.contains("reviewer\thosted\thosted-model"), "{text}");
 }
 
 #[test]
 fn env_overrides_the_configured_default_base_url() {
     let s = Scratch::new("env-override");
-    let (claude, _) = claude_stub(&s, "ok");
     s.write(
         "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:8000/v1"),
+        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
 
     let out = Command::new(BIN)
@@ -295,74 +265,48 @@ fn env_overrides_the_configured_default_base_url() {
 }
 
 // ---------------------------------------------------------------------------
-// The Claude Code CLI adapter, against a real subprocess
+// One task to one role, against a real socket
 // ---------------------------------------------------------------------------
 
 #[test]
-fn run_drives_the_claude_cli_as_a_subprocess_and_returns_its_result() {
-    let s = Scratch::new("claude-run");
-    let (claude, log) = claude_stub(&s, "ensemble-real-ok");
-    s.write(
-        "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:8000/v1"),
-    );
+fn run_sends_one_task_to_a_role_and_prints_its_answer() {
+    let (url, seen) = openai_stub(vec![text_body("ensemble-real-ok")]);
+    let s = Scratch::new("run");
+    s.write("ensemble.yaml", &config_yaml(&url, NOWHERE));
 
     let out = ensemble(&s, &["run", "reviewer", "review", "this", "code"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(stdout_of(&out).trim(), "ensemble-real-ok");
     // Provenance goes to stderr so stdout stays pipeable.
     assert!(
-        stderr_of(&out).contains("reviewer via claude/claude-sonnet-5"),
+        stderr_of(&out).contains("reviewer via hosted/stub"),
         "{}",
         stderr_of(&out)
     );
-
-    let argv: Vec<String> = std::fs::read_to_string(&log)
-        .unwrap()
-        .lines()
-        .map(str::to_string)
-        .collect();
-    assert!(argv.contains(&"-p".to_string()), "{argv:?}");
-    assert!(argv.contains(&"review this code".to_string()), "{argv:?}");
+    let body: serde_json::Value = serde_json::from_str(&seen.lock().unwrap()[0]).unwrap();
+    assert_eq!(body["model"], "hosted-model");
+    let sent = body["messages"].to_string();
     assert!(
-        argv.contains(&"--model".to_string()) && argv.contains(&"sonnet".to_string()),
-        "{argv:?}"
+        sent.contains("Reviews code and reports findings."),
+        "{sent}"
     );
-    assert!(argv.contains(&"--output-format".to_string()), "{argv:?}");
-    assert!(
-        argv.contains(&"Reviews code and reports findings.".to_string()),
-        "{argv:?}"
-    );
-    // --bare bypasses the subscription login and bills per token.
-    assert!(!argv.contains(&"--bare".to_string()), "{argv:?}");
-    // The session's directory is passed through.
-    assert!(argv.contains(&"--add-dir".to_string()), "{argv:?}");
+    assert!(sent.contains("review this code"), "{sent}");
 }
 
 #[test]
-fn a_claude_subprocess_that_exits_non_zero_is_reported_with_its_stderr() {
-    let s = Scratch::new("claude-fail");
-    let claude = s.script("claude-fail", "echo 'credit balance too low' >&2; exit 1");
-    s.write(
-        "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:8000/v1"),
+fn a_silent_endpoint_is_cut_off_at_the_backend_timeout() {
+    // Accepts the connection, never answers.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
     );
-
-    let out = ensemble(&s, &["run", "reviewer", "review this"]);
-    assert!(!out.status.success());
-    let err = stderr_of(&out);
-    assert!(err.contains("exited 1"), "{err}");
-    assert!(err.contains("credit balance too low"), "{err}");
-}
-
-#[test]
-fn a_claude_subprocess_that_hangs_is_killed_at_the_timeout() {
-    // Regression: `sleep` inherits the stdout pipe, so killing only the shell
-    // left the runner blocked on a read until the orphan finished — a
-    // 2-second timeout that took 120 seconds to report.
-    let s = Scratch::new("claude-hang");
-    let claude = s.script("claude-hang", "sleep 120");
-    let cfg = config_yaml(&claude, "http://127.0.0.1:8000/v1").replace(
+    std::thread::spawn(move || {
+        let _held: Vec<_> = listener.incoming().take(3).collect();
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    });
+    let s = Scratch::new("silent");
+    let cfg = config_yaml(&url, NOWHERE).replace(
         "    timeout_seconds: 20\n  openai-local:",
         "    timeout_seconds: 2\n  openai-local:",
     );
@@ -370,116 +314,23 @@ fn a_claude_subprocess_that_hangs_is_killed_at_the_timeout() {
 
     let started = std::time::Instant::now();
     let out = ensemble(&s, &["run", "reviewer", "review this"]);
-    let elapsed = started.elapsed();
-
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("no answer within 2s"),
         "{}",
         stderr_of(&out)
     );
-    // Reported near the deadline, not at the child's leisure.
-    assert!(elapsed.as_secs() < 15, "took {elapsed:?}");
-}
-
-#[cfg(unix)]
-#[test]
-fn a_timeout_takes_the_whole_process_tree_down_not_just_the_leader() {
-    // A leaked `claude` is a model call still running that nobody is waiting
-    // for, so the orphan being gone is the actual requirement; returning
-    // promptly is only the symptom that exposed it.
-    let s = Scratch::new("claude-orphan");
-    let marker = s.path().join("orphan-still-alive");
-    let claude = s.script(
-        "claude-orphan",
-        &format!(
-            r#"
-if [ "$1" = "--version" ]; then echo v; exit 0; fi
-# A grandchild that outlives its parent unless the group is signalled.
-( sleep 8; touch '{marker}' ) &
-sleep 60
-"#,
-            marker = marker.display()
-        ),
-    );
-    let cfg = config_yaml(&claude, "http://127.0.0.1:8000/v1").replace(
-        "    timeout_seconds: 20
-  openai-local:",
-        "    timeout_seconds: 2
-  openai-local:",
-    );
-    s.write("ensemble.yaml", &cfg);
-
-    let out = ensemble(&s, &["run", "reviewer", "review this"]);
-    assert!(!out.status.success());
     assert!(
-        stderr_of(&out).contains("no answer within 2s"),
-        "{}",
-        stderr_of(&out)
+        started.elapsed().as_secs() < 15,
+        "took {:?}",
+        started.elapsed()
     );
-
-    // Outlive the grandchild's own timer. If it survived the kill, it touches
-    // the marker; if the group was signalled, it never runs.
-    std::thread::sleep(std::time::Duration::from_secs(12));
-    assert!(
-        !marker.exists(),
-        "a grandchild outlived the timeout — the process group was not killed"
-    );
-}
-
-#[test]
-fn a_chatty_subprocess_does_not_deadlock_on_a_full_pipe() {
-    // A child writing more than the pipe buffer blocks until something reads
-    // it. If the runner waits before reading, this hangs until the timeout and
-    // every long answer becomes a spurious failure.
-    let s = Scratch::new("claude-chatty");
-    let big = "y".repeat(400_000);
-    let claude = s.script(
-        "claude-chatty",
-        &format!(
-            r#"
-if [ "$1" = "--version" ]; then echo v; exit 0; fi
-printf '{{"result":"%s","modelUsage":{{"claude-sonnet-5":{{}}}}}}' '{big}'
-"#
-        ),
-    );
-    s.write(
-        "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:8000/v1"),
-    );
-
-    let out = ensemble(&s, &["run", "reviewer", "say a lot"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(
-        stdout_of(&out).trim().len() >= 400_000,
-        "got {} bytes",
-        stdout_of(&out).trim().len()
-    );
-}
-
-#[test]
-fn a_missing_claude_binary_says_what_is_missing() {
-    let s = Scratch::new("claude-absent");
-    s.write(
-        "ensemble.yaml",
-        &config_yaml(Path::new("/nonexistent/claude"), "http://127.0.0.1:8000/v1"),
-    );
-    let out = ensemble(&s, &["run", "reviewer", "review this"]);
-    assert!(!out.status.success());
-    let err = stderr_of(&out);
-    assert!(err.contains("could not start"), "{err}");
-    assert!(err.contains("PATH"), "{err}");
 }
 
 #[test]
 fn an_unreachable_openai_endpoint_fails_with_a_transport_error_not_a_hang() {
     let s = Scratch::new("openai-down");
-    let (claude, _) = claude_stub(&s, "ok");
-    // Port 1 is reserved and nothing listens there.
-    s.write(
-        "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:1/v1"),
-    );
+    s.write("ensemble.yaml", &config_yaml(NOWHERE, NOWHERE));
 
     let out = ensemble(&s, &["run", "coder", "write something"]);
     assert!(!out.status.success());
@@ -578,10 +429,9 @@ fn tool_text(reply: &serde_json::Value) -> String {
 #[test]
 fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
     let s = Scratch::new("mcp-handshake");
-    let (claude, _) = claude_stub(&s, "ok");
     s.write(
         "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:8000/v1"),
+        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
     let mut session = McpSession::start(&s);
 
@@ -613,11 +463,8 @@ fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
 #[test]
 fn a_harness_can_delegate_through_mcp_and_get_the_work_back() {
     let s = Scratch::new("mcp-delegate");
-    let (claude, log) = claude_stub(&s, "the review is clean");
-    s.write(
-        "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:8000/v1"),
-    );
+    let (url, seen) = openai_stub(vec![text_body("the review is clean")]);
+    s.write("ensemble.yaml", &config_yaml(&url, NOWHERE));
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
 
@@ -628,19 +475,18 @@ fn a_harness_can_delegate_through_mcp_and_get_the_work_back() {
     assert_eq!(reply["result"]["isError"], false, "{reply}");
     assert_eq!(tool_text(&reply), "the review is clean");
 
-    // And it really went to the Claude backend, with the context attached.
-    let argv = std::fs::read_to_string(&log).unwrap();
-    assert!(argv.contains("review src/main.rs"), "{argv}");
-    assert!(argv.contains("it is new"), "{argv}");
+    // And it really went to the reviewer's backend, with the context attached.
+    let sent = seen.lock().unwrap()[0].clone();
+    assert!(sent.contains("review src/main.rs"), "{sent}");
+    assert!(sent.contains("it is new"), "{sent}");
 }
 
 #[test]
 fn an_unknown_role_comes_back_as_a_readable_tool_error_and_the_session_survives() {
     let s = Scratch::new("mcp-bad-role");
-    let (claude, _) = claude_stub(&s, "ok");
     s.write(
         "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:8000/v1"),
+        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
@@ -666,10 +512,9 @@ fn an_unknown_role_comes_back_as_a_readable_tool_error_and_the_session_survives(
 #[test]
 fn a_backend_failure_reaches_the_model_as_a_readable_reason() {
     let s = Scratch::new("mcp-backend-down");
-    let (claude, _) = claude_stub(&s, "ok");
     s.write(
         "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:1/v1"),
+        &config_yaml(NOWHERE, "http://127.0.0.1:1/v1"),
     );
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
@@ -690,10 +535,9 @@ fn a_backend_failure_reaches_the_model_as_a_readable_reason() {
 #[test]
 fn the_tools_never_offer_a_way_to_pick_a_model_or_a_backend() {
     let s = Scratch::new("mcp-no-model-param");
-    let (claude, _) = claude_stub(&s, "ok");
     s.write(
         "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:8000/v1"),
+        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
@@ -706,27 +550,16 @@ fn the_tools_never_offer_a_way_to_pick_a_model_or_a_backend() {
     // And the role listing does not leak them either.
     let roles = tool_text(&session.call("roles", serde_json::json!({})));
     assert!(!roles.contains("qwen3-coder"), "{roles}");
-    assert!(!roles.contains("claude-sonnet"), "{roles}");
+    assert!(!roles.contains("hosted-model"), "{roles}");
 }
 
 #[test]
 fn nothing_but_protocol_is_ever_written_to_stdout() {
     // One stray println corrupts the stream and the harness sees a parse error
-    // instead of a tool. The `claude` stub is made noisy to prove adapter
-    // chatter cannot leak into it either.
+    // instead of a tool.
     let s = Scratch::new("mcp-clean-stdout");
-    let claude = s.script(
-        "claude-noisy",
-        r#"
-if [ "$1" = "--version" ]; then echo v; exit 0; fi
-echo "a warning from the CLI" >&2
-printf '{"result":"fine","modelUsage":{"claude-sonnet-5":{}}}'
-"#,
-    );
-    s.write(
-        "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:8000/v1"),
-    );
+    let (url, _) = openai_stub(vec![text_body("fine")]);
+    s.write("ensemble.yaml", &config_yaml(&url, NOWHERE));
 
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
@@ -744,10 +577,9 @@ printf '{"result":"fine","modelUsage":{"claude-sonnet-5":{}}}'
 #[test]
 fn a_malformed_message_does_not_end_the_session() {
     let s = Scratch::new("mcp-garbage");
-    let (claude, _) = claude_stub(&s, "ok");
     s.write(
         "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:8000/v1"),
+        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
     let mut session = McpSession::start(&s);
 
@@ -769,10 +601,9 @@ fn a_malformed_message_does_not_end_the_session() {
 #[test]
 fn the_server_exits_cleanly_when_the_harness_closes_the_pipe() {
     let s = Scratch::new("mcp-eof");
-    let (claude, _) = claude_stub(&s, "ok");
     s.write(
         "ensemble.yaml",
-        &config_yaml(&claude, "http://127.0.0.1:8000/v1"),
+        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));

@@ -95,7 +95,7 @@ fn adapter(base_url: &str, api_key: Option<&str>) -> std::sync::Arc<dyn ModelPor
             base_url_env: "OPENAI_LOCAL_BASE_URL".into(),
         },
     };
-    ensemble::backend::build(&backend, None).expect("build the adapter")
+    ensemble::backend::build(&backend).expect("build the adapter")
 }
 
 const COMPLETION: &str = r#"{"id":"chatcmpl-1","object":"chat.completion","model":"qwen3-coder",

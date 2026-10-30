@@ -102,10 +102,7 @@ impl Ensemble {
     pub fn new(config: Config, workdir: Option<PathBuf>) -> Result<Self, Error> {
         let mut ports = BTreeMap::new();
         for (name, backend) in &config.backends {
-            ports.insert(
-                name.clone(),
-                crate::backend::build(backend, workdir.clone())?,
-            );
+            ports.insert(name.clone(), crate::backend::build(backend)?);
         }
         Ok(Self::with_ports(config, ports, workdir))
     }
@@ -207,7 +204,6 @@ impl Ensemble {
         messages.push(Message::user(task.to_string()));
 
         let mut request = Request::new(assignment.model.clone(), messages);
-        request.workdir = self.workdir.as_ref().map(|p| p.display().to_string());
         request.temperature = assignment.temperature;
         request.reasoning_effort = assignment.reasoning_effort.clone();
 
@@ -326,8 +322,10 @@ mod tests {
     const YAML: &str = r#"
 version: 1
 backends:
-  claude:
-    type: claude-code-cli
+  hosted:
+    type: openai-compatible-api
+    base_url_env: H
+    base_url_default: "http://127.0.0.1:9000/v1"
   openai-local:
     type: openai-compatible-api
     base_url_env: L
@@ -345,8 +343,8 @@ roles:
     backend: openai-remote
     model: qwen3-coder
   reviewer:
-    backend: claude
-    model: claude-sonnet
+    backend: hosted
+    model: hosted-model
 "#;
 
     fn cfg() -> Config {
@@ -361,7 +359,7 @@ roles:
     /// An ensemble whose three backends are fakes, each answering with its own
     /// name so routing is observable from the result alone.
     fn ensemble() -> (Ensemble, BTreeMap<String, Arc<FakePort>>) {
-        let fakes: BTreeMap<String, Arc<FakePort>> = ["claude", "openai-local", "openai-remote"]
+        let fakes: BTreeMap<String, Arc<FakePort>> = ["hosted", "openai-local", "openai-remote"]
             .into_iter()
             .map(|n| {
                 (
@@ -392,19 +390,19 @@ roles:
             e.delegate("coder", "t", None).unwrap().backend,
             "openai-remote"
         );
-        assert_eq!(e.delegate("reviewer", "t", None).unwrap().backend, "claude");
+        assert_eq!(e.delegate("reviewer", "t", None).unwrap().backend, "hosted");
 
         // And the calls landed where the names say, not merely got labelled so.
         assert_eq!(fakes["openai-local"].call_count(), 1);
         assert_eq!(fakes["openai-remote"].call_count(), 1);
-        assert_eq!(fakes["claude"].call_count(), 1);
+        assert_eq!(fakes["hosted"].call_count(), 1);
     }
 
     #[test]
     fn the_model_sent_is_the_one_the_role_is_assigned() {
         let (e, fakes) = ensemble();
         e.delegate("reviewer", "review this", None).unwrap();
-        assert_eq!(fakes["claude"].last().unwrap().model, "claude-sonnet");
+        assert_eq!(fakes["hosted"].last().unwrap().model, "hosted-model");
         e.delegate("coder", "write this", None).unwrap();
         assert_eq!(fakes["openai-remote"].last().unwrap().model, "qwen3-coder");
     }
@@ -509,16 +507,6 @@ roles:
     }
 
     #[test]
-    fn the_project_directory_travels_with_every_request() {
-        let (e, fakes) = ensemble();
-        e.delegate("reviewer", "review", None).unwrap();
-        assert_eq!(
-            fakes["claude"].last().unwrap().workdir.as_deref(),
-            Some("/proj")
-        );
-    }
-
-    #[test]
     fn a_backend_failure_is_reported_with_its_reason_and_its_retryability() {
         let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
         ports.insert(
@@ -529,7 +517,7 @@ roles:
             "openai-remote".into(),
             Arc::new(FakePort::failing("openai-remote", "Connection refused")),
         );
-        ports.insert("claude".into(), Arc::new(FakePort::ok("claude", "ok")));
+        ports.insert("hosted".into(), Arc::new(FakePort::ok("hosted", "ok")));
         let e = Ensemble::with_ports(cfg(), ports, None);
 
         let err = e.delegate("coder", "t", None).unwrap_err();
@@ -554,7 +542,7 @@ roles:
         let results = e.health();
         let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
         // Three backends, one role on each.
-        assert_eq!(names, vec!["claude", "openai-local", "openai-remote"]);
+        assert_eq!(names, vec!["hosted", "openai-local", "openai-remote"]);
         assert!(results.iter().all(|(_, r)| r.is_ok()));
     }
 }

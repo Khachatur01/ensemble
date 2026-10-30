@@ -28,7 +28,7 @@ ureq = "3"
 strip = true
 
 [target.'cfg(unix)'.dependencies]
-# Only for killpg: a timeout must take the backend's whole process tree down,
-# and std can signal one pid. Already in the tree via ureq, so this costs no
+# Landlock syscalls and killpg for the bash tool: a timeout must take a
+# command's whole process tree down, and std can signal one pid. Already in the tree via ureq, so this costs no
 # extra compilation.
 libc = "0.2"

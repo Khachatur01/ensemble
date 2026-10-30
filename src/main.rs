@@ -182,13 +182,6 @@ fn cmd_check(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
     println!("backends:");
     for (name, b) in &config.backends {
         let detail = match &b.settings {
-            config::BackendSettings::ClaudeCodeCli {
-                command,
-                allowed_tools,
-                ..
-            } => {
-                format!("{command}, tools: {allowed_tools}")
-            }
             config::BackendSettings::OpenAiCompatible {
                 base_url,
                 api_key,
@@ -216,15 +209,7 @@ fn cmd_check(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
         let a = config
             .assignment(role)
             .expect("role_names only yields configured roles");
-        let claude_tools = match config.backends.get(&a.backend).map(|b| &b.settings) {
-            Some(config::BackendSettings::ClaudeCodeCli { allowed_tools, .. }) => {
-                Some(allowed_tools)
-            }
-            _ => None,
-        };
-        let kind = if let Some(allowed) = claude_tools {
-            format!("Claude Code's own tools: {allowed}")
-        } else if a.tools.is_empty() {
+        let kind = if a.tools.is_empty() {
             "think-only".to_string()
         } else {
             let names: Vec<&str> = a.tools.iter().map(|t| t.as_str()).collect();
@@ -236,8 +221,8 @@ fn cmd_check(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
         println!("  (none — add roles under `roles:`)");
     }
 
-    // Constructing the Ensemble builds every backend, which is where a missing
-    // binary or a bad URL shows up.
+    // Constructing the Ensemble builds every backend, which is where a bad URL
+    // shows up.
     println!();
     match Ensemble::new(config, Some(dir)) {
         Ok(_) => println!("mcp: ready"),

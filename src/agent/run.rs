@@ -132,7 +132,6 @@ pub fn run(
         let mut r = Request::new(assignment.model.clone(), messages.to_vec());
         r.temperature = assignment.temperature;
         r.reasoning_effort = assignment.reasoning_effort.clone();
-        r.workdir = Some(sandbox.root().display().to_string());
         r.deadline = Some(deadline);
         if offer_tools {
             r.tools = defs.clone();

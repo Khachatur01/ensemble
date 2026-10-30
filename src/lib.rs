@@ -13,15 +13,14 @@
 //!                 \          /
 //!                  v        v
 //!                  ModelPort                      (src/port.rs)
-//!                  /        \
-//!                 v          v
-//!       OpenAI-compatible   Claude Code           (src/backend/)
-//!            API               CLI
+//!                      |
+//!                      v
+//!              OpenAI-compatible API              (src/backend/)
 //! ```
 //!
 //! The layering is the design: a backend-specific detail may never travel
-//! upward. The router knows roles and `ModelPort`; it does not know that one
-//! adapter spawns a process and the other opens a socket. The harness knows the
+//! upward. The router knows roles and `ModelPort`; it does not know how an
+//! adapter reaches its model. The harness knows the
 //! router and nothing about backends. The agent loop knows `ModelPort` and the
 //! project directory, and nothing about which model is behind it.
 

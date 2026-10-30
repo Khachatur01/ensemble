@@ -23,7 +23,6 @@ pub const SCHEMA: &str = include_str!("../ensemble.schema.json");
 pub const SUPPORTED_VERSION: u32 = 1;
 
 /// The backend types that ship. Adding one is adding an adapter and a variant.
-pub const CLAUDE_CODE_CLI: &str = "claude-code-cli";
 pub const OPENAI_COMPATIBLE_API: &str = "openai-compatible-api";
 
 // ---------------------------------------------------------------------------
@@ -53,47 +52,10 @@ struct RawBackend {
     #[serde(rename = "type")]
     type_id: String,
 
-    // --- openai-compatible-api ---
     base_url_env: Option<String>,
     base_url_default: Option<String>,
     api_key_env: Option<String>,
-
-    // --- claude-code-cli ---
-    /// Path to the CLI. Defaults to `claude` on PATH.
-    command: Option<String>,
-    /// Claude Code's own tools (`Read`, `Edit`, `Bash(git:*)`, ...) that it
-    /// may run without asking. Read-only by default: a role that should edit
-    /// files has to say so. Not the same as a role's `tools`, which are
-    /// Ensemble's own agent tools.
-    #[serde(default, deserialize_with = "tool_list")]
-    allowed_tools: Option<Vec<String>>,
-    permission_mode: Option<String>,
-    max_turns: Option<u32>,
-
-    // --- both ---
     timeout_seconds: Option<u64>,
-}
-
-/// A list of names. A string, such as the comma-separated form Claude Code's
-/// own flag takes, is refused with the fix rather than a type error.
-fn tool_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Listed {
-        List(Vec<String>),
-        Text(String),
-    }
-    match Option::<Listed>::deserialize(d)? {
-        None => Ok(None),
-        Some(Listed::List(list)) => Ok(Some(list)),
-        Some(Listed::Text(text)) => Err(serde::de::Error::custom(format!(
-            "`allowed_tools` is a list, not a string; write [{}]",
-            text.split(',')
-                .map(str::trim)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,12 +119,6 @@ struct RawAssignment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendSettings {
-    ClaudeCodeCli {
-        command: String,
-        allowed_tools: String,
-        permission_mode: String,
-        max_turns: u32,
-    },
     OpenAiCompatible {
         /// Already resolved from the environment. Never a `{env:...}` template:
         /// if it could not be resolved, loading failed instead.
@@ -183,23 +139,8 @@ pub struct Backend {
 impl Backend {
     pub fn type_id(&self) -> &'static str {
         match self.settings {
-            BackendSettings::ClaudeCodeCli { .. } => CLAUDE_CODE_CLI,
             BackendSettings::OpenAiCompatible { .. } => OPENAI_COMPATIBLE_API,
         }
-    }
-
-    /// Does this backend type let a model call the *caller's* tools?
-    ///
-    /// `claude -p` emits Claude Code's own tool_use blocks, which Claude Code
-    /// executes itself; it never returns an OpenAI `tool_calls` array against a
-    /// schema we supplied. So the answer is no, and it is declared rather than
-    /// discovered.
-    ///
-    /// A role on this backend still does real work, with Claude Code's own
-    /// tools, and reports back in prose. What it cannot do is drive the tool
-    /// loop in `agent`, which needs a schema *this* process supplies.
-    pub fn supports_tool_calling(&self) -> bool {
-        matches!(self.settings, BackendSettings::OpenAiCompatible { .. })
     }
 }
 
@@ -515,29 +456,10 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
                     REASONING_EFFORTS.join(", ")
                 ));
             }
-            if backends
-                .get(&a.backend)
-                .is_some_and(|b| !b.supports_tool_calling())
-            {
-                problems.push(format!(
-                    "roles.{name}: `reasoning_effort` needs an openai-compatible-api backend; '{}' is not one",
-                    a.backend
-                ));
-            }
         }
         if !a.tools.is_empty() && ra.context_window.is_none() {
             problems.push(format!(
                 "roles.{name}: a role with `tools` needs `context_window`, the tokens of context your server runs the model with (Ollama: OLLAMA_CONTEXT_LENGTH, default 4096)"
-            ));
-        }
-        if !a.tools.is_empty()
-            && backends
-                .get(&a.backend)
-                .is_some_and(|b| !b.supports_tool_calling())
-        {
-            problems.push(format!(
-                "roles.{name}: `tools` needs a backend that supports tool calling; '{}' does not",
-                a.backend
             ));
         }
         check_assignment(&a, &backends, &raw.backends, &mut problems);
@@ -636,52 +558,8 @@ fn resolve_backend(name: &str, rb: &RawBackend, env: &dyn Env) -> Result<Backend
         ));
     }
 
-    // Reject settings that belong to a different type rather than ignoring
-    // them. A `base_url_env` on a claude-code-cli backend means someone
-    // believes the URL is being used, and it is not.
-    let mut reject_foreign = |keys: &[(&str, bool)], type_id: &str| {
-        for (key, present) in keys {
-            if *present {
-                problems.push(format!(
-                    "backends.{name}: `{key}` is not a setting of type '{type_id}'"
-                ));
-            }
-        }
-    };
-
     let settings = match rb.type_id.as_str() {
-        CLAUDE_CODE_CLI => {
-            reject_foreign(
-                &[
-                    ("base_url_env", rb.base_url_env.is_some()),
-                    ("base_url_default", rb.base_url_default.is_some()),
-                    ("api_key_env", rb.api_key_env.is_some()),
-                ],
-                CLAUDE_CODE_CLI,
-            );
-            Some(BackendSettings::ClaudeCodeCli {
-                command: rb.command.clone().unwrap_or_else(|| "claude".into()),
-                allowed_tools: rb
-                    .allowed_tools
-                    .as_ref()
-                    .map_or_else(|| "Read,Grep,Glob".into(), |list| list.join(",")),
-                permission_mode: rb
-                    .permission_mode
-                    .clone()
-                    .unwrap_or_else(|| "dontAsk".into()),
-                max_turns: rb.max_turns.unwrap_or(12),
-            })
-        }
         OPENAI_COMPATIBLE_API => {
-            reject_foreign(
-                &[
-                    ("command", rb.command.is_some()),
-                    ("allowed_tools", rb.allowed_tools.is_some()),
-                    ("permission_mode", rb.permission_mode.is_some()),
-                    ("max_turns", rb.max_turns.is_some()),
-                ],
-                OPENAI_COMPATIBLE_API,
-            );
             resolve_openai(name, rb, env, &mut problems).map(|(base_url, api_key, var)| {
                 BackendSettings::OpenAiCompatible {
                     base_url,
@@ -693,7 +571,7 @@ fn resolve_backend(name: &str, rb: &RawBackend, env: &dyn Env) -> Result<Backend
         other => {
             problems.push(format!(
                 "backends.{name}: type '{other}' is unknown. Known types: \
-                 {CLAUDE_CODE_CLI}, {OPENAI_COMPATIBLE_API}."
+                 {OPENAI_COMPATIBLE_API}."
             ));
             None
         }
@@ -798,8 +676,6 @@ mod tests {
     const REFERENCE: &str = r#"
 version: 1
 backends:
-  claude:
-    type: claude-code-cli
   openai-local:
     type: openai-compatible-api
     base_url_env: OPENAI_LOCAL_BASE_URL
@@ -833,7 +709,7 @@ roles:
     fn the_reference_config_loads() {
         let c = parse(REFERENCE, &p(), &env(&[])).expect("reference config must load");
         assert_eq!(c.version, 1);
-        assert_eq!(c.backends.len(), 3);
+        assert_eq!(c.backends.len(), 2);
         assert_eq!(c.roles.len(), 3);
         assert_eq!(c.role_names(), vec!["coder", "planner", "reviewer"]);
     }
@@ -845,8 +721,6 @@ backends:
     type: openai-compatible-api
     base_url_env: OPENAI_LOCAL_BASE_URL
     base_url_default: "http://127.0.0.1:11434/v1"
-  claude:
-    type: claude-code-cli
 roles:
   coder:
     backend: openai-local
@@ -1068,7 +942,7 @@ roles:
 
         let mut types = schema_enum(&backend["type"]);
         types.sort();
-        assert_eq!(types, [CLAUDE_CODE_CLI, OPENAI_COMPATIBLE_API]);
+        assert_eq!(types, [OPENAI_COMPATIBLE_API]);
 
         let mut tools = schema_enum(&role["tools"]["items"]);
         tools.sort();
@@ -1100,25 +974,6 @@ roles:
     }
 
     #[test]
-    fn allowed_tools_is_a_list_and_a_string_is_refused_with_the_fix() {
-        let doc = |value: &str| {
-            format!(
-                "version: 1\nbackends:\n  c:\n    type: claude-code-cli\n    allowed_tools: {value}\nroles:\n  r: {{backend: c, model: m}}\n"
-            )
-        };
-        let c = parse(&doc("[Read, \"Bash(git:*)\"]"), &p(), &env(&[])).unwrap();
-        let BackendSettings::ClaudeCodeCli { allowed_tools, .. } = &c.backends["c"].settings else {
-            panic!("claude backend");
-        };
-        assert_eq!(allowed_tools, "Read,Bash(git:*)");
-
-        let err = parse(&doc("\"Read,Grep\""), &p(), &env(&[]))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("write [Read, Grep]"), "{err}");
-    }
-
-    #[test]
     fn max_seconds_must_be_positive_and_needs_tools() {
         let set = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    max_seconds: 60");
         assert_eq!(
@@ -1143,21 +998,6 @@ roles:
             problems
                 .iter()
                 .any(|p| p.contains("roles.idle: `max_seconds` only")),
-            "{problems:?}"
-        );
-    }
-
-    #[test]
-    fn tools_on_a_backend_that_cannot_call_tools_are_rejected() {
-        let doc = AGENT_DOC.replace(
-            "  coder:\n    backend: openai-local",
-            "  coder:\n    backend: claude",
-        );
-        let Err(ConfigError::Invalid { problems, .. }) = parse(&doc, &p(), &env(&[])) else {
-            panic!("expected invalid");
-        };
-        assert!(
-            problems.iter().any(|p| p.contains("supports tool calling")),
             "{problems:?}"
         );
     }
@@ -1222,14 +1062,12 @@ roles:
             BackendSettings::OpenAiCompatible { base_url, .. } => {
                 assert_eq!(base_url, "http://192.168.1.9:9000/v1");
             }
-            other => panic!("wrong settings: {other:?}"),
         }
         // The one without an override keeps its default.
         match &c.backends["openai-remote"].settings {
             BackendSettings::OpenAiCompatible { base_url, .. } => {
                 assert_eq!(base_url, "http://10.10.10.5:8000/v1");
             }
-            other => panic!("wrong settings: {other:?}"),
         }
     }
 
@@ -1243,7 +1081,6 @@ roles:
             BackendSettings::OpenAiCompatible { base_url, .. } => {
                 assert_eq!(base_url, "http://127.0.0.1:8000/v1")
             }
-            other => panic!("{other:?}"),
         }
     }
 
@@ -1259,12 +1096,10 @@ roles:
             BackendSettings::OpenAiCompatible { api_key, .. } => {
                 assert_eq!(api_key.as_deref(), Some("sk-secret"))
             }
-            other => panic!("{other:?}"),
         }
         // And an unset one is simply absent, not an empty bearer token.
         match &c.backends["openai-remote"].settings {
             BackendSettings::OpenAiCompatible { api_key, .. } => assert_eq!(*api_key, None),
-            other => panic!("{other:?}"),
         }
     }
 
@@ -1343,21 +1178,6 @@ roles:
     }
 
     #[test]
-    fn a_role_on_claude_code_is_fine() {
-        let yaml = r#"
-version: 1
-backends:
-  claude: { type: claude-code-cli }
-  local: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
-roles:
-  reviewer: { backend: claude, model: claude-sonnet }
-"#;
-        let c = parse(yaml, &p(), &env(&[])).unwrap();
-        assert_eq!(c.roles["reviewer"].backend, "claude");
-        assert!(!c.backends["claude"].supports_tool_calling());
-    }
-
-    #[test]
     fn an_unknown_backend_type_lists_the_known_ones() {
         let yaml = r#"
 version: 1
@@ -1367,10 +1187,7 @@ backends:
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
         let joined = problems.join("\n");
         assert!(joined.contains("ollama"), "{joined}");
-        assert!(
-            joined.contains(CLAUDE_CODE_CLI) && joined.contains(OPENAI_COMPATIBLE_API),
-            "{joined}"
-        );
+        assert!(joined.contains(OPENAI_COMPATIBLE_API), "{joined}");
     }
 
     #[test]
@@ -1412,22 +1229,7 @@ backends:
             BackendSettings::OpenAiCompatible { base_url, .. } => {
                 assert_eq!(base_url, "http://127.0.0.1:8000/v1")
             }
-            other => panic!("{other:?}"),
         }
-    }
-
-    #[test]
-    fn settings_from_the_wrong_backend_type_are_refused_not_ignored() {
-        let yaml = r#"
-version: 1
-backends:
-  claude: { type: claude-code-cli, base_url_env: NOPE }
-  x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1", max_turns: 3 }
-"#;
-        let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
-        let joined = problems.join("\n");
-        assert!(joined.contains("base_url_env"), "{joined}");
-        assert!(joined.contains("max_turns"), "{joined}");
     }
 
     #[test]
@@ -1482,36 +1284,6 @@ backends:
         assert!(
             problems.iter().any(|p| p.contains("timeout_seconds")),
             "{problems:?}"
-        );
-    }
-
-    #[test]
-    fn claude_code_defaults_are_read_only() {
-        let yaml = r#"
-version: 1
-backends:
-  claude: { type: claude-code-cli }
-  x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
-roles:
-  planner: { backend: claude, model: claude-sonnet }
-"#;
-        let c = parse(yaml, &p(), &env(&[])).unwrap();
-        match &c.backends["claude"].settings {
-            BackendSettings::ClaudeCodeCli {
-                allowed_tools,
-                command,
-                max_turns,
-                ..
-            } => {
-                assert_eq!(allowed_tools, "Read,Grep,Glob");
-                assert_eq!(command, "claude");
-                assert_eq!(*max_turns, 12);
-            }
-            other => panic!("{other:?}"),
-        }
-        assert_eq!(
-            c.backends["claude"].timeout_seconds,
-            DEFAULT_TIMEOUT_SECONDS
         );
     }
 
