@@ -226,18 +226,8 @@ pub fn call_reporting(
 
             match ensemble.delegate_reporting(role, task, context, progress) {
                 Ok(out) => ToolResult {
-                    text: match out.agent {
-                        Some(a) => format!(
-                            "{}\n\n[{role} ran as an agent: {} step(s), {} tool call(s){}]",
-                            out.text,
-                            a.steps,
-                            a.tool_calls,
-                            if a.trimmed > 0 {
-                                format!(", {} old tool output(s) dropped", a.trimmed)
-                            } else {
-                                String::new()
-                            }
-                        ),
+                    text: match &out.agent {
+                        Some(a) => format!("{}\n\n{}", out.text, agent_footer(role, a)),
                         None => out.text,
                     },
                     is_error: false,
@@ -314,6 +304,47 @@ pub fn call_reporting(
              {DELEGATE}, {ROLES}, {HEALTH}."
         )),
     }
+}
+
+/// Most `bash` commands listed in a footer; the rest are counted.
+const MAX_LISTED_COMMANDS: usize = 10;
+
+/// What an agent did, under its report: enough for the caller to review the
+/// work without asking the agent to describe it.
+fn agent_footer(role: &str, a: &crate::router::AgentStats) -> String {
+    let mut out = format!(
+        "[{role} ran as an agent: {} step(s), {} tool call(s){}]",
+        a.steps,
+        a.tool_calls,
+        if a.trimmed > 0 {
+            format!(", {} old tool output(s) dropped", a.trimmed)
+        } else {
+            String::new()
+        }
+    );
+    if !a.changes.is_empty() {
+        let files: Vec<String> = a
+            .changes
+            .iter()
+            .map(|(path, change)| format!("{path} ({})", change.as_str()))
+            .collect();
+        out.push_str(&format!("\n[files changed: {}]", files.join(", ")));
+    }
+    if !a.commands.is_empty() {
+        let mut shown: Vec<&str> = a
+            .commands
+            .iter()
+            .take(MAX_LISTED_COMMANDS)
+            .map(String::as_str)
+            .collect();
+        let more = a.commands.len().saturating_sub(MAX_LISTED_COMMANDS);
+        let more = format!("and {more} more");
+        if a.commands.len() > MAX_LISTED_COMMANDS {
+            shown.push(&more);
+        }
+        out.push_str(&format!("\n[commands run: {}]", shown.join("; ")));
+    }
+    out
 }
 
 /// A role prompt is a paragraph; a tool listing wants a line.

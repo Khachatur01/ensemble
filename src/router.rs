@@ -30,12 +30,16 @@ pub struct Outcome {
     pub agent: Option<AgentStats>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentStats {
     pub steps: u32,
     pub tool_calls: u32,
     /// Old tool results the agent lost to stay within its context budget.
     pub trimmed: u32,
+    /// Files it changed, so the caller can review them.
+    pub changes: crate::agent::tools::Changes,
+    /// `bash` commands it ran.
+    pub commands: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -247,6 +251,8 @@ impl Ensemble {
                 steps: run.steps,
                 tool_calls: run.tool_calls,
                 trimmed: run.trimmed,
+                changes: run.changes,
+                commands: run.commands,
             }),
         })
     }

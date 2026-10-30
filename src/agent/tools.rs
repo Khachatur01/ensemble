@@ -321,6 +321,92 @@ fn write(sb: &Sandbox, args: &Value) -> Result<String, String> {
     ))
 }
 
+/// What happened to one file during a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    Added,
+    Modified,
+    Deleted,
+}
+
+impl Change {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Change::Added => "added",
+            Change::Modified => "modified",
+            Change::Deleted => "deleted",
+        }
+    }
+}
+
+/// Every file a run changed, by project-relative path.
+pub type Changes = std::collections::BTreeMap<String, Change>;
+
+/// Fold one change into what is already known about that file: a file added
+/// and then edited is still added, and one added then deleted never existed.
+pub fn record(changes: &mut Changes, path: String, change: Change) {
+    match (changes.get(&path), change) {
+        (Some(Change::Added), Change::Modified) => {}
+        (Some(Change::Added), Change::Deleted) => {
+            changes.remove(&path);
+        }
+        (Some(Change::Deleted), Change::Added) => {
+            changes.insert(path, Change::Modified);
+        }
+        _ => {
+            changes.insert(path, change);
+        }
+    }
+}
+
+/// The file an `edit_file` or `write_file` call is about to change, if the
+/// call names one inside the project. Other tools change nothing by name.
+pub fn target(sb: &Sandbox, name: &str, arguments: &str) -> Option<std::path::PathBuf> {
+    if name != wire_name(AgentTool::Edit) && name != wire_name(AgentTool::Write) {
+        return None;
+    }
+    let args: Value = serde_json::from_str(arguments).ok()?;
+    sb.new_or_existing(args.get("path")?.as_str()?).ok()
+}
+
+/// Above this many files a snapshot is not taken; `bash` changes then go
+/// unreported rather than every command paying for a huge walk.
+const MAX_SNAPSHOT_FILES: usize = 50_000;
+
+/// Size and modification time of every project file, skipping [`SKIP_DIRS`].
+/// Comparing two of them shows what a shell command changed.
+pub type Snapshot = std::collections::BTreeMap<String, (Option<std::time::SystemTime>, u64)>;
+
+pub fn snapshot(sb: &Sandbox) -> Option<Snapshot> {
+    let mut out = Snapshot::new();
+    let mut too_many = false;
+    walk(sb.root(), &mut |p| {
+        if out.len() >= MAX_SNAPSHOT_FILES {
+            too_many = true;
+            return;
+        }
+        if let Ok(meta) = fs::metadata(p) {
+            out.insert(sb.show(p), (meta.modified().ok(), meta.len()));
+        }
+    });
+    (!too_many).then_some(out)
+}
+
+pub fn diff(before: &Snapshot, after: &Snapshot, changes: &mut Changes) {
+    for (path, stamp) in after {
+        match before.get(path) {
+            None => record(changes, path.clone(), Change::Added),
+            Some(old) if old != stamp => record(changes, path.clone(), Change::Modified),
+            Some(_) => {}
+        }
+    }
+    for path in before.keys() {
+        if !after.contains_key(path) {
+            record(changes, path.clone(), Change::Deleted);
+        }
+    }
+}
+
 /// Call `visit` for every file under `dir`, skipping [`SKIP_DIRS`]. Symlinks
 /// are not followed: a link is neither visited nor descended into.
 fn walk(dir: &Path, visit: &mut dyn FnMut(&Path)) {
@@ -544,6 +630,49 @@ mod tests {
                 .unwrap_err()
                 .contains("'path'")
         );
+    }
+
+    #[test]
+    fn a_snapshot_diff_finds_added_modified_and_deleted_files() {
+        let (tmp, sb) = project();
+        let before = snapshot(&sb).unwrap();
+        fs::write(tmp.0.join("p/new.txt"), "n").unwrap();
+        fs::write(tmp.0.join("p/README.md"), "changed and longer\n").unwrap();
+        fs::remove_file(tmp.0.join("p/src/deep/lib.rs")).unwrap();
+        fs::write(tmp.0.join("p/target/junk.rs"), "ignored").unwrap();
+        let mut changes = Changes::new();
+        diff(&before, &snapshot(&sb).unwrap(), &mut changes);
+        let got: Vec<(&str, Change)> = changes.iter().map(|(p, c)| (p.as_str(), *c)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("README.md", Change::Modified),
+                ("new.txt", Change::Added),
+                ("src/deep/lib.rs", Change::Deleted),
+            ]
+        );
+    }
+
+    #[test]
+    fn changes_to_one_file_fold_into_one_entry() {
+        let mut c = Changes::new();
+        record(&mut c, "a".into(), Change::Added);
+        record(&mut c, "a".into(), Change::Modified);
+        assert_eq!(c["a"], Change::Added);
+        record(&mut c, "a".into(), Change::Deleted);
+        assert!(c.is_empty(), "added then deleted never existed");
+        record(&mut c, "b".into(), Change::Deleted);
+        record(&mut c, "b".into(), Change::Added);
+        assert_eq!(c["b"], Change::Modified);
+    }
+
+    #[test]
+    fn only_edit_and_write_name_a_target() {
+        let (_t, sb) = project();
+        let t = target(&sb, "edit_file", r#"{"path":"src/main.rs"}"#).unwrap();
+        assert_eq!(sb.show(&t), "src/main.rs");
+        assert!(target(&sb, "write_file", r#"{"path":"../x"}"#).is_none());
+        assert!(target(&sb, "read_file", r#"{"path":"src/main.rs"}"#).is_none());
     }
 
     #[test]

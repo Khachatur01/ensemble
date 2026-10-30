@@ -905,7 +905,9 @@ fn a_role_with_tools_edits_the_project_through_its_own_loop_over_mcp() {
     let text = tool_text(&reply);
     assert!(text.starts_with("renamed it"), "{text}");
     assert!(
-        text.ends_with("[coder ran as an agent: 4 step(s), 3 tool call(s)]"),
+        text.ends_with(
+            "[coder ran as an agent: 4 step(s), 3 tool call(s)]\n[files changed: a.txt (modified)]"
+        ),
         "{text}"
     );
     assert_eq!(

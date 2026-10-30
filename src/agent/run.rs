@@ -2,8 +2,8 @@
 
 use super::sandbox::Sandbox;
 use super::shell;
-use super::tools;
-use crate::config::Assignment;
+use super::tools::{self, Change, Changes};
+use crate::config::{AgentTool, Assignment};
 use crate::port::{Error, Message, ModelPort, Request, Role, Usage, complete_retrying};
 use std::path::Path;
 
@@ -31,6 +31,11 @@ pub struct AgentRun {
     pub tool_calls: u32,
     /// Old tool results replaced by a note to keep within `context_window`.
     pub trimmed: u32,
+    /// Files the run changed: by name for `edit_file` and `write_file`, and by
+    /// comparing the project before and after each `bash` command.
+    pub changes: Changes,
+    /// The `bash` commands that ran, each on one short line.
+    pub commands: Vec<String>,
 }
 
 /// Run a role's tool loop. `progress` hears one short line per model call and
@@ -77,6 +82,8 @@ pub fn run(
         steps: 0,
         tool_calls: 0,
         trimmed: 0,
+        changes: Changes::new(),
+        commands: Vec::new(),
     };
 
     let Some(window) = assignment.context_window else {
@@ -108,6 +115,12 @@ pub fn run(
     let say =
         |step: u32, what: &str| progress(&format!("{} · step {step} · {what}", assignment.role));
 
+    let mut baseline = if assignment.tools.contains(&AgentTool::Bash) {
+        tools::snapshot(&sandbox)
+    } else {
+        None
+    };
+
     for step in 1..=assignment.max_steps {
         let dropped = trim_history(&mut messages, budget, defs_bytes);
         if dropped > 0 {
@@ -138,6 +151,8 @@ pub fn run(
         for call in &response.tool_calls {
             say(step, &format!("{}({})", call.name, brief(&call.arguments)));
             out.tool_calls += 1;
+            let target = tools::target(&sandbox, &call.name, &call.arguments);
+            let existed = target.as_ref().is_some_and(|p| p.exists());
             let result = tools::execute(
                 &sandbox,
                 &assignment.tools,
@@ -145,8 +160,28 @@ pub fn run(
                 &call.name,
                 &call.arguments,
                 result_cap,
-            )
-            .unwrap_or_else(|e| format!("error: {e}"));
+            );
+            if result.is_ok() {
+                if let Some(path) = &target {
+                    let change = if existed {
+                        Change::Modified
+                    } else {
+                        Change::Added
+                    };
+                    tools::record(&mut out.changes, sandbox.show(path), change);
+                }
+                if call.name == tools::wire_name(AgentTool::Bash) {
+                    out.commands.push(command_of(&call.arguments));
+                    // What a command changed is only knowable by looking.
+                    if let Some(before) = &baseline
+                        && let Some(after) = tools::snapshot(&sandbox)
+                    {
+                        tools::diff(before, &after, &mut out.changes);
+                        baseline = Some(after);
+                    }
+                }
+            }
+            let result = result.unwrap_or_else(|e| format!("error: {e}"));
             messages.push(Message::tool_result(call.id.clone(), result));
         }
     }
@@ -171,6 +206,15 @@ pub fn run(
         assignment.max_steps, response.text
     );
     Ok(out)
+}
+
+/// The command a `bash` call ran, on one short line.
+fn command_of(arguments: &str) -> String {
+    let command = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|v| v.get("command")?.as_str().map(str::to_string))
+        .unwrap_or_default();
+    brief(&command)
 }
 
 /// A tool call's arguments squeezed onto one short line.
@@ -390,6 +434,40 @@ mod tests {
             .content
             .clone();
         assert_eq!(result, "old\nextra\n[exit 0]");
+    }
+
+    #[test]
+    fn the_run_reports_files_it_changed_and_commands_it_ran() {
+        let tmp = project();
+        let port = FakePort::scripted(
+            "b",
+            "x",
+            vec![
+                Scripted::call(
+                    "c1",
+                    "edit_file",
+                    r#"{"path":"a.txt","old_string":"old","new_string":"new"}"#,
+                ),
+                Scripted::call("c2", "write_file", r#"{"path":"b.txt","content":"b"}"#),
+                Scripted::call("c3", "bash", r#"{"command":"echo c > c.txt"}"#),
+                Scripted::call("c4", "edit_file", r#"{"path":"nope.txt","old_string":"a","new_string":"b"}"#),
+                Scripted::text("done"),
+            ],
+        );
+        let a = assignment(vec![AgentTool::Edit, AgentTool::Write, AgentTool::Bash], 9);
+        let r = go(&port, &a, &tmp.0).unwrap();
+        let changes: Vec<(&str, Change)> =
+            r.changes.iter().map(|(p, c)| (p.as_str(), *c)).collect();
+        assert_eq!(
+            changes,
+            vec![
+                ("a.txt", Change::Modified),
+                ("b.txt", Change::Added),
+                ("c.txt", Change::Added),
+            ],
+            "a failed edit changes nothing"
+        );
+        assert_eq!(r.commands, vec!["echo c > c.txt"]);
     }
 
     #[test]

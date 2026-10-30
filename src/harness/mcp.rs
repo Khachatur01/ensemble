@@ -332,6 +332,45 @@ roles:
         );
     }
 
+    #[test]
+    fn an_agents_delegation_lists_the_files_it_changed() {
+        let yaml = YAML.replace(
+            "  reviewer:",
+            "  fixer:\n    backend: local\n    model: m\n    tools: [edit]\n    context_window: 8000\n  reviewer:",
+        );
+        let cfg = config::parse(
+            &yaml,
+            std::path::Path::new("ensemble.yaml"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let tmp = crate::agent::sandbox::testing::TempDir::new();
+        std::fs::write(tmp.0.join("a.txt"), "hello").unwrap();
+        let local = Arc::new(FakePort::scripted(
+            "local",
+            "unused",
+            vec![
+                crate::port::testing::Scripted::call(
+                    "c1",
+                    "edit_file",
+                    r#"{"path":"a.txt","old_string":"hello","new_string":"bye"}"#,
+                ),
+                crate::port::testing::Scripted::text("fixed"),
+            ],
+        ));
+        let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
+        ports.insert("local".into(), local);
+        ports.insert("claude".into(), Arc::new(FakePort::ok("claude", "r")));
+        let e = Ensemble::with_ports(cfg, ports, Some(tmp.0.clone()));
+
+        let r = call(&e, "delegate", json!({"role": "fixer", "task": "fix"}));
+        let text = text_of(&r);
+        assert!(
+            text.ends_with("tool call(s)]\n[files changed: a.txt (modified)]"),
+            "{text}"
+        );
+    }
+
     /// An ensemble whose `scout` is an agent that reads a file, then answers.
     fn scouting() -> (Ensemble, crate::agent::sandbox::testing::TempDir) {
         let yaml = YAML.replace(
