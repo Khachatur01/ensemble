@@ -7,7 +7,8 @@
 //! model or a backend, and nothing the router returns has to be interpreted
 //! differently depending on which one answered.
 
-use crate::config::{AgentConfig, AgentTool, Config};
+use crate::agent::AgentRun;
+use crate::config::{Adapter, AgentConfig, AgentTool, CLAUDE_CODE_AGENT, Config, EnsembleAdapter};
 use crate::port::{Error, Message, ModelPort, Request, Response};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -130,34 +131,42 @@ impl Ensemble {
         self.config.agent_names()
     }
 
-    fn resolve(&self, role: &str) -> Result<(&AgentConfig, &Arc<dyn ModelPort>), RouteError> {
-        let assignment = self
-            .config
-            .agent(role)
+    fn resolve(&self, name: &str) -> Result<&AgentConfig, RouteError> {
+        self.config
+            .agent(name)
             .ok_or_else(|| RouteError::UnknownAgent {
-                asked: role.to_string(),
+                asked: name.to_string(),
                 known: self.agents().into_iter().map(str::to_string).collect(),
-            })?;
-
-        // An agent whose backend is missing from `ports` cannot happen through
-        // `new`, which builds every declared backend, and config validation
-        // rejects an agent naming an undeclared one. It can happen through
-        // `with_ports`, so it is an error rather than an unwrap.
-        let port = self.ports.get(&assignment.llm_backend).ok_or_else(|| {
-            RouteError::LlmBackend(Error::Unsupported {
-                backend: assignment.llm_backend.clone(),
-                detail: format!("no adapter was built for this backend (agent '{role}')"),
             })
-        })?;
-
-        Ok((assignment, port))
     }
 
-    /// Which backend and model an agent would use. Used by `ensemble agents` and
-    /// by the health check; does not spend a model call.
-    pub fn route_of(&self, role: &str) -> Result<(&str, &str), RouteError> {
-        let (a, _) = self.resolve(role)?;
-        Ok((a.llm_backend.as_str(), a.model.as_str()))
+    /// The LLM port an `ensemble` agent runs on.
+    ///
+    /// A backend missing from `ports` cannot happen through `new`, which
+    /// builds every declared backend, and config validation rejects an agent
+    /// naming an undeclared one. It can happen through `with_ports`, so it is
+    /// an error rather than an unwrap.
+    fn port_for(
+        &self,
+        agent: &str,
+        adapter: &EnsembleAdapter,
+    ) -> Result<&dyn ModelPort, RouteError> {
+        self.ports
+            .get(&adapter.llm_backend)
+            .map(|p| p.as_ref())
+            .ok_or_else(|| {
+                RouteError::LlmBackend(Error::Unsupported {
+                    backend: adapter.llm_backend.clone(),
+                    detail: format!("no adapter was built for this backend (agent '{agent}')"),
+                })
+            })
+    }
+
+    /// What runs an agent, and on which model. Used by `ensemble agents`;
+    /// does not spend a model call.
+    pub fn route_of(&self, name: &str) -> Result<(&str, &str), RouteError> {
+        let a = self.resolve(name)?;
+        Ok((a.runs_on(), a.model()))
     }
 
     /// Send a task to an agent and return what it produced.
@@ -167,35 +176,54 @@ impl Ensemble {
     /// distinction and one that does not loses nothing.
     pub fn delegate(
         &self,
-        role: &str,
+        name: &str,
         task: &str,
         context: Option<&str>,
     ) -> Result<Outcome, RouteError> {
-        self.delegate_reporting(role, task, context, &|_| {}, &AtomicBool::new(false))
+        self.delegate_reporting(name, task, context, &|_| {}, &AtomicBool::new(false))
     }
 
-    /// [`Self::delegate`], telling `progress` what an agent is doing as it
-    /// goes. A think-only agent makes one call and reports nothing. Setting
-    /// `cancel` stops an agent at its next step.
+    /// [`Self::delegate`], telling `progress` what the agent is doing as it
+    /// goes. An `ensemble` agent without tools makes one call and reports
+    /// nothing. Setting `cancel` stops an agent at its next step.
     pub fn delegate_reporting(
         &self,
-        role: &str,
+        name: &str,
         task: &str,
         context: Option<&str>,
         progress: &dyn Fn(&str),
         cancel: &AtomicBool,
     ) -> Result<Outcome, RouteError> {
-        let (assignment, port) = self.resolve(role)?;
-        if !assignment.tools.is_empty() {
-            return self.delegate_agent(assignment, port.as_ref(), task, context, progress, cancel);
+        let agent = self.resolve(name)?;
+        match &agent.adapter {
+            Adapter::Ensemble(e) if e.tools.is_empty() => {
+                self.one_completion(agent, e, task, context, progress, cancel)
+            }
+            Adapter::Ensemble(e) => {
+                let port = self.port_for(name, e)?;
+                self.run_tracked(agent, |dir| {
+                    crate::agent::run(port, agent, task, context, dir, progress, cancel)
+                })
+            }
+            Adapter::ClaudeCode(cc) => self.run_tracked(agent, |dir| {
+                crate::claude_code::run(agent, cc, task, context, dir, progress, cancel)
+            }),
         }
+    }
 
+    /// An `ensemble` agent without tools: one model call, text back.
+    fn one_completion(
+        &self,
+        agent: &AgentConfig,
+        adapter: &EnsembleAdapter,
+        task: &str,
+        context: Option<&str>,
+        progress: &dyn Fn(&str),
+        cancel: &AtomicBool,
+    ) -> Result<Outcome, RouteError> {
+        let port = self.port_for(&agent.name, adapter)?;
         let mut messages = Vec::new();
-        if let Some(prompt) = assignment
-            .prompt
-            .as_deref()
-            .filter(|p| !p.trim().is_empty())
-        {
+        if let Some(prompt) = agent.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
             messages.push(Message::system(prompt));
         }
         if let Some(ctx) = context.filter(|c| !c.trim().is_empty()) {
@@ -203,21 +231,21 @@ impl Ensemble {
         }
         messages.push(Message::user(task.to_string()));
 
-        let mut request = Request::new(assignment.model.clone(), messages);
-        request.temperature = assignment.temperature;
-        request.reasoning_effort = assignment.reasoning_effort.clone();
+        let mut request = Request::new(adapter.model.clone(), messages);
+        request.temperature = adapter.temperature;
+        request.reasoning_effort = adapter.reasoning_effort.clone();
 
         let response: Response = crate::port::complete_retrying(
-            port.as_ref(),
+            port,
             &request,
             &|| cancel.load(Ordering::Relaxed),
-            &|l| progress(&format!("{} · {l}", assignment.name)),
+            &|l| progress(&format!("{} · {l}", agent.name)),
         )
         .map_err(RouteError::LlmBackend)?;
 
         Ok(Outcome {
-            agent: assignment.name.clone(),
-            backend: assignment.llm_backend.clone(),
+            agent: agent.name.clone(),
+            backend: adapter.llm_backend.clone(),
             model: response.model,
             text: response.text,
             prompt_tokens: response.usage.prompt_tokens,
@@ -226,35 +254,36 @@ impl Ensemble {
         })
     }
 
-    /// An agent with tools is an agent: it loops over its tools inside the
-    /// project directory instead of answering in one call.
-    fn delegate_agent(
+    /// An agent that works in the project: `run` gets the project directory,
+    /// and the result says whether another delegation overlapped it.
+    fn run_tracked(
         &self,
-        assignment: &AgentConfig,
-        port: &dyn ModelPort,
-        task: &str,
-        context: Option<&str>,
-        progress: &dyn Fn(&str),
-        cancel: &AtomicBool,
+        agent: &AgentConfig,
+        run: impl FnOnce(&std::path::Path) -> Result<AgentRun, Error>,
     ) -> Result<Outcome, RouteError> {
         let workdir = match &self.workdir {
             Some(dir) => dir.clone(),
             None => std::env::current_dir().map_err(|e| {
                 RouteError::LlmBackend(Error::Unsupported {
-                    backend: assignment.llm_backend.clone(),
-                    detail: format!("no working directory for agent '{}': {e}", assignment.name),
+                    backend: agent.runs_on().to_string(),
+                    detail: format!("no working directory for agent '{}': {e}", agent.name),
                 })
             })?,
         };
         let me = self.started.fetch_add(1, Ordering::SeqCst) + 1;
         let others_running = self.active.fetch_add(1, Ordering::SeqCst) > 0;
-        let run = crate::agent::run(port, assignment, task, context, &workdir, progress, cancel);
+        let run = run(&workdir);
         let overlapped = others_running || self.started.load(Ordering::SeqCst) != me;
         self.active.fetch_sub(1, Ordering::SeqCst);
         let run = run.map_err(RouteError::LlmBackend)?;
+        // Changes found by comparing the project can include another run's.
+        let compared = match &agent.adapter {
+            Adapter::Ensemble(e) => e.tools.contains(&AgentTool::Bash),
+            Adapter::ClaudeCode(_) => agent.can_change_files(),
+        };
         Ok(Outcome {
-            agent: assignment.name.clone(),
-            backend: assignment.llm_backend.clone(),
+            agent: agent.name.clone(),
+            backend: agent.runs_on().to_string(),
             model: run.model,
             text: run.text,
             prompt_tokens: run.usage.prompt_tokens,
@@ -265,15 +294,15 @@ impl Ensemble {
                 trimmed: run.trimmed,
                 changes: run.changes,
                 commands: run.commands,
-                overlapped: overlapped && assignment.tools.contains(&AgentTool::Bash),
+                overlapped: overlapped && compared,
             }),
         })
     }
 
     /// The configured prompt for an agent, if it has one.
-    pub fn prompt_of(&self, role: &str) -> Option<&str> {
+    pub fn prompt_of(&self, name: &str) -> Option<&str> {
         self.config
-            .agent(role)
+            .agent(name)
             .and_then(|a| a.prompt.as_deref())
             .filter(|p| !p.trim().is_empty())
     }
@@ -283,21 +312,27 @@ impl Ensemble {
         self.config.agents.keys().map(String::as_str).collect()
     }
 
-    /// Check every backend an agent actually uses.
+    /// Check everything an agent actually runs on: each LLM backend in use,
+    /// and each Claude Code command.
     ///
     /// Keyed by backend, not by agent: two agents on one endpoint are one thing
     /// to check and one thing to fix.
     pub fn health(&self) -> Vec<(String, Result<(), Error>)> {
-        let mut used: Vec<&str> = self
-            .agents()
-            .iter()
-            .filter_map(|r| self.config.agent(r))
-            .map(|a| a.llm_backend.as_str())
-            .collect();
-        used.sort_unstable();
-        used.dedup();
+        let mut backends: Vec<&str> = Vec::new();
+        let mut commands: Vec<&str> = Vec::new();
+        for a in self.config.agents.values() {
+            match &a.adapter {
+                Adapter::Ensemble(e) => backends.push(&e.llm_backend),
+                Adapter::ClaudeCode(cc) => commands.push(&cc.command),
+            }
+        }
+        backends.sort_unstable();
+        backends.dedup();
+        commands.sort_unstable();
+        commands.dedup();
 
-        used.into_iter()
+        let mut out: Vec<(String, Result<(), Error>)> = backends
+            .into_iter()
             .map(|name| {
                 let result = match self.ports.get(name) {
                     Some(p) => p.health(),
@@ -308,7 +343,14 @@ impl Ensemble {
                 };
                 (name.to_string(), result)
             })
-            .collect()
+            .collect();
+        out.extend(commands.into_iter().map(|command| {
+            (
+                format!("{CLAUDE_CODE_AGENT} ({command})"),
+                crate::claude_code::health(command),
+            )
+        }));
+        out
     }
 }
 

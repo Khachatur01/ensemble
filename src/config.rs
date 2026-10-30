@@ -26,11 +26,18 @@ pub const SUPPORTED_VERSION: u32 = 1;
 /// variant.
 pub const OPENAI_COMPATIBLE_API: &str = "openai-compatible-api";
 
-/// The agent types that ship. `ensemble` is Ensemble's own harness, run on an
-/// LLM backend. External agents (Claude Code, OpenCode, Codex) will sit beside
-/// it as further types.
+/// The adapter types that ship. `ensemble` is Ensemble's own harness, run on
+/// an LLM backend; `claude-code` is the Claude Code CLI, a whole agent of its
+/// own. Others (OpenCode, Codex) will sit beside them.
 pub const ENSEMBLE_AGENT: &str = "ensemble";
-const AGENT_TYPES: [&str; 1] = [ENSEMBLE_AGENT];
+pub const CLAUDE_CODE_AGENT: &str = "claude-code";
+const AGENT_TYPES: [&str; 2] = [ENSEMBLE_AGENT, CLAUDE_CODE_AGENT];
+
+/// Claude Code tools a `claude-code` agent gets when it names none: it may
+/// look, not change anything.
+pub const CLAUDE_CODE_DEFAULT_TOOLS: [&str; 3] = ["Read", "Grep", "Glob"];
+const CLAUDE_CODE_DEFAULT_PERMISSION_MODE: &str = "dontAsk";
+const CLAUDE_CODE_DEFAULT_MAX_TURNS: u32 = 30;
 
 // ---------------------------------------------------------------------------
 // The document, as written
@@ -95,17 +102,26 @@ struct RawAgent {
     adapter: RawAdapter,
 }
 
-/// The harness behind an agent. The fields below are the `ensemble` adapter's;
-/// other adapter types will bring their own.
+/// The harness behind an agent. `type` decides which of the other fields
+/// apply; one that belongs to another type is refused, not ignored.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAdapter {
-    /// Which harness runs this agent. Only `ensemble`, for now.
+    /// `ensemble` or `claude-code`.
     #[serde(rename = "type")]
     kind: String,
-    /// Which of `llm_backends` the `ensemble` harness calls.
-    llm_backend: String,
+    /// Both: the model, as the backend or Claude Code names it.
     model: String,
+    /// Both: what the agent may do. Ensemble's own tool names for
+    /// `ensemble`, Claude Code's (`Read`, `Edit`, `Bash(git:*)`) for
+    /// `claude-code`.
+    #[serde(default)]
+    tools: Option<Vec<String>>,
+
+    // --- ensemble ---
+    /// Which of `llm_backends` the `ensemble` harness calls.
+    #[serde(default)]
+    llm_backend: Option<String>,
     /// Overrides the backend's own default for this agent. Needed when a
     /// model's baked-in sampling (Ollama's `temperature`/`presence_penalty`
     /// Modelfile defaults, for instance) is too hot for reliable tool calling.
@@ -119,12 +135,6 @@ struct RawAdapter {
     /// appears; `none` turns it off.
     #[serde(default)]
     reasoning_effort: Option<String>,
-    /// What the agent may do on its own, inside the project directory. Empty
-    /// or absent is a think-only agent: one model call, text back. Anything
-    /// listed makes it loop over these tools; write access has to be asked for
-    /// by name.
-    #[serde(default)]
-    tools: Vec<String>,
     /// Cap on model calls within one delegation. Defaults to
     /// [`DEFAULT_MAX_STEPS`].
     #[serde(default)]
@@ -139,6 +149,18 @@ struct RawAdapter {
     /// directories otherwise.
     #[serde(default)]
     readable: Vec<String>,
+
+    // --- claude-code ---
+    /// The `claude` binary, if it is not `claude` on PATH.
+    #[serde(default)]
+    command: Option<String>,
+    /// Claude Code's `--permission-mode`. `dontAsk` denies what `tools` does
+    /// not allow instead of waiting for a person who is not there.
+    #[serde(default)]
+    permission_mode: Option<String>,
+    /// Most agent turns Claude Code may take for one delegation.
+    #[serde(default)]
+    max_turns: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -227,24 +249,107 @@ const REASONING_EFFORTS: [&str; 4] = ["none", "low", "medium", "high"];
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentConfig {
     pub name: String,
+    pub prompt: Option<String>,
+    /// See [`RawAgent::context_window`]. Set exactly when the agent is an
+    /// `ensemble` agent with tools.
+    pub context_window: Option<u32>,
+    /// See [`RawAgent::max_seconds`].
+    pub max_seconds: u32,
+    pub adapter: Adapter,
+}
+
+/// What runs an agent.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Adapter {
+    Ensemble(EnsembleAdapter),
+    ClaudeCode(ClaudeCodeAdapter),
+}
+
+/// Ensemble's own harness: a model on one of the LLM backends, in a tool loop.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnsembleAdapter {
     /// Which of [`Config::llm_backends`] runs it.
     pub llm_backend: String,
     pub model: String,
-    pub prompt: Option<String>,
     pub temperature: Option<f32>,
-    /// See [`RawAgent::reasoning_effort`].
+    /// See [`RawAdapter::reasoning_effort`].
     pub reasoning_effort: Option<String>,
-    /// Empty: a think-only agent. See [`RawAgent::tools`].
+    /// Empty: one model call, text back.
     pub tools: Vec<AgentTool>,
     pub max_steps: u32,
-    /// See [`RawAgent::max_seconds`].
-    pub max_seconds: u32,
-    /// See [`RawAgent::context_window`]. Always set for an agent with tools.
-    pub context_window: Option<u32>,
     /// Outbound TCP for `bash`. Meaningless without that tool.
     pub network: bool,
-    /// See [`RawAgent::readable`].
+    /// See [`RawAdapter::readable`].
     pub readable: Vec<String>,
+}
+
+/// The Claude Code CLI, run headless in the project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeCodeAdapter {
+    pub command: String,
+    pub model: String,
+    /// Claude Code's own tool names and rules, passed to `--allowedTools`.
+    pub tools: Vec<String>,
+    pub permission_mode: String,
+    pub max_turns: u32,
+}
+
+impl AgentConfig {
+    pub fn kind(&self) -> &'static str {
+        match self.adapter {
+            Adapter::Ensemble(_) => ENSEMBLE_AGENT,
+            Adapter::ClaudeCode(_) => CLAUDE_CODE_AGENT,
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        match &self.adapter {
+            Adapter::Ensemble(e) => &e.model,
+            Adapter::ClaudeCode(c) => &c.model,
+        }
+    }
+
+    /// Where its model runs: an LLM backend's name, or the adapter type for an
+    /// agent that brings its own.
+    pub fn runs_on(&self) -> &str {
+        match &self.adapter {
+            Adapter::Ensemble(e) => &e.llm_backend,
+            Adapter::ClaudeCode(_) => CLAUDE_CODE_AGENT,
+        }
+    }
+
+    /// Does it have any tool at all?
+    pub fn has_tools(&self) -> bool {
+        match &self.adapter {
+            Adapter::Ensemble(e) => !e.tools.is_empty(),
+            Adapter::ClaudeCode(c) => !c.tools.is_empty(),
+        }
+    }
+
+    /// Can it change files?
+    pub fn can_change_files(&self) -> bool {
+        match &self.adapter {
+            Adapter::Ensemble(e) => e.tools.iter().any(|t| t.writes()),
+            Adapter::ClaudeCode(c) => c.tools.iter().any(|t| claude_tool_writes(t)),
+        }
+    }
+
+    /// Its tools, by the names its adapter uses.
+    pub fn tool_names(&self) -> Vec<&str> {
+        match &self.adapter {
+            Adapter::Ensemble(e) => e.tools.iter().map(|t| t.as_str()).collect(),
+            Adapter::ClaudeCode(c) => c.tools.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+/// Can this Claude Code tool (or rule, such as `Bash(git:*)`) change files?
+pub fn claude_tool_writes(tool: &str) -> bool {
+    let name = tool.split('(').next().unwrap_or(tool).trim();
+    matches!(
+        name,
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "Bash"
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -263,8 +368,10 @@ impl Config {
     }
 
     pub fn llm_backend_for(&self, agent: &str) -> Option<&LlmBackend> {
-        self.agent(agent)
-            .and_then(|a| self.llm_backends.get(&a.llm_backend))
+        match &self.agent(agent)?.adapter {
+            Adapter::Ensemble(e) => self.llm_backends.get(&e.llm_backend),
+            Adapter::ClaudeCode(_) => None,
+        }
     }
 
     pub fn agent_names(&self) -> Vec<&str> {
@@ -402,9 +509,6 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
                 .into(),
         );
     }
-    if raw.llm_backends.is_empty() && raw.backends.is_none() {
-        problems.push("llm_backends: at least one LLM backend must be defined".into());
-    }
 
     // --- backends ---
     let mut backends: BTreeMap<String, LlmBackend> = BTreeMap::new();
@@ -435,57 +539,13 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             continue;
         }
         let ad = &ra.adapter;
-        if !AGENT_TYPES.contains(&ad.kind.as_str()) {
-            problems.push(format!(
-                "agents.{name}.adapter: type '{}' is unknown. Known types: {}.",
-                ad.kind,
-                AGENT_TYPES.join(", ")
-            ));
-        }
-        let a = AgentConfig {
-            name: name.clone(),
-            llm_backend: ad.llm_backend.clone(),
-            model: ad.model.clone(),
-            prompt: ra.prompt.clone(),
-            temperature: ad.temperature,
-            reasoning_effort: ad.reasoning_effort.clone(),
-            tools: parse_tools(&format!("agents.{name}.adapter"), &ad.tools, &mut problems),
-            max_steps: ad.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
-            max_seconds: ra.max_seconds.unwrap_or(DEFAULT_MAX_SECONDS),
-            context_window: ra.context_window,
-            network: ad.network.unwrap_or(false),
-            readable: ad.readable.clone(),
-        };
-        if !ad.readable.is_empty() && !a.tools.contains(&AgentTool::Bash) {
-            problems.push(format!(
-                "agents.{name}.adapter: `readable` only applies to the `bash` tool, which this agent does not have"
-            ));
-        }
-        for path in &ad.readable {
-            if !path.starts_with('/') && !path.starts_with("~/") {
-                problems.push(format!(
-                    "agents.{name}.adapter: readable path '{path}' must be absolute or start with ~/"
-                ));
-            }
-        }
-        if ad.network.is_some() && !a.tools.contains(&AgentTool::Bash) {
-            problems.push(format!(
-                "agents.{name}.adapter: `network` only applies to the `bash` tool, which this agent does not have"
-            ));
-        }
-        if ad.max_steps == Some(0) {
-            problems.push(format!(
-                "agents.{name}.adapter: `max_steps` must be greater than 0"
-            ));
+        let at = format!("agents.{name}.adapter");
+        if ad.model.trim().is_empty() {
+            problems.push(format!("{at}: `model` is empty"));
         }
         if ra.max_seconds == Some(0) {
             problems.push(format!(
                 "agents.{name}: `max_seconds` must be greater than 0"
-            ));
-        }
-        if a.tools.is_empty() && ra.max_seconds.is_some() {
-            problems.push(format!(
-                "agents.{name}: `max_seconds` only applies to agents with `tools`; a think-only agent is bounded by its backend's `timeout_seconds`"
             ));
         }
         if ra.context_window == Some(0) {
@@ -493,33 +553,59 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
                 "agents.{name}: `context_window` must be greater than 0"
             ));
         }
-        if a.tools.is_empty() && ra.context_window.is_some() {
-            problems.push(format!(
-                "agents.{name}: `context_window` only applies to agents with `tools`"
-            ));
-        }
-        if let Some(effort) = &ad.reasoning_effort
-            && !REASONING_EFFORTS.contains(&effort.as_str())
-        {
-            problems.push(format!(
-                "agents.{name}.adapter: `reasoning_effort` is '{effort}'; must be one of {}",
-                REASONING_EFFORTS.join(", ")
-            ));
-        }
-        if !a.tools.is_empty() && ra.context_window.is_none() {
-            problems.push(format!(
-                "agents.{name}: an agent whose adapter has `tools` needs `context_window`, the tokens of context your server runs the model with (Ollama: OLLAMA_CONTEXT_LENGTH, default 4096)"
-            ));
-        }
-        check_agent(&a, &backends, &raw.llm_backends, &mut problems);
-        agents.insert(name.clone(), a);
+        let adapter = match ad.kind.as_str() {
+            ENSEMBLE_AGENT => {
+                let e = ensemble_adapter(&at, ad, &backends, &raw.llm_backends, &mut problems);
+                if e.tools.is_empty() && ra.max_seconds.is_some() {
+                    problems.push(format!(
+                        "agents.{name}: `max_seconds` only applies to agents with `tools`; one without is bounded by its backend's `timeout_seconds`"
+                    ));
+                }
+                if e.tools.is_empty() && ra.context_window.is_some() {
+                    problems.push(format!(
+                        "agents.{name}: `context_window` only applies to agents with `tools`"
+                    ));
+                }
+                if !e.tools.is_empty() && ra.context_window.is_none() {
+                    problems.push(format!(
+                        "agents.{name}: an agent whose adapter has `tools` needs `context_window`, the tokens of context your server runs the model with (Ollama: OLLAMA_CONTEXT_LENGTH, default 4096)"
+                    ));
+                }
+                Adapter::Ensemble(e)
+            }
+            CLAUDE_CODE_AGENT => {
+                if ra.context_window.is_some() {
+                    problems.push(format!(
+                        "agents.{name}: `context_window` does not apply to a {CLAUDE_CODE_AGENT} agent; Claude Code manages its own context"
+                    ));
+                }
+                Adapter::ClaudeCode(claude_code_adapter(&at, ad, &mut problems))
+            }
+            other => {
+                problems.push(format!(
+                    "{at}: type '{other}' is unknown. Known types: {}.",
+                    AGENT_TYPES.join(", ")
+                ));
+                continue;
+            }
+        };
+        agents.insert(
+            name.clone(),
+            AgentConfig {
+                name: name.clone(),
+                prompt: ra.prompt.clone(),
+                context_window: ra.context_window,
+                max_seconds: ra.max_seconds.unwrap_or(DEFAULT_MAX_SECONDS),
+                adapter,
+            },
+        );
     }
 
     // A backend nothing uses is not an error — it is a spare, and deleting it
     // from a shared config is how you break someone else's profile. Say so once
     // and carry on.
     for name in backends.keys() {
-        let used = agents.values().any(|a| a.llm_backend == *name);
+        let used = agents.values().any(|a| a.runs_on() == name);
         if !used {
             eprintln!("ensemble: note: LLM backend '{name}' is defined but no agent uses it");
         }
@@ -558,43 +644,146 @@ fn parse_tools(where_: &str, names: &[String], problems: &mut Vec<String>) -> Ve
     tools
 }
 
-/// Does this agent name an LLM backend that exists, with a non-empty model?
-fn check_agent(
-    a: &AgentConfig,
+/// Refuse fields that belong to another adapter type rather than ignoring
+/// them: an `llm_backend` on a `claude-code` agent means someone believes a
+/// model server is being used, and it is not.
+fn reject_foreign(at: &str, kind: &str, keys: &[(&str, bool)], problems: &mut Vec<String>) {
+    for (key, present) in keys {
+        if *present {
+            problems.push(format!(
+                "{at}: `{key}` is not a field of adapter type '{kind}'"
+            ));
+        }
+    }
+}
+
+fn ensemble_adapter(
+    at: &str,
+    ad: &RawAdapter,
     resolved: &BTreeMap<String, LlmBackend>,
     declared: &BTreeMap<String, RawLlmBackend>,
     problems: &mut Vec<String>,
-) {
-    let where_ = format!("agents.{}.adapter", a.name);
-
-    if a.llm_backend.trim().is_empty() {
-        problems.push(format!("{where_}: `llm_backend` is empty"));
-    } else if !declared.contains_key(&a.llm_backend) {
+) -> EnsembleAdapter {
+    reject_foreign(
+        at,
+        ENSEMBLE_AGENT,
+        &[
+            ("command", ad.command.is_some()),
+            ("permission_mode", ad.permission_mode.is_some()),
+            ("max_turns", ad.max_turns.is_some()),
+        ],
+        problems,
+    );
+    let llm_backend = ad.llm_backend.clone().unwrap_or_default();
+    if llm_backend.trim().is_empty() {
+        problems.push(format!(
+            "{at}: an {ENSEMBLE_AGENT} adapter needs `llm_backend`, one of `llm_backends`"
+        ));
+    } else if !declared.contains_key(&llm_backend) {
         let known: Vec<&str> = declared.keys().map(String::as_str).collect();
         problems.push(format!(
-            "{where_}: LLM backend '{}' is not defined. Defined LLM backends: {}.",
-            a.llm_backend,
+            "{at}: LLM backend '{llm_backend}' is not defined. Defined LLM backends: {}.",
             if known.is_empty() {
                 "(none)".to_string()
             } else {
                 known.join(", ")
             }
         ));
-    } else if !resolved.contains_key(&a.llm_backend) {
+    } else if !resolved.contains_key(&llm_backend) {
         // Declared but failed to resolve. Its own problem is already in the
         // list; adding "not defined" here would be a second, misleading one.
     }
-
-    if a.model.trim().is_empty() {
-        problems.push(format!("{where_}: `model` is empty"));
+    let tools = parse_tools(at, ad.tools.as_deref().unwrap_or_default(), problems);
+    let has_bash = tools.contains(&AgentTool::Bash);
+    if !ad.readable.is_empty() && !has_bash {
+        problems.push(format!(
+            "{at}: `readable` only applies to the `bash` tool, which this agent does not have"
+        ));
     }
-
-    if let Some(t) = a.temperature
+    for path in &ad.readable {
+        if !path.starts_with('/') && !path.starts_with("~/") {
+            problems.push(format!(
+                "{at}: readable path '{path}' must be absolute or start with ~/"
+            ));
+        }
+    }
+    if ad.network.is_some() && !has_bash {
+        problems.push(format!(
+            "{at}: `network` only applies to the `bash` tool, which this agent does not have"
+        ));
+    }
+    if ad.max_steps == Some(0) {
+        problems.push(format!("{at}: `max_steps` must be greater than 0"));
+    }
+    if let Some(effort) = &ad.reasoning_effort
+        && !REASONING_EFFORTS.contains(&effort.as_str())
+    {
+        problems.push(format!(
+            "{at}: `reasoning_effort` is '{effort}'; must be one of {}",
+            REASONING_EFFORTS.join(", ")
+        ));
+    }
+    if let Some(t) = ad.temperature
         && !(0.0..=2.0).contains(&t)
     {
         problems.push(format!(
-            "{where_}: `temperature` is {t}; must be between 0.0 and 2.0"
+            "{at}: `temperature` is {t}; must be between 0.0 and 2.0"
         ));
+    }
+    EnsembleAdapter {
+        llm_backend,
+        model: ad.model.clone(),
+        temperature: ad.temperature,
+        reasoning_effort: ad.reasoning_effort.clone(),
+        tools,
+        max_steps: ad.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
+        network: ad.network.unwrap_or(false),
+        readable: ad.readable.clone(),
+    }
+}
+
+fn claude_code_adapter(at: &str, ad: &RawAdapter, problems: &mut Vec<String>) -> ClaudeCodeAdapter {
+    reject_foreign(
+        at,
+        CLAUDE_CODE_AGENT,
+        &[
+            ("llm_backend", ad.llm_backend.is_some()),
+            ("temperature", ad.temperature.is_some()),
+            ("reasoning_effort", ad.reasoning_effort.is_some()),
+            ("max_steps", ad.max_steps.is_some()),
+            ("network", ad.network.is_some()),
+            ("readable", !ad.readable.is_empty()),
+        ],
+        problems,
+    );
+    let tools = match &ad.tools {
+        Some(list) => list.clone(),
+        None => CLAUDE_CODE_DEFAULT_TOOLS.map(String::from).to_vec(),
+    };
+    if let Some(bad) = tools
+        .iter()
+        .find(|t| t.trim().is_empty() || t.contains(','))
+    {
+        problems.push(format!(
+            "{at}: tool '{bad}' must be one Claude Code tool or rule per list entry, such as Read or Bash(git:*)"
+        ));
+    }
+    if ad.max_turns == Some(0) {
+        problems.push(format!("{at}: `max_turns` must be greater than 0"));
+    }
+    let command = ad.command.clone().unwrap_or_else(|| "claude".into());
+    if command.trim().is_empty() {
+        problems.push(format!("{at}: `command` is empty"));
+    }
+    ClaudeCodeAdapter {
+        command,
+        model: ad.model.clone(),
+        tools,
+        permission_mode: ad
+            .permission_mode
+            .clone()
+            .unwrap_or_else(|| CLAUDE_CODE_DEFAULT_PERMISSION_MODE.into()),
+        max_turns: ad.max_turns.unwrap_or(CLAUDE_CODE_DEFAULT_MAX_TURNS),
     }
 }
 
@@ -725,6 +914,14 @@ mod tests {
         PathBuf::from("ensemble.yaml")
     }
 
+    /// The ensemble adapter of an agent that has one.
+    fn ens<'a>(c: &'a Config, agent: &str) -> &'a EnsembleAdapter {
+        match &c.agents[agent].adapter {
+            Adapter::Ensemble(e) => e,
+            other => panic!("not an ensemble agent: {other:?}"),
+        }
+    }
+
     /// The document from the README, which is also the shipped example.
     const REFERENCE: &str = r#"
 version: 1
@@ -800,13 +997,13 @@ agents:
     fn a_role_with_tools_is_an_agent_and_one_without_is_think_only() {
         let c = parse(AGENT_DOC, &p(), &env(&[])).unwrap();
         assert_eq!(
-            c.agents["coder"].tools,
+            ens(&c, "coder").tools,
             vec![AgentTool::Read, AgentTool::Grep, AgentTool::Edit]
         );
-        assert_eq!(c.agents["coder"].max_steps, 5);
+        assert_eq!(ens(&c, "coder").max_steps, 5);
         assert_eq!(c.agents["coder"].max_seconds, DEFAULT_MAX_SECONDS);
-        assert!(c.agents["thinker"].tools.is_empty());
-        assert_eq!(c.agents["thinker"].max_steps, DEFAULT_MAX_STEPS);
+        assert!(ens(&c, "thinker").tools.is_empty());
+        assert_eq!(ens(&c, "thinker").max_steps, DEFAULT_MAX_STEPS);
         assert_eq!(c.agents["coder"].context_window, Some(8000));
         assert_eq!(c.agents["thinker"].context_window, None);
     }
@@ -835,8 +1032,8 @@ agents:
     fn reasoning_effort_is_read_and_checked() {
         let doc = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n      reasoning_effort: none");
         let c = parse(&doc, &p(), &env(&[])).unwrap();
-        assert_eq!(c.agents["coder"].reasoning_effort.as_deref(), Some("none"));
-        assert_eq!(c.agents["thinker"].reasoning_effort, None);
+        assert_eq!(ens(&c, "coder").reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(ens(&c, "thinker").reasoning_effort, None);
 
         let bad = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n      reasoning_effort: lots");
         let Err(ConfigError::Invalid { problems, .. }) = parse(&bad, &p(), &env(&[])) else {
@@ -889,12 +1086,12 @@ agents:
     fn bash_is_a_writing_tool_and_network_is_off_unless_asked_for() {
         let doc = AGENT_DOC.replace("[read, grep, edit]", "[read, bash]");
         let c = parse(&doc, &p(), &env(&[])).unwrap();
-        assert!(c.agents["coder"].tools.contains(&AgentTool::Bash));
+        assert!(ens(&c, "coder").tools.contains(&AgentTool::Bash));
         assert!(AgentTool::Bash.writes());
-        assert!(!c.agents["coder"].network);
+        assert!(!ens(&c, "coder").network);
 
         let on = doc.replace("max_steps: 5", "max_steps: 5\n      network: true");
-        assert!(parse(&on, &p(), &env(&[])).unwrap().agents["coder"].network);
+        assert!(ens(&parse(&on, &p(), &env(&[])).unwrap(), "coder").network);
     }
 
     #[test]
@@ -905,7 +1102,7 @@ agents:
             "max_steps: 5\n      readable: [\"~/.m2\", /srv]",
         );
         assert_eq!(
-            parse(&ok, &p(), &env(&[])).unwrap().agents["coder"].readable,
+            ens(&parse(&ok, &p(), &env(&[])).unwrap(), "coder").readable,
             vec!["~/.m2", "/srv"]
         );
         let relative = doc.replace("max_steps: 5", "max_steps: 5\n      readable: [data]");
@@ -997,11 +1194,12 @@ agents:
             accepted_keys::<RawAgent>(),
             "agents"
         );
-        assert_eq!(
-            schema_keys(&defs["ensemble_adapter"]),
-            accepted_keys::<RawAdapter>(),
-            "the ensemble adapter"
-        );
+        // Every adapter key belongs to exactly one adapter type, or to both.
+        let mut adapters = schema_keys(&defs["ensemble_adapter"]);
+        adapters.extend(schema_keys(&defs["claude_code_adapter"]));
+        adapters.sort();
+        adapters.dedup();
+        assert_eq!(adapters, accepted_keys::<RawAdapter>(), "adapters");
     }
 
     #[test]
@@ -1011,7 +1209,21 @@ agents:
         let agent = &schema["definitions"]["agent"]["properties"];
         let role = &schema["definitions"]["ensemble_adapter"]["properties"];
         assert_eq!(role["type"]["const"], ENSEMBLE_AGENT);
-        assert_eq!(AGENT_TYPES, [ENSEMBLE_AGENT]);
+        let claude = &schema["definitions"]["claude_code_adapter"]["properties"];
+        assert_eq!(claude["type"]["const"], CLAUDE_CODE_AGENT);
+        assert_eq!(AGENT_TYPES, [ENSEMBLE_AGENT, CLAUDE_CODE_AGENT]);
+        assert_eq!(
+            claude["tools"]["default"],
+            serde_json::json!(CLAUDE_CODE_DEFAULT_TOOLS)
+        );
+        assert_eq!(
+            claude["permission_mode"]["default"],
+            CLAUDE_CODE_DEFAULT_PERMISSION_MODE
+        );
+        assert_eq!(
+            claude["max_turns"]["default"],
+            CLAUDE_CODE_DEFAULT_MAX_TURNS
+        );
 
         let mut types = schema_enum(&backend["type"]);
         types.sort();
@@ -1065,6 +1277,116 @@ roles:
         );
     }
 
+    const CLAUDE_DOC: &str = r#"
+version: 1
+agents:
+  reviewer:
+    prompt: Reviews code.
+    adapter:
+      type: claude-code
+      model: sonnet
+  fixer:
+    max_seconds: 600
+    adapter:
+      type: claude-code
+      model: opus
+      tools: [Read, Edit, "Bash(git diff:*)"]
+      permission_mode: acceptEdits
+      max_turns: 9
+      command: /opt/claude
+"#;
+
+    fn claude(c: &Config, agent: &str) -> ClaudeCodeAdapter {
+        match &c.agents[agent].adapter {
+            Adapter::ClaudeCode(cc) => cc.clone(),
+            other => panic!("not a claude-code agent: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_claude_code_agent_needs_no_llm_backend_and_defaults_to_read_only() {
+        let c = parse(CLAUDE_DOC, &p(), &env(&[])).unwrap();
+        let r = claude(&c, "reviewer");
+        assert_eq!(r.tools, CLAUDE_CODE_DEFAULT_TOOLS);
+        assert_eq!(r.command, "claude");
+        assert_eq!(r.permission_mode, "dontAsk");
+        assert_eq!(r.max_turns, CLAUDE_CODE_DEFAULT_MAX_TURNS);
+        assert!(!c.agents["reviewer"].can_change_files());
+        assert_eq!(c.agents["reviewer"].runs_on(), CLAUDE_CODE_AGENT);
+
+        let f = claude(&c, "fixer");
+        assert_eq!(f.tools, ["Read", "Edit", "Bash(git diff:*)"]);
+        assert_eq!(
+            (f.permission_mode.as_str(), f.max_turns),
+            ("acceptEdits", 9)
+        );
+        assert_eq!(f.command, "/opt/claude");
+        assert_eq!(c.agents["fixer"].max_seconds, 600);
+        assert!(c.agents["fixer"].can_change_files());
+    }
+
+    #[test]
+    fn fields_of_the_other_adapter_type_are_refused() {
+        let doc = CLAUDE_DOC.replace(
+            "      model: sonnet
+",
+            "      model: sonnet
+      llm_backend: x
+      max_steps: 3
+",
+        );
+        let joined = problems_of(parse(&doc, &p(), &env(&[])).unwrap_err()).join(
+            "
+",
+        );
+        assert!(
+            joined.contains("agents.reviewer.adapter: `llm_backend` is not a field of adapter type 'claude-code'"),
+            "{joined}"
+        );
+        assert!(joined.contains("`max_steps` is not a field"), "{joined}");
+
+        let ens = AGENT_DOC.replace(
+            "      max_steps: 5
+",
+            "      max_steps: 5
+      max_turns: 4
+",
+        );
+        let joined = problems_of(parse(&ens, &p(), &env(&[])).unwrap_err()).join(
+            "
+",
+        );
+        assert!(
+            joined.contains("`max_turns` is not a field of adapter type 'ensemble'"),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn a_claude_code_agent_takes_no_context_window_and_one_tool_per_entry() {
+        let doc = CLAUDE_DOC
+            .replace(
+                "    prompt: Reviews code.
+",
+                "    prompt: Reviews code.
+    context_window: 8000
+",
+            )
+            .replace("[Read, Edit, ", "[\"Read,Edit\", ");
+        let joined = problems_of(parse(&doc, &p(), &env(&[])).unwrap_err()).join(
+            "
+",
+        );
+        assert!(
+            joined.contains("Claude Code manages its own context"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("one Claude Code tool or rule per list entry"),
+            "{joined}"
+        );
+    }
+
     #[test]
     fn an_unknown_adapter_type_lists_the_known_ones() {
         let doc = AGENT_DOC.replace(
@@ -1075,7 +1397,7 @@ roles:
         assert!(
             problems.iter().any(
                 |p| p.contains("agents.thinker.adapter: type 'codex' is unknown")
-                    && p.contains("ensemble")
+                    && p.contains("ensemble, claude-code")
             ),
             "{problems:?}"
         );
@@ -1133,10 +1455,10 @@ agents:
       model: qwen3.5:9b
 "#;
         let c = parse(doc, &p(), &env(&[])).unwrap();
-        assert_eq!(c.agents["scout"].temperature, Some(0.2));
+        assert_eq!(ens(&c, "scout").temperature, Some(0.2));
         // Unset is unset, not defaulted to something: the backend's own
         // default still applies.
-        assert_eq!(c.agents["plain"].temperature, None);
+        assert_eq!(ens(&c, "plain").temperature, None);
     }
 
     #[test]

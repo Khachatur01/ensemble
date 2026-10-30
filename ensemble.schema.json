@@ -81,7 +81,7 @@
           "type": "string"
         },
         "context_window": {
-          "description": "Required when the adapter has `tools`. Tokens of context the model really runs with (Ollama: OLLAMA_CONTEXT_LENGTH, 4096 unless raised). A server that overflows silently drops the oldest messages, so Ensemble trims old tool output to stay within it.",
+          "description": "Tokens of context the model really runs with. Required for an ensemble agent with `tools` (Ollama: OLLAMA_CONTEXT_LENGTH, 4096 unless raised); a server that overflows silently drops the oldest messages, so Ensemble trims old tool output to stay within it. Not for claude-code, which manages its own context.",
           "type": "integer",
           "minimum": 1,
           "examples": [
@@ -90,7 +90,7 @@
           ]
         },
         "max_seconds": {
-          "description": "Wall-clock limit for one delegation. At the limit the run stops and returns what it did, marked unfinished. Only for agents whose adapter has `tools`.",
+          "description": "Wall-clock limit for one delegation. At the limit the run stops and returns what it did, marked unfinished. Any claude-code agent, or an ensemble agent with `tools`.",
           "type": "integer",
           "minimum": 1,
           "default": 1800
@@ -100,6 +100,9 @@
           "oneOf": [
             {
               "$ref": "#/definitions/ensemble_adapter"
+            },
+            {
+              "$ref": "#/definitions/claude_code_adapter"
             }
           ]
         }
@@ -110,9 +113,13 @@
             "properties": {
               "adapter": {
                 "required": [
+                  "type",
                   "tools"
                 ],
                 "properties": {
+                  "type": {
+                    "const": "ensemble"
+                  },
                   "tools": {
                     "minItems": 1
                   }
@@ -124,11 +131,58 @@
             "required": [
               "context_window"
             ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "adapter": {
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "const": "ensemble"
+                  }
+                },
+                "not": {
+                  "required": [
+                    "tools"
+                  ],
+                  "properties": {
+                    "tools": {
+                      "minItems": 1
+                    }
+                  }
+                }
+              }
+            }
           },
-          "else": {
+          "then": {
             "properties": {
               "context_window": false,
               "max_seconds": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "adapter": {
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "const": "claude-code"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "context_window": false
             }
           }
         }
@@ -144,7 +198,7 @@
       "additionalProperties": false,
       "properties": {
         "type": {
-          "description": "ensemble: Ensemble's own agent harness, run on one of `llm_backends`. Other agents (Claude Code, OpenCode, Codex) will be further types.",
+          "description": "ensemble: Ensemble's own agent harness, run on one of `llm_backends`.",
           "const": "ensemble"
         },
         "llm_backend": {
@@ -252,6 +306,84 @@
           }
         }
       ]
+    },
+    "claude_code_adapter": {
+      "type": "object",
+      "required": [
+        "type",
+        "model"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "claude-code: the Claude Code CLI (`claude -p`), run headless in the project on your own subscription. It brings its own tools and manages its own context.",
+          "const": "claude-code"
+        },
+        "model": {
+          "description": "Claude Code's --model: an alias such as sonnet, opus or haiku, or a full model id.",
+          "type": "string",
+          "minLength": 1,
+          "examples": [
+            "sonnet",
+            "opus",
+            "haiku"
+          ]
+        },
+        "tools": {
+          "description": "Claude Code's own tools this agent may use, passed to --allowedTools: Read, Grep, Glob, Edit, Write, Bash, WebFetch, ..., or a rule such as Bash(git:*). With permission_mode dontAsk anything else is denied. Default: [Read, Grep, Glob], read-only.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^,]+$"
+          },
+          "default": [
+            "Read",
+            "Grep",
+            "Glob"
+          ],
+          "examples": [
+            [
+              "Read",
+              "Grep",
+              "Glob"
+            ],
+            [
+              "Read",
+              "Grep",
+              "Glob",
+              "Edit",
+              "Write",
+              "Bash"
+            ]
+          ]
+        },
+        "permission_mode": {
+          "description": "Claude Code's --permission-mode. dontAsk denies anything not in tools instead of waiting for a person who is not there.",
+          "type": "string",
+          "default": "dontAsk",
+          "examples": [
+            "dontAsk",
+            "acceptEdits",
+            "plan",
+            "default",
+            "bypassPermissions"
+          ]
+        },
+        "max_turns": {
+          "description": "Most agent turns Claude Code may take for one delegation.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 30
+        },
+        "command": {
+          "description": "The claude binary, if it is not `claude` on PATH.",
+          "type": "string",
+          "minLength": 1,
+          "default": "claude"
+        }
+      }
     }
   }
 }

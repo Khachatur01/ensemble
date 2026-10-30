@@ -3,7 +3,7 @@
 use super::sandbox::Sandbox;
 use super::shell;
 use super::tools::{self, Change, Changes};
-use crate::config::{AgentConfig, AgentTool};
+use crate::config::{Adapter, AgentConfig, AgentTool, ENSEMBLE_AGENT};
 use crate::port::{Error, Message, ModelPort, Request, Role, Usage, complete_retrying};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,6 +54,15 @@ pub fn run(
     progress: &dyn Fn(&str),
     cancel: &AtomicBool,
 ) -> Result<AgentRun, Error> {
+    let Adapter::Ensemble(adapter) = &assignment.adapter else {
+        return Err(Error::Unsupported {
+            backend: port.name().to_string(),
+            detail: format!(
+                "agent '{}' is not an {ENSEMBLE_AGENT} agent",
+                assignment.name
+            ),
+        });
+    };
     let deadline = Instant::now() + Duration::from_secs(u64::from(assignment.max_seconds));
     let stopped = || cancel.load(Ordering::Relaxed) || Instant::now() >= deadline;
     let halt = |mut out: AgentRun, last_text: &str| {
@@ -78,10 +87,10 @@ pub fn run(
         backend: port.name().to_string(),
         detail: format!("agent '{}' cannot start: {detail}", assignment.name),
     })?;
-    let defs = tools::definitions(&assignment.tools);
+    let defs = tools::definitions(&adapter.tools);
     let policy = shell::Policy {
-        allow_network: assignment.network,
-        readable: assignment.readable.clone(),
+        allow_network: adapter.network,
+        readable: adapter.readable.clone(),
     };
 
     let mut system = PREAMBLE.to_string();
@@ -101,7 +110,7 @@ pub fn run(
 
     let mut out = AgentRun {
         text: String::new(),
-        model: assignment.model.clone(),
+        model: adapter.model.clone(),
         usage: Usage::default(),
         steps: 0,
         tool_calls: 0,
@@ -126,9 +135,9 @@ pub fn run(
         .sum();
 
     let request = |messages: &[Message], offer_tools: bool| {
-        let mut r = Request::new(assignment.model.clone(), messages.to_vec());
-        r.temperature = assignment.temperature;
-        r.reasoning_effort = assignment.reasoning_effort.clone();
+        let mut r = Request::new(adapter.model.clone(), messages.to_vec());
+        r.temperature = adapter.temperature;
+        r.reasoning_effort = adapter.reasoning_effort.clone();
         r.deadline = Some(deadline);
         if offer_tools {
             r.tools = defs.clone();
@@ -139,7 +148,7 @@ pub fn run(
     let say =
         |step: u32, what: &str| progress(&format!("{} · step {step} · {what}", assignment.name));
 
-    let mut baseline = if assignment.tools.contains(&AgentTool::Bash) {
+    let mut baseline = if adapter.tools.contains(&AgentTool::Bash) {
         tools::snapshot(&sandbox)
     } else {
         None
@@ -148,7 +157,7 @@ pub fn run(
     // What the model last said, to report if the run is stopped.
     let mut last_text = String::new();
 
-    for step in 1..=assignment.max_steps {
+    for step in 1..=adapter.max_steps {
         if stopped() {
             return Ok(halt(out, &last_text));
         }
@@ -195,7 +204,7 @@ pub fn run(
             let existed = target.as_ref().is_some_and(|p| p.exists());
             let result = tools::execute(
                 &sandbox,
-                &assignment.tools,
+                &adapter.tools,
                 &policy,
                 &call.name,
                 &call.arguments,
@@ -230,16 +239,13 @@ pub fn run(
     // Out of steps. One last call with no tools on offer, so the work done so
     // far is reported instead of discarded.
     messages.push(Message::user(OUT_OF_STEPS));
-    say(
-        assignment.max_steps + 1,
-        "out of steps; asking for a report",
-    );
+    say(adapter.max_steps + 1, "out of steps; asking for a report");
     out.trimmed += trim_history(&mut messages, budget, defs_bytes);
     if stopped() {
         return Ok(halt(out, &last_text));
     }
     let response = match complete_retrying(port, &request(&messages, false), &stopped, &|l| {
-        say(assignment.max_steps + 1, l)
+        say(adapter.max_steps + 1, l)
     }) {
         Ok(r) => r,
         Err(_) if stopped() => return Ok(halt(out, &last_text)),
@@ -251,7 +257,7 @@ pub fn run(
     out.model = response.model;
     out.text = format!(
         "[stopped at the {}-step limit]\n{}",
-        assignment.max_steps, response.text
+        adapter.max_steps, response.text
     );
     Ok(out)
 }
@@ -266,7 +272,7 @@ fn command_of(arguments: &str) -> String {
 }
 
 /// A tool call's arguments squeezed onto one short line.
-fn brief(arguments: &str) -> String {
+pub(crate) fn brief(arguments: &str) -> String {
     let one_line = arguments.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut shown: String = one_line.chars().take(70).collect();
     if shown.len() < one_line.len() {
@@ -344,24 +350,33 @@ fn trim_history(messages: &mut [Message], budget: usize, defs_bytes: usize) -> u
 mod tests {
     use super::super::sandbox::testing::TempDir;
     use super::*;
-    use crate::config::AgentTool;
+    use crate::config::{AgentTool, EnsembleAdapter};
     use crate::port::Role;
     use crate::port::testing::{FakePort, Scripted, call};
 
     fn assignment(tools: Vec<AgentTool>, max_steps: u32) -> AgentConfig {
         AgentConfig {
             name: "coder".into(),
-            llm_backend: "b".into(),
-            model: "m".into(),
             prompt: Some("Be careful.".into()),
-            temperature: Some(0.1),
-            reasoning_effort: None,
-            tools,
-            max_steps,
             max_seconds: 600,
             context_window: Some(16_000),
-            network: false,
-            readable: Vec::new(),
+            adapter: Adapter::Ensemble(EnsembleAdapter {
+                llm_backend: "b".into(),
+                model: "m".into(),
+                temperature: Some(0.1),
+                reasoning_effort: None,
+                tools,
+                max_steps,
+                network: false,
+                readable: Vec::new(),
+            }),
+        }
+    }
+
+    fn ensemble(a: &mut AgentConfig) -> &mut EnsembleAdapter {
+        match &mut a.adapter {
+            Adapter::Ensemble(e) => e,
+            _ => unreachable!(),
         }
     }
 
@@ -678,7 +693,7 @@ mod tests {
         let tmp = project();
         let port = FakePort::ok("b", "done");
         let mut a = assignment(vec![AgentTool::Read], 5);
-        a.reasoning_effort = Some("none".into());
+        ensemble(&mut a).reasoning_effort = Some("none".into());
         go(&port, &a, &tmp.0).unwrap();
         assert_eq!(
             port.last().unwrap().reasoning_effort.as_deref(),

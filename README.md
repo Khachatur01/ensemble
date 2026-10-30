@@ -7,11 +7,18 @@ says what runs it. Your own agent — Claude Code, OpenCode, anything that speak
 MCP — is the manager. It sees the team as tools and delegates to an agent by
 name.
 
-Today the one adapter is `ensemble`: Ensemble's own agent harness. It runs on
-any OpenAI-compatible model (llama-server, vLLM, Ollama, a hosted API) and
-reads, searches and edits your project in a loop until the task is done, so a
-team needs nothing installed but a model server. External agents — Claude Code,
-OpenCode, Codex — are meant to become further adapter types, at the same level.
+Two adapters ship:
+
+- **`ensemble`**, Ensemble's own agent harness. It runs on any
+  OpenAI-compatible model (llama-server, vLLM, Ollama, a hosted API) and reads,
+  searches and edits your project in a loop until the task is done, so a team
+  needs nothing installed but a model server.
+- **`claude-code`**, the Claude Code CLI, run headless in the project on your
+  own subscription, with the tools you allow it.
+
+They are at the same level: a team can mix them, and your agent delegates to
+either the same way. OpenCode and Codex are meant to become further adapter
+types.
 
 ```
    Your agent (Claude Code, OpenCode, ...)      = the manager
@@ -19,13 +26,13 @@ OpenCode, Codex — are meant to become further adapter types, at the same level
         v
      Ensemble                                   src/router.rs
         |  agents, by adapter type
+        +--------------------------------+
+        v                                v
+     ensemble: agent loop            claude-code: `claude -p`
+     (src/agent/)                    (src/claude_code.rs)
+        |  the Model Port (src/port.rs)
         v
-     ensemble adapter: agent loop               src/agent/
-     (tools in the project, or one completion
-      when the agent has no tools)
-        |  the Model Port                       src/port.rs
-        v
-     LLM backend: OpenAI-compatible API         src/backend/
+     LLM backend: OpenAI-compatible API (src/backend/)
 ```
 
 ## Quick start
@@ -86,7 +93,7 @@ lists it as failed. Ensemble reads no user-level config.
 
 Your agent sees three tools: `delegate` (send a task to an agent, get the work
 back), `agents` (the team and what each is for) and `health` (is every LLM
-backend reachable).
+backend reachable, and Claude Code installed).
 
 ## Configuration
 
@@ -134,7 +141,8 @@ hardcoded as planner, coder or reviewer. It has:
 | `max_seconds` | wall-clock limit for one delegation (default 1800) |
 | `adapter` | what runs it. `type` decides which other fields the adapter takes |
 
-An **LLM backend** is a model endpoint, for agents with the `ensemble` adapter.
+An **LLM backend** is a model endpoint, for agents with the `ensemble` adapter;
+a team of `claude-code` agents needs none.
 Its one type today, `openai-compatible-api`, is any `/chat/completions`
 endpoint. It requires `base_url_env` and takes `base_url_default`,
 `api_key_env` and `timeout_seconds` (default 600, per request).
@@ -252,6 +260,50 @@ which keeps it from spending a small context's whole reply on thinking.
 Small local models are the weak point. A 9B model that handles a read-and-edit
 task fine can still ignore tools when its prompt is large, so keep prompts
 short and give an agent only the tools it needs.
+
+### The `claude-code` adapter
+
+The Claude Code CLI as a member of the team. It is a whole agent of its own:
+it runs its own loop with its own tools in the project directory, and manages
+its own context.
+
+```yaml
+agents:
+  reviewer:
+    prompt: You review code for correctness and report findings as file:line — problem.
+    max_seconds: 1800     # wall-clock limit per delegation (the default)
+    adapter:
+      type: claude-code
+      model: sonnet         # an alias (sonnet, opus, haiku) or a full model id
+      tools: [Read, Grep, Glob]  # Claude Code's own tools; this is the default
+      permission_mode: dontAsk   # the default
+      max_turns: 30         # the default
+      command: claude       # if it is not `claude` on PATH
+```
+
+Ensemble starts `claude -p` in the project with the task, the agent's prompt
+(`--append-system-prompt`) and `--allowedTools`. With `permission_mode:
+dontAsk` Claude Code denies any tool not listed instead of waiting for a person
+who is not there, and the result says which it was denied. `tools` takes
+Claude Code's names and rules — `Read`, `Edit`, `Write`, `Bash`,
+`Bash(git diff:*)`, `WebFetch` — one per entry; the default is read-only.
+`context_window` does not apply.
+
+Ensemble reads Claude Code's `stream-json` output as it goes, so it reports
+the same way as an `ensemble` agent: a progress line per tool call, and a
+footer with turns, tool calls, the files it changed (found by comparing the
+project before and after, when it has a tool that writes) and the `Bash`
+commands that ran. `max_seconds` and cancellation kill the CLI and its whole
+process tree.
+
+It runs on your own subscription, through the official CLI's supported
+headless mode. Ensemble does not read, copy or replay Claude Code's
+credentials and never talks to Anthropic's API itself; it never passes
+`--bare`, which would bypass the saved login and bill per token. If an answer
+comes from a model that is not Claude (a stray `ANTHROPIC_BASE_URL`), it is
+refused. Unlike `ensemble`'s `bash`, Claude Code's own tools are not in a
+Landlock sandbox: what they may do is what `tools` and `permission_mode`
+allow.
 
 ### Progress
 
@@ -371,7 +423,8 @@ $ cargo install --git https://github.com/Khachatur01/ensemble
 This puts `ensemble` in `~/.cargo/bin`, which must be on `PATH`. Run the same
 command again to update.
 
-Nothing else is needed: there is no runtime service, no daemon and no port.
+The `claude` CLI is needed only for `claude-code` agents. Nothing else is:
+there is no runtime service, no daemon and no port.
 
 ## Usage
 
@@ -381,7 +434,7 @@ up and for debugging it.
 ```console
 $ ensemble check                # validate the config, print the team
 $ ensemble agents               # the routing table
-$ ensemble health               # is every LLM backend reachable? exits non-zero if not
+$ ensemble health               # is every LLM backend reachable, and claude installed? non-zero if not
 $ ensemble run <agent> <task>   # send one task to one agent (it works in --dir)
 $ ensemble schema               # print the JSON Schema for ensemble.yaml
 $ ensemble mcp                  # serve the team over stdio
@@ -398,6 +451,7 @@ current directory), `--context <text>` (for `run`).
 | `src/port.rs` | the Model Port — the one interface every LLM adapter implements, and the shared error type |
 | `src/backend/openai.rs` | anything speaking `/chat/completions` |
 | `src/agent/` | the `ensemble` adapter: the agent loop, its tools and the sandboxes |
+| `src/claude_code.rs` | the `claude-code` adapter: `claude -p` as a subprocess, its `stream-json` read as it goes |
 | `src/router.rs` | agents → adapters; the ensemble itself |
 | `src/harness/delegation.rs` | the three tools your agent calls: delegate, agents, health |
 | `src/harness/mcp.rs` | the MCP server, over stdio |
@@ -443,6 +497,7 @@ None of the tests need the network or a model server.
 | `src/config.rs` | every validation rule, environment precedence, secrets, typos, the schema kept in step with the code |
 | `src/agent/` | the tools, path confinement (`..`, absolute, symlinks), the bash sandbox, the loop, its limits |
 | `src/backend/openai.rs` | request construction, response parsing, every error path, with the transport injected |
+| `src/claude_code.rs` | the command line, the event stream, denials, turn limits, failures, the time limit killing the process tree, against stand-in scripts |
 | `src/router.rs` | agent → backend routing, prompts, context, provenance |
 | `src/harness/mcp.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation |
 | `tests/end_to_end.rs` | the real binary: CLI, MCP over real pipes, an agent editing a file against a stub model server |
@@ -450,8 +505,8 @@ None of the tests need the network or a model server.
 
 ## Limitations
 
-- **One adapter so far.** Only `ensemble`. Claude Code, OpenCode and Codex as
-  adapters are planned, not built.
+- **Two adapters so far.** `ensemble` and `claude-code`. OpenCode and Codex
+  are planned, not built.
 - **Delegation is single-shot.** An agent cannot ask a clarifying question; the
   caller must pass everything in `task` and `context`.
 - **`bash` is Linux-only.** See above. `grep` is a literal-string search, not
@@ -460,7 +515,8 @@ None of the tests need the network or a model server.
   to stay within `context_window`; the agent loses that detail.
 - **Weak models can ignore tools.** See above.
 - **No concurrency cap.** Nothing stops a calling agent delegating many tasks
-  at once against one model server.
+  at once against one model server, or spending a Claude subscription limit in
+  a loop.
 - **Cancelling cannot interrupt a model call already in flight.** The run stops
   when that call returns; `max_seconds` bounds how long that can be.
 - **The project directory is fixed when the server starts.** The working

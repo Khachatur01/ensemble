@@ -280,8 +280,8 @@ pub fn call_reporting(
                     .map(first_line)
                     .unwrap_or_else(|| "(no description configured)".to_string());
                 let kind = match ensemble.config().agent(role) {
-                    Some(a) if a.tools.iter().any(|t| t.writes()) => " [can change files]",
-                    Some(a) if !a.tools.is_empty() => " [read-only]",
+                    Some(a) if a.can_change_files() => " [can change files]",
+                    Some(a) if a.has_tools() => " [read-only]",
                     _ => "",
                 };
                 lines.push(format!("{role}{kind}: {purpose}"));

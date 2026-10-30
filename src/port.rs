@@ -217,6 +217,18 @@ pub struct Capabilities {
 /// Everything that can go wrong between asking an agent for work and getting it.
 #[derive(Debug)]
 pub enum Error {
+    /// An agent's program could not be started at all.
+    Spawn {
+        backend: String,
+        program: String,
+        detail: String,
+    },
+    /// It started and exited non-zero.
+    ProcessFailed {
+        backend: String,
+        code: Option<i32>,
+        stderr: String,
+    },
     /// The deadline passed before the endpoint answered.
     Timeout { backend: String, seconds: u64 },
     /// The request never reached the endpoint: DNS, refused connection, TLS.
@@ -237,7 +249,9 @@ impl Error {
     /// The backend an error came from, for log lines and run records.
     pub fn backend(&self) -> &str {
         match self {
-            Error::Timeout { backend, .. }
+            Error::Spawn { backend, .. }
+            | Error::ProcessFailed { backend, .. }
+            | Error::Timeout { backend, .. }
             | Error::Transport { backend, .. }
             | Error::Api { backend, .. }
             | Error::Protocol { backend, .. }
@@ -254,7 +268,10 @@ impl Error {
         match self {
             Error::Timeout { .. } | Error::Transport { .. } => true,
             Error::Api { status, .. } => *status == 429 || *status >= 500,
-            Error::Protocol { .. } | Error::Unsupported { .. } => false,
+            Error::Spawn { .. }
+            | Error::ProcessFailed { .. }
+            | Error::Protocol { .. }
+            | Error::Unsupported { .. } => false,
         }
     }
 }
@@ -331,6 +348,29 @@ fn clip(s: &str, max: usize) -> String {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Error::Spawn {
+                backend,
+                program,
+                detail,
+            } => write!(
+                f,
+                "backend '{backend}': could not start '{program}': {detail}. \
+                 Is it installed and on PATH?"
+            ),
+            Error::ProcessFailed {
+                backend,
+                code,
+                stderr,
+            } => {
+                let code = code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".into());
+                write!(
+                    f,
+                    "backend '{backend}': exited {code}: {}",
+                    clip(stderr, 800)
+                )
+            }
             Error::Timeout { backend, seconds } => write!(
                 f,
                 "backend '{backend}': no answer within {seconds}s, killed. \

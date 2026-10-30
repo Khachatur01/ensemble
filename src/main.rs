@@ -209,13 +209,12 @@ fn cmd_check(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
         let a = config
             .agent(role)
             .expect("agent_names only yields configured agents");
-        let kind = if a.tools.is_empty() {
-            "ensemble, no tools".to_string()
+        let kind = if a.has_tools() {
+            format!("{}: {}", a.kind(), a.tool_names().join(", "))
         } else {
-            let names: Vec<&str> = a.tools.iter().map(|t| t.as_str()).collect();
-            format!("ensemble: {}", names.join(", "))
+            format!("{}, no tools", a.kind())
         };
-        println!("  {role}  ->  {} / {}  ({kind})", a.llm_backend, a.model);
+        println!("  {role}  ->  {} / {}  ({kind})", a.runs_on(), a.model());
     }
     if config.agents.is_empty() {
         println!("  (none — add agents under `agents:`)");

@@ -76,7 +76,18 @@ llm_backends:
 #                          reliable tool calling
 #   reasoning_effort       none, low, medium or high; `none` turns thinking off
 #
-# Other adapters (Claude Code, OpenCode, Codex) will be further types.
+# The `claude-code` adapter is the Claude Code CLI, run headless in the
+# project on your own subscription. It needs no LLM backend and takes no
+# context_window (Claude Code manages its own):
+#   model                  sonnet, opus, haiku, or a full model id
+#   tools                  Claude Code's own tools, one per entry, such as Read,
+#                          Edit, Bash or Bash(git diff:*). Default: [Read, Grep,
+#                          Glob], read-only
+#   permission_mode        default dontAsk: anything not in tools is denied
+#   max_turns              default 30
+#   command                default claude
+#
+# Other adapters (OpenCode, Codex) will be further types.
 # ---------------------------------------------------------------------------
 agents:
   planner:
@@ -110,6 +121,15 @@ agents:
       llm_backend: openai-local
       model: qwen3-coder
       tools: [read, glob, grep]
+
+  # A Claude Code agent. Uncomment if `claude` is installed and logged in.
+  # architect:
+  #   prompt: |
+  #     You review a design or a change for structural problems and say what
+  #     to do instead. You do not edit.
+  #   adapter:
+  #     type: claude-code
+  #     model: sonnet
 
 # ---------------------------------------------------------------------------
 # Environment
