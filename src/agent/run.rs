@@ -84,6 +84,7 @@ pub fn run(
     let defs = tools::definitions(&assignment.tools);
     let policy = shell::Policy {
         allow_network: assignment.network,
+        readable: assignment.readable.clone(),
     };
 
     let mut system = PREAMBLE.to_string();
@@ -199,7 +200,7 @@ pub fn run(
             let result = tools::execute(
                 &sandbox,
                 &assignment.tools,
-                policy,
+                &policy,
                 &call.name,
                 &call.arguments,
                 result_cap,
@@ -364,6 +365,7 @@ mod tests {
             max_seconds: 600,
             context_window: Some(16_000),
             network: false,
+            readable: Vec::new(),
         }
     }
 

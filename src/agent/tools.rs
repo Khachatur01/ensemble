@@ -128,7 +128,7 @@ fn definition(tool: AgentTool) -> ToolDef {
 pub fn execute(
     sandbox: &Sandbox,
     allowed: &[AgentTool],
-    shell_policy: shell::Policy,
+    shell_policy: &shell::Policy,
     name: &str,
     arguments: &str,
     max_bytes: usize,
@@ -299,7 +299,7 @@ fn edit(sb: &Sandbox, args: &Value) -> Result<String, String> {
 fn bash(
     sb: &Sandbox,
     args: &Value,
-    policy: shell::Policy,
+    policy: &shell::Policy,
     stop: &dyn Fn() -> bool,
 ) -> Result<String, String> {
     let command = str_arg(args, "command")?;
@@ -485,8 +485,9 @@ mod tests {
     ];
     const TEST_CAP: usize = 8_000;
 
-    const NO_NET: shell::Policy = shell::Policy {
+    const NO_NET: &shell::Policy = &shell::Policy {
         allow_network: false,
+        readable: Vec::new(),
     };
 
     fn project() -> (TempDir, Sandbox) {

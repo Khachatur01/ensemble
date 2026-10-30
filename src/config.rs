@@ -115,6 +115,11 @@ struct RawAssignment {
     /// can send what it reads anywhere.
     #[serde(default)]
     network: Option<bool>,
+    /// More paths the role's `bash` commands may read, absolute or `~/`.
+    /// They can read only the project, the system and a few toolchain
+    /// directories otherwise.
+    #[serde(default)]
+    readable: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +239,8 @@ pub struct Assignment {
     pub context_window: Option<u32>,
     /// Outbound TCP for `bash`. Meaningless without that tool.
     pub network: bool,
+    /// See [`RawAssignment::readable`].
+    pub readable: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -426,7 +433,20 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             max_seconds: ra.max_seconds.unwrap_or(DEFAULT_MAX_SECONDS),
             context_window: ra.context_window,
             network: ra.network.unwrap_or(false),
+            readable: ra.readable.clone(),
         };
+        if !ra.readable.is_empty() && !a.tools.contains(&AgentTool::Bash) {
+            problems.push(format!(
+                "roles.{name}: `readable` only applies to the `bash` tool, which this role does not have"
+            ));
+        }
+        for path in &ra.readable {
+            if !path.starts_with('/') && !path.starts_with("~/") {
+                problems.push(format!(
+                    "roles.{name}: readable path '{path}' must be absolute or start with ~/"
+                ));
+            }
+        }
         if ra.network.is_some() && !a.tools.contains(&AgentTool::Bash) {
             problems.push(format!(
                 "roles.{name}: `network` only applies to the `bash` tool, which this role does not have"
@@ -905,6 +925,35 @@ roles:
 
         let on = doc.replace("max_steps: 5", "max_steps: 5\n    network: true");
         assert!(parse(&on, &p(), &env(&[])).unwrap().roles["coder"].network);
+    }
+
+    #[test]
+    fn readable_paths_need_bash_and_an_absolute_or_home_path() {
+        let doc = AGENT_DOC.replace("tools: [read, grep, edit]", "tools: [read, bash]");
+        let ok = doc.replace(
+            "max_steps: 5",
+            "max_steps: 5\n    readable: [\"~/.m2\", /srv]",
+        );
+        assert_eq!(
+            parse(&ok, &p(), &env(&[])).unwrap().roles["coder"].readable,
+            vec!["~/.m2", "/srv"]
+        );
+        let relative = doc.replace("max_steps: 5", "max_steps: 5\n    readable: [data]");
+        let Err(ConfigError::Invalid { problems, .. }) = parse(&relative, &p(), &env(&[])) else {
+            panic!("expected invalid");
+        };
+        assert!(
+            problems.iter().any(|p| p.contains("'data'")),
+            "{problems:?}"
+        );
+        let no_bash = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    readable: [/srv]");
+        let Err(ConfigError::Invalid { problems, .. }) = parse(&no_bash, &p(), &env(&[])) else {
+            panic!("expected invalid");
+        };
+        assert!(
+            problems.iter().any(|p| p.contains("`readable`")),
+            "{problems:?}"
+        );
     }
 
     #[test]

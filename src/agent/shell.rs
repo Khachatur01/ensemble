@@ -7,10 +7,12 @@
 //! * **Outbound TCP is denied** unless the role sets `network: true` (needs a
 //!   kernel with Landlock ABI 4, Linux 6.7). A command cannot upload what it
 //!   reads. DNS over UDP and unix sockets are not covered.
-//! * **Reads are not confined.** A command can read any file this user can,
-//!   including `~/.ssh`. Landlock could fence that, but then compilers and
-//!   package managers stop finding their toolchains and caches, which is most
-//!   of what a shell is for. Give `bash` only to roles you trust that far.
+//! * **Reads are confined** to the project, the system directories toolchains
+//!   live in ([`SYSTEM_READABLE`]), a few toolchain directories in the home
+//!   ([`HOME_READABLE`]), and whatever the role lists in `readable`. The rest
+//!   of the home — `~/.ssh`, `~/.aws`, browser profiles — cannot be read.
+//!   Landlock also stops a command reading another process's environment
+//!   through `/proc`.
 //! * The environment is rebuilt from an allowlist, so API keys and tokens in
 //!   Ensemble's own environment never reach a command.
 //!
@@ -27,9 +29,66 @@ const MAX_STREAM_BYTES: usize = 24_000;
 /// secrets above all, is dropped.
 const ENV_ALLOWLIST: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "TERM", "USER", "SHELL"];
 
-#[derive(Debug, Clone, Copy)]
+/// Readable by every command: where programs, libraries and system
+/// configuration live. Missing ones are skipped.
+pub const SYSTEM_READABLE: &[&str] = &[
+    "/nix",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/opt",
+    "/etc",
+    "/proc",
+    "/sys",
+    "/run/current-system",
+    "/run/booted-system",
+    "/run/wrappers",
+    "/run/opengl-driver",
+    "/run/systemd/resolve",
+];
+
+/// Readable by every command, relative to `$HOME`: toolchains and the
+/// configuration git needs. Nothing that usually holds a secret.
+pub const HOME_READABLE: &[&str] = &[
+    ".cargo",
+    ".rustup",
+    ".npm",
+    ".nix-profile",
+    ".local/state/nix",
+    ".gitconfig",
+    ".config/git",
+];
+
+#[derive(Debug, Clone, Default)]
 pub struct Policy {
     pub allow_network: bool,
+    /// Readable on top of the defaults. Absolute, or `~/` for the home.
+    pub readable: Vec<String>,
+}
+
+impl Policy {
+    /// Every path a command may read, with `~/` expanded. Without a `$HOME`
+    /// the home entries are dropped rather than guessed.
+    pub fn readable_paths(&self) -> Vec<std::path::PathBuf> {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let mut out: Vec<std::path::PathBuf> = SYSTEM_READABLE
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        if let Some(home) = &home {
+            out.extend(HOME_READABLE.iter().map(|rel| home.join(rel)));
+        }
+        for path in &self.readable {
+            match path.strip_prefix("~/") {
+                Some(rel) => out.extend(home.as_ref().map(|h| h.join(rel))),
+                None => out.push(path.into()),
+            }
+        }
+        out
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -40,7 +99,7 @@ pub fn run(
     _project: &std::path::Path,
     _command: &str,
     _timeout: Duration,
-    _policy: Policy,
+    _policy: &Policy,
     _stop: &dyn Fn() -> bool,
 ) -> Result<String, String> {
     Err("bash needs Linux (Landlock); this platform has no sandbox, so it will not run".into())
@@ -97,7 +156,10 @@ mod linux {
     const CREATE_RULESET_VERSION: libc::c_ulong = 1;
     const RULE_PATH_BENEATH: libc::c_int = 1;
 
+    const FS_EXECUTE: u64 = 1 << 0;
     const FS_WRITE_FILE: u64 = 1 << 1;
+    const FS_READ_FILE: u64 = 1 << 2;
+    const FS_READ_DIR: u64 = 1 << 3;
     const FS_REMOVE_DIR: u64 = 1 << 4;
     const FS_REMOVE_FILE: u64 = 1 << 5;
     const FS_MAKE_CHAR: u64 = 1 << 6;
@@ -151,10 +213,12 @@ mod linux {
     fn build_ruleset(
         project: &Path,
         extra_writable: &[&Path],
-        policy: Policy,
+        policy: &Policy,
     ) -> Result<i32, String> {
         let abi = abi_version()?;
-        let mut fs = FS_WRITE_FILE
+        let read = FS_EXECUTE | FS_READ_FILE | FS_READ_DIR;
+        let mut fs = read
+            | FS_WRITE_FILE
             | FS_REMOVE_DIR
             | FS_REMOVE_FILE
             | FS_MAKE_CHAR
@@ -193,10 +257,11 @@ mod linux {
         }
         let fd = fd as i32;
 
-        let mut allow = vec![project];
-        allow.extend(extra_writable.iter().copied());
-        for dir in allow {
-            if let Err(e) = allow_path(fd, dir, fs) {
+        let mut rules: Vec<(std::path::PathBuf, u64)> = vec![(project.to_path_buf(), fs)];
+        rules.extend(extra_writable.iter().map(|p| (p.to_path_buf(), fs)));
+        rules.extend(policy.readable_paths().into_iter().map(|p| (p, read)));
+        for (path, access) in rules {
+            if let Err(e) = allow_path(fd, &path, access) {
                 // SAFETY: closing the fd we just opened.
                 unsafe { libc::close(fd) };
                 return Err(e);
@@ -205,7 +270,26 @@ mod linux {
         Ok(fd)
     }
 
+    /// Rights that only make sense on a directory. Landlock refuses a rule
+    /// that grants them on a file.
+    const DIR_ONLY: u64 = FS_READ_DIR
+        | FS_REMOVE_DIR
+        | FS_REMOVE_FILE
+        | FS_MAKE_CHAR
+        | FS_MAKE_DIR
+        | FS_MAKE_REG
+        | FS_MAKE_SOCK
+        | FS_MAKE_FIFO
+        | FS_MAKE_BLOCK
+        | FS_MAKE_SYM
+        | FS_REFER;
+
     fn allow_path(ruleset: i32, path: &Path, access: u64) -> Result<(), String> {
+        let access = if std::fs::metadata(path).is_ok_and(|m| !m.is_dir()) {
+            access & !DIR_ONLY
+        } else {
+            access
+        };
         use std::os::unix::ffi::OsStrExt;
         let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
             return Err(format!("bad path {}", path.display()));
@@ -243,7 +327,7 @@ mod linux {
         project: &Path,
         command: &str,
         timeout: Duration,
-        policy: Policy,
+        policy: &Policy,
         stop: &dyn Fn() -> bool,
     ) -> Result<String, String> {
         run_with(
@@ -260,7 +344,7 @@ mod linux {
         project: &Path,
         command: &str,
         timeout: Duration,
-        policy: Policy,
+        policy: &Policy,
         stop: &dyn Fn() -> bool,
         extra_writable: &[&Path],
     ) -> Result<String, String> {
@@ -388,12 +472,70 @@ mod linux {
             }
         }
 
-        const OFF: Policy = Policy {
+        const OFF: &Policy = &Policy {
             allow_network: false,
+            readable: Vec::new(),
         };
 
         fn go(d: &Dirs, cmd: &str) -> String {
             run(&d.project, cmd, Duration::from_secs(20), OFF, &|| false).unwrap()
+        }
+
+        #[test]
+        fn reads_outside_the_project_and_the_system_are_denied() {
+            let d = Dirs::new("read");
+            std::fs::write(d.elsewhere.join("secret.txt"), "hunter2").unwrap();
+            std::fs::write(d.project.join("mine.txt"), "visible").unwrap();
+            let out = go(
+                &d,
+                &format!(
+                    "cat mine.txt; cat '{}'; ls '{}'",
+                    d.elsewhere.join("secret.txt").display(),
+                    d.elsewhere.display()
+                ),
+            );
+            assert!(out.starts_with("visible"), "{out}");
+            assert!(!out.contains("hunter2"), "{out}");
+            assert!(
+                !out.contains("secret.txt\n"),
+                "the listing is denied too: {out}"
+            );
+            assert!(out.contains("Permission denied"), "{out}");
+        }
+
+        #[test]
+        fn a_path_the_role_lists_as_readable_can_be_read_but_not_written() {
+            let d = Dirs::new("readable");
+            let file = d.elsewhere.join("notes.txt");
+            std::fs::write(&file, "shared notes").unwrap();
+            let policy = Policy {
+                allow_network: false,
+                readable: vec![d.elsewhere.display().to_string()],
+            };
+            let out = run(
+                &d.project,
+                &format!("cat '{0}'; echo x >> '{0}'", file.display()),
+                Duration::from_secs(20),
+                &policy,
+                &|| false,
+            )
+            .unwrap();
+            assert!(out.starts_with("shared notes"), "{out}");
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "shared notes");
+        }
+
+        #[test]
+        fn home_entries_expand_and_unknown_homes_are_dropped() {
+            let policy = Policy {
+                allow_network: false,
+                readable: vec!["~/.m2".into(), "/srv/data".into()],
+            };
+            let paths = policy.readable_paths();
+            assert!(paths.contains(&PathBuf::from("/srv/data")));
+            assert!(paths.contains(&PathBuf::from("/nix")));
+            if let Some(home) = std::env::var_os("HOME") {
+                assert!(paths.contains(&PathBuf::from(home).join(".m2")));
+            }
         }
 
         #[test]
@@ -486,8 +628,9 @@ mod linux {
                 &d.project,
                 &probe,
                 Duration::from_secs(20),
-                Policy {
+                &Policy {
                     allow_network: true,
+                    readable: Vec::new(),
                 },
                 &|| false,
             )
