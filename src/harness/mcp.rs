@@ -648,7 +648,7 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
         assert_eq!(
             names,
             vec![
-                "delegate", "submit", "status", "wait", "cancel", "agents", "health"
+                "delegate", "submit", "status", "wait", "cancel", "answer", "agents", "health"
             ]
         );
 
@@ -1496,5 +1496,39 @@ printf '{"type":"text","part":{"text":"edited"}}\n'
             assert!(r.starts_with("---\nstatus: failed\n"), "{r}");
             assert!(r.contains("git repository with at least one commit"), "{r}");
         });
+    }
+    #[test]
+    fn a_task_that_asks_waits_for_the_answer_and_goes_on_with_it() {
+        let asker = r#"if printf '%s' "$*" | grep -q '### Answer'; then t="used the answer"; else t="NEEDS INPUT: Which parser?"; fi
+printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
+"#;
+        let (e, tmp) = team(&[("scout", "read", asker)]);
+        write_task(&tmp, "0001-look", "scout", "Find the parser.");
+        session(&e, |ask| {
+            let r = ask("wait", json!({"task": "0001-look", "timeout_seconds": 20}));
+            assert!(r.starts_with("0001-look needs input: Which parser?"), "{r}");
+            let s = ask("status", json!({"task": "0001-look"}));
+            assert!(s.contains("· needs input: Which parser?"), "{s}");
+            let r = ask(
+                "answer",
+                json!({"task": "0001-look", "answer": "The new one."}),
+            );
+            assert!(r.contains("answered"), "{r}");
+            let r = ask("wait", json!({"task": "0001-look", "timeout_seconds": 20}));
+            assert!(
+                r.starts_with("---\nstatus: done\n") && r.contains("used the answer"),
+                "{r}"
+            );
+            let r = ask("answer", json!({"task": "0001-look", "answer": "again"}));
+            assert!(r.contains("no question waiting"), "{r}");
+            let r = ask("answer", json!({"task": "0009", "answer": "x"}));
+            assert!(r.contains("no task '0009'"), "{r}");
+        });
+        let questions =
+            std::fs::read_to_string(tasks(&tmp).join("0001-look/questions.md")).unwrap();
+        assert!(
+            questions.contains("Which parser?\n\n### Answer\nThe new one.\n"),
+            "{questions}"
+        );
     }
 }

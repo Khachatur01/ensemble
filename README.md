@@ -95,7 +95,8 @@ and the agent lists it as failed. Ensemble reads no user-level config.
 
 Your agent sees these tools: `delegate` (send a task to an agent, get the work
 back), `submit` (write a task for an agent to work through), `status`, `wait`
-and `cancel` (follow tasks and background delegations), `agents` (the team and what each is for) and `health` (every agent
+and `cancel` (follow tasks and background delegations), `answer` (answer a
+question a task stopped to ask), `agents` (the team and what each is for) and `health` (every agent
 CLI starts, and every model server answers and serves its agents' models).
 
 ## Configuration
@@ -417,6 +418,15 @@ git. `ensemble init` writes `.ensemble/tasks/README.md` with the format, and
 `ensemble check` reports a `task.md` that cannot be read or names an agent
 that does not exist.
 
+A task's agent may stop to ask. It is told that, when it cannot finish without
+a decision only the person who asked can make, it should end its reply with a
+line `NEEDS INPUT: <question>`. The question is added to `questions.md` beside
+the ticket (committed, like the ticket), the task shows as `needs input:
+<question>` in `status`, and `wait` returns the question. `answer` adds the
+answer under it, and the task runs again, given the questions and answers so
+far and its reply when it stopped. A gate does not run on a reply that asks,
+and a worktree is not committed until the task ends.
+
 An agent with `isolation: worktree` runs each task in a git worktree of its
 own, `.ensemble/worktrees/<id>`, on the branch `ensemble/<id>` made from the
 project's `HEAD`. The project directory is not touched, so such tasks can run
@@ -631,8 +641,9 @@ scripts stand in for the CLIs.
 - **Two adapters so far.** `claude-code` and `opencode`. Codex is planned, not
   built.
 - **Only OpenCode runs on an LLM backend.** Claude Code needs the Anthropic API.
-- **Delegation is single-shot.** An agent cannot ask a clarifying question; the
-  caller must pass everything in `task` and `context`.
+- **Only a task can ask.** A delegation is single-shot: the caller must pass
+  everything in `task` and `context`. A task's agent can stop with a question
+  (`NEEDS INPUT:`), but only at the end of a run, not halfway through one.
 - **No sandbox of Ensemble's own.** The agents' tools are the CLIs' own; their
   permission settings are what limit them.
 - **Concurrency is capped per agent, not per model server.** Two agents on one

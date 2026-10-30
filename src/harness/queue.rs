@@ -26,7 +26,7 @@ use super::delegation::{ToolResult, run_delegation};
 use crate::config::Isolation;
 use crate::external::gate;
 use crate::router::Ensemble;
-use crate::tasks::{Entry, Status, Store, Ticket, waiting_for};
+use crate::tasks::{ASK_MARKER, Entry, Status, Store, Ticket, question_in, waiting_for};
 use crate::worktree;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
@@ -305,6 +305,7 @@ impl<'e> Queue<'e> {
                 if inner.live.contains_key(&ticket.id)
                     || store.outcome(&ticket.id).is_some()
                     || !waiting_for(ticket, &entries).is_empty()
+                    || store.open_question(&ticket.id).is_some()
                 {
                     continue;
                 }
@@ -350,16 +351,31 @@ impl<'e> Queue<'e> {
                 },
             );
         let (mut result, mut extra) = match &place {
-            Ok((dir, _)) => self.work_on(&ticket, dir, cancel),
+            Ok((dir, _)) => self.work_on(store, &ticket, dir, cancel),
             Err(e) => (ToolResult::err(e.clone()), Vec::new()),
         };
         drop(slot);
         // Commit the work on the task's branch, unless the session ended under
         // it: then the worktree is left as it is, for the next session.
-        let interrupted_now = cancel.load(Ordering::Relaxed)
-            && !self.lock().live.get(&ticket.id).is_some_and(|l| l.asked);
+        let asked = self.lock().live.get(&ticket.id).is_some_and(|l| l.asked);
+        let interrupted_now = cancel.load(Ordering::Relaxed) && !asked;
+        // A question pauses the task: its worktree stays as it is until the
+        // answer comes and the task goes on.
+        let question = (!result.is_error && !cancel.load(Ordering::Relaxed))
+            .then(|| question_in(&result.text))
+            .flatten();
+        if let Some(question) = &question {
+            self.note(
+                &ticket.id,
+                &format!("{}: needs input: {question}", ticket.agent),
+            );
+            if let Err(e) = store.ask(&ticket.id, question, &result.text) {
+                eprintln!("ensemble: cannot write the question of {}: {e}", ticket.id);
+            }
+        }
         if let Ok((_, Some(wt))) = &place
             && !interrupted_now
+            && question.is_none()
         {
             extra.push(("branch", wt.branch.clone()));
             let note = match worktree::commit(wt, &format!("{}: {}", ticket.id, ticket.title)) {
@@ -379,11 +395,12 @@ impl<'e> Queue<'e> {
             result.text = format!("{}\n{note}", result.text);
         }
         let mut inner = self.lock();
-        let asked = inner.live.get(&ticket.id).is_some_and(|l| l.asked);
-        if cancel.load(Ordering::Relaxed) && !asked {
+        if interrupted_now {
             // The session ended under it: no result, so the next session
             // runs it again.
             store.set_state(&ticket.id, "interrupted", since);
+        } else if question.is_some() {
+            store.set_state(&ticket.id, "needs-input", since);
         } else {
             let status = if asked {
                 Status::Cancelled
@@ -414,11 +431,23 @@ impl<'e> Queue<'e> {
     /// gate's output. Returns the outcome and front matter for `result.md`.
     fn work_on(
         &self,
+        store: &Store,
         ticket: &Ticket,
         dir: &Path,
         cancel: &AtomicBool,
     ) -> (ToolResult, Vec<(&'static str, String)>) {
         let note = |line: &str| self.note(&ticket.id, line);
+        let mut base = ticket.prompt();
+        if let Some((questions, reply)) = store.conversation(&ticket.id) {
+            base.push_str(&format!(
+                "\n\nYou stopped earlier to ask. The questions and their answers:\n\n{}\n\nYour reply when you last stopped:\n{}\n\nGo on from there.",
+                questions.trim(),
+                reply.trim()
+            ));
+        }
+        base.push_str(&format!(
+            "\n\nIf you cannot finish without a decision that only the person who asked can make, stop and end your reply with one line: {ASK_MARKER} <your question>"
+        ));
         let delegate = |prompt: &str| {
             run_delegation(
                 self.ensemble,
@@ -431,7 +460,7 @@ impl<'e> Queue<'e> {
             )
         };
         let Some(gate) = &ticket.gate else {
-            return (delegate(&ticket.prompt()), Vec::new());
+            return (delegate(&base), Vec::new());
         };
         let Some(check) = self.ensemble.config().gates.get(&gate.name) else {
             return (
@@ -444,7 +473,7 @@ impl<'e> Queue<'e> {
         };
         let attempts = gate.attempts.max(1);
         let name = serde_json::to_string(&gate.name).expect("a string serializes");
-        let mut prompt = ticket.prompt();
+        let mut prompt = base.clone();
         let mut attempt = 1;
         loop {
             let reported = |verdict: &str| {
@@ -455,7 +484,10 @@ impl<'e> Queue<'e> {
                 ]
             };
             let result = delegate(&prompt);
-            if result.is_error || cancel.load(Ordering::Relaxed) {
+            if result.is_error
+                || cancel.load(Ordering::Relaxed)
+                || question_in(&result.text).is_some()
+            {
                 return (result, reported("not run"));
             }
             note(&format!("gate {}: running `{}`", gate.name, check.command));
@@ -481,11 +513,7 @@ impl<'e> Queue<'e> {
             attempt += 1;
             prompt = format!(
                 "{}\n\nYour previous attempt did not pass the check `{}` ({}). Its output:\n```\n{}\n```\n\nYour previous reply was:\n{}\n\nFix what the check reports.",
-                ticket.prompt(),
-                check.command,
-                verdict.ended,
-                verdict.output,
-                result.text
+                base, check.command, verdict.ended, verdict.output, result.text
             );
         }
     }
@@ -570,7 +598,10 @@ impl<'e> Queue<'e> {
                     .and_then(|s| s.state(&t.id))
                     .is_some_and(|s| s == "interrupted" || s == "running");
                 let blockers = waiting_for(t, entries);
-                let state = if !blockers.is_empty() {
+                let question = self.store.as_ref().and_then(|s| s.open_question(&t.id));
+                let state = if let Some(q) = question {
+                    format!("needs input: {q}")
+                } else if !blockers.is_empty() {
                     format!("blocked by {}", blockers.join(", "))
                 } else if interrupted {
                     "queued (interrupted last session)".into()
@@ -610,6 +641,13 @@ impl<'e> Queue<'e> {
                         is_error: status == Status::Failed,
                     },
                 };
+            }
+            if !inner.live.contains_key(id)
+                && let Some(q) = self.store.as_ref().and_then(|s| s.open_question(id))
+            {
+                return ToolResult::ok(format!(
+                    "{id} needs input: {q}\nAnswer it with `answer`; the task then goes on."
+                ));
             }
             if let Some(outcome) = self.store.as_ref().and_then(|s| s.outcome(id)) {
                 return ToolResult {
@@ -670,6 +708,24 @@ impl<'e> Queue<'e> {
         match written {
             Ok(()) => ToolResult::ok(format!("{id} is cancelled; it had not started.")),
             Err(e) => ToolResult::err(format!("cannot cancel {id}: {e}")),
+        }
+    }
+
+    /// Answer the question a task is waiting on, so it goes on.
+    pub fn answer(&self, id: &str, answer: &str) -> ToolResult {
+        let Some(store) = &self.store else {
+            return ToolResult::err("there is no task store in this session.");
+        };
+        if !store.exists(id) {
+            let entries = store.scan();
+            return ToolResult::err(unknown(&self.lock(), &entries, id));
+        }
+        match store.answer(id, answer) {
+            Ok(()) => {
+                self.changed.notify_all();
+                ToolResult::ok(format!("{id} is answered and queued to go on."))
+            }
+            Err(e) => ToolResult::err(e),
         }
     }
 

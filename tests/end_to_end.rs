@@ -596,7 +596,7 @@ fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
     assert_eq!(
         names,
         vec![
-            "delegate", "submit", "status", "wait", "cancel", "agents", "health"
+            "delegate", "submit", "status", "wait", "cancel", "answer", "agents", "health"
         ]
     );
 }

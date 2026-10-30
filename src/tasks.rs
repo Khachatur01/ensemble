@@ -12,6 +12,11 @@
 //!   `agent`, `started`, `ended`), then the agent's reply. A task with a
 //!   `result.md` is over; delete it to run the task again.
 //!
+//! An agent that cannot go on without a decision ends its reply with
+//! `NEEDS INPUT: <question>`. The question is added to `questions.md` beside
+//! the ticket (committed too), and the task waits until it is answered; then
+//! it runs again with the questions and answers so far.
+//!
 //! What a run does while it runs (its activity log, whether it was
 //! interrupted) is not worth committing, and lives in `.ensemble/runs/<id>/`,
 //! which ignores itself.
@@ -27,8 +32,14 @@ pub const TASKS_DIR: &str = "tasks";
 pub const RUNS_DIR: &str = "runs";
 pub const TASK_FILE: &str = "task.md";
 pub const RESULT_FILE: &str = "result.md";
+pub const QUESTIONS_FILE: &str = "questions.md";
 const STATE_FILE: &str = "state.json";
 const LOG_FILE: &str = "log.txt";
+const REPLY_FILE: &str = "reply.md";
+
+/// How an agent asks: a line of its reply starting with this.
+pub const ASK_MARKER: &str = "NEEDS INPUT:";
+const ANSWER_HEADING: &str = "### Answer";
 
 /// What `ensemble init` writes in `tasks/`, so a person can write a task
 /// without reading the README.
@@ -54,6 +65,10 @@ agent's `max_concurrent`.
     gate: { name: test, attempts: 3 }   # a check from config.yaml's gates
     ---
     Retry a failed request three times, waiting 1s, 2s, 4s.
+
+If the agent stops to ask, its question is added to `questions.md`; answer it
+with the manager's `answer` tool, or write `### Answer` and the answer under
+it, and the task goes on.
 
 `result.md` appears when the task ends, with its status (done, failed or
 cancelled) and the agent's reply. Delete it to run the task again.
@@ -394,6 +409,61 @@ impl Store {
         }
     }
 
+    /// Add a question to the task's `questions.md`, and keep the reply that
+    /// asked it for the run after the answer.
+    pub fn ask(&self, id: &str, question: &str, reply: &str) -> io::Result<()> {
+        let path = self.tasks.join(id).join(QUESTIONS_FILE);
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        let n = text.matches("## Question ").count() + 1;
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        write!(
+            f,
+            "## Question {n} ({})\n{}\n\n",
+            utc(SystemTime::now()),
+            question.trim()
+        )?;
+        write_atomically(&self.run_dir(id)?.join(REPLY_FILE), reply)
+    }
+
+    /// The question the task is waiting on, if one is not answered yet.
+    pub fn open_question(&self, id: &str) -> Option<String> {
+        if !valid_id(id) {
+            return None;
+        }
+        let text = fs::read_to_string(self.tasks.join(id).join(QUESTIONS_FILE)).ok()?;
+        let (_, last) = text.rsplit_once("## Question ")?;
+        if last.contains(ANSWER_HEADING) {
+            return None;
+        }
+        let question = last.split_once('\n').map_or("", |(_, q)| q).trim();
+        Some(question.to_string())
+    }
+
+    /// Answer the open question of a task.
+    pub fn answer(&self, id: &str, answer: &str) -> Result<(), String> {
+        if self.open_question(id).is_none() {
+            return Err(format!("{id} has no question waiting for an answer."));
+        }
+        let path = self.tasks.join(id).join(QUESTIONS_FILE);
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        write!(f, "{ANSWER_HEADING}\n{}\n\n", answer.trim())
+            .map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// The questions and answers so far, and the reply that last asked, for
+    /// the run after an answer.
+    pub fn conversation(&self, id: &str) -> Option<(String, String)> {
+        let questions = fs::read_to_string(self.tasks.join(id).join(QUESTIONS_FILE)).ok()?;
+        let reply = fs::read_to_string(self.runs.join(id).join(REPLY_FILE)).unwrap_or_default();
+        Some((questions, reply))
+    }
+
     /// The state a run last recorded, if any.
     pub fn state(&self, id: &str) -> Option<String> {
         let text = fs::read_to_string(self.runs.join(id).join(STATE_FILE)).ok()?;
@@ -410,6 +480,17 @@ impl Store {
             .max()
             .unwrap_or(0)
     }
+}
+
+/// The question an agent's reply asks, if it asks one: the last line that
+/// starts with [`ASK_MARKER`].
+pub fn question_in(reply: &str) -> Option<String> {
+    reply
+        .lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix(ASK_MARKER))
+        .map(|q| q.trim().to_string())
+        .filter(|q| !q.is_empty())
 }
 
 /// What `ticket` still waits for: each task in its `after` that is not done,
@@ -806,6 +887,47 @@ mod tests {
         let store = Store::new(&tmp.0);
         assert!(!store.exists("../x"));
         assert!(store.outcome("..").is_none());
+    }
+
+    #[test]
+    fn a_question_waits_for_its_answer_and_both_are_kept() {
+        let tmp = TempDir::new();
+        let store = Store::new(&tmp.0);
+        let id = store.create(&draft("Look", "scout", "t")).unwrap();
+        assert_eq!(store.open_question(&id), None);
+        assert!(store.answer(&id, "x").is_err());
+        store
+            .ask(
+                &id,
+                "Which parser?",
+                "I found two.\nNEEDS INPUT: Which parser?",
+            )
+            .unwrap();
+        assert_eq!(store.open_question(&id).as_deref(), Some("Which parser?"));
+        store.answer(&id, "The new one.").unwrap();
+        assert_eq!(store.open_question(&id), None);
+        store.ask(&id, "Keep the old one?", "r2").unwrap();
+        assert_eq!(
+            store.open_question(&id).as_deref(),
+            Some("Keep the old one?")
+        );
+        let (questions, reply) = store.conversation(&id).unwrap();
+        assert!(questions.starts_with("## Question 1 ("), "{questions}");
+        assert!(
+            questions.contains("Which parser?\n\n### Answer\nThe new one.\n\n## Question 2 ("),
+            "{questions}"
+        );
+        assert_eq!(reply, "r2");
+    }
+
+    #[test]
+    fn the_last_marked_line_of_a_reply_is_its_question() {
+        assert_eq!(question_in("done"), None);
+        assert_eq!(
+            question_in("x\n  NEEDS INPUT: a?\nNEEDS INPUT: b?\n\n[scout: 1 step(s)]").as_deref(),
+            Some("b?")
+        );
+        assert_eq!(question_in("NEEDS INPUT:   "), None);
     }
 
     #[test]

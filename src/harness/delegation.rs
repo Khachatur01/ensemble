@@ -17,6 +17,7 @@ pub const SUBMIT: &str = "submit";
 pub const STATUS: &str = "status";
 pub const WAIT: &str = "wait";
 pub const CANCEL: &str = "cancel";
+pub const ANSWER: &str = "answer";
 
 /// Seconds `wait` waits when the caller names no time, and the most it may.
 const DEFAULT_WAIT_SECONDS: u64 = 30;
@@ -198,6 +199,23 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                     "task": { "type": "string", "description": "The id `submit` or `delegate` returned." }
                 },
                 "required": ["task"],
+                "additionalProperties": false
+            }),
+        });
+
+        out.push(Tool {
+            name: ANSWER,
+            description: "Answer the question a task stopped to ask (`status` and `wait` show it \
+                          as `needs input`). The task then runs again with the questions and \
+                          answers so far."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "The task that asked." },
+                    "answer": { "type": "string", "description": "The decision or information it asked for." }
+                },
+                "required": ["task", "answer"],
                 "additionalProperties": false
             }),
         });
@@ -426,6 +444,16 @@ pub fn call<'s>(
             )),
         },
 
+        ANSWER => {
+            let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::trim);
+            match (text("task"), text("answer")) {
+                (Some(id), Some(answer)) if !answer.is_empty() => queue.answer(id, answer),
+                _ => ToolResult::err(format!(
+                    "{ANSWER}: `task` and a non-empty `answer` are required"
+                )),
+            }
+        }
+
         AGENTS => {
             let mut lines = Vec::new();
             for role in ensemble.agents() {
@@ -469,7 +497,7 @@ pub fn call<'s>(
 
         other => ToolResult::err(format!(
             "no such tool: '{other}'. This server provides: \
-             {DELEGATE}, {SUBMIT}, {STATUS}, {WAIT}, {CANCEL}, {AGENTS}, {HEALTH}."
+             {DELEGATE}, {SUBMIT}, {STATUS}, {WAIT}, {CANCEL}, {ANSWER}, {AGENTS}, {HEALTH}."
         )),
     }
 }
@@ -617,7 +645,9 @@ mod tests {
         let names: Vec<&str> = tools(&["coder"]).iter().map(|t| t.name).collect();
         assert_eq!(
             names,
-            vec![DELEGATE, SUBMIT, STATUS, WAIT, CANCEL, AGENTS, HEALTH]
+            vec![
+                DELEGATE, SUBMIT, STATUS, WAIT, CANCEL, ANSWER, AGENTS, HEALTH
+            ]
         );
     }
 
