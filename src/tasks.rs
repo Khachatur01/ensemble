@@ -23,6 +23,7 @@
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -36,6 +37,8 @@ pub const QUESTIONS_FILE: &str = "questions.md";
 const STATE_FILE: &str = "state.json";
 const LOG_FILE: &str = "log.txt";
 const REPLY_FILE: &str = "reply.md";
+/// When each agent with a budget started its recent runs, across sessions.
+const USAGE_FILE: &str = "usage.json";
 
 /// How an agent asks: a line of its reply starting with this.
 pub const ASK_MARKER: &str = "NEEDS INPUT:";
@@ -371,15 +374,21 @@ impl Store {
         write_atomically(&path, &text)
     }
 
-    /// The run directory of `id`, made on first use, with the `.gitignore`
-    /// that keeps every run out of git.
-    fn run_dir(&self, id: &str) -> io::Result<PathBuf> {
-        let dir = self.runs.join(id);
-        fs::create_dir_all(&dir)?;
+    /// `runs/`, made on first use, with the `.gitignore` that keeps every
+    /// run out of git.
+    fn runs_dir(&self) -> io::Result<&Path> {
+        fs::create_dir_all(&self.runs)?;
         let ignore = self.runs.join(".gitignore");
         if !ignore.exists() {
             fs::write(ignore, "*\n")?;
         }
+        Ok(&self.runs)
+    }
+
+    /// The run directory of `id`, made on first use.
+    fn run_dir(&self, id: &str) -> io::Result<PathBuf> {
+        let dir = self.runs_dir()?.join(id);
+        fs::create_dir_all(&dir)?;
         Ok(dir)
     }
 
@@ -469,6 +478,24 @@ impl Store {
         let text = fs::read_to_string(self.runs.join(id).join(STATE_FILE)).ok()?;
         let value: Value = serde_json::from_str(&text).ok()?;
         value["state"].as_str().map(str::to_string)
+    }
+
+    /// When each agent started its recent runs, in seconds since the epoch.
+    pub fn usage(&self) -> BTreeMap<String, Vec<u64>> {
+        fs::read_to_string(self.runs.join(USAGE_FILE))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_usage(&self, usage: &BTreeMap<String, Vec<u64>>) {
+        let write = || -> io::Result<()> {
+            let text = serde_json::to_string(usage).expect("usage serializes");
+            write_atomically(&self.runs_dir()?.join(USAGE_FILE), &text)
+        };
+        if let Err(e) = write() {
+            eprintln!("ensemble: cannot record usage: {e}");
+        }
     }
 
     /// The highest `adhoc-N` a run directory has, so a new session does not

@@ -312,6 +312,9 @@ pub fn call<'s>(
             if !ensemble.agents().contains(&role) {
                 return run_delegation(ensemble, role, task, context, None, progress, cancel);
             }
+            if let Err(refused) = queue.spend(role) {
+                return ToolResult::err(format!("delegation refused: {refused}"));
+            }
             if background {
                 let id = queue.start_adhoc(role, task, context, spawn);
                 return ToolResult::ok(format!(

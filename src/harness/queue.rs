@@ -23,7 +23,7 @@
 //! its agent first, so `max_concurrent` means what it says.
 
 use super::delegation::{ToolResult, run_delegation};
-use crate::config::Isolation;
+use crate::config::{Budget, Isolation};
 use crate::external::gate;
 use crate::router::Ensemble;
 use crate::tasks::{ASK_MARKER, Entry, Status, Store, Ticket, question_in, waiting_for};
@@ -79,6 +79,8 @@ struct Inner {
     ended: BTreeMap<String, Ended>,
     /// Slots in use, per agent.
     busy: HashMap<String, u32>,
+    /// When each agent with a budget started its runs in the last hour.
+    usage: BTreeMap<String, Vec<u64>>,
 }
 
 /// The tasks and background delegations of one session.
@@ -114,11 +116,13 @@ impl Drop for Slot<'_> {
 impl<'e> Queue<'e> {
     pub fn new(ensemble: &'e Ensemble, store: Option<Store>) -> Self {
         let last_adhoc = store.as_ref().map_or(0, Store::last_adhoc);
+        let usage = store.as_ref().map(Store::usage).unwrap_or_default();
         Queue {
             ensemble,
             store,
             inner: Mutex::new(Inner {
                 last_adhoc,
+                usage,
                 ..Inner::default()
             }),
             changed: Condvar::new(),
@@ -136,6 +140,56 @@ impl<'e> Queue<'e> {
             .config()
             .agent(agent)
             .map_or(u32::MAX, |a| a.max_concurrent)
+    }
+
+    /// Seconds until `agent` may start another run, or `None` if it may now.
+    fn over_budget(&self, inner: &Inner, agent: &str) -> Option<u64> {
+        let Some(Budget::PerHour { delegations }) =
+            self.ensemble.config().agent(agent).map(|a| a.budget)
+        else {
+            return None;
+        };
+        let now = unix_now();
+        let mut recent: Vec<u64> = inner
+            .usage
+            .get(agent)
+            .map(|runs| runs.iter().copied().filter(|t| now < t + HOUR).collect())
+            .unwrap_or_default();
+        if recent.len() < delegations as usize {
+            return None;
+        }
+        recent.sort_unstable();
+        // The run that frees a place is the one that leaves the hour first.
+        let frees = recent[recent.len() - delegations as usize];
+        Some((frees + HOUR).saturating_sub(now).max(1))
+    }
+
+    /// Count a run of `agent` against its budget, or say how long until it
+    /// may start one.
+    fn spend_locked(&self, inner: &mut Inner, agent: &str) -> Result<(), u64> {
+        if let Some(wait) = self.over_budget(inner, agent) {
+            return Err(wait);
+        }
+        if !matches!(
+            self.ensemble.config().agent(agent).map(|a| a.budget),
+            Some(Budget::PerHour { .. })
+        ) {
+            return Ok(());
+        }
+        let now = unix_now();
+        let runs = inner.usage.entry(agent.to_string()).or_default();
+        runs.retain(|t| now < t + HOUR);
+        runs.push(now);
+        if let Some(store) = &self.store {
+            store.save_usage(&inner.usage);
+        }
+        Ok(())
+    }
+
+    /// [`Self::spend_locked`], as a refusal the caller can read.
+    pub fn spend(&self, agent: &str) -> Result<(), String> {
+        self.spend_locked(&mut self.lock(), agent)
+            .map_err(|wait| over_budget_message(agent, wait))
     }
 
     /// Take a slot of `agent` if one is free.
@@ -310,9 +364,14 @@ impl<'e> Queue<'e> {
                     continue;
                 }
                 let ticket = ticket.clone();
+                if self.over_budget(&inner, &ticket.agent).is_some() {
+                    continue;
+                }
                 let Some(slot) = self.take(&mut inner, &ticket.agent) else {
                     continue;
                 };
+                // Cannot fail: the budget was checked under this same lock.
+                let _ = self.spend_locked(&mut inner, &ticket.agent);
                 let cancel = Arc::new(AtomicBool::new(false));
                 inner.live.insert(
                     ticket.id.clone(),
@@ -510,6 +569,13 @@ impl<'e> Queue<'e> {
                 );
                 return (ToolResult::err(text), reported("failed"));
             }
+            if let Err(refused) = self.spend(&ticket.agent) {
+                let text = format!(
+                    "{}\n\n[gate {}: failed ({}) on attempt {attempt} of {attempts}; no retry: {refused}]\n```\n{}\n```",
+                    result.text, gate.name, verdict.ended, verdict.output
+                );
+                return (ToolResult::err(text), reported("failed"));
+            }
             attempt += 1;
             prompt = format!(
                 "{}\n\nYour previous attempt did not pass the check `{}` ({}). Its output:\n```\n{}\n```\n\nYour previous reply was:\n{}\n\nFix what the check reports.",
@@ -556,7 +622,7 @@ impl<'e> Queue<'e> {
                 return ToolResult::ok(describe_ended(id, ended));
             }
             return match entries.iter().find(|e| e.id() == id) {
-                Some(entry) => ToolResult::ok(self.describe_entry(entry, &entries)),
+                Some(entry) => ToolResult::ok(self.describe_entry(&inner, entry, &entries)),
                 None => ToolResult::err(unknown(&inner, &entries, id)),
             };
         }
@@ -569,8 +635,8 @@ impl<'e> Queue<'e> {
         let mut over = Vec::new();
         for entry in entries.iter().filter(|e| !inner.live.contains_key(e.id())) {
             match entry {
-                Entry::Task(_, Some(_)) => over.push(self.describe_entry(entry, &entries)),
-                _ => lines.push(self.describe_entry(entry, &entries)),
+                Entry::Task(_, Some(_)) => over.push(self.describe_entry(&inner, entry, &entries)),
+                _ => lines.push(self.describe_entry(&inner, entry, &entries)),
             }
         }
         let hidden = over.len().saturating_sub(LISTED_ENDED);
@@ -586,7 +652,7 @@ impl<'e> Queue<'e> {
         }
     }
 
-    fn describe_entry(&self, entry: &Entry, entries: &[Entry]) -> String {
+    fn describe_entry(&self, inner: &Inner, entry: &Entry, entries: &[Entry]) -> String {
         match entry {
             Entry::Task(t, Some(status)) => {
                 format!("{} · {} · {} · {}", t.id, t.agent, status.as_str(), t.title)
@@ -601,6 +667,8 @@ impl<'e> Queue<'e> {
                 let question = self.store.as_ref().and_then(|s| s.open_question(&t.id));
                 let state = if let Some(q) = question {
                     format!("needs input: {q}")
+                } else if let Some(wait) = self.over_budget(inner, &t.agent) {
+                    format!("queued, over its agent's budget for {}", minutes(wait))
                 } else if !blockers.is_empty() {
                     format!("blocked by {}", blockers.join(", "))
                 } else if interrupted {
@@ -740,6 +808,27 @@ impl<'e> Queue<'e> {
         drop(inner);
         self.changed.notify_all();
     }
+}
+
+const HOUR: u64 = 3600;
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn minutes(seconds: u64) -> String {
+    let m = seconds.div_ceil(60);
+    format!("{m} more minute{}", if m == 1 { "" } else { "s" })
+}
+
+fn over_budget_message(agent: &str, wait: u64) -> String {
+    format!(
+        "agent '{agent}' has used its budget of runs for this hour; the next is allowed in {}. \
+         Use another agent, or try again then.",
+        minutes(wait)
+    )
 }
 
 fn unknown(inner: &Inner, entries: &[Entry], id: &str) -> String {

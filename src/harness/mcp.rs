@@ -410,7 +410,7 @@ mod tests {
         for (name, tools, body) in scripts {
             let command = cli(&bin, name, body);
             yaml.push_str(&format!(
-                "  {name}:\n    prompt: \"The {name}. Second line.\"\n    max_seconds: 1800\n    max_concurrent: {max_concurrent}\n    isolation: {isolation}\n    adapter:\n      type: opencode\n      model: {{ type: provider, name: opencode/m-{name} }}\n      tools: [{tools}]\n      max_steps: 30\n      command: \"{command}\"\n"
+                "  {name}:\n    prompt: \"The {name}. Second line.\"\n    max_seconds: 1800\n    max_concurrent: {max_concurrent}\n    isolation: {isolation}\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {{ type: provider, name: opencode/m-{name} }}\n      tools: [{tools}]\n      max_steps: 30\n      command: \"{command}\"\n"
             ));
         }
         let cfg =
@@ -773,7 +773,7 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
         assert!(text_of(&good).contains(": ok"), "{}", text_of(&good));
 
         let cfg = config::parse(
-            "version: 1\nllm_backends: {}\ngates: {}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 4\n    isolation: shared\n    adapter: { type: opencode, model: { type: provider, name: a/b }, tools: [read], max_steps: 3, command: /nonexistent/opencode }\n",
+            "version: 1\nllm_backends: {}\ngates: {}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 4\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter: { type: opencode, model: { type: provider, name: a/b }, tools: [read], max_steps: 3, command: /nonexistent/opencode }\n",
             std::path::Path::new("config.yaml"),
             &BTreeMap::new(),
         )
@@ -1530,5 +1530,33 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
             questions.contains("Which parser?\n\n### Answer\nThe new one.\n"),
             "{questions}"
         );
+    }
+    #[test]
+    fn an_agent_over_its_budget_is_refused_and_its_tasks_wait() {
+        let (e, tmp) = team(&[("scout", "read", &emit(&step(vec![text("found it")])))]);
+        // One run an hour; the record is kept across sessions.
+        let mut config = e.config().clone();
+        config.agents.get_mut("scout").unwrap().budget = config::Budget::PerHour { delegations: 1 };
+        let e = Ensemble::new(config, Some(project(&tmp)));
+        session(&e, |ask| {
+            let r = ask("delegate", json!({"agent": "scout", "task": "a"}));
+            assert!(r.starts_with("found it"), "{r}");
+            let r = ask(
+                "delegate",
+                json!({"agent": "scout", "task": "b", "background": true}),
+            );
+            assert!(
+                r.contains("used its budget") && r.contains("60 more minutes"),
+                "{r}"
+            );
+        });
+        write_task(&tmp, "0001-a", "scout", "a");
+        session(&e, |ask| {
+            let s = until(ask, json!({"task": "0001-a"}), "over its agent's budget");
+            assert!(s.contains("0001-a · scout · queued"), "{s}");
+        });
+        assert!(store(&tmp).outcome("0001-a").is_none());
+        let usage = store(&tmp).usage();
+        assert_eq!(usage["scout"].len(), 1, "{usage:?}");
     }
 }

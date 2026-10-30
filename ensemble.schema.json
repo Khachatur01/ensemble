@@ -39,6 +39,38 @@
     }
   },
   "definitions": {
+    "budget_unlimited": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "unlimited: no cap.",
+          "const": "unlimited"
+        }
+      }
+    },
+    "budget_per_hour": {
+      "type": "object",
+      "required": [
+        "type",
+        "delegations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "per_hour: at most `delegations` runs started in any hour, counted across sessions. Over it, tasks wait and delegations are refused, saying when the next run is allowed.",
+          "const": "per_hour"
+        },
+        "delegations": {
+          "description": "Runs it may start in any hour.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
     "gate": {
       "type": "object",
       "required": [
@@ -111,6 +143,7 @@
         "max_seconds",
         "max_concurrent",
         "isolation",
+        "budget",
         "adapter"
       ],
       "additionalProperties": false,
@@ -134,6 +167,17 @@
           "enum": [
             "shared",
             "worktree"
+          ]
+        },
+        "budget": {
+          "description": "How many runs it may start in an hour: tasks, each gate retry, and delegations, blocking or in the background. `type` decides which other settings there are.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/budget_unlimited"
+            },
+            {
+              "$ref": "#/definitions/budget_per_hour"
+            }
           ]
         },
         "adapter": {

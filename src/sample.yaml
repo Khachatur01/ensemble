@@ -74,6 +74,10 @@ agents:
     # its own git worktree on the branch ensemble/<id>, committed there and
     # never merged by Ensemble.
     isolation: worktree
+    # How many runs it may start in an hour: `unlimited`, or `per_hour` with
+    # `delegations` (tasks, gate retries and delegations all count).
+    budget:
+      type: unlimited
     adapter:
       type: opencode
       # Where the model comes from: `llm_backend` for one an entry of
@@ -101,6 +105,8 @@ agents:
     max_seconds: 1800
     max_concurrent: 1
     isolation: shared
+    budget:
+      type: unlimited
     adapter:
       type: opencode
       model:
@@ -120,6 +126,9 @@ agents:
     max_seconds: 1800
     max_concurrent: 1
     isolation: shared
+    budget:
+      type: per_hour
+      delegations: 20
     adapter:
       type: claude-code
       # An alias (sonnet, opus, haiku) or a full model id.

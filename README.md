@@ -139,6 +139,8 @@ agents:
     max_seconds: 1800
     max_concurrent: 1
     isolation: shared
+    budget:
+      type: unlimited
     adapter:
       type: opencode
       model:
@@ -155,6 +157,8 @@ agents:
     max_seconds: 1800
     max_concurrent: 1
     isolation: shared
+    budget:
+      type: unlimited
     adapter:
       type: claude-code
       model: sonnet
@@ -181,6 +185,7 @@ hardcoded as planner, coder or reviewer. It has:
 | `max_seconds` | wall-clock limit for one delegation. At the limit the CLI and its whole process tree are killed and what it did is returned, marked unfinished |
 | `max_concurrent` | most delegations to it that run at once in a session: tasks, background and blocking delegations alike. More wait for a free slot. `1` suits a model server that serves one request at a time |
 | `isolation` | where its tasks run: `shared`, in the project directory, or `worktree`, each task in a git worktree of its own (see [Tasks](#tasks-and-background-delegations)). Delegations always run in the project |
+| `budget` | how many runs it may start in an hour: `{ type: unlimited }`, or `{ type: per_hour, delegations: 20 }`. Tasks, each gate retry, and delegations, blocking or in the background, all count, across sessions (`.ensemble/runs/usage.json`). Over it, a delegation is refused saying when the next run is allowed, a task waits (`queued, over its agent's budget for 12 more minutes`), and a gate retry is not made |
 | `adapter` | what runs it. `type` decides which other fields the adapter takes |
 
 An **LLM backend** is a model server of yours, defined once. An OpenCode agent
@@ -212,6 +217,8 @@ agents:
     max_seconds: 1800
     max_concurrent: 1
     isolation: shared
+    budget:
+      type: unlimited
     adapter:
       type: opencode
       model:
@@ -227,6 +234,8 @@ agents:
     max_seconds: 1800
     max_concurrent: 1
     isolation: shared
+    budget:
+      type: unlimited
     adapter:
       type: opencode
       model:
@@ -284,6 +293,8 @@ agents:
     max_seconds: 1800
     max_concurrent: 1
     isolation: shared
+    budget:
+      type: unlimited
     adapter:
       type: claude-code
       model: sonnet         # an alias (sonnet, opus, haiku) or a full model id
@@ -646,9 +657,9 @@ scripts stand in for the CLIs.
   (`NEEDS INPUT:`), but only at the end of a run, not halfway through one.
 - **No sandbox of Ensemble's own.** The agents' tools are the CLIs' own; their
   permission settings are what limit them.
-- **Concurrency is capped per agent, not per model server.** Two agents on one
-  server each get their own `max_concurrent`. Nothing caps spending a Claude
-  subscription limit in a loop.
+- **Limits are per agent, not per model server or subscription.** Two agents
+  on one server each get their own `max_concurrent` and `budget`. A budget
+  counts runs, not tokens.
 - **Tasks run only while a session runs.** There is no daemon: the worker lives
   in `ensemble mcp`.
 - **The project directory is fixed when the server starts.** The working

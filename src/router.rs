@@ -335,6 +335,8 @@ agents:
     max_seconds: 1800
     max_concurrent: 2
     isolation: shared
+    budget:
+      type: unlimited
     adapter:
       type: opencode
       model: {{ type: provider, name: opencode/big-pickle }}
@@ -345,6 +347,8 @@ agents:
     max_seconds: 1800
     max_concurrent: 2
     isolation: shared
+    budget:
+      type: unlimited
     adapter:
       type: opencode
       model: {{ type: llm_backend, backend: local, name: qwen3.5-9b, context_window: 32768 }}
@@ -355,6 +359,8 @@ agents:
     max_seconds: 1800
     max_concurrent: 2
     isolation: shared
+    budget:
+      type: unlimited
     adapter:
       type: claude-code
       model: sonnet

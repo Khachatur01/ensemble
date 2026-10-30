@@ -125,8 +125,32 @@ struct RawAgent {
     /// Where its tasks run: in the project itself, or each in a git worktree
     /// of its own.
     isolation: Isolation,
+    /// How many runs it may start in an hour.
+    budget: RawBudget,
     /// What runs the agent, and how.
     adapter: RawAdapter,
+}
+
+/// How much an agent may run. `type` decides which settings it has.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum RawBudget {
+    #[serde(rename = "unlimited")]
+    Unlimited(RawUnlimited),
+    #[serde(rename = "per_hour")]
+    PerHour(RawPerHour),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawUnlimited {}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPerHour {
+    /// Runs it may start in any hour: tasks, each gate retry, and
+    /// delegations, blocking or in the background.
+    delegations: u32,
 }
 
 /// The harness behind an agent. `type` decides which settings it has.
@@ -238,6 +262,7 @@ pub struct AgentConfig {
     /// See [`RawAgent::max_concurrent`].
     pub max_concurrent: u32,
     pub isolation: Isolation,
+    pub budget: Budget,
     pub adapter: Adapter,
 }
 
@@ -251,6 +276,16 @@ pub enum Isolation {
     /// Each task in its own git worktree, on a branch named after the task,
     /// where the agent's work is committed. Ensemble never merges it.
     Worktree,
+}
+
+/// How much an agent may run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Budget {
+    Unlimited,
+    /// At most this many runs started in any hour.
+    PerHour {
+        delegations: u32,
+    },
 }
 
 /// What runs an agent.
@@ -707,6 +742,19 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
                 "agents.{name}: `max_concurrent` must be greater than 0"
             ));
         }
+        let budget = match &ra.budget {
+            RawBudget::Unlimited(_) => Budget::Unlimited,
+            RawBudget::PerHour(b) => {
+                if b.delegations == 0 {
+                    problems.push(format!(
+                        "agents.{name}.budget: `delegations` must be greater than 0"
+                    ));
+                }
+                Budget::PerHour {
+                    delegations: b.delegations,
+                }
+            }
+        };
         let at = format!("agents.{name}.adapter");
         let adapter = match &ra.adapter {
             RawAdapter::ClaudeCode(c) => {
@@ -724,6 +772,7 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
                 max_seconds: ra.max_seconds,
                 max_concurrent: ra.max_concurrent,
                 isolation: ra.isolation,
+                budget,
                 adapter,
             },
         );
@@ -980,6 +1029,8 @@ agents:
     max_seconds: 1800
     max_concurrent: 1
     isolation: shared
+    budget:
+      type: unlimited
     adapter:
       type: opencode
       model:
@@ -994,6 +1045,8 @@ agents:
     max_seconds: 900
     max_concurrent: 1
     isolation: shared
+    budget:
+      type: unlimited
     adapter:
       type: opencode
       model:
@@ -1008,6 +1061,8 @@ agents:
     max_seconds: 1800
     max_concurrent: 1
     isolation: shared
+    budget:
+      type: unlimited
     adapter:
       type: claude-code
       model: sonnet
@@ -1148,14 +1203,14 @@ agents:
 
         // The window belongs to the model on an LLM backend, nowhere else.
         let doc = REFERENCE.replace(
-            "    isolation: shared\n    adapter:\n      type: claude-code",
-            "    isolation: shared\n    context_window: 8000\n    adapter:\n      type: claude-code",
+            "    adapter:\n      type: claude-code",
+            "    context_window: 8000\n    adapter:\n      type: claude-code",
         );
         assert!(refusal(&doc).contains("context_window"));
 
         let provider = "model:\n        type: provider\n        name: opencode/big-pickle\n        context_window: 1\n";
         let doc = format!(
-            "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    adapter:\n      type: opencode\n      {provider}      tools: []\n      max_steps: 3\n      command: opencode\n"
+            "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      {provider}      tools: []\n      max_steps: 3\n      command: opencode\n"
         );
         assert!(refusal(&doc).contains("context_window"));
     }
@@ -1164,7 +1219,7 @@ agents:
     fn an_opencode_model_is_a_provider_model_or_an_llm_backend_model() {
         let doc = |model: &str| {
             format!(
-                "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      max_steps: 3\n      command: opencode\n"
+                "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      max_steps: 3\n      command: opencode\n"
             )
         };
         let c = parse(
@@ -1276,6 +1331,11 @@ agents:
             ("agent", accepted_keys::<RawAgent>(), "agents"),
             ("gate", accepted_keys::<RawGate>(), "gates"),
             (
+                "budget_per_hour",
+                accepted_keys::<RawPerHour>(),
+                "per_hour budget",
+            ),
+            (
                 "claude_code_adapter",
                 accepted_keys::<RawClaudeCodeAdapter>(),
                 "claude-code adapter",
@@ -1318,6 +1378,8 @@ agents:
             ("openai_compatible_api_backend", vec!["api_key_env"]),
             ("agent", vec!["prompt"]),
             ("gate", vec![]),
+            ("budget_unlimited", vec![]),
+            ("budget_per_hour", vec![]),
             ("claude_code_adapter", vec![]),
             ("opencode_adapter", vec![]),
             ("opencode_provider_model", vec![]),
@@ -1434,6 +1496,13 @@ agents:
                 .filter(|a| a["type"] == kind)
                 .collect()
         };
+        let budgets = |kind: &str| -> Vec<&serde_json::Value> {
+            agents
+                .iter()
+                .map(|a| &a["budget"])
+                .filter(|b| b["type"] == kind)
+                .collect()
+        };
         let models = |kind: &str| -> Vec<&serde_json::Value> {
             adapters(OPENCODE_AGENT)
                 .into_iter()
@@ -1445,6 +1514,8 @@ agents:
             ("openai_compatible_api_backend", backends),
             ("agent", agents.clone()),
             ("gate", doc["gates"].as_object().unwrap().values().collect()),
+            ("budget_unlimited", budgets("unlimited")),
+            ("budget_per_hour", budgets("per_hour")),
             ("claude_code_adapter", adapters(CLAUDE_CODE_AGENT)),
             ("opencode_adapter", adapters(OPENCODE_AGENT)),
             ("opencode_provider_model", models(PROVIDER_MODEL)),
@@ -1508,6 +1579,8 @@ agents:
     max_seconds: 600
     max_concurrent: 1
     isolation: shared
+    budget:
+      type: unlimited
     adapter:
       type: opencode
       model: { type: provider, name: "ollama/qwen3.5:9b" }
@@ -1531,6 +1604,8 @@ agents:
     max_seconds: 60
     max_concurrent: 1
     isolation: shared
+    budget:
+      type: unlimited
     adapter:
       type: opencode
       model: { type: provider, name: big-pickle }
@@ -1584,6 +1659,36 @@ agents:
         assert!(
             detail.contains("unknown variant `branch`") && detail.contains("worktree"),
             "{detail}"
+        );
+    }
+
+    #[test]
+    fn a_budget_is_unlimited_or_a_number_of_runs_per_hour() {
+        let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
+        assert_eq!(c.agents["coder"].budget, Budget::Unlimited);
+        let doc = REFERENCE.replacen(
+            "    budget:\n      type: unlimited\n",
+            "    budget:\n      type: per_hour\n      delegations: 5\n",
+            1,
+        );
+        let c = parse(&doc, &p(), &env(&[])).unwrap();
+        assert_eq!(
+            c.agents["planner"].budget,
+            Budget::PerHour { delegations: 5 }
+        );
+        let zero = doc.replace("delegations: 5", "delegations: 0");
+        assert!(joined_problems(&zero).contains("`delegations` must be greater than 0"));
+        let stray = REFERENCE.replacen(
+            "      type: unlimited\n",
+            "      type: unlimited\n      delegations: 5\n",
+            1,
+        );
+        assert!(refusal(&stray).contains("delegations"));
+        let missing = REFERENCE.replacen("      type: unlimited\n", "      type: per_hour\n", 1);
+        assert!(
+            refusal(&missing).contains("`delegations` is required"),
+            "{}",
+            refusal(&missing)
         );
     }
 
@@ -1764,6 +1869,8 @@ agents:
     max_seconds: 0
     max_concurrent: 1
     isolation: shared
+    budget:
+      type: unlimited
     adapter:
       type: opencode
       model: { type: llm_backend, backend: missing, name: "", context_window: 0 }
@@ -1799,8 +1906,8 @@ agents: {}
         let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
         assert_eq!(c.agents["coder"].prompt, None);
         let with = REFERENCE.replacen(
-            "  coder:\n    max_seconds: 900\n    max_concurrent: 1\n    isolation: shared\n",
-            "  coder:\n    prompt: Writes code.\n    max_seconds: 900\n    max_concurrent: 1\n    isolation: shared\n",
+            "  coder:\n    max_seconds: 900\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n",
+            "  coder:\n    prompt: Writes code.\n    max_seconds: 900\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n",
             1,
         );
         let c = parse(&with, &p(), &env(&[])).unwrap();
