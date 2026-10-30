@@ -5,8 +5,9 @@
 //! (`0007-add-retry`), holding two files that are meant to be committed, like
 //! a ticket and its resolution:
 //!
-//! - `task.md`: YAML front matter (`title`, `agent`, optional `context`), then
-//!   the task itself. Written once; nothing rewrites it.
+//! - `task.md`: YAML front matter (`title`, `agent`, and optionally `context`,
+//!   `goal`, `constraints`, `files`, `done_when`, `after`), then the task
+//!   itself. Written once; nothing rewrites it.
 //! - `result.md`: written once, when the task ends: front matter (`status`,
 //!   `agent`, `started`, `ended`), then the agent's reply. A task with a
 //!   `result.md` is over; delete it to run the task again.
@@ -43,7 +44,13 @@ agent's `max_concurrent`.
     ---
     title: Add retry to the fetcher
     agent: coder
-    context: The fetcher is src/fetch.rs.   # optional
+    # The rest is optional.
+    context: The fetcher is src/fetch.rs; it uses ureq.
+    goal: A request survives one dropped connection.
+    constraints: [No new dependency]
+    files: [src/fetch.rs]
+    done_when: [cargo test passes]
+    after: [0001-add-ureq]     # tasks that must be done first
     ---
     Retry a failed request three times, waiting 1s, 2s, 4s.
 
@@ -60,16 +67,57 @@ struct FrontMatter {
     title: String,
     agent: String,
     context: Option<String>,
+    goal: Option<String>,
+    constraints: Option<Vec<String>>,
+    files: Option<Vec<String>>,
+    done_when: Option<Vec<String>>,
+    after: Option<Vec<String>>,
 }
 
-/// One task, read from its `task.md`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One task, read from its `task.md`. The optional parts are empty when the
+/// ticket does not have them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Ticket {
     pub id: String,
     pub title: String,
     pub agent: String,
+    /// Background for the agent, passed as the delegation's context.
     pub context: Option<String>,
+    /// The outcome wanted, in a sentence.
+    pub goal: Option<String>,
+    /// What the agent must not do or change.
+    pub constraints: Vec<String>,
+    /// Where the work is.
+    pub files: Vec<String>,
+    /// How to tell the task is done.
+    pub done_when: Vec<String>,
+    /// Tasks that must be done before this one starts.
+    pub after: Vec<String>,
     pub text: String,
+}
+
+impl Ticket {
+    /// What the agent is asked: the task, then its goal, constraints, files
+    /// and acceptance criteria as sections it can check its work against.
+    pub fn prompt(&self) -> String {
+        let mut out = self.text.clone();
+        if let Some(goal) = &self.goal {
+            out.push_str(&format!("\n\nGoal: {goal}"));
+        }
+        for (heading, items) in [
+            ("Constraints", &self.constraints),
+            ("Files to work on", &self.files),
+            ("Done when", &self.done_when),
+        ] {
+            if !items.is_empty() {
+                out.push_str(&format!("\n\n{heading}:"));
+                for item in items {
+                    out.push_str(&format!("\n- {item}"));
+                }
+            }
+        }
+        out
+    }
 }
 
 /// How a task ended.
@@ -146,22 +194,33 @@ impl Store {
         &self.tasks
     }
 
-    /// Write a new ticket and return its id: the next number, then a slug of
-    /// the title.
-    pub fn create(
-        &self,
-        title: &str,
-        agent: &str,
-        context: Option<&str>,
-        text: &str,
-    ) -> io::Result<String> {
+    /// Write `ticket` as a new task and return its id: the next number, then
+    /// a slug of the title. The ticket's own `id` is not used.
+    pub fn create(&self, ticket: &Ticket) -> io::Result<String> {
         fs::create_dir_all(&self.tasks)?;
-        let mut front = format!("title: {}\nagent: {}\n", yaml_str(title), yaml_str(agent));
-        if let Some(context) = context {
-            front.push_str(&format!("context: {}\n", yaml_str(context)));
+        let mut front = format!(
+            "title: {}\nagent: {}\n",
+            yaml_str(&ticket.title),
+            yaml_str(&ticket.agent)
+        );
+        for (key, value) in [("context", &ticket.context), ("goal", &ticket.goal)] {
+            if let Some(value) = value {
+                front.push_str(&format!("{key}: {}\n", yaml_str(value)));
+            }
         }
-        let body = format!("---\n{front}---\n{}\n", text.trim_end());
-        let slug = slug(title);
+        for (key, items) in [
+            ("constraints", &ticket.constraints),
+            ("files", &ticket.files),
+            ("done_when", &ticket.done_when),
+            ("after", &ticket.after),
+        ] {
+            if !items.is_empty() {
+                let list = serde_json::to_string(items).expect("strings serialize");
+                front.push_str(&format!("{key}: {list}\n"));
+            }
+        }
+        let body = format!("---\n{front}---\n{}\n", ticket.text.trim_end());
+        let slug = slug(&ticket.title);
         let mut number = self.next_number();
         loop {
             let id = if slug.is_empty() {
@@ -323,6 +382,53 @@ impl Store {
     }
 }
 
+/// What `ticket` still waits for: each task in its `after` that is not done,
+/// and why. Empty when it may start.
+pub fn waiting_for(ticket: &Ticket, entries: &[Entry]) -> Vec<String> {
+    ticket
+        .after
+        .iter()
+        .filter_map(|dep| {
+            let why = match entries.iter().find(|e| e.id() == dep) {
+                Some(Entry::Task(_, Some(Status::Done))) => return None,
+                Some(Entry::Task(_, Some(status))) => status.as_str(),
+                Some(Entry::Task(_, None)) => "not done yet",
+                Some(Entry::Unreadable { .. }) => "unreadable",
+                None => "no such task",
+            };
+            Some(format!("{dep} ({why})"))
+        })
+        .collect()
+}
+
+/// Tasks whose `after` leads back to themselves, which can never start.
+pub fn cyclic(entries: &[Entry]) -> Vec<String> {
+    let after = |id: &str| -> Vec<String> {
+        match entries.iter().find(|e| e.id() == id) {
+            Some(Entry::Task(t, _)) => t.after.clone(),
+            _ => Vec::new(),
+        }
+    };
+    entries
+        .iter()
+        .map(Entry::id)
+        .filter(|start| {
+            let mut seen = std::collections::BTreeSet::new();
+            let mut todo = after(start);
+            while let Some(id) = todo.pop() {
+                if id == *start {
+                    return true;
+                }
+                if seen.insert(id.clone()) {
+                    todo.extend(after(&id));
+                }
+            }
+            false
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 /// A task id is one directory name: no separators, no `..`.
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id != "." && id != ".." && !id.contains(['/', '\\'])
@@ -367,11 +473,24 @@ fn parse_ticket(id: &str, text: &str) -> Result<Ticket, String> {
     if text.is_empty() {
         return Err("there is no task below the front matter".into());
     }
+    let after = front.after.unwrap_or_default();
+    if let Some(bad) = after.iter().find(|a| !valid_id(a)) {
+        return Err(format!("`after`: '{bad}' is not a task id"));
+    }
+    if after.iter().any(|a| a == id) {
+        return Err("`after` names the task itself".into());
+    }
+    let some = |s: Option<String>| s.filter(|s| !s.trim().is_empty());
     Ok(Ticket {
         id: id.to_string(),
         title: front.title.trim().to_string(),
         agent: front.agent.trim().to_string(),
-        context: front.context.filter(|c| !c.trim().is_empty()),
+        context: some(front.context),
+        goal: some(front.goal),
+        constraints: front.constraints.unwrap_or_default(),
+        files: front.files.unwrap_or_default(),
+        done_when: front.done_when.unwrap_or_default(),
+        after,
         text: text.to_string(),
     })
 }
@@ -432,25 +551,100 @@ mod tests {
     use crate::workspace::testing::TempDir;
     use std::time::Duration;
 
+    /// A ticket with only what every ticket has.
+    pub(crate) fn draft(title: &str, agent: &str, text: &str) -> Ticket {
+        Ticket {
+            title: title.into(),
+            agent: agent.into(),
+            text: text.into(),
+            ..Ticket::default()
+        }
+    }
+
     #[test]
     fn a_created_ticket_reads_back_as_written() {
         let tmp = TempDir::new();
         let store = Store::new(&tmp.0);
-        let id = store
-            .create(
+        let written = Ticket {
+            context: Some("see \"src/fetch.rs\"\nline two".into()),
+            goal: Some("Requests survive a flaky network.".into()),
+            constraints: vec!["No new dependency".into(), "Keep: the API".into()],
+            files: vec!["src/fetch.rs".into()],
+            done_when: vec!["cargo test passes".into()],
+            after: vec!["0000-setup".into()],
+            ..draft(
                 "Add retry: to the fetcher!",
                 "coder",
-                Some("see \"src/fetch.rs\"\nline two"),
                 "Retry three times.\n\n---\nNot front matter.",
             )
-            .unwrap();
+        };
+        let id = store.create(&written).unwrap();
         assert_eq!(id, "0001-add-retry-to-the-fetcher");
         let t = store.read(&id).unwrap();
-        assert_eq!(t.title, "Add retry: to the fetcher!");
-        assert_eq!(t.agent, "coder");
-        assert_eq!(t.context.as_deref(), Some("see \"src/fetch.rs\"\nline two"));
-        assert_eq!(t.text, "Retry three times.\n\n---\nNot front matter.");
-        assert_eq!(store.scan(), vec![Entry::Task(t, None)]);
+        assert_eq!(
+            t,
+            Ticket {
+                id: id.clone(),
+                ..written
+            }
+        );
+        assert_eq!(store.scan(), vec![Entry::Task(t.clone(), None)]);
+        assert_eq!(
+            t.prompt(),
+            "Retry three times.\n\n---\nNot front matter.\n\nGoal: Requests survive a flaky network.\n\nConstraints:\n- No new dependency\n- Keep: the API\n\nFiles to work on:\n- src/fetch.rs\n\nDone when:\n- cargo test passes"
+        );
+    }
+
+    #[test]
+    fn a_task_waits_for_every_task_in_after_to_be_done() {
+        let task = |id: &str, after: &[&str], status: Option<Status>| {
+            Entry::Task(
+                Ticket {
+                    id: id.into(),
+                    after: after.iter().map(|a| a.to_string()).collect(),
+                    ..draft(id, "x", "t")
+                },
+                status,
+            )
+        };
+        let entries = vec![
+            task("1", &[], Some(Status::Done)),
+            task("2", &[], Some(Status::Failed)),
+            task("3", &[], None),
+            task("4", &["1", "2", "3", "9"], None),
+            task("5", &["6"], None),
+            task("6", &["7"], None),
+            task("7", &["5"], None),
+        ];
+        let Entry::Task(four, _) = &entries[3] else {
+            unreachable!()
+        };
+        assert_eq!(
+            waiting_for(four, &entries),
+            ["2 (failed)", "3 (not done yet)", "9 (no such task)"]
+        );
+        let Entry::Task(one, _) = &entries[0] else {
+            unreachable!()
+        };
+        assert!(waiting_for(one, &entries).is_empty());
+        assert_eq!(cyclic(&entries), ["5", "6", "7"]);
+    }
+
+    #[test]
+    fn a_task_cannot_wait_for_itself_or_for_a_path() {
+        assert!(
+            parse_ticket(
+                "0001-a",
+                "---\ntitle: a\nagent: x\nafter: [0001-a]\n---\nt\n"
+            )
+            .unwrap_err()
+            .contains("itself")
+        );
+        assert!(
+            parse_ticket("0001-a", "---\ntitle: a\nagent: x\nafter: [../b]\n---\nt\n")
+                .unwrap_err()
+                .contains("not a task id")
+        );
     }
 
     #[test]
@@ -458,10 +652,10 @@ mod tests {
         let tmp = TempDir::new();
         let store = Store::new(&tmp.0);
         fs::create_dir_all(tmp.0.join("tasks/0007-by-hand")).unwrap();
-        assert_eq!(store.create("Next", "a", None, "t").unwrap(), "0008-next");
+        assert_eq!(store.create(&draft("Next", "a", "t")).unwrap(), "0008-next");
         fs::create_dir_all(tmp.0.join("tasks/0009-same")).unwrap();
-        assert_eq!(store.create("Same", "a", None, "t").unwrap(), "0010-same");
-        assert_eq!(store.create("", "a", None, "t").unwrap(), "0011");
+        assert_eq!(store.create(&draft("Same", "a", "t")).unwrap(), "0010-same");
+        assert_eq!(store.create(&draft("", "a", "t")).unwrap(), "0011");
     }
 
     #[test]
@@ -497,7 +691,7 @@ mod tests {
     fn a_result_is_written_once_and_ends_the_task() {
         let tmp = TempDir::new();
         let store = Store::new(&tmp.0);
-        let id = store.create("Look", "scout", None, "t").unwrap();
+        let id = store.create(&draft("Look", "scout", "t")).unwrap();
         let started = UNIX_EPOCH + Duration::from_secs(1_793_448_000);
         store
             .write_result(&id, "scout", Status::Failed, started, "it broke\n")

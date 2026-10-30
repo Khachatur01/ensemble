@@ -935,3 +935,32 @@ fn check_reports_a_task_that_could_not_run() {
         "{text}"
     );
 }
+
+#[test]
+fn check_reports_a_task_that_can_never_start() {
+    let s = Scratch::new("check-after");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write(
+        ".ensemble/tasks/0001-a/task.md",
+        "---\ntitle: a\nagent: coder\nafter: [0002-b]\n---\na\n",
+    );
+    s.write(
+        ".ensemble/tasks/0002-b/task.md",
+        "---\ntitle: b\nagent: coder\nafter: [0001-a]\n---\nb\n",
+    );
+    s.write(
+        ".ensemble/tasks/0003-c/task.md",
+        "---\ntitle: c\nagent: coder\nafter: [0009]\n---\nc\n",
+    );
+    let out = ensemble(&s, &["check"]);
+    assert!(!out.status.success());
+    let text = stdout_of(&out);
+    assert!(
+        text.contains("0001-a: its `after` leads back to itself"),
+        "{text}"
+    );
+    assert!(
+        text.contains("0003-c: `after` 0009 (no such task)"),
+        "{text}"
+    );
+}

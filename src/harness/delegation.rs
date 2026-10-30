@@ -111,7 +111,28 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                     },
                     "context": {
                         "type": "string",
-                        "description": "Optional background: prior findings, file contents, constraints."
+                        "description": "Optional background: prior findings, file contents."
+                    },
+                    "goal": {
+                        "type": "string",
+                        "description": "Optional: the outcome wanted, in a sentence."
+                    },
+                    "constraints": {
+                        "type": "array", "items": { "type": "string" },
+                        "description": "Optional: what the agent must not do or change."
+                    },
+                    "files": {
+                        "type": "array", "items": { "type": "string" },
+                        "description": "Optional: where the work is."
+                    },
+                    "done_when": {
+                        "type": "array", "items": { "type": "string" },
+                        "description": "Optional: how the agent can tell it is done."
+                    },
+                    "after": {
+                        "type": "array", "items": { "type": "string" },
+                        "description": "Optional: ids of tasks that must be done first. The task \
+                                        waits until each has ended `done`."
                     }
                 },
                 "required": ["agent", "title", "task"],
@@ -298,7 +319,40 @@ pub fn call<'s>(
                     ensemble.agents().join(", ")
                 ));
             }
-            queue.submit(role, title, task, text("context").filter(|c| !c.is_empty()))
+            let mut lists = Vec::new();
+            for key in ["constraints", "files", "done_when", "after"] {
+                match args.get(key) {
+                    None | Some(Value::Null) => lists.push(Vec::new()),
+                    Some(Value::Array(items)) if items.iter().all(Value::is_string) => lists.push(
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                    ),
+                    Some(_) => {
+                        return ToolResult::err(format!(
+                            "{SUBMIT}: `{key}` must be a list of strings"
+                        ));
+                    }
+                }
+            }
+            let [constraints, files, done_when, after] =
+                <[Vec<String>; 4]>::try_from(lists).expect("four lists");
+            let optional = |key: &str| text(key).filter(|s| !s.is_empty()).map(str::to_string);
+            queue.submit(&crate::tasks::Ticket {
+                title: title.to_string(),
+                agent: role.to_string(),
+                context: optional("context"),
+                goal: optional("goal"),
+                constraints,
+                files,
+                done_when,
+                after,
+                text: task.to_string(),
+                ..Default::default()
+            })
         }
 
         STATUS => match args.get("task") {

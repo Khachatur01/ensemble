@@ -322,6 +322,20 @@ fn cmd_check(config: Config, dir: &Path) -> Result<ExitCode, String> {
             _ => {}
         }
     }
+    for entry in &entries {
+        if let tasks::Entry::Task(t, None) = entry {
+            for dep in tasks::waiting_for(t, &entries) {
+                if dep.ends_with("(no such task)") || dep.ends_with("(unreadable)") {
+                    bad.push(format!("{}: `after` {dep}; it can never start", t.id));
+                }
+            }
+        }
+    }
+    for id in tasks::cyclic(&entries) {
+        bad.push(format!(
+            "{id}: its `after` leads back to itself; it can never start"
+        ));
+    }
     if !entries.is_empty() {
         let queued = entries
             .iter()

@@ -24,7 +24,7 @@
 
 use super::delegation::{ToolResult, run_delegation};
 use crate::router::Ensemble;
-use crate::tasks::{Entry, Status, Store, Ticket};
+use crate::tasks::{Entry, Status, Store, Ticket, waiting_for};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -291,15 +291,19 @@ impl<'e> Queue<'e> {
             if inner.closed {
                 return;
             }
-            for entry in entries {
+            for entry in &entries {
                 let Entry::Task(ticket, None) = entry else {
                     continue;
                 };
                 // Ended since the scan: a result is written before its run
                 // leaves `live`, under this lock.
-                if inner.live.contains_key(&ticket.id) || store.outcome(&ticket.id).is_some() {
+                if inner.live.contains_key(&ticket.id)
+                    || store.outcome(&ticket.id).is_some()
+                    || !waiting_for(ticket, &entries).is_empty()
+                {
                     continue;
                 }
+                let ticket = ticket.clone();
                 let Some(slot) = self.take(&mut inner, &ticket.agent) else {
                     continue;
                 };
@@ -326,7 +330,7 @@ impl<'e> Queue<'e> {
         let result = run_delegation(
             self.ensemble,
             &ticket.agent,
-            &ticket.text,
+            &ticket.prompt(),
             ticket.context.as_deref(),
             &|line| self.note(&ticket.id, line),
             cancel,
@@ -359,17 +363,17 @@ impl<'e> Queue<'e> {
     }
 
     /// Write a new task for the worker, and return at once.
-    pub fn submit(
-        &self,
-        agent: &str,
-        title: &str,
-        task: &str,
-        context: Option<&str>,
-    ) -> ToolResult {
+    pub fn submit(&self, ticket: &Ticket) -> ToolResult {
         let Some(store) = &self.store else {
             return ToolResult::err("there is no task store in this session.");
         };
-        match store.create(title, agent, context, task) {
+        if let Some(missing) = ticket.after.iter().find(|a| !store.exists(a)) {
+            return ToolResult::err(format!(
+                "`after` names '{missing}', which is not a task. Tasks are named by the id \
+                 `submit` returned."
+            ));
+        }
+        match store.create(ticket) {
             Ok(id) => {
                 self.changed.notify_all();
                 ToolResult::ok(format!(
@@ -396,7 +400,7 @@ impl<'e> Queue<'e> {
                 return ToolResult::ok(describe_ended(id, ended));
             }
             return match entries.iter().find(|e| e.id() == id) {
-                Some(entry) => ToolResult::ok(self.describe_entry(entry)),
+                Some(entry) => ToolResult::ok(self.describe_entry(entry, &entries)),
                 None => ToolResult::err(unknown(&inner, &entries, id)),
             };
         }
@@ -409,8 +413,8 @@ impl<'e> Queue<'e> {
         let mut over = Vec::new();
         for entry in entries.iter().filter(|e| !inner.live.contains_key(e.id())) {
             match entry {
-                Entry::Task(_, Some(_)) => over.push(self.describe_entry(entry)),
-                _ => lines.push(self.describe_entry(entry)),
+                Entry::Task(_, Some(_)) => over.push(self.describe_entry(entry, &entries)),
+                _ => lines.push(self.describe_entry(entry, &entries)),
             }
         }
         let hidden = over.len().saturating_sub(LISTED_ENDED);
@@ -426,7 +430,7 @@ impl<'e> Queue<'e> {
         }
     }
 
-    fn describe_entry(&self, entry: &Entry) -> String {
+    fn describe_entry(&self, entry: &Entry, entries: &[Entry]) -> String {
         match entry {
             Entry::Task(t, Some(status)) => {
                 format!("{} · {} · {} · {}", t.id, t.agent, status.as_str(), t.title)
@@ -437,10 +441,13 @@ impl<'e> Queue<'e> {
                     .as_ref()
                     .and_then(|s| s.state(&t.id))
                     .is_some_and(|s| s == "interrupted" || s == "running");
-                let state = if interrupted {
-                    "queued (interrupted last session)"
+                let blockers = waiting_for(t, entries);
+                let state = if !blockers.is_empty() {
+                    format!("blocked by {}", blockers.join(", "))
+                } else if interrupted {
+                    "queued (interrupted last session)".into()
                 } else {
-                    "queued"
+                    "queued".into()
                 };
                 format!("{} · {} · {state} · {}", t.id, t.agent, t.title)
             }

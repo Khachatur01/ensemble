@@ -360,16 +360,30 @@ Then, for either:
 - `cancel` with `task` kills the agent's CLI and its process tree. A task that
   has not started gets a `cancelled` result and never runs.
 
-A task looks like this (`context` is optional):
+A task looks like this. Only `title` and `agent` are required; `submit` takes
+the same fields:
 
 ```markdown
 ---
 title: Add retry to the fetcher
 agent: coder
-context: The fetcher is src/fetch.rs.
+context: The fetcher is src/fetch.rs; it uses ureq.
+goal: A request survives one dropped connection.
+constraints: [No new dependency]
+files: [src/fetch.rs]
+done_when: [cargo test passes]
+after: [0001-add-ureq]
 ---
 Retry a failed request three times, waiting 1s, 2s, 4s.
 ```
+
+The agent is sent the text, then the goal, constraints, files and
+`done_when` as sections it can check its work against; `context` goes as the
+delegation's context. A task with `after` waits until every task it names has
+ended `done`; `status` shows it as `blocked by 0001-add-ureq (not done yet)`.
+If one of them failed or was cancelled, it stays blocked until that task is run
+again. `ensemble check` reports an `after` that names no task, and tasks whose
+`after` leads back to themselves.
 
 Its `result.md` starts with `status` (`done`, `failed` or `cancelled`),
 `agent`, `started` and `ended`, then the agent's reply. A task with a result is

@@ -1303,4 +1303,53 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
         assert_eq!(s.state("0002-b"), None, "it never started");
         assert_eq!(s.state("0003-c"), None, "it never ran again");
     }
+    #[test]
+    fn a_task_starts_only_once_every_task_it_is_after_is_done() {
+        let (e, tmp) = team(&[("coder", "read", BUSY)]);
+        write_task(&tmp, "0001-a", "coder", "a");
+        let dir = tasks(&tmp).join("0002-b");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("task.md"),
+            "---\ntitle: b\nagent: coder\nafter: [0001-a]\n---\nb\n",
+        )
+        .unwrap();
+        let dir = tasks(&tmp).join("0003-c");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("task.md"),
+            "---\ntitle: c\nagent: coder\nafter: [0009-gone]\n---\nc\n",
+        )
+        .unwrap();
+        session(&e, |ask| {
+            let status = until(ask, json!({"task": "0002-b"}), "blocked by 0001-a");
+            assert!(status.contains("not done yet"), "{status}");
+            for id in ["0001-a", "0002-b"] {
+                let r = ask("wait", json!({"task": id, "timeout_seconds": 20}));
+                assert_eq!(r.lines().nth(6), Some("alone"), "{id}: {r}");
+            }
+            let c = ask("status", json!({"task": "0003-c"}));
+            assert!(c.contains("blocked by 0009-gone (no such task)"), "{c}");
+            let r = ask(
+                "submit",
+                json!({"agent": "coder", "title": "d", "task": "d", "after": ["0042"]}),
+            );
+            assert!(r.contains("'0042', which is not a task"), "{r}");
+            let r = ask(
+                "submit",
+                json!({"agent": "coder", "title": "e", "task": "e", "after": ["0001-a"],
+                       "goal": "g", "done_when": ["x"]}),
+            );
+            assert!(r.starts_with("task 0004-e queued"), "{r}");
+        });
+        let e = store(&tmp).read("0004-e").unwrap();
+        assert_eq!(
+            (e.after, e.goal, e.done_when),
+            (
+                vec!["0001-a".to_string()],
+                Some("g".to_string()),
+                vec!["x".to_string()]
+            )
+        );
+    }
 }
