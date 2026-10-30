@@ -1017,7 +1017,7 @@ mod tests {
         }
     }
 
-    /// The document from the README, which is also the shipped example.
+    /// A plain team of ensemble agents on two backends.
     const REFERENCE: &str = r#"
 version: 1
 llm_backends:
@@ -1409,16 +1409,6 @@ agents:
         );
         let id = schema["$id"].as_str().unwrap().to_string();
         assert!(SAMPLE.starts_with(&format!("# yaml-language-server: $schema={id}")));
-    }
-
-    #[test]
-    fn the_shipped_example_names_the_schema_for_editors() {
-        let example = include_str!("../ensemble.yaml");
-        let id = schema()["$id"].as_str().unwrap().to_string();
-        assert!(
-            example.contains(&format!("# yaml-language-server: $schema={id}")),
-            "ensemble.yaml should start with the schema modeline"
-        );
     }
 
     const CLAUDE_DOC: &str = r#"

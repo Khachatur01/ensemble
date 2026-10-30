@@ -105,8 +105,8 @@ backend reachable, and every agent CLI installed).
 Ensemble reads `ensemble.yaml` from the project directory (the working
 directory your agent spawned it in, or `--dir`) and nowhere else: parent
 directories are not searched and there is no user-level config. Each project
-defines its own team; to share one, copy the file. The
-shipped [`ensemble.yaml`](ensemble.yaml) is a working example.
+defines its own team; to share one, copy the file. `ensemble init` writes a
+sample with every setting.
 
 ```yaml
 version: 1
@@ -382,7 +382,8 @@ $ OLLAMA_CONTEXT_LENGTH=32768 ollama serve
 completion for every key and value, hover descriptions, defaults, and errors for
 the mistakes `ensemble check` would also report (a missing `context_window`, a
 field the adapter type does not take, an unknown tool). The first line of the
-shipped `ensemble.yaml` points an editor with the YAML language server at it:
+file `ensemble init` writes points an editor with the YAML language server at
+it:
 
 ```yaml
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json
