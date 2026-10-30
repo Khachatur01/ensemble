@@ -7,6 +7,7 @@
 //! without asking for a tool. Any `openai-compatible-api` model can be the
 //! brain; nothing else needs installing.
 
+pub mod fetch;
 pub mod run;
 pub mod sandbox;
 pub mod shell;

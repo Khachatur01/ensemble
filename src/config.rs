@@ -184,16 +184,19 @@ pub enum AgentTool {
     Write,
     /// Run a shell command in the project, inside a Landlock sandbox.
     Bash,
+    /// Read a public web page as text.
+    Fetch,
 }
 
 impl AgentTool {
-    pub const ALL: [AgentTool; 6] = [
+    pub const ALL: [AgentTool; 7] = [
         AgentTool::Read,
         AgentTool::Glob,
         AgentTool::Grep,
         AgentTool::Edit,
         AgentTool::Write,
         AgentTool::Bash,
+        AgentTool::Fetch,
     ];
 
     pub fn parse(name: &str) -> Option<AgentTool> {
@@ -208,6 +211,7 @@ impl AgentTool {
             AgentTool::Edit => "edit",
             AgentTool::Write => "write",
             AgentTool::Bash => "bash",
+            AgentTool::Fetch => "fetch",
         }
     }
 

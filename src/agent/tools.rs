@@ -30,6 +30,7 @@ pub fn wire_name(tool: AgentTool) -> &'static str {
         AgentTool::Edit => "edit_file",
         AgentTool::Write => "write_file",
         AgentTool::Bash => "bash",
+        AgentTool::Fetch => "web_fetch",
     }
 }
 
@@ -113,6 +114,16 @@ fn definition(tool: AgentTool) -> ToolDef {
                 "required": ["command"]
             }),
         ),
+        AgentTool::Fetch => (
+            "Fetch a public web page or text file over http(s) and return it as text; \
+             HTML is turned into plain text. Local and private network addresses are \
+             refused.",
+            json!({
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"]
+            }),
+        ),
     };
     ToolDef {
         name: wire_name(tool).into(),
@@ -151,6 +162,7 @@ pub fn execute(
         AgentTool::Edit => edit(sandbox, &args)?,
         AgentTool::Write => write(sandbox, &args)?,
         AgentTool::Bash => bash(sandbox, &args, shell_policy, stop)?,
+        AgentTool::Fetch => super::fetch::get(str_arg(&args, "url")?)?,
     };
     Ok(cap(out, max_bytes))
 }
