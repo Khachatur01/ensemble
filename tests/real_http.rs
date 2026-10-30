@@ -9,7 +9,7 @@
 //! The server is ~40 lines of `std::net` rather than a test dependency; it only
 //! has to answer one request per connection.
 
-use ensemble::config::{Backend, BackendSettings};
+use ensemble::config::{BackendSettings, LlmBackend};
 use ensemble::port::{Message, ModelPort, Request};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -86,7 +86,7 @@ fn stub_server(replies: Vec<(u16, String)>) -> (String, mpsc::Receiver<Captured>
 }
 
 fn adapter(base_url: &str, api_key: Option<&str>) -> std::sync::Arc<dyn ModelPort> {
-    let backend = Backend {
+    let backend = LlmBackend {
         name: "openai-local".into(),
         timeout_seconds: 10,
         settings: BackendSettings::OpenAiCompatible {

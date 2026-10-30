@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json",
   "title": "ensemble.yaml",
-  "description": "The agent team for one project: the backends that reach models, and the roles an agent can delegate to.",
+  "description": "The agent team for one project: the agents a calling agent can delegate to, and the LLM backends Ensemble's own agents run on.",
   "type": "object",
   "required": [
     "version"
@@ -13,23 +13,23 @@
       "description": "Config format version. Always 1.",
       "const": 1
     },
-    "backends": {
-      "description": "How models are reached. The key is the backend's name, which roles refer to.",
+    "llm_backends": {
+      "description": "Model endpoints. The key is the backend's name, which an `ensemble` adapter's `llm_backend` refers to.",
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/definitions/backend"
+        "$ref": "#/definitions/llm_backend"
       }
     },
-    "roles": {
-      "description": "The team. The key is the role's name, which the calling agent sees as a delegation target. No model is hardcoded as planner, coder or reviewer: the names are yours.",
+    "agents": {
+      "description": "The team. The key is the agent's name, which the calling agent delegates to. The names are yours.",
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/definitions/role"
+        "$ref": "#/definitions/agent"
       }
     }
   },
   "definitions": {
-    "backend": {
+    "llm_backend": {
       "type": "object",
       "required": [
         "type",
@@ -69,16 +69,86 @@
         }
       }
     },
-    "role": {
+    "agent": {
       "type": "object",
       "required": [
-        "backend",
+        "adapter"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "prompt": {
+          "description": "What this agent is for. Its first line is what the calling agent sees when it lists the team; the whole of it is the agent's system prompt. Keep it short for small local models.",
+          "type": "string"
+        },
+        "context_window": {
+          "description": "Required when the adapter has `tools`. Tokens of context the model really runs with (Ollama: OLLAMA_CONTEXT_LENGTH, 4096 unless raised). A server that overflows silently drops the oldest messages, so Ensemble trims old tool output to stay within it.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [
+            16384,
+            32768
+          ]
+        },
+        "max_seconds": {
+          "description": "Wall-clock limit for one delegation. At the limit the run stops and returns what it did, marked unfinished. Only for agents whose adapter has `tools`.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 1800
+        },
+        "adapter": {
+          "description": "What runs this agent. `type` decides which other fields apply.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ensemble_adapter"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "adapter": {
+                "required": [
+                  "tools"
+                ],
+                "properties": {
+                  "tools": {
+                    "minItems": 1
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "context_window"
+            ]
+          },
+          "else": {
+            "properties": {
+              "context_window": false,
+              "max_seconds": false
+            }
+          }
+        }
+      ]
+    },
+    "ensemble_adapter": {
+      "type": "object",
+      "required": [
+        "type",
+        "llm_backend",
         "model"
       ],
       "additionalProperties": false,
       "properties": {
-        "backend": {
-          "description": "Name of a backend defined under `backends`.",
+        "type": {
+          "description": "ensemble: Ensemble's own agent harness, run on one of `llm_backends`. Other agents (Claude Code, OpenCode, Codex) will be further types.",
+          "const": "ensemble"
+        },
+        "llm_backend": {
+          "description": "Name of a backend defined under `llm_backends`.",
           "type": "string",
           "minLength": 1
         },
@@ -87,12 +157,8 @@
           "type": "string",
           "minLength": 1
         },
-        "prompt": {
-          "description": "What this role is for. Sent as the system prompt, and its first line is what the calling agent sees when it lists the roles. Keep it short for small local models.",
-          "type": "string"
-        },
         "temperature": {
-          "description": "Sampling temperature for this role, overriding the model's own default.",
+          "description": "Sampling temperature, overriding the model's own default.",
           "type": "number",
           "minimum": 0,
           "maximum": 2
@@ -107,7 +173,7 @@
           ]
         },
         "tools": {
-          "description": "Ensemble's own agent tools this role may use, inside the project. Listing any makes the role an agent (needs context_window and a model that calls tools). Absent or empty: a think-only role, one model call, text back. edit, write and bash change files, so a role gets them only by name.",
+          "description": "Ensemble's own tools this agent may use, inside the project. Listing any makes it loop over them (needs `context_window` on the agent and a model that calls tools). Absent or empty: one model call, text back. edit, write and bash change files, so an agent gets them only by name.",
           "type": "array",
           "uniqueItems": true,
           "items": {
@@ -138,26 +204,11 @@
             ]
           ]
         },
-        "context_window": {
-          "description": "Required with `tools`. Tokens of context your server really runs the model with (Ollama: OLLAMA_CONTEXT_LENGTH, 4096 unless raised). A server that overflows silently drops the oldest messages, so Ensemble trims old tool output to stay within it.",
-          "type": "integer",
-          "minimum": 1,
-          "examples": [
-            16384,
-            32768
-          ]
-        },
         "max_steps": {
           "description": "Most model calls one delegation may make. At the limit the agent gets one last call, without tools, to report what it did.",
           "type": "integer",
           "minimum": 1,
           "default": 20
-        },
-        "max_seconds": {
-          "description": "Wall-clock limit for one delegation. At the limit the run stops and returns what it did, marked unfinished. Roles with `tools` only.",
-          "type": "integer",
-          "minimum": 1,
-          "default": 1800
         },
         "network": {
           "description": "Let `bash` commands open outbound TCP connections. Off by default: a command that can read files and reach the network can send what it reads anywhere. Needs the `bash` tool; restricting it needs Linux 6.7+.",
@@ -180,29 +231,6 @@
         }
       },
       "allOf": [
-        {
-          "if": {
-            "required": [
-              "tools"
-            ],
-            "properties": {
-              "tools": {
-                "minItems": 1
-              }
-            }
-          },
-          "then": {
-            "required": [
-              "context_window"
-            ]
-          },
-          "else": {
-            "properties": {
-              "context_window": false,
-              "max_seconds": false
-            }
-          }
-        },
         {
           "if": {
             "required": [

@@ -2,7 +2,7 @@
 //!
 //! The agent that calls Ensemble (Claude Code, OpenCode, ...) is the manager.
 //! It spawns `ensemble mcp` with the project as its working directory and sees
-//! the team as tools: `roles`, `delegate`, `health`.
+//! the team as tools: `agents`, `delegate`, `health`.
 //!
 //! Ensemble is a subprocess the harness spawns, speaking JSON-RPC 2.0 as
 //! newline-delimited JSON on stdin/stdout. **Nothing but protocol goes to
@@ -12,12 +12,12 @@
 //!
 //! WHAT THE TOOLS DELIBERATELY DO NOT EXPOSE
 //! -----------------------------------------
-//! No tool takes a backend or a model. The caller names a *role* and Ensemble
+//! No tool takes a backend or a model. The caller names an *agent* and Ensemble
 //! decides what runs it — that is the whole point of the indirection, and a
 //! `model` parameter would quietly undo it at the first opportunity.
 //!
 //! The tools themselves live in `super::delegation`, kept apart from the
-//! transport so what a role is and what a failed delegation says do not depend
+//! transport so what an agent is and what a failed delegation says do not depend
 //! on how it was asked. This module owns only the JSON-RPC envelope.
 
 use super::delegation;
@@ -34,10 +34,10 @@ pub const SERVER_NAME: &str = "ensemble";
 
 /// The shared tool catalogue, wrapped in MCP's envelope.
 ///
-/// `roles` is the whole team.
-pub fn tool_definitions(roles: &[&str]) -> Value {
+/// `agents` is the whole team.
+pub fn tool_definitions(agents: &[&str]) -> Value {
     Value::Array(
-        delegation::tools(roles)
+        delegation::tools(agents)
             .into_iter()
             .map(|t| {
                 json!({
@@ -132,7 +132,7 @@ pub fn handle_reporting(
             }))
         }
 
-        "tools/list" => reply(json!({ "tools": tool_definitions(&ensemble.roles()) })),
+        "tools/list" => reply(json!({ "tools": tool_definitions(&ensemble.agents()) })),
 
         "tools/call" => {
             let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -191,7 +191,7 @@ pub fn handle_reporting(
 /// Run the server until stdin closes.
 ///
 /// Each `tools/call` runs on its own thread, so the caller can delegate to
-/// several roles at once and still get `ping` and `tools/list` answered while
+/// several agents at once and still get `ping` and `tools/list` answered while
 /// they work. `notifications/cancelled` stops the named call at its next step,
 /// and it gets no reply: the client has stopped waiting for one. When stdin
 /// closes, calls still running are finished before this returns.
@@ -299,17 +299,21 @@ mod tests {
 
     const YAML: &str = r#"
 version: 1
-backends:
+llm_backends:
   local: { type: openai-compatible-api, base_url_env: L, base_url_default: "http://127.0.0.1:8000/v1" }
   hosted: { type: openai-compatible-api, base_url_env: H, base_url_default: "http://127.0.0.1:9000/v1" }
-roles:
+agents:
   coder:
-    backend: local
-    model: qwen3-coder
     prompt: "Writes code to a stated spec."
+    adapter:
+      type: ensemble
+      llm_backend: local
+      model: qwen3-coder
   reviewer:
-    backend: hosted
-    model: hosted-model
+    adapter:
+      type: ensemble
+      llm_backend: hosted
+      model: hosted-model
 "#;
 
     fn ensemble_with(local: Arc<FakePort>, hosted: Arc<FakePort>) -> Ensemble {
@@ -352,7 +356,7 @@ roles:
     fn an_agent_role_is_labelled_and_its_delegation_reports_what_it_did() {
         let yaml = YAML.replace(
             "  reviewer:",
-            "  scout:\n    backend: local\n    model: m\n    tools: [read]\n    context_window: 8000\n  fixer:\n    backend: local\n    model: m\n    tools: [read, edit]\n    context_window: 8000\n  reviewer:",
+            "  scout:\n    context_window: 8000\n    adapter:\n      type: ensemble\n      llm_backend: local\n      model: m\n      tools: [read]\n  fixer:\n    context_window: 8000\n    adapter:\n      type: ensemble\n      llm_backend: local\n      model: m\n      tools: [read, edit]\n  reviewer:",
         );
         let cfg = config::parse(
             &yaml,
@@ -375,20 +379,17 @@ roles:
         ports.insert("hosted".into(), Arc::new(FakePort::ok("hosted", "r")));
         let e = Ensemble::with_ports(cfg, ports, Some(tmp.0.clone()));
 
-        let roles = call(&e, "roles", json!({}));
+        let roles = call(&e, "agents", json!({}));
         let listing = text_of(&roles);
-        assert!(listing.contains("scout [agent, read-only]"), "{listing}");
-        assert!(
-            listing.contains("fixer [agent, can change files]"),
-            "{listing}"
-        );
+        assert!(listing.contains("scout [read-only]"), "{listing}");
+        assert!(listing.contains("fixer [can change files]"), "{listing}");
         assert!(listing.starts_with("coder:"), "{listing}");
 
-        let r = call(&e, "delegate", json!({"role": "scout", "task": "look"}));
+        let r = call(&e, "delegate", json!({"agent": "scout", "task": "look"}));
         let text = text_of(&r);
         assert!(text.starts_with("it says hello"), "{text}");
         assert!(
-            text.ends_with("[scout ran as an agent: 2 step(s), 1 tool call(s)]"),
+            text.ends_with("[scout: 2 step(s), 1 tool call(s)]"),
             "{text}"
         );
     }
@@ -397,7 +398,7 @@ roles:
     fn an_agents_delegation_lists_the_files_it_changed() {
         let yaml = YAML.replace(
             "  reviewer:",
-            "  fixer:\n    backend: local\n    model: m\n    tools: [edit]\n    context_window: 8000\n  reviewer:",
+            "  fixer:\n    context_window: 8000\n    adapter:\n      type: ensemble\n      llm_backend: local\n      model: m\n      tools: [edit]\n  reviewer:",
         );
         let cfg = config::parse(
             &yaml,
@@ -424,7 +425,7 @@ roles:
         ports.insert("hosted".into(), Arc::new(FakePort::ok("hosted", "r")));
         let e = Ensemble::with_ports(cfg, ports, Some(tmp.0.clone()));
 
-        let r = call(&e, "delegate", json!({"role": "fixer", "task": "fix"}));
+        let r = call(&e, "delegate", json!({"agent": "fixer", "task": "fix"}));
         let text = text_of(&r);
         assert!(
             text.ends_with("tool call(s)]\n[files changed: a.txt (modified)]"),
@@ -436,7 +437,7 @@ roles:
     fn scouting() -> (Ensemble, crate::agent::sandbox::testing::TempDir) {
         let yaml = YAML.replace(
             "  reviewer:",
-            "  scout:\n    backend: local\n    model: m\n    tools: [read]\n    context_window: 8000\n  reviewer:",
+            "  scout:\n    context_window: 8000\n    adapter:\n      type: ensemble\n      llm_backend: local\n      model: m\n      tools: [read]\n  reviewer:",
         );
         let cfg = config::parse(
             &yaml,
@@ -471,7 +472,7 @@ roles:
             .collect()
     }
 
-    const SCOUT_CALL: &str = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"delegate","arguments":{"role":"scout","task":"look"},"_meta":{"progressToken":"tok"}}}"#;
+    const SCOUT_CALL: &str = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"delegate","arguments":{"agent":"scout","task":"look"},"_meta":{"progressToken":"tok"}}}"#;
 
     #[test]
     fn a_delegation_streams_progress_and_log_messages_before_its_reply() {
@@ -588,7 +589,7 @@ roles:
         let e = ensemble_with_port(meeting);
         let call = |id: u32| {
             format!(
-                r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"delegate","arguments":{{"role":"coder","task":"t"}}}}}}"#
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"delegate","arguments":{{"agent":"coder","task":"t"}}}}}}"#
             )
         };
         let out = served(&e, &format!("{}\n{}\n", call(1), call(2)));
@@ -648,7 +649,7 @@ roles:
     fn a_cancelled_delegation_stops_and_gets_no_reply() {
         let yaml = YAML.replace(
             "  reviewer:",
-            "  scout:\n    backend: local\n    model: m\n    tools: [glob]\n    context_window: 8000\n  reviewer:",
+            "  scout:\n    context_window: 8000\n    adapter:\n      type: ensemble\n      llm_backend: local\n      model: m\n      tools: [glob]\n  reviewer:",
         );
         let cfg = config::parse(
             &yaml,
@@ -712,9 +713,9 @@ roles:
         let r = handle(&working(), &rpc("tools/list", json!({}))).unwrap();
         let tools = r["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["delegate", "roles", "health"]);
+        assert_eq!(names, vec!["delegate", "agents", "health"]);
 
-        let enum_ = &tools[0]["inputSchema"]["properties"]["role"]["enum"];
+        let enum_ = &tools[0]["inputSchema"]["properties"]["agent"]["enum"];
         let roles: Vec<&str> = enum_
             .as_array()
             .unwrap()
@@ -743,7 +744,7 @@ roles:
         let r = call(
             &e,
             "delegate",
-            json!({"role": "coder", "task": "write a parser"}),
+            json!({"agent": "coder", "task": "write a parser"}),
         );
         assert_eq!(text_of(&r), "work done");
         assert_eq!(r["result"]["isError"], false);
@@ -753,7 +754,7 @@ roles:
         let r = call(
             &e,
             "delegate",
-            json!({"role": "reviewer", "task": "review it"}),
+            json!({"agent": "reviewer", "task": "review it"}),
         );
         assert_eq!(text_of(&r), "reviewed");
         assert_eq!(hosted.call_count(), 1);
@@ -766,7 +767,7 @@ roles:
         call(
             &e,
             "delegate",
-            json!({"role": "coder", "task": "fix it", "context": "the test fails on line 9"}),
+            json!({"agent": "coder", "task": "fix it", "context": "the test fails on line 9"}),
         );
         let sent = local.last().unwrap();
         assert!(
@@ -784,7 +785,7 @@ roles:
             Arc::new(FakePort::failing("local", "Connection refused")),
             Arc::new(FakePort::ok("hosted", "ok")),
         );
-        let r = call(&e, "delegate", json!({"role": "coder", "task": "t"}));
+        let r = call(&e, "delegate", json!({"agent": "coder", "task": "t"}));
         assert!(r.get("error").is_none(), "{r}");
         assert_eq!(r["result"]["isError"], true);
         let text = text_of(&r);
@@ -798,7 +799,7 @@ roles:
     #[test]
     fn a_permanent_failure_tells_the_model_not_to_loop() {
         let e = working();
-        let r = call(&e, "delegate", json!({"role": "architect", "task": "t"}));
+        let r = call(&e, "delegate", json!({"agent": "architect", "task": "t"}));
         assert_eq!(r["result"]["isError"], true);
         let text = text_of(&r);
         assert!(text.contains("architect"), "{text}");
@@ -811,8 +812,8 @@ roles:
         let e = working();
         for args in [
             json!({"task": "t"}),
-            json!({"role": "coder"}),
-            json!({"role": "coder", "task": "   "}),
+            json!({"agent": "coder"}),
+            json!({"agent": "coder", "task": "   "}),
         ] {
             let r = call(&e, "delegate", args.clone());
             assert_eq!(r["result"]["isError"], true, "{args}");
@@ -821,7 +822,7 @@ roles:
 
     #[test]
     fn roles_lists_the_team_without_naming_backends_or_models() {
-        let r = call(&working(), "roles", json!({}));
+        let r = call(&working(), "agents", json!({}));
         let text = text_of(&r);
         assert!(
             text.contains("coder") && text.contains("reviewer"),

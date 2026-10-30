@@ -6,8 +6,8 @@
 //! one, so a model cannot use this to reach the model server, the router or
 //! a service on the user's machine.
 //!
-//! What it does not stop: the URL itself can carry what the role has read to
-//! any public server. Give `fetch` to a role only as far as you would let it
+//! What it does not stop: the URL itself can carry what the agent has read to
+//! any public server. Give `fetch` to an agent only as far as you would let it
 //! talk to the internet.
 
 use std::net::{IpAddr, ToSocketAddrs};

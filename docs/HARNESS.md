@@ -1,5 +1,11 @@
 # Harness integration: what was verified, and what it cannot do
 
+> **Historical record.** Written against earlier versions: the tools were named
+> `ensemble_delegate`, `ensemble_roles` and `ensemble_health`, the team was a set
+> of *roles* on *backends*, and a `claude-code-cli` backend existed. It has since
+> been removed; Claude Code is planned as an agent adapter instead. The
+> observations about the harnesses still hold.
+
 Requirement 4 of the brief says to investigate the harness's extension
 mechanisms, choose the simplest supported one, and not assume a model API alone
 is enough for agent orchestration. This is the record of that investigation:

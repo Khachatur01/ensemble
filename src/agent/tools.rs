@@ -1,4 +1,4 @@
-//! The agent's tools: what a role can do to the project, and nothing else.
+//! The agent's tools: what an agent can do to the project, and nothing else.
 //!
 //! Each tool is a name, a JSON schema the model sees, and an executor. An
 //! executor returns `Err(text)` for anything the model got wrong (bad
@@ -132,7 +132,7 @@ fn definition(tool: AgentTool) -> ToolDef {
     }
 }
 
-/// Run one tool call. `allowed` is the role's permission set: a call to a tool
+/// Run one tool call. `allowed` is the agent's permission set: a call to a tool
 /// outside it is refused here, whatever the model was offered. A result longer
 /// than `max_bytes` is cut, so one call cannot fill the model's context.
 /// `stop` turning true ends a long-running call early.

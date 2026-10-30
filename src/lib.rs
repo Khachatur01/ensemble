@@ -9,7 +9,7 @@
 //!                  /        \
 //!                 v          v
 //!       agent loop           one completion       (src/agent/)
-//!    (tools in the project)  (think-only role)
+//!    (tools in the project)  (think-only agent)
 //!                 \          /
 //!                  v        v
 //!                  ModelPort                      (src/port.rs)
@@ -19,7 +19,7 @@
 //! ```
 //!
 //! The layering is the design: a backend-specific detail may never travel
-//! upward. The router knows roles and `ModelPort`; it does not know how an
+//! upward. The router knows agents and `ModelPort`; it does not know how an
 //! adapter reaches its model. The harness knows the
 //! router and nothing about backends. The agent loop knows `ModelPort` and the
 //! project directory, and nothing about which model is behind it.

@@ -1,8 +1,8 @@
-//! The tools an agent calls to use the ensemble: delegate, list roles, check
+//! The tools an agent calls to use the ensemble: delegate, list agents, check
 //! health. The schemas and the execution live here; `mcp.rs` wraps them in
 //! its JSON-RPC envelope (`inputSchema`).
 //!
-//! No tool takes a backend or a model. The caller names a *role* and Ensemble
+//! No tool takes a backend or a model. The caller names an *agent* and Ensemble
 //! decides what runs it — that is the whole point of the indirection, and a
 //! `model` parameter would quietly undo it at the first opportunity.
 
@@ -11,12 +11,12 @@ use crate::router::{Ensemble, RouteError};
 use serde_json::{Value, json};
 
 pub const DELEGATE: &str = "delegate";
-pub const ROLES: &str = "roles";
+pub const AGENTS: &str = "agents";
 pub const HEALTH: &str = "health";
 
 /// Every name this module owns. A harness tool that collides with one of these
 /// is a configuration problem, not something to silently shadow.
-pub const NAMES: [&str; 3] = [DELEGATE, ROLES, HEALTH];
+pub const NAMES: [&str; 3] = [DELEGATE, AGENTS, HEALTH];
 
 pub fn is_ensemble_tool(name: &str) -> bool {
     NAMES.contains(&name)
@@ -30,35 +30,35 @@ pub struct Tool {
     pub parameters: Value,
 }
 
-/// The catalogue, for a given set of delegable roles.
+/// The catalogue, for a given set of delegable agents.
 ///
-/// `roles` is what the caller may delegate to.
+/// `agents` is what the caller may delegate to.
 ///
-/// With no delegable roles there is no delegation tool. Offering one whose
+/// With no delegable agents there is no delegation tool. Offering one whose
 /// enum is empty invites a call that cannot succeed.
-pub fn tools(roles: &[&str]) -> Vec<Tool> {
+pub fn tools(agents: &[&str]) -> Vec<Tool> {
     let mut out = Vec::new();
 
-    if !roles.is_empty() {
-        // Listing the real role names in the description and the enum is what
+    if !agents.is_empty() {
+        // Listing the real agent names in the description and the enum is what
         // makes the first delegation land: without it the model guesses
         // "architect" and spends a round trip finding out.
-        let role_list = roles.join(", ");
+        let agent_list = agents.join(", ");
         out.push(Tool {
             name: DELEGATE,
             description: format!(
-                "Delegate a self-contained task to a member of the ensemble and return its \
-                 work. Available roles: {role_list}. Ensemble selects the model and backend \
-                 for the role — you do not choose one. Give the role everything it needs: \
-                 each call is stateless and the role cannot see this conversation."
+                "Delegate a self-contained task to an agent of the ensemble and return its \
+                 work. Available agents: {agent_list}. Ensemble selects what runs the agent \
+                 — you do not choose a model. Give the agent everything it needs: each \
+                 call is stateless and the agent cannot see this conversation."
             ),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "role": {
+                    "agent": {
                         "type": "string",
-                        "enum": roles,
-                        "description": "Which member of the ensemble does the work."
+                        "enum": agents,
+                        "description": "Which agent of the ensemble does the work."
                     },
                     "task": {
                         "type": "string",
@@ -69,15 +69,15 @@ pub fn tools(roles: &[&str]) -> Vec<Tool> {
                         "description": "Optional background: prior findings, file contents, constraints."
                     }
                 },
-                "required": ["role", "task"],
+                "required": ["agent", "task"],
                 "additionalProperties": false
             }),
         });
     }
 
     out.push(Tool {
-        name: ROLES,
-        description: "List the roles this ensemble can delegate to, and what each is for. \
+        name: AGENTS,
+        description: "List the agents this ensemble can delegate to, and what each is for. \
                       Call this first if you are unsure who should do a piece of work."
             .into(),
         parameters: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
@@ -127,23 +127,23 @@ impl ToolResult {
     }
 }
 
-/// Turn a call that names a role directly into the arguments
+/// Turn a call that names an agent directly into the arguments
 /// [`DELEGATE`] takes.
 ///
-/// Models that have just been told about a role often call it as if it were a
+/// Models that have just been told about an agent often call it as if it were a
 /// tool: `scout({"task": "find the README"})`. The task is usually under
 /// `task`, but `prompt`, `description`, `input`, `query` and `message` all
 /// occur. A bare string is a task. When none of those is present, the whole
 /// argument object becomes the task rather than being discarded — the model
-/// wrote it for a reason, and a downstream role can still use it.
+/// wrote it for a reason, and a downstream agent can still use it.
 ///
 /// An unusable call is an error the caller reads as a tool result and can
 /// correct.
-pub fn role_arguments(role: &str, arguments: &str) -> Result<Value, String> {
+pub fn agent_arguments(role: &str, arguments: &str) -> Result<Value, String> {
     let parsed: Value = serde_json::from_str(arguments).map_err(|e| {
         format!(
             "the arguments were not valid JSON ({e}). Call `{role}` with \
-             {{\"task\": \"...\"}}, or call `{DELEGATE}` with `role` and `task`."
+             {{\"task\": \"...\"}}, or call `{DELEGATE}` with `agent` and `task`."
         )
     })?;
 
@@ -179,7 +179,7 @@ pub fn role_arguments(role: &str, arguments: &str) -> Result<Value, String> {
         ));
     }
 
-    let mut out = json!({ "role": role, "task": task });
+    let mut out = json!({ "agent": role, "task": task });
     if let Some(context) = context {
         out["context"] = Value::String(context);
     }
@@ -189,7 +189,7 @@ pub fn role_arguments(role: &str, arguments: &str) -> Result<Value, String> {
 fn no_task(role: &str) -> String {
     format!(
         "no task: call `{role}` with {{\"task\": \"what to do\"}}, or call `{DELEGATE}` \
-         with `role` and `task`."
+         with `agent` and `task`."
     )
 }
 
@@ -215,9 +215,9 @@ pub fn call_reporting(
 ) -> ToolResult {
     match name {
         DELEGATE => {
-            let Some(role) = args.get("role").and_then(Value::as_str) else {
+            let Some(role) = args.get("agent").and_then(Value::as_str) else {
                 return ToolResult::err(format!(
-                    "{DELEGATE}: `role` is required and must be a string"
+                    "{DELEGATE}: `agent` is required and must be a string"
                 ));
             };
             let Some(task) = args.get("task").and_then(Value::as_str) else {
@@ -234,7 +234,7 @@ pub fn call_reporting(
 
             match ensemble.delegate_reporting(role, task, context, progress, cancel) {
                 Ok(out) => ToolResult {
-                    text: match &out.agent {
+                    text: match &out.stats {
                         Some(a) => format!("{}\n\n{}", out.text, agent_footer(role, a)),
                         None => out.text,
                     },
@@ -247,9 +247,11 @@ pub fn call_reporting(
                 Err(e) => {
                     // Telling the model whether another attempt could work is
                     // the difference between a useful retry and a loop against
-                    // a typo'd role name.
-                    let timed_out =
-                        matches!(&e, RouteError::Backend(crate::port::Error::Timeout { .. }));
+                    // a typo'd agent name.
+                    let timed_out = matches!(
+                        &e,
+                        RouteError::LlmBackend(crate::port::Error::Timeout { .. })
+                    );
                     let hint = if timed_out {
                         " This may be transient; the same call is worth one retry."
                     } else if e.is_retryable() {
@@ -258,28 +260,28 @@ pub fn call_reporting(
                         " Retrying this unchanged will fail the same way."
                     };
                     let detail = match &e {
-                        RouteError::UnknownRole { .. } => String::new(),
-                        RouteError::Backend(_) => format!(" (role '{role}')"),
+                        RouteError::UnknownAgent { .. } => String::new(),
+                        RouteError::LlmBackend(_) => format!(" (agent '{role}')"),
                     };
                     ToolResult::err(format!("delegation failed{detail}: {e}{hint}"))
                 }
             }
         }
 
-        ROLES => {
+        AGENTS => {
             let mut lines = Vec::new();
-            for role in ensemble.roles() {
-                // Backend and model are deliberately absent: the caller must
+            for role in ensemble.agents() {
+                // LlmBackend and model are deliberately absent: the caller must
                 // not start choosing them.
                 let purpose = ensemble
                     .config()
-                    .assignment(role)
+                    .agent(role)
                     .and_then(|a| a.prompt.as_deref())
                     .map(first_line)
                     .unwrap_or_else(|| "(no description configured)".to_string());
-                let kind = match ensemble.config().assignment(role) {
-                    Some(a) if a.tools.iter().any(|t| t.writes()) => " [agent, can change files]",
-                    Some(a) if !a.tools.is_empty() => " [agent, read-only]",
+                let kind = match ensemble.config().agent(role) {
+                    Some(a) if a.tools.iter().any(|t| t.writes()) => " [can change files]",
+                    Some(a) if !a.tools.is_empty() => " [read-only]",
                     _ => "",
                 };
                 lines.push(format!("{role}{kind}: {purpose}"));
@@ -309,7 +311,7 @@ pub fn call_reporting(
 
         other => ToolResult::err(format!(
             "no such tool: '{other}'. This server provides: \
-             {DELEGATE}, {ROLES}, {HEALTH}."
+             {DELEGATE}, {AGENTS}, {HEALTH}."
         )),
     }
 }
@@ -321,7 +323,7 @@ const MAX_LISTED_COMMANDS: usize = 10;
 /// work without asking the agent to describe it.
 fn agent_footer(role: &str, a: &crate::router::AgentStats) -> String {
     let mut out = format!(
-        "[{role} ran as an agent: {} step(s), {} tool call(s){}]",
+        "[{role}: {} step(s), {} tool call(s){}]",
         a.steps,
         a.tool_calls,
         if a.trimmed > 0 {
@@ -360,7 +362,7 @@ fn agent_footer(role: &str, a: &crate::router::AgentStats) -> String {
     out
 }
 
-/// A role prompt is a paragraph; a tool listing wants a line.
+/// An agent prompt is a paragraph; a tool listing wants a line.
 pub fn first_line(prompt: &str) -> String {
     let line = prompt
         .lines()
@@ -394,11 +396,11 @@ mod tests {
         let t = tools(&["planner", "coder"]);
         let delegate = t.iter().find(|t| t.name == DELEGATE).unwrap();
         assert_eq!(
-            delegate.parameters["properties"]["role"]["enum"][0],
+            delegate.parameters["properties"]["agent"]["enum"][0],
             "planner"
         );
         assert_eq!(
-            delegate.parameters["properties"]["role"]["enum"][1],
+            delegate.parameters["properties"]["agent"]["enum"][1],
             "coder"
         );
         assert!(
@@ -413,7 +415,7 @@ mod tests {
         // An enum with nothing in it is an invitation to a call that cannot
         // succeed.
         let names: Vec<&str> = tools(&[]).iter().map(|t| t.name).collect();
-        assert_eq!(names, vec![ROLES, HEALTH]);
+        assert_eq!(names, vec![AGENTS, HEALTH]);
     }
 
     #[test]
@@ -426,12 +428,12 @@ mod tests {
 
     #[test]
     fn a_role_named_directly_becomes_a_delegation_with_task_and_context() {
-        let args = role_arguments(
+        let args = agent_arguments(
             "scout",
             r#"{"task":"find the README","context":"the project root"}"#,
         )
         .unwrap();
-        assert_eq!(args["role"], "scout");
+        assert_eq!(args["agent"], "scout");
         assert_eq!(args["task"], "find the README");
         assert_eq!(args["context"], "the project root");
     }
@@ -440,28 +442,28 @@ mod tests {
     fn the_task_aliases_models_use_are_accepted() {
         for key in ["task", "prompt", "description", "input", "query", "message"] {
             let call = format!(r#"{{"{key}":"do the work"}}"#);
-            let args = role_arguments("scout", &call).unwrap();
+            let args = agent_arguments("scout", &call).unwrap();
             assert_eq!(args["task"], "do the work", "alias {key}");
         }
     }
 
     #[test]
     fn a_bare_string_is_the_task() {
-        let args = role_arguments("scout", r#""find the README""#).unwrap();
-        assert_eq!(args["role"], "scout");
+        let args = agent_arguments("scout", r#""find the README""#).unwrap();
+        assert_eq!(args["agent"], "scout");
         assert_eq!(args["task"], "find the README");
     }
 
     #[test]
     fn an_unrecognised_argument_object_is_kept_as_the_task() {
-        let args = role_arguments("scout", r#"{"filePath":"src/main.rs"}"#).unwrap();
-        assert_eq!(args["role"], "scout");
+        let args = agent_arguments("scout", r#"{"filePath":"src/main.rs"}"#).unwrap();
+        assert_eq!(args["agent"], "scout");
         assert_eq!(args["task"], r#"{"filePath":"src/main.rs"}"#);
     }
 
     #[test]
     fn a_direct_role_call_with_no_task_says_how_to_call_it() {
-        let err = role_arguments("scout", "{}").unwrap_err();
+        let err = agent_arguments("scout", "{}").unwrap_err();
         assert!(err.contains("no task"), "{err}");
         assert!(err.contains(DELEGATE), "{err}");
     }

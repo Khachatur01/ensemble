@@ -5,9 +5,9 @@
 //! an HTTP endpoint is addressed, what an API error body looks like — lives
 //! inside an adapter and is not visible from here.
 //!
-//! The error type is shared rather than per-adapter on purpose. A role failing
-//! because a connection was refused and a role failing because an endpoint
-//! returned 503 are the same event to the harness: this role did not answer, and
+//! The error type is shared rather than per-adapter on purpose. An agent failing
+//! because a connection was refused and an agent failing because an endpoint
+//! returned 503 are the same event to the harness: this agent did not answer, and
 //! here is why in one sentence.
 
 use std::fmt;
@@ -111,7 +111,7 @@ impl Message {
 /// One completion request, in the only shape the port understands.
 ///
 /// `tools` is what the *caller* can run, offered to the model. It is empty for
-/// a think-only role, and non-empty for a role with `tools:`, where
+/// a think-only agent, and non-empty for an agent with `tools:`, where
 /// Ensemble's own agent loop runs the calls the model makes.
 ///
 /// A silently dropped `tools` array is worse than no
@@ -121,7 +121,7 @@ impl Message {
 #[derive(Debug, Clone)]
 pub struct Request {
     /// The model id as the *backend* names it. The router fills this in from
-    /// config; callers name a role, never a model.
+    /// config; callers name an agent, never a model.
     pub model: String,
     pub messages: Vec<Message>,
     pub max_tokens: Option<u32>,
@@ -205,7 +205,7 @@ pub struct Response {
 
 /// What a backend *type* can do. Declared, never inferred.
 ///
-/// `tool_calling` is load-bearing: a role with `tools:` runs Ensemble's own
+/// `tool_calling` is load-bearing: an agent with `tools:` runs Ensemble's own
 /// agent loop, which needs the model to answer with structured tool calls.
 /// Config validation refuses that on a backend that cannot, rather than letting
 /// it fail silently at run time.
@@ -214,7 +214,7 @@ pub struct Capabilities {
     pub tool_calling: bool,
 }
 
-/// Everything that can go wrong between asking a role for work and getting it.
+/// Everything that can go wrong between asking an agent for work and getting it.
 #[derive(Debug)]
 pub enum Error {
     /// The deadline passed before the endpoint answered.
@@ -372,7 +372,7 @@ impl std::error::Error for Error {}
 /// The port itself.
 ///
 /// `&self` rather than `&mut self`: adapters hold configuration, not
-/// conversation state, so one instance serves every role assigned to it and the
+/// conversation state, so one instance serves every agent assigned to it and the
 /// router can hand out shared references.
 pub trait ModelPort: Send + Sync {
     /// The backend instance name from `ensemble.yaml`, for errors and logs.

@@ -9,17 +9,17 @@
 # and point the line at that file instead.
 #
 # This is the shipped example. Copy it to your project root and edit the
-# `roles` block; the backends are already pointed at the
-# environment variables listed at the bottom.
+# `agents` block; the LLM backends are already pointed at the environment
+# variables listed at the bottom.
 #
 # Validate it at any time with:   ensemble check
 
 version: 1
 
 # ---------------------------------------------------------------------------
-# Backends — *how* a model is reached.
+# LLM backends — model endpoints that Ensemble's own agents run on.
 # ---------------------------------------------------------------------------
-backends:
+llm_backends:
   # Anything speaking POST /chat/completions — llama-server, vLLM, Ollama,
   # a hosted API.
   openai-local:
@@ -36,77 +36,80 @@ backends:
 
 # ---------------------------------------------------------------------------
 # There is no manager block. The agent that calls Ensemble over MCP (Claude
-# Code, OpenCode, ...) is the manager: it sees the roles below as tools and
+# Code, OpenCode, ...) is the manager: it sees the agents below as tools and
 # decides what to delegate. Register it from the project directory with:
 #
 #   opencode mcp add ensemble -- ensemble mcp
 #   claude mcp add --scope local ensemble -- ensemble mcp
 #
-# and tell it, in CLAUDE.md / AGENTS.md, which roles to use for what.
+# and tell it, in CLAUDE.md / AGENTS.md, which agents to use for what.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Agent roles — a role with `tools:` is an agent. Ensemble runs the tool loop
-# itself, inside the project directory (fixed when the server starts; the model
-# can name paths inside it and nothing else):
+# Agents — the team, entirely yours to name. These are a starting kit, not a
+# fixed set: add, remove or rename freely.
 #
-#   tools:     read, glob, grep, edit, write, bash, fetch
-#                                              (edit, write and bash change
-#                                               things, so a role gets them
-#                                               only by name; bash is
-#                                               sandboxed to write only in the
-#                                               project and /tmp, and to read
-#                                               only the project, the system
-#                                               and toolchain directories;
-#                                               fetch reads public web pages)
-#   network:   false                           (bash may open outbound TCP)
-#   readable:  [~/.m2]                         (more paths bash may read)
-#   max_steps: 20                              (model calls per delegation)
-#   max_seconds: 1800                          (wall-clock limit per delegation)
-#   context_window: 16384                      (required: tokens of context the server runs the
-#                                               model with; Ollama: OLLAMA_CONTEXT_LENGTH)
+# Each agent has:
+#   prompt:          what it is for; its first line is what the manager sees
+#   context_window:  required when the adapter has tools: tokens of context
+#                    the server runs the model with (Ollama:
+#                    OLLAMA_CONTEXT_LENGTH)
+#   max_seconds:     wall-clock limit per delegation (default 1800)
+#   adapter:         what runs it. `type` decides the other fields.
 #
-# No `tools:` means a think-only role: one model call, text back. Roles with
-# tools need a backend with tool calling (openai-compatible-api).
+# The `ensemble` adapter is Ensemble's own harness, run on one of the LLM
+# backends above, inside the project directory (fixed when the server starts;
+# the model can name paths inside it and nothing else):
+#   llm_backend, model     which endpoint and model
+#   tools:                 read, glob, grep, edit, write, bash, fetch
+#                          (edit, write and bash change things, so an agent
+#                          gets them only by name; bash is sandboxed to write
+#                          only in the project and /tmp, and to read only the
+#                          project, the system and toolchain directories;
+#                          fetch reads public web pages). No tools: one model
+#                          call, text back.
+#   network: false         bash may open outbound TCP
+#   readable: [~/.m2]      more paths bash may read
+#   max_steps: 20          model calls per delegation
+#   temperature            overrides the model's default (0.0-2.0); for a
+#                          server whose baked-in sampling is too hot for
+#                          reliable tool calling
+#   reasoning_effort       none, low, medium or high; `none` turns thinking off
 #
-# The team — entirely yours to name. These are a
-# starting kit, not a fixed set: add, remove or rename freely.
-#
-# Moving a role to a different model is two words, and nothing else changes.
-#
-# Any role may also set `temperature: <0.0-2.0>` to
-# override the backend's own default. Mainly for a server whose baked-in
-# sampling is too hot for reliable tool calling (an Ollama Modelfile's
-# `temperature`/`presence_penalty`, for instance) — `ensemble check` cannot
-# see that, only a role that narrates calling a tool instead of calling it
-# shows it.
+# Other adapters (Claude Code, OpenCode, Codex) will be further types.
 # ---------------------------------------------------------------------------
-roles:
+agents:
   planner:
-    backend: openai-local
-    model: qwen3-coder
     prompt: |
       You turn a goal into an ordered plan of small, verifiable steps. State
       what you are unsure about rather than guessing.
+    adapter:
+      type: ensemble
+      llm_backend: openai-local
+      model: qwen3-coder
 
   coder:
-    backend: openai-remote
-    model: qwen3-coder
-    tools: [read, glob, grep, edit, write]
-    context_window: 16384
     prompt: |
       You implement exactly what is asked, in the style of the surrounding
       code. Read the relevant files first, make the change, and report what
       you changed.
+    context_window: 16384
+    adapter:
+      type: ensemble
+      llm_backend: openai-remote
+      model: qwen3-coder
+      tools: [read, glob, grep, edit, write]
 
   reviewer:
-    backend: openai-local
-    model: qwen3-coder
-    tools: [read, glob, grep]
-    context_window: 16384
     prompt: |
       You review code for correctness and report findings. You do not rewrite
       it; you say what is wrong and where.
+    context_window: 16384
+    adapter:
+      type: ensemble
+      llm_backend: openai-local
+      model: qwen3-coder
+      tools: [read, glob, grep]
 
 # ---------------------------------------------------------------------------
 # Environment

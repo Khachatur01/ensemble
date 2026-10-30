@@ -3,7 +3,7 @@
 use super::sandbox::Sandbox;
 use super::shell;
 use super::tools::{self, Change, Changes};
-use crate::config::{AgentTool, Assignment};
+use crate::config::{AgentConfig, AgentTool};
 use crate::port::{Error, Message, ModelPort, Request, Role, Usage, complete_retrying};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,14 +40,14 @@ pub struct AgentRun {
     pub commands: Vec<String>,
 }
 
-/// Run a role's tool loop. `progress` hears one short line per model call and
+/// Run an agent's tool loop. `progress` hears one short line per model call and
 /// per tool call, as they happen, so a slow run can be told from a hung one.
 ///
 /// The run ends early, reporting what it did, when `cancel` is set or the
-/// role's `max_seconds` pass.
+/// agent's `max_seconds` pass.
 pub fn run(
     port: &dyn ModelPort,
-    assignment: &Assignment,
+    assignment: &AgentConfig,
     task: &str,
     context: Option<&str>,
     workdir: &Path,
@@ -62,7 +62,7 @@ pub fn run(
         } else {
             format!("stopped at the {}s time limit", assignment.max_seconds)
         };
-        progress(&format!("{} · {why}", assignment.role));
+        progress(&format!("{} · {why}", assignment.name));
         out.text = format!(
             "[{why} after {} step(s); the work is unfinished]",
             out.steps
@@ -76,10 +76,7 @@ pub fn run(
 
     let sandbox = Sandbox::new(workdir).map_err(|detail| Error::Unsupported {
         backend: port.name().to_string(),
-        detail: format!(
-            "role '{}' cannot start its agent: {detail}",
-            assignment.role
-        ),
+        detail: format!("agent '{}' cannot start: {detail}", assignment.name),
     })?;
     let defs = tools::definitions(&assignment.tools);
     let policy = shell::Policy {
@@ -116,7 +113,7 @@ pub fn run(
     let Some(window) = assignment.context_window else {
         return Err(Error::Unsupported {
             backend: port.name().to_string(),
-            detail: format!("role '{}' has no context_window", assignment.role),
+            detail: format!("agent '{}' has no context_window", assignment.name),
         });
     };
     // A quarter of the window stays free for the reply: a history that fills
@@ -140,7 +137,7 @@ pub fn run(
     };
 
     let say =
-        |step: u32, what: &str| progress(&format!("{} · step {step} · {what}", assignment.role));
+        |step: u32, what: &str| progress(&format!("{} · step {step} · {what}", assignment.name));
 
     let mut baseline = if assignment.tools.contains(&AgentTool::Bash) {
         tools::snapshot(&sandbox)
@@ -351,10 +348,10 @@ mod tests {
     use crate::port::Role;
     use crate::port::testing::{FakePort, Scripted, call};
 
-    fn assignment(tools: Vec<AgentTool>, max_steps: u32) -> Assignment {
-        Assignment {
-            role: "coder".into(),
-            backend: "b".into(),
+    fn assignment(tools: Vec<AgentTool>, max_steps: u32) -> AgentConfig {
+        AgentConfig {
+            name: "coder".into(),
+            llm_backend: "b".into(),
             model: "m".into(),
             prompt: Some("Be careful.".into()),
             temperature: Some(0.1),
@@ -374,7 +371,7 @@ mod tests {
         tmp
     }
 
-    fn go(port: &FakePort, a: &Assignment, dir: &Path) -> Result<AgentRun, Error> {
+    fn go(port: &FakePort, a: &AgentConfig, dir: &Path) -> Result<AgentRun, Error> {
         run(
             port,
             a,
@@ -660,7 +657,7 @@ mod tests {
             Path::new("/no/such/dir"),
         )
         .unwrap_err();
-        assert!(err.to_string().contains("role 'coder'"), "{err}");
+        assert!(err.to_string().contains("agent 'coder'"), "{err}");
     }
 
     fn reads_of_a_big_file(steps: usize) -> Vec<Scripted> {

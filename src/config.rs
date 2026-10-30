@@ -2,7 +2,7 @@
 //!
 //! Validation is deliberately loud and early. Every check here corresponds to a
 //! failure that would otherwise surface much later and much less clearly — as a
-//! 404 on the first request to a role, as a role that quietly runs with
+//! 404 on the first request to an agent, as an agent that quietly runs with
 //! default settings, or as an empty base URL that turns into a connection refused.
 //!
 //! Secrets never live in this file. An API key is named by the *variable* that
@@ -22,33 +22,47 @@ pub const CONFIG_FILENAME: &str = "ensemble.yaml";
 pub const SCHEMA: &str = include_str!("../ensemble.schema.json");
 pub const SUPPORTED_VERSION: u32 = 1;
 
-/// The backend types that ship. Adding one is adding an adapter and a variant.
+/// The LLM backend types that ship. Adding one is adding an adapter and a
+/// variant.
 pub const OPENAI_COMPATIBLE_API: &str = "openai-compatible-api";
+
+/// The agent types that ship. `ensemble` is Ensemble's own harness, run on an
+/// LLM backend. External agents (Claude Code, OpenCode, Codex) will sit beside
+/// it as further types.
+pub const ENSEMBLE_AGENT: &str = "ensemble";
+const AGENT_TYPES: [&str; 1] = [ENSEMBLE_AGENT];
 
 // ---------------------------------------------------------------------------
 // The document, as written
 // ---------------------------------------------------------------------------
 
 /// `deny_unknown_fields` throughout: a typo'd key is a key that does nothing,
-/// and a role silently running with default settings is the failure mode this
-/// whole module exists to prevent. `reviewr:` should be an error, not a no-op.
+/// and an agent silently running with default settings is the failure mode
+/// this whole module exists to prevent. `reviewr:` should be an error, not a
+/// no-op.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     version: u32,
+    /// Model endpoints, for agents of type `ensemble` to run on.
     #[serde(default)]
-    backends: BTreeMap<String, RawBackend>,
-    /// Removed. Kept only so an old config gets a pointed error instead of
-    /// "unknown field".
+    llm_backends: BTreeMap<String, RawLlmBackend>,
+    /// The team.
+    #[serde(default)]
+    agents: BTreeMap<String, RawAgent>,
+    /// Removed or renamed. Kept only so an old config gets a pointed error
+    /// instead of "unknown field".
     #[serde(default)]
     manager: Option<serde_norway::Value>,
     #[serde(default)]
-    roles: BTreeMap<String, RawAssignment>,
+    backends: Option<serde_norway::Value>,
+    #[serde(default)]
+    roles: Option<serde_norway::Value>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawBackend {
+struct RawLlmBackend {
     #[serde(rename = "type")]
     type_id: String,
 
@@ -60,18 +74,43 @@ struct RawBackend {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawAssignment {
-    backend: String,
-    model: String,
-    /// Prepended to every request sent to this role. Optional: a role with no
-    /// prompt is a model with a name, which is a legitimate thing to want.
+struct RawAgent {
+    /// What the agent is for. Its first line is what the calling agent sees
+    /// when it lists the team, and the whole of it is the agent's system
+    /// prompt. Optional: an agent with no prompt is a model with a name.
     #[serde(default)]
     prompt: Option<String>,
-    /// Overrides the backend's own default for this role. Needed when a
+    /// Tokens of context the server really runs the model with. Required when
+    /// the adapter has `tools`, whose conversation grows with every step; the agent
+    /// keeps it within this, because a server that overflows silently drops the
+    /// start of the conversation.
+    #[serde(default)]
+    context_window: Option<u32>,
+    /// Wall-clock cap on one delegation, in seconds. Defaults to
+    /// [`DEFAULT_MAX_SECONDS`]. A run that reaches it stops and reports what
+    /// it did, so a hung model cannot hold the caller forever.
+    #[serde(default)]
+    max_seconds: Option<u32>,
+    /// What runs the agent, and how.
+    adapter: RawAdapter,
+}
+
+/// The harness behind an agent. The fields below are the `ensemble` adapter's;
+/// other adapter types will bring their own.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAdapter {
+    /// Which harness runs this agent. Only `ensemble`, for now.
+    #[serde(rename = "type")]
+    kind: String,
+    /// Which of `llm_backends` the `ensemble` harness calls.
+    llm_backend: String,
+    model: String,
+    /// Overrides the backend's own default for this agent. Needed when a
     /// model's baked-in sampling (Ollama's `temperature`/`presence_penalty`
     /// Modelfile defaults, for instance) is too hot for reliable tool calling.
     /// Takes precedence over whatever a caller asked for: a chat client has no
-    /// business tuning a role's reliability-critical sampling.
+    /// business tuning an agent's reliability-critical sampling.
     #[serde(default)]
     temperature: Option<f32>,
     /// How much a reasoning model thinks before it answers: `none`, `low`,
@@ -80,33 +119,22 @@ struct RawAssignment {
     /// appears; `none` turns it off.
     #[serde(default)]
     reasoning_effort: Option<String>,
-    /// What the role may do on its own, inside the project directory. Empty or
-    /// absent is a think-only role: one model call, text back. Anything listed
-    /// turns the role into an agent that loops over these tools; write access
-    /// has to be asked for by name.
+    /// What the agent may do on its own, inside the project directory. Empty
+    /// or absent is a think-only agent: one model call, text back. Anything
+    /// listed makes it loop over these tools; write access has to be asked for
+    /// by name.
     #[serde(default)]
     tools: Vec<String>,
     /// Cap on model calls within one delegation. Defaults to
     /// [`DEFAULT_MAX_STEPS`].
     #[serde(default)]
     max_steps: Option<u32>,
-    /// Wall-clock cap on one delegation, in seconds. Defaults to
-    /// [`DEFAULT_MAX_SECONDS`]. A run that reaches it stops and reports what
-    /// it did, so a hung model cannot hold the caller forever.
-    #[serde(default)]
-    max_seconds: Option<u32>,
-    /// Tokens of context the server really runs the model with. Required for
-    /// a role with `tools`, whose conversation grows with every step; the agent
-    /// keeps it within this, because a server that overflows silently drops the
-    /// start of the conversation.
-    #[serde(default)]
-    context_window: Option<u32>,
-    /// Let the role's `bash` commands open outbound TCP connections. Off by
+    /// Let the agent's `bash` commands open outbound TCP connections. Off by
     /// default: a command that can read the filesystem and reach the network
     /// can send what it reads anywhere.
     #[serde(default)]
     network: Option<bool>,
-    /// More paths the role's `bash` commands may read, absolute or `~/`.
+    /// More paths the agent's `bash` commands may read, absolute or `~/`.
     /// They can read only the project, the system and a few toolchain
     /// directories otherwise.
     #[serde(default)]
@@ -130,13 +158,13 @@ pub enum BackendSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Backend {
+pub struct LlmBackend {
     pub name: String,
     pub timeout_seconds: u64,
     pub settings: BackendSettings,
 }
 
-impl Backend {
+impl LlmBackend {
     pub fn type_id(&self) -> &'static str {
         match self.settings {
             BackendSettings::OpenAiCompatible { .. } => OPENAI_COMPATIBLE_API,
@@ -195,50 +223,52 @@ pub const DEFAULT_MAX_STEPS: u32 = 20;
 pub const DEFAULT_MAX_SECONDS: u32 = 1800;
 const REASONING_EFFORTS: [&str; 4] = ["none", "low", "medium", "high"];
 
+/// One member of the team, resolved.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Assignment {
-    pub role: String,
-    pub backend: String,
+pub struct AgentConfig {
+    pub name: String,
+    /// Which of [`Config::llm_backends`] runs it.
+    pub llm_backend: String,
     pub model: String,
     pub prompt: Option<String>,
     pub temperature: Option<f32>,
-    /// See [`RawAssignment::reasoning_effort`].
+    /// See [`RawAgent::reasoning_effort`].
     pub reasoning_effort: Option<String>,
-    /// Empty: a think-only role. See [`RawAssignment::tools`].
+    /// Empty: a think-only agent. See [`RawAgent::tools`].
     pub tools: Vec<AgentTool>,
     pub max_steps: u32,
-    /// See [`RawAssignment::max_seconds`].
+    /// See [`RawAgent::max_seconds`].
     pub max_seconds: u32,
-    /// See [`RawAssignment::context_window`]. Always set for a role with tools.
+    /// See [`RawAgent::context_window`]. Always set for an agent with tools.
     pub context_window: Option<u32>,
     /// Outbound TCP for `bash`. Meaningless without that tool.
     pub network: bool,
-    /// See [`RawAssignment::readable`].
+    /// See [`RawAgent::readable`].
     pub readable: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub version: u32,
-    pub backends: BTreeMap<String, Backend>,
+    pub llm_backends: BTreeMap<String, LlmBackend>,
     /// The team. There is no manager: the agent that calls Ensemble is it.
-    pub roles: BTreeMap<String, Assignment>,
+    pub agents: BTreeMap<String, AgentConfig>,
     /// Where it was loaded from, for error messages.
     pub source: PathBuf,
 }
 
 impl Config {
-    pub fn assignment(&self, role: &str) -> Option<&Assignment> {
-        self.roles.get(role)
+    pub fn agent(&self, name: &str) -> Option<&AgentConfig> {
+        self.agents.get(name)
     }
 
-    pub fn backend_for(&self, role: &str) -> Option<&Backend> {
-        self.assignment(role)
-            .and_then(|a| self.backends.get(&a.backend))
+    pub fn llm_backend_for(&self, agent: &str) -> Option<&LlmBackend> {
+        self.agent(agent)
+            .and_then(|a| self.llm_backends.get(&a.llm_backend))
     }
 
-    pub fn role_names(&self) -> Vec<&str> {
-        self.roles.keys().map(String::as_str).collect()
+    pub fn agent_names(&self) -> Vec<&str> {
+        self.agents.keys().map(String::as_str).collect()
     }
 }
 
@@ -363,13 +393,22 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
         ));
     }
 
-    if raw.backends.is_empty() {
-        problems.push("backends: at least one backend must be defined".into());
+    if raw.backends.is_some() {
+        problems.push("backends: renamed to `llm_backends`".into());
+    }
+    if raw.roles.is_some() {
+        problems.push(
+            "roles: renamed to `agents`. Each agent keeps `prompt` and `context_window`; the rest moves under `adapter:` with `type: ensemble`, and `backend` becomes `llm_backend`"
+                .into(),
+        );
+    }
+    if raw.llm_backends.is_empty() && raw.backends.is_none() {
+        problems.push("llm_backends: at least one LLM backend must be defined".into());
     }
 
     // --- backends ---
-    let mut backends: BTreeMap<String, Backend> = BTreeMap::new();
-    for (name, rb) in &raw.backends {
+    let mut backends: BTreeMap<String, LlmBackend> = BTreeMap::new();
+    for (name, rb) in &raw.llm_backends {
         match resolve_backend(name, rb, env) {
             Ok(b) => {
                 backends.insert(name.clone(), b);
@@ -378,109 +417,119 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
         }
     }
 
-    // --- roles ---
+    // --- agents ---
     //
     if raw.manager.is_some() {
         problems.push(
             "manager: there is no manager block any more. The agent that calls Ensemble \
              (Claude Code, OpenCode, ...) is the manager; delete this block and give the \
-             work to `roles:`."
+             work to `agents:`."
                 .into(),
         );
     }
 
-    let mut roles: BTreeMap<String, Assignment> = BTreeMap::new();
-    for (name, ra) in &raw.roles {
+    let mut agents: BTreeMap<String, AgentConfig> = BTreeMap::new();
+    for (name, ra) in &raw.agents {
         if name.trim().is_empty() {
-            problems.push("roles: a role name cannot be empty".into());
+            problems.push("agents: an agent name cannot be empty".into());
             continue;
         }
-        let a = Assignment {
-            role: name.clone(),
-            backend: ra.backend.clone(),
-            model: ra.model.clone(),
-            prompt: ra.prompt.clone(),
-            temperature: ra.temperature,
-            reasoning_effort: ra.reasoning_effort.clone(),
-            tools: parse_tools(name, &ra.tools, &mut problems),
-            max_steps: ra.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
-            max_seconds: ra.max_seconds.unwrap_or(DEFAULT_MAX_SECONDS),
-            context_window: ra.context_window,
-            network: ra.network.unwrap_or(false),
-            readable: ra.readable.clone(),
-        };
-        if !ra.readable.is_empty() && !a.tools.contains(&AgentTool::Bash) {
+        let ad = &ra.adapter;
+        if !AGENT_TYPES.contains(&ad.kind.as_str()) {
             problems.push(format!(
-                "roles.{name}: `readable` only applies to the `bash` tool, which this role does not have"
+                "agents.{name}.adapter: type '{}' is unknown. Known types: {}.",
+                ad.kind,
+                AGENT_TYPES.join(", ")
             ));
         }
-        for path in &ra.readable {
+        let a = AgentConfig {
+            name: name.clone(),
+            llm_backend: ad.llm_backend.clone(),
+            model: ad.model.clone(),
+            prompt: ra.prompt.clone(),
+            temperature: ad.temperature,
+            reasoning_effort: ad.reasoning_effort.clone(),
+            tools: parse_tools(&format!("agents.{name}.adapter"), &ad.tools, &mut problems),
+            max_steps: ad.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
+            max_seconds: ra.max_seconds.unwrap_or(DEFAULT_MAX_SECONDS),
+            context_window: ra.context_window,
+            network: ad.network.unwrap_or(false),
+            readable: ad.readable.clone(),
+        };
+        if !ad.readable.is_empty() && !a.tools.contains(&AgentTool::Bash) {
+            problems.push(format!(
+                "agents.{name}.adapter: `readable` only applies to the `bash` tool, which this agent does not have"
+            ));
+        }
+        for path in &ad.readable {
             if !path.starts_with('/') && !path.starts_with("~/") {
                 problems.push(format!(
-                    "roles.{name}: readable path '{path}' must be absolute or start with ~/"
+                    "agents.{name}.adapter: readable path '{path}' must be absolute or start with ~/"
                 ));
             }
         }
-        if ra.network.is_some() && !a.tools.contains(&AgentTool::Bash) {
+        if ad.network.is_some() && !a.tools.contains(&AgentTool::Bash) {
             problems.push(format!(
-                "roles.{name}: `network` only applies to the `bash` tool, which this role does not have"
+                "agents.{name}.adapter: `network` only applies to the `bash` tool, which this agent does not have"
             ));
         }
-        if ra.max_steps == Some(0) {
-            problems.push(format!("roles.{name}: `max_steps` must be greater than 0"));
+        if ad.max_steps == Some(0) {
+            problems.push(format!(
+                "agents.{name}.adapter: `max_steps` must be greater than 0"
+            ));
         }
         if ra.max_seconds == Some(0) {
             problems.push(format!(
-                "roles.{name}: `max_seconds` must be greater than 0"
+                "agents.{name}: `max_seconds` must be greater than 0"
             ));
         }
         if a.tools.is_empty() && ra.max_seconds.is_some() {
             problems.push(format!(
-                "roles.{name}: `max_seconds` only applies to roles with `tools`; a think-only role is bounded by its backend's `timeout_seconds`"
+                "agents.{name}: `max_seconds` only applies to agents with `tools`; a think-only agent is bounded by its backend's `timeout_seconds`"
             ));
         }
         if ra.context_window == Some(0) {
             problems.push(format!(
-                "roles.{name}: `context_window` must be greater than 0"
+                "agents.{name}: `context_window` must be greater than 0"
             ));
         }
         if a.tools.is_empty() && ra.context_window.is_some() {
             problems.push(format!(
-                "roles.{name}: `context_window` only applies to roles with `tools`"
+                "agents.{name}: `context_window` only applies to agents with `tools`"
             ));
         }
-        if let Some(effort) = &ra.reasoning_effort {
-            if !REASONING_EFFORTS.contains(&effort.as_str()) {
-                problems.push(format!(
-                    "roles.{name}: `reasoning_effort` is '{effort}'; must be one of {}",
-                    REASONING_EFFORTS.join(", ")
-                ));
-            }
+        if let Some(effort) = &ad.reasoning_effort
+            && !REASONING_EFFORTS.contains(&effort.as_str())
+        {
+            problems.push(format!(
+                "agents.{name}.adapter: `reasoning_effort` is '{effort}'; must be one of {}",
+                REASONING_EFFORTS.join(", ")
+            ));
         }
         if !a.tools.is_empty() && ra.context_window.is_none() {
             problems.push(format!(
-                "roles.{name}: a role with `tools` needs `context_window`, the tokens of context your server runs the model with (Ollama: OLLAMA_CONTEXT_LENGTH, default 4096)"
+                "agents.{name}: an agent whose adapter has `tools` needs `context_window`, the tokens of context your server runs the model with (Ollama: OLLAMA_CONTEXT_LENGTH, default 4096)"
             ));
         }
-        check_assignment(&a, &backends, &raw.backends, &mut problems);
-        roles.insert(name.clone(), a);
+        check_agent(&a, &backends, &raw.llm_backends, &mut problems);
+        agents.insert(name.clone(), a);
     }
 
     // A backend nothing uses is not an error — it is a spare, and deleting it
     // from a shared config is how you break someone else's profile. Say so once
     // and carry on.
     for name in backends.keys() {
-        let used = roles.values().any(|a| a.backend == *name);
+        let used = agents.values().any(|a| a.llm_backend == *name);
         if !used {
-            eprintln!("ensemble: note: backend '{name}' is defined but no role uses it");
+            eprintln!("ensemble: note: LLM backend '{name}' is defined but no agent uses it");
         }
     }
 
     if problems.is_empty() {
         Ok(Config {
             version: raw.version,
-            backends,
-            roles,
+            llm_backends: backends,
+            agents,
             source: path.to_path_buf(),
         })
     } else {
@@ -491,7 +540,7 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
     }
 }
 
-fn parse_tools(role: &str, names: &[String], problems: &mut Vec<String>) -> Vec<AgentTool> {
+fn parse_tools(where_: &str, names: &[String], problems: &mut Vec<String>) -> Vec<AgentTool> {
     let mut tools = Vec::new();
     for name in names {
         match AgentTool::parse(name) {
@@ -500,7 +549,7 @@ fn parse_tools(role: &str, names: &[String], problems: &mut Vec<String>) -> Vec<
             None => {
                 let known: Vec<&str> = AgentTool::ALL.iter().map(|t| t.as_str()).collect();
                 problems.push(format!(
-                    "roles.{role}: tool '{name}' is unknown. Known tools: {}.",
+                    "{where_}: tool '{name}' is unknown. Known tools: {}.",
                     known.join(", ")
                 ));
             }
@@ -509,29 +558,29 @@ fn parse_tools(role: &str, names: &[String], problems: &mut Vec<String>) -> Vec<
     tools
 }
 
-/// Does this assignment name a backend that exists, with a non-empty model?
-fn check_assignment(
-    a: &Assignment,
-    resolved: &BTreeMap<String, Backend>,
-    declared: &BTreeMap<String, RawBackend>,
+/// Does this agent name an LLM backend that exists, with a non-empty model?
+fn check_agent(
+    a: &AgentConfig,
+    resolved: &BTreeMap<String, LlmBackend>,
+    declared: &BTreeMap<String, RawLlmBackend>,
     problems: &mut Vec<String>,
 ) {
-    let where_ = format!("roles.{}", a.role);
+    let where_ = format!("agents.{}.adapter", a.name);
 
-    if a.backend.trim().is_empty() {
-        problems.push(format!("{where_}: `backend` is empty"));
-    } else if !declared.contains_key(&a.backend) {
+    if a.llm_backend.trim().is_empty() {
+        problems.push(format!("{where_}: `llm_backend` is empty"));
+    } else if !declared.contains_key(&a.llm_backend) {
         let known: Vec<&str> = declared.keys().map(String::as_str).collect();
         problems.push(format!(
-            "{where_}: backend '{}' is not defined. Defined backends: {}.",
-            a.backend,
+            "{where_}: LLM backend '{}' is not defined. Defined LLM backends: {}.",
+            a.llm_backend,
             if known.is_empty() {
                 "(none)".to_string()
             } else {
                 known.join(", ")
             }
         ));
-    } else if !resolved.contains_key(&a.backend) {
+    } else if !resolved.contains_key(&a.llm_backend) {
         // Declared but failed to resolve. Its own problem is already in the
         // list; adding "not defined" here would be a second, misleading one.
     }
@@ -540,21 +589,25 @@ fn check_assignment(
         problems.push(format!("{where_}: `model` is empty"));
     }
 
-    if let Some(t) = a.temperature {
-        if !(0.0..=2.0).contains(&t) {
-            problems.push(format!(
-                "{where_}: `temperature` is {t}; must be between 0.0 and 2.0"
-            ));
-        }
+    if let Some(t) = a.temperature
+        && !(0.0..=2.0).contains(&t)
+    {
+        problems.push(format!(
+            "{where_}: `temperature` is {t}; must be between 0.0 and 2.0"
+        ));
     }
 }
 
-fn resolve_backend(name: &str, rb: &RawBackend, env: &dyn Env) -> Result<Backend, Vec<String>> {
+fn resolve_backend(
+    name: &str,
+    rb: &RawLlmBackend,
+    env: &dyn Env,
+) -> Result<LlmBackend, Vec<String>> {
     let mut problems = Vec::new();
     let timeout_seconds = rb.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS);
     if timeout_seconds == 0 {
         problems.push(format!(
-            "backends.{name}: `timeout_seconds` must be greater than 0"
+            "llm_llm_backends.{name}: `timeout_seconds` must be greater than 0"
         ));
     }
 
@@ -570,7 +623,7 @@ fn resolve_backend(name: &str, rb: &RawBackend, env: &dyn Env) -> Result<Backend
         }
         other => {
             problems.push(format!(
-                "backends.{name}: type '{other}' is unknown. Known types: \
+                "llm_llm_backends.{name}: type '{other}' is unknown. Known types: \
                  {OPENAI_COMPATIBLE_API}."
             ));
             None
@@ -578,7 +631,7 @@ fn resolve_backend(name: &str, rb: &RawBackend, env: &dyn Env) -> Result<Backend
     };
 
     match (settings, problems.is_empty()) {
-        (Some(settings), true) => Ok(Backend {
+        (Some(settings), true) => Ok(LlmBackend {
             name: name.to_string(),
             timeout_seconds,
             settings,
@@ -596,13 +649,13 @@ fn resolve_backend(name: &str, rb: &RawBackend, env: &dyn Env) -> Result<Backend
 /// so at load time rather than at the first request.
 fn resolve_openai(
     name: &str,
-    rb: &RawBackend,
+    rb: &RawLlmBackend,
     env: &dyn Env,
     problems: &mut Vec<String>,
 ) -> Option<(String, Option<String>, String)> {
     let Some(var) = rb.base_url_env.clone() else {
         problems.push(format!(
-            "backends.{name}: `base_url_env` is required for type '{OPENAI_COMPATIBLE_API}' \
+            "llm_llm_backends.{name}: `base_url_env` is required for type '{OPENAI_COMPATIBLE_API}' \
              (the name of the variable holding the base URL, not the URL itself)"
         ));
         return None;
@@ -622,7 +675,7 @@ fn resolve_openai(
         Some(u) => u,
         None => {
             problems.push(format!(
-                "backends.{name}: ${var} is unset and there is no `base_url_default`. \
+                "llm_llm_backends.{name}: ${var} is unset and there is no `base_url_default`. \
                  Export ${var} (for example http://127.0.0.1:8000/v1) before using this backend."
             ));
             return None;
@@ -631,7 +684,7 @@ fn resolve_openai(
 
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
         problems.push(format!(
-            "backends.{name}: base URL '{base_url}' must start with http:// or https://"
+            "llm_llm_backends.{name}: base URL '{base_url}' must start with http:// or https://"
         ));
         return None;
     }
@@ -646,7 +699,7 @@ fn resolve_openai(
             Some(k) => Some(k),
             None => {
                 eprintln!(
-                    "ensemble: note: backends.{name} names ${key_var} for its API key, \
+                    "ensemble: note: llm_backends.{name} names ${key_var} for its API key, \
                      but it is unset; requests will be sent unauthenticated"
                 );
                 None
@@ -675,7 +728,7 @@ mod tests {
     /// The document from the README, which is also the shipped example.
     const REFERENCE: &str = r#"
 version: 1
-backends:
+llm_backends:
   openai-local:
     type: openai-compatible-api
     base_url_env: OPENAI_LOCAL_BASE_URL
@@ -686,16 +739,22 @@ backends:
     base_url_env: OPENAI_REMOTE_BASE_URL
     base_url_default: "http://10.10.10.5:8000/v1"
     api_key_env: OPENAI_REMOTE_API_KEY
-roles:
+agents:
   planner:
-    backend: openai-local
-    model: qwen3-coder
+    adapter:
+      type: ensemble
+      llm_backend: openai-local
+      model: qwen3-coder
   coder:
-    backend: openai-remote
-    model: qwen3-coder
+    adapter:
+      type: ensemble
+      llm_backend: openai-remote
+      model: qwen3-coder
   reviewer:
-    backend: openai-local
-    model: qwen3-coder
+    adapter:
+      type: ensemble
+      llm_backend: openai-local
+      model: qwen3-coder
 "#;
 
     fn problems_of(err: ConfigError) -> Vec<String> {
@@ -709,43 +768,47 @@ roles:
     fn the_reference_config_loads() {
         let c = parse(REFERENCE, &p(), &env(&[])).expect("reference config must load");
         assert_eq!(c.version, 1);
-        assert_eq!(c.backends.len(), 2);
-        assert_eq!(c.roles.len(), 3);
-        assert_eq!(c.role_names(), vec!["coder", "planner", "reviewer"]);
+        assert_eq!(c.llm_backends.len(), 2);
+        assert_eq!(c.agents.len(), 3);
+        assert_eq!(c.agent_names(), vec!["coder", "planner", "reviewer"]);
     }
 
     const AGENT_DOC: &str = r#"
 version: 1
-backends:
+llm_backends:
   openai-local:
     type: openai-compatible-api
     base_url_env: OPENAI_LOCAL_BASE_URL
     base_url_default: "http://127.0.0.1:11434/v1"
-roles:
+agents:
   coder:
-    backend: openai-local
-    model: m
-    tools: [read, grep, edit]
-    max_steps: 5
     context_window: 8000
+    adapter:
+      type: ensemble
+      llm_backend: openai-local
+      model: m
+      tools: [read, grep, edit]
+      max_steps: 5
   thinker:
-    backend: openai-local
-    model: m
+    adapter:
+      type: ensemble
+      llm_backend: openai-local
+      model: m
 "#;
 
     #[test]
     fn a_role_with_tools_is_an_agent_and_one_without_is_think_only() {
         let c = parse(AGENT_DOC, &p(), &env(&[])).unwrap();
         assert_eq!(
-            c.roles["coder"].tools,
+            c.agents["coder"].tools,
             vec![AgentTool::Read, AgentTool::Grep, AgentTool::Edit]
         );
-        assert_eq!(c.roles["coder"].max_steps, 5);
-        assert_eq!(c.roles["coder"].max_seconds, DEFAULT_MAX_SECONDS);
-        assert!(c.roles["thinker"].tools.is_empty());
-        assert_eq!(c.roles["thinker"].max_steps, DEFAULT_MAX_STEPS);
-        assert_eq!(c.roles["coder"].context_window, Some(8000));
-        assert_eq!(c.roles["thinker"].context_window, None);
+        assert_eq!(c.agents["coder"].max_steps, 5);
+        assert_eq!(c.agents["coder"].max_seconds, DEFAULT_MAX_SECONDS);
+        assert!(c.agents["thinker"].tools.is_empty());
+        assert_eq!(c.agents["thinker"].max_steps, DEFAULT_MAX_STEPS);
+        assert_eq!(c.agents["coder"].context_window, Some(8000));
+        assert_eq!(c.agents["thinker"].context_window, None);
     }
 
     #[test]
@@ -770,12 +833,12 @@ roles:
 
     #[test]
     fn reasoning_effort_is_read_and_checked() {
-        let doc = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    reasoning_effort: none");
+        let doc = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n      reasoning_effort: none");
         let c = parse(&doc, &p(), &env(&[])).unwrap();
-        assert_eq!(c.roles["coder"].reasoning_effort.as_deref(), Some("none"));
-        assert_eq!(c.roles["thinker"].reasoning_effort, None);
+        assert_eq!(c.agents["coder"].reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(c.agents["thinker"].reasoning_effort, None);
 
-        let bad = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    reasoning_effort: lots");
+        let bad = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n      reasoning_effort: lots");
         let Err(ConfigError::Invalid { problems, .. }) = parse(&bad, &p(), &env(&[])) else {
             panic!("expected invalid");
         };
@@ -808,8 +871,8 @@ roles:
         );
 
         let think_only = AGENT_DOC.replace(
-            "  thinker:\n    backend: openai-local\n    model: m\n",
-            "  thinker:\n    backend: openai-local\n    model: m\n    context_window: 8000\n",
+            "  thinker:\n    adapter:",
+            "  thinker:\n    context_window: 8000\n    adapter:",
         );
         let Err(ConfigError::Invalid { problems, .. }) = parse(&think_only, &p(), &env(&[])) else {
             panic!("expected invalid");
@@ -817,7 +880,7 @@ roles:
         assert!(
             problems
                 .iter()
-                .any(|p| p.contains("only applies to roles with")),
+                .any(|p| p.contains("only applies to agents with")),
             "{problems:?}"
         );
     }
@@ -826,12 +889,12 @@ roles:
     fn bash_is_a_writing_tool_and_network_is_off_unless_asked_for() {
         let doc = AGENT_DOC.replace("[read, grep, edit]", "[read, bash]");
         let c = parse(&doc, &p(), &env(&[])).unwrap();
-        assert!(c.roles["coder"].tools.contains(&AgentTool::Bash));
+        assert!(c.agents["coder"].tools.contains(&AgentTool::Bash));
         assert!(AgentTool::Bash.writes());
-        assert!(!c.roles["coder"].network);
+        assert!(!c.agents["coder"].network);
 
-        let on = doc.replace("max_steps: 5", "max_steps: 5\n    network: true");
-        assert!(parse(&on, &p(), &env(&[])).unwrap().roles["coder"].network);
+        let on = doc.replace("max_steps: 5", "max_steps: 5\n      network: true");
+        assert!(parse(&on, &p(), &env(&[])).unwrap().agents["coder"].network);
     }
 
     #[test]
@@ -839,13 +902,13 @@ roles:
         let doc = AGENT_DOC.replace("tools: [read, grep, edit]", "tools: [read, bash]");
         let ok = doc.replace(
             "max_steps: 5",
-            "max_steps: 5\n    readable: [\"~/.m2\", /srv]",
+            "max_steps: 5\n      readable: [\"~/.m2\", /srv]",
         );
         assert_eq!(
-            parse(&ok, &p(), &env(&[])).unwrap().roles["coder"].readable,
+            parse(&ok, &p(), &env(&[])).unwrap().agents["coder"].readable,
             vec!["~/.m2", "/srv"]
         );
-        let relative = doc.replace("max_steps: 5", "max_steps: 5\n    readable: [data]");
+        let relative = doc.replace("max_steps: 5", "max_steps: 5\n      readable: [data]");
         let Err(ConfigError::Invalid { problems, .. }) = parse(&relative, &p(), &env(&[])) else {
             panic!("expected invalid");
         };
@@ -853,7 +916,7 @@ roles:
             problems.iter().any(|p| p.contains("'data'")),
             "{problems:?}"
         );
-        let no_bash = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    readable: [/srv]");
+        let no_bash = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n      readable: [/srv]");
         let Err(ConfigError::Invalid { problems, .. }) = parse(&no_bash, &p(), &env(&[])) else {
             panic!("expected invalid");
         };
@@ -865,7 +928,7 @@ roles:
 
     #[test]
     fn network_without_bash_is_rejected() {
-        let doc = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    network: true");
+        let doc = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n      network: true");
         let Err(ConfigError::Invalid { problems, .. }) = parse(&doc, &p(), &env(&[])) else {
             panic!("expected invalid");
         };
@@ -920,25 +983,35 @@ roles:
     fn the_schema_names_exactly_the_keys_the_config_accepts() {
         let schema = schema();
         let mut top = accepted_keys::<RawConfig>();
-        top.retain(|k| k != "manager"); // removed; refused with its own message
+        // Removed or renamed; each is refused with its own message.
+        top.retain(|k| !["manager", "backends", "roles"].contains(&k.as_str()));
         assert_eq!(schema_keys(&schema), top, "top level");
+        let defs = &schema["definitions"];
         assert_eq!(
-            schema_keys(&schema["definitions"]["backend"]),
-            accepted_keys::<RawBackend>(),
-            "backends"
+            schema_keys(&defs["llm_backend"]),
+            accepted_keys::<RawLlmBackend>(),
+            "llm_backends"
         );
         assert_eq!(
-            schema_keys(&schema["definitions"]["role"]),
-            accepted_keys::<RawAssignment>(),
-            "roles"
+            schema_keys(&defs["agent"]),
+            accepted_keys::<RawAgent>(),
+            "agents"
+        );
+        assert_eq!(
+            schema_keys(&defs["ensemble_adapter"]),
+            accepted_keys::<RawAdapter>(),
+            "the ensemble adapter"
         );
     }
 
     #[test]
     fn the_schemas_choices_and_defaults_are_the_codes() {
         let schema = schema();
-        let backend = &schema["definitions"]["backend"]["properties"];
-        let role = &schema["definitions"]["role"]["properties"];
+        let backend = &schema["definitions"]["llm_backend"]["properties"];
+        let agent = &schema["definitions"]["agent"]["properties"];
+        let role = &schema["definitions"]["ensemble_adapter"]["properties"];
+        assert_eq!(role["type"]["const"], ENSEMBLE_AGENT);
+        assert_eq!(AGENT_TYPES, [ENSEMBLE_AGENT]);
 
         let mut types = schema_enum(&backend["type"]);
         types.sort();
@@ -955,7 +1028,7 @@ roles:
 
         assert_eq!(schema_enum(&role["reasoning_effort"]), REASONING_EFFORTS);
         assert_eq!(role["max_steps"]["default"], DEFAULT_MAX_STEPS);
-        assert_eq!(role["max_seconds"]["default"], DEFAULT_MAX_SECONDS);
+        assert_eq!(agent["max_seconds"]["default"], DEFAULT_MAX_SECONDS);
         assert_eq!(
             backend["timeout_seconds"]["default"],
             DEFAULT_TIMEOUT_SECONDS
@@ -974,10 +1047,45 @@ roles:
     }
 
     #[test]
+    fn an_old_config_with_backends_and_roles_says_what_they_became() {
+        let old = r#"
+version: 1
+backends:
+  x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
+roles:
+  coder: { backend: x, model: m }
+"#;
+        let problems = problems_of(parse(old, &p(), &env(&[])).unwrap_err());
+        let joined = problems.join("\n");
+        assert!(joined.contains("renamed to `llm_backends`"), "{joined}");
+        assert!(joined.contains("renamed to `agents`"), "{joined}");
+        assert!(
+            !joined.contains("at least one LLM backend"),
+            "one message per mistake: {joined}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_adapter_type_lists_the_known_ones() {
+        let doc = AGENT_DOC.replace(
+            "  thinker:\n    adapter:\n      type: ensemble",
+            "  thinker:\n    adapter:\n      type: codex",
+        );
+        let problems = problems_of(parse(&doc, &p(), &env(&[])).unwrap_err());
+        assert!(
+            problems.iter().any(
+                |p| p.contains("agents.thinker.adapter: type 'codex' is unknown")
+                    && p.contains("ensemble")
+            ),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
     fn max_seconds_must_be_positive_and_needs_tools() {
         let set = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    max_seconds: 60");
         assert_eq!(
-            parse(&set, &p(), &env(&[])).unwrap().roles["coder"].max_seconds,
+            parse(&set, &p(), &env(&[])).unwrap().agents["coder"].max_seconds,
             60
         );
         let zero = AGENT_DOC.replace("max_steps: 5", "max_steps: 5\n    max_seconds: 0");
@@ -989,7 +1097,7 @@ roles:
             "{problems:?}"
         );
         let think_only = format!(
-            "{AGENT_DOC}  idle:\n    backend: openai-local\n    model: m\n    max_seconds: 60\n"
+            "{AGENT_DOC}  idle:\n    max_seconds: 60\n    adapter: {{ type: ensemble, llm_backend: openai-local, model: m }}\n"
         );
         let Err(ConfigError::Invalid { problems, .. }) = parse(&think_only, &p(), &env(&[])) else {
             panic!("expected invalid");
@@ -997,7 +1105,7 @@ roles:
         assert!(
             problems
                 .iter()
-                .any(|p| p.contains("roles.idle: `max_seconds` only")),
+                .any(|p| p.contains("agents.idle: `max_seconds` only")),
             "{problems:?}"
         );
     }
@@ -1006,41 +1114,47 @@ roles:
     fn a_role_may_override_the_backends_default_temperature() {
         let doc = r#"
 version: 1
-backends:
+llm_backends:
   openai-local:
     type: openai-compatible-api
     base_url_env: OPENAI_LOCAL_BASE_URL
     base_url_default: "http://127.0.0.1:11434/v1"
-roles:
+agents:
   scout:
-    backend: openai-local
-    model: qwen3.5:9b
-    temperature: 0.2
+    adapter:
+      type: ensemble
+      llm_backend: openai-local
+      model: qwen3.5:9b
+      temperature: 0.2
   plain:
-    backend: openai-local
-    model: qwen3.5:9b
+    adapter:
+      type: ensemble
+      llm_backend: openai-local
+      model: qwen3.5:9b
 "#;
         let c = parse(doc, &p(), &env(&[])).unwrap();
-        assert_eq!(c.roles["scout"].temperature, Some(0.2));
+        assert_eq!(c.agents["scout"].temperature, Some(0.2));
         // Unset is unset, not defaulted to something: the backend's own
         // default still applies.
-        assert_eq!(c.roles["plain"].temperature, None);
+        assert_eq!(c.agents["plain"].temperature, None);
     }
 
     #[test]
     fn a_temperature_outside_zero_to_two_is_rejected() {
         let doc = r#"
 version: 1
-backends:
+llm_backends:
   openai-local:
     type: openai-compatible-api
     base_url_env: OPENAI_LOCAL_BASE_URL
     base_url_default: "http://127.0.0.1:11434/v1"
-roles:
+agents:
   scout:
-    backend: openai-local
-    model: m
-    temperature: 3.5
+    adapter:
+      type: ensemble
+      llm_backend: openai-local
+      model: m
+      temperature: 3.5
 "#;
         let err = parse(doc, &p(), &env(&[])).unwrap_err();
         let problems = problems_of(err);
@@ -1058,13 +1172,13 @@ roles:
             &env(&[("OPENAI_LOCAL_BASE_URL", "http://192.168.1.9:9000/v1")]),
         )
         .unwrap();
-        match &c.backends["openai-local"].settings {
+        match &c.llm_backends["openai-local"].settings {
             BackendSettings::OpenAiCompatible { base_url, .. } => {
                 assert_eq!(base_url, "http://192.168.1.9:9000/v1");
             }
         }
         // The one without an override keeps its default.
-        match &c.backends["openai-remote"].settings {
+        match &c.llm_backends["openai-remote"].settings {
             BackendSettings::OpenAiCompatible { base_url, .. } => {
                 assert_eq!(base_url, "http://10.10.10.5:8000/v1");
             }
@@ -1077,7 +1191,7 @@ roles:
         // this and did not". Treating "" as an override produces a request to
         // the empty URL, which fails far from here.
         let c = parse(REFERENCE, &p(), &env(&[("OPENAI_LOCAL_BASE_URL", "   ")])).unwrap();
-        match &c.backends["openai-local"].settings {
+        match &c.llm_backends["openai-local"].settings {
             BackendSettings::OpenAiCompatible { base_url, .. } => {
                 assert_eq!(base_url, "http://127.0.0.1:8000/v1")
             }
@@ -1092,13 +1206,13 @@ roles:
             &env(&[("OPENAI_LOCAL_API_KEY", "sk-secret")]),
         )
         .unwrap();
-        match &c.backends["openai-local"].settings {
+        match &c.llm_backends["openai-local"].settings {
             BackendSettings::OpenAiCompatible { api_key, .. } => {
                 assert_eq!(api_key.as_deref(), Some("sk-secret"))
             }
         }
         // And an unset one is simply absent, not an empty bearer token.
-        match &c.backends["openai-remote"].settings {
+        match &c.llm_backends["openai-remote"].settings {
             BackendSettings::OpenAiCompatible { api_key, .. } => assert_eq!(*api_key, None),
         }
     }
@@ -1107,7 +1221,7 @@ roles:
     fn an_inline_api_key_is_refused_by_name() {
         let yaml = r#"
 version: 1
-backends:
+llm_backends:
   x:
     type: openai-compatible-api
     base_url_env: X_URL
@@ -1128,11 +1242,15 @@ backends:
     fn an_old_manager_block_is_refused_with_a_pointer() {
         let yaml = r#"
 version: 1
-backends:
+llm_backends:
   x: { type: openai-compatible-api, base_url_env: X, base_url_default: "http://127.0.0.1:1/v1" }
 manager: { backend: x, model: m }
-roles:
-  coder: { backend: x, model: m }
+agents:
+  coder:
+    adapter:
+      type: ensemble
+      llm_backend: x
+      model: m
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
         assert!(
@@ -1145,10 +1263,14 @@ roles:
     fn a_role_naming_an_undefined_backend_is_fatal_and_lists_the_real_ones() {
         let yaml = r#"
 version: 1
-backends:
+llm_backends:
   openai-local: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
-roles:
-  coder: { backend: opanai-local, model: m }
+agents:
+  coder:
+    adapter:
+      type: ensemble
+      llm_backend: opanai-local
+      model: m
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
         let joined = problems.join("\n");
@@ -1163,16 +1285,20 @@ roles:
     fn a_role_with_an_empty_model_is_fatal() {
         let yaml = r#"
 version: 1
-backends:
+llm_backends:
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
-roles:
-  coder: { backend: x, model: "  " }
+agents:
+  coder:
+    adapter:
+      type: ensemble
+      llm_backend: x
+      model: "  "
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
         assert!(
             problems
                 .iter()
-                .any(|p| p.contains("roles.coder") && p.contains("model")),
+                .any(|p| p.contains("agents.coder") && p.contains("model")),
             "{problems:?}"
         );
     }
@@ -1181,7 +1307,7 @@ roles:
     fn an_unknown_backend_type_lists_the_known_ones() {
         let yaml = r#"
 version: 1
-backends:
+llm_backends:
   x: { type: ollama }
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
@@ -1194,7 +1320,7 @@ backends:
     fn an_unresolvable_base_url_names_the_variable_to_export() {
         let yaml = r#"
 version: 1
-backends:
+llm_backends:
   remote: { type: openai-compatible-api, base_url_env: OPENAI_REMOTE_BASE_URL }
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
@@ -1207,7 +1333,7 @@ backends:
     fn a_base_url_without_a_scheme_is_refused() {
         let yaml = r#"
 version: 1
-backends:
+llm_backends:
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "127.0.0.1:8000/v1" }
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
@@ -1221,11 +1347,11 @@ backends:
     fn trailing_slashes_are_normalised_away() {
         let yaml = r#"
 version: 1
-backends:
+llm_backends:
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:8000/v1/" }
 "#;
         let c = parse(yaml, &p(), &env(&[])).unwrap();
-        match &c.backends["x"].settings {
+        match &c.llm_backends["x"].settings {
             BackendSettings::OpenAiCompatible { base_url, .. } => {
                 assert_eq!(base_url, "http://127.0.0.1:8000/v1")
             }
@@ -1236,7 +1362,7 @@ backends:
     fn an_unsupported_version_is_refused() {
         let yaml = r#"
 version: 2
-backends:
+llm_backends:
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
@@ -1250,10 +1376,14 @@ backends:
     fn a_typo_in_a_role_key_is_an_error_not_a_default() {
         let yaml = r#"
 version: 1
-backends:
+llm_backends:
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
-roles:
-  coder: { backend: x, modle: m }
+agents:
+  coder:
+    adapter:
+      type: ensemble
+      llm_backend: x
+      modle: m
 "#;
         let err = parse(yaml, &p(), &env(&[])).unwrap_err();
         assert!(matches!(err, ConfigError::Syntax { .. }), "{err}");
@@ -1264,10 +1394,14 @@ roles:
     fn every_independent_problem_is_reported_in_one_pass() {
         let yaml = r#"
 version: 9
-backends:
+llm_backends:
   x: { type: nonsense }
-roles:
-  r: { backend: missing, model: "" }
+agents:
+  r:
+    adapter:
+      type: ensemble
+      llm_backend: missing
+      model: ""
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
         assert!(problems.len() >= 4, "expected several, got: {problems:#?}");
@@ -1277,7 +1411,7 @@ roles:
     fn zero_timeout_is_refused() {
         let yaml = r#"
 version: 1
-backends:
+llm_backends:
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1", timeout_seconds: 0 }
 "#;
         let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
@@ -1290,9 +1424,9 @@ backends:
     #[test]
     fn assignment_and_backend_lookup_find_roles() {
         let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
-        assert_eq!(c.assignment("coder").unwrap().role, "coder");
-        assert_eq!(c.backend_for("coder").unwrap().name, "openai-remote");
-        assert!(c.assignment("nope").is_none());
-        assert!(c.assignment("manager").is_none());
+        assert_eq!(c.agent("coder").unwrap().name, "coder");
+        assert_eq!(c.llm_backend_for("coder").unwrap().name, "openai-remote");
+        assert!(c.agent("nope").is_none());
+        assert!(c.agent("manager").is_none());
     }
 }

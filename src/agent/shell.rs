@@ -4,12 +4,12 @@
 //!
 //! * **Writes are confined** to the project directory, `/tmp` and `/dev`. A
 //!   command cannot create, change or delete anything elsewhere.
-//! * **Outbound TCP is denied** unless the role sets `network: true` (needs a
+//! * **Outbound TCP is denied** unless the agent sets `network: true` (needs a
 //!   kernel with Landlock ABI 4, Linux 6.7). A command cannot upload what it
 //!   reads. DNS over UDP and unix sockets are not covered.
 //! * **Reads are confined** to the project, the system directories toolchains
 //!   live in ([`SYSTEM_READABLE`]), a few toolchain directories in the home
-//!   ([`HOME_READABLE`]), and whatever the role lists in `readable`. The rest
+//!   ([`HOME_READABLE`]), and whatever the agent lists in `readable`. The rest
 //!   of the home — `~/.ssh`, `~/.aws`, browser profiles — cannot be read.
 //!   Landlock also stops a command reading another process's environment
 //!   through `/proc`.

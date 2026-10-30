@@ -59,7 +59,7 @@ fn config_yaml(hosted_url: &str, openai_url: &str) -> String {
         r#"
 version: 1
 
-backends:
+llm_backends:
   hosted:
     type: openai-compatible-api
     base_url_env: ENSEMBLE_TEST_HOSTED_URL
@@ -71,14 +71,18 @@ backends:
     base_url_default: "{url}"
     timeout_seconds: 20
 
-roles:
+agents:
   reviewer:
-    backend: hosted
-    model: hosted-model
     prompt: "Reviews code and reports findings."
+    adapter:
+      type: ensemble
+      llm_backend: hosted
+      model: hosted-model
   coder:
-    backend: openai-local
-    model: qwen3-coder
+    adapter:
+      type: ensemble
+      llm_backend: openai-local
+      model: qwen3-coder
 "#,
         hosted = hosted_url,
         url = openai_url,
@@ -132,11 +136,15 @@ fn check_refuses_an_old_config_that_still_has_a_manager() {
         "ensemble.yaml",
         r#"
 version: 1
-backends:
+llm_backends:
   x: { type: openai-compatible-api, base_url_env: U, base_url_default: "http://127.0.0.1:1/v1" }
 manager: { backend: x, model: m }
-roles:
-  coder: { backend: x, model: m }
+agents:
+  coder:
+    adapter:
+      type: ensemble
+      llm_backend: x
+      model: m
 "#,
     );
     let out = ensemble(&s, &["check"]);
@@ -154,10 +162,14 @@ fn check_reports_several_problems_at_once() {
         "ensemble.yaml",
         r#"
 version: 4
-backends:
+llm_backends:
   x: { type: made-up-backend }
-roles:
-  r: { backend: nowhere, model: "" }
+agents:
+  r:
+    adapter:
+      type: ensemble
+      llm_backend: nowhere
+      model: ""
 "#,
     );
     let out = ensemble(&s, &["check"]);
@@ -175,7 +187,7 @@ fn an_api_key_written_into_the_config_is_refused() {
         "ensemble.yaml",
         r#"
 version: 1
-backends:
+llm_backends:
   x:
     type: openai-compatible-api
     base_url_env: U
@@ -228,14 +240,14 @@ fn a_missing_config_says_so_rather_than_guessing() {
 }
 
 #[test]
-fn roles_prints_the_routing_table() {
-    let s = Scratch::new("roles");
+fn agents_prints_the_routing_table() {
+    let s = Scratch::new("agents");
     s.write(
         "ensemble.yaml",
         &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
 
-    let out = ensemble(&s, &["roles"]);
+    let out = ensemble(&s, &["agents"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(text.contains("coder\topenai-local\tqwen3-coder"), "{text}");
@@ -457,7 +469,7 @@ fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
         .iter()
         .map(|t| t["name"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(names, vec!["delegate", "roles", "health"]);
+    assert_eq!(names, vec!["delegate", "agents", "health"]);
 }
 
 #[test]
@@ -470,7 +482,7 @@ fn a_harness_can_delegate_through_mcp_and_get_the_work_back() {
 
     let reply = session.call(
         "delegate",
-        serde_json::json!({"role": "reviewer", "task": "review src/main.rs", "context": "it is new"}),
+        serde_json::json!({"agent": "reviewer", "task": "review src/main.rs", "context": "it is new"}),
     );
     assert_eq!(reply["result"]["isError"], false, "{reply}");
     assert_eq!(tool_text(&reply), "the review is clean");
@@ -493,7 +505,7 @@ fn an_unknown_role_comes_back_as_a_readable_tool_error_and_the_session_survives(
 
     let reply = session.call(
         "delegate",
-        serde_json::json!({"role": "architect", "task": "design it"}),
+        serde_json::json!({"agent": "architect", "task": "design it"}),
     );
     assert!(
         reply.get("error").is_none(),
@@ -505,7 +517,7 @@ fn an_unknown_role_comes_back_as_a_readable_tool_error_and_the_session_survives(
     assert!(text.contains("reviewer"), "lists the real roles: {text}");
 
     // The session continues — the point of returning this as a result.
-    let after = session.call("roles", serde_json::json!({}));
+    let after = session.call("agents", serde_json::json!({}));
     assert_eq!(after["result"]["isError"], false, "{after}");
 }
 
@@ -521,7 +533,7 @@ fn a_backend_failure_reaches_the_model_as_a_readable_reason() {
 
     let reply = session.call(
         "delegate",
-        serde_json::json!({"role": "coder", "task": "write a function"}),
+        serde_json::json!({"agent": "coder", "task": "write a function"}),
     );
     assert_eq!(reply["result"]["isError"], true);
     let text = tool_text(&reply);
@@ -548,7 +560,7 @@ fn the_tools_never_offer_a_way_to_pick_a_model_or_a_backend() {
     assert!(!schema.contains("\"backend\""), "{schema}");
 
     // And the role listing does not leak them either.
-    let roles = tool_text(&session.call("roles", serde_json::json!({})));
+    let roles = tool_text(&session.call("agents", serde_json::json!({})));
     assert!(!roles.contains("qwen3-coder"), "{roles}");
     assert!(!roles.contains("hosted-model"), "{roles}");
 }
@@ -565,7 +577,7 @@ fn nothing_but_protocol_is_ever_written_to_stdout() {
     session.request("initialize", serde_json::json!({}));
     session.call(
         "delegate",
-        serde_json::json!({"role": "reviewer", "task": "look"}),
+        serde_json::json!({"agent": "reviewer", "task": "look"}),
     );
     session.call("health", serde_json::json!({}));
     let last = session.request("ping", serde_json::json!({}));
@@ -713,10 +725,11 @@ fn a_role_with_tools_edits_the_project_through_its_own_loop_over_mcp() {
     s.write(
         "ensemble.yaml",
         &format!(
-            "version: 1\nbackends:\n  local:\n    type: openai-compatible-api\n    \
+            "version: 1\nllm_backends:\n  local:\n    type: openai-compatible-api\n    \
              base_url_env: ENSEMBLE_TEST_LOCAL_URL\n    base_url_default: \"{url}\"\n    \
-             timeout_seconds: 20\nroles:\n  coder:\n    backend: local\n    model: coder-model\n    \
-             tools: [read, edit]\n    context_window: 8000\n"
+             timeout_seconds: 20\nagents:\n  coder:\n    context_window: 8000\n    adapter:\n      \
+             type: ensemble\n      llm_backend: local\n      model: coder-model\n      \
+             tools: [read, edit]\n"
         ),
     );
     s.write("a.txt", "foo\n");
@@ -726,19 +739,17 @@ fn a_role_with_tools_edits_the_project_through_its_own_loop_over_mcp() {
         serde_json::json!({"protocolVersion": "2025-06-18"}),
     );
 
-    let roles = tool_text(&session.call("roles", serde_json::json!({})));
-    assert!(roles.contains("coder [agent, can change files]"), "{roles}");
+    let roles = tool_text(&session.call("agents", serde_json::json!({})));
+    assert!(roles.contains("coder [can change files]"), "{roles}");
 
     let reply = session.call(
         "delegate",
-        serde_json::json!({"role": "coder", "task": "rename foo to bar in a.txt"}),
+        serde_json::json!({"agent": "coder", "task": "rename foo to bar in a.txt"}),
     );
     let text = tool_text(&reply);
     assert!(text.starts_with("renamed it"), "{text}");
     assert!(
-        text.ends_with(
-            "[coder ran as an agent: 4 step(s), 3 tool call(s)]\n[files changed: a.txt (modified)]"
-        ),
+        text.ends_with("[coder: 4 step(s), 3 tool call(s)]\n[files changed: a.txt (modified)]"),
         "{text}"
     );
     assert_eq!(

@@ -2,13 +2,13 @@
 //!
 //! Anything that speaks `POST /chat/completions` — llama.cpp's `llama-server`,
 //! vLLM, Ollama, a hosted API. This is the backend type that *can* call the
-//! caller's tools, which is why a role with `tools:` has to sit on one.
+//! caller's tools, which is why an agent with `tools:` has to sit on one.
 //!
 //! The HTTP transport is injected behind [`Http`] so every branch below — a
 //! 500, a 429, a body that is 2xx but malformed, a refused connection — is
 //! covered by a test that neither binds a port nor needs a model server.
 
-use crate::config::{Backend, BackendSettings};
+use crate::config::{BackendSettings, LlmBackend};
 use crate::port::{
     Capabilities, Error, Message, ModelPort, Request, Response, Role, ToolCall, Usage,
 };
@@ -441,7 +441,7 @@ pub struct OpenAiAdapter {
 }
 
 impl OpenAiAdapter {
-    pub fn new(backend: &Backend, http: Box<dyn Http>) -> Result<Self, Error> {
+    pub fn new(backend: &LlmBackend, http: Box<dyn Http>) -> Result<Self, Error> {
         let BackendSettings::OpenAiCompatible {
             base_url, api_key, ..
         } = &backend.settings;
@@ -538,7 +538,7 @@ fn classify_transport(backend: &str, detail: String, timeout: Duration) -> Error
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Backend, BackendSettings};
+    use crate::config::{BackendSettings, LlmBackend};
     use crate::port::{Message, ToolDef};
     use std::sync::{Arc, Mutex};
 
@@ -620,8 +620,8 @@ mod tests {
         assert!(http.posts.lock().unwrap().is_empty());
     }
 
-    fn backend(api_key: Option<&str>) -> Backend {
-        Backend {
+    fn backend(api_key: Option<&str>) -> LlmBackend {
+        LlmBackend {
             name: "openai-local".into(),
             timeout_seconds: 60,
             settings: BackendSettings::OpenAiCompatible {

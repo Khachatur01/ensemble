@@ -1,9 +1,9 @@
 //! The `ensemble` binary.
 //!
-//! `ensemble mcp` is the one a harness spawns: it offers the team's roles as MCP
+//! `ensemble mcp` is the one a harness spawns: it offers the team's agents as MCP
 //! tools. Everything else is for the person setting it up — validating the
 //! config, checking the backends are reachable, and sending one task to one
-//! role with no harness in the way.
+//! agent with no harness in the way.
 
 use ensemble::config::{self, Config, SystemEnv};
 use ensemble::harness::mcp;
@@ -19,22 +19,22 @@ USAGE:
     ensemble <COMMAND> [OPTIONS]
 
 COMMANDS:
-    mcp                     Serve the roles over MCP on stdio. This is what an
+    mcp                     Serve the agents over MCP on stdio. This is what an
                             agent (Claude Code, OpenCode, ...) spawns, with the
                             project as its working directory; it is not meant
                             to be run by hand.
     check                   Load and validate the config, then report the team.
     schema                  Print the JSON Schema for ensemble.yaml, so an editor
                             can complete and check it. Needs no config.
-    roles                   List the roles and what runs each.
+    agents                  List the agents and what runs each.
     health                  Check that every backend in use is reachable.
-    run <ROLE> <TASK>       Send one task to one role and print the answer.
+    run <AGENT> <TASK>      Send one task to one agent and print the answer.
 
 OPTIONS:
     -c, --config <PATH>     Path to ensemble.yaml.
                             Default: ensemble.yaml in the project directory.
                             Parent directories are not searched.
-    -d, --dir <PATH>        The project directory roles work in.
+    -d, --dir <PATH>        The project directory agents work in.
                             Default: the current directory.
         --context <TEXT>    Extra context for `run`.
     -h, --help              This.
@@ -144,7 +144,7 @@ fn run() -> Result<ExitCode, String> {
     match args.command.as_str() {
         "mcp" => cmd_mcp(config, dir),
         "check" => cmd_check(config, dir),
-        "roles" => cmd_roles(config, dir),
+        "agents" => cmd_agents(config, dir),
         "health" => cmd_health(config, dir),
         "run" => cmd_run(config, dir, &args),
         other => Err(format!("unknown command '{other}'. Try --help.")),
@@ -160,7 +160,7 @@ fn cmd_mcp(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
     if std::io::stdin().is_terminal() {
         eprintln!(
             "ensemble: speaking MCP (JSON-RPC 2.0, one object per line) on stdin/stdout.\n\
-             ensemble: a harness spawns this; for a one-off try `ensemble run <role> <task>`."
+             ensemble: a harness spawns this; for a one-off try `ensemble run <agent> <task>`."
         );
     }
     let ensemble = build(config, dir)?;
@@ -179,8 +179,8 @@ fn cmd_check(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
         config.version
     );
     println!();
-    println!("backends:");
-    for (name, b) in &config.backends {
+    println!("llm_backends:");
+    for (name, b) in &config.llm_backends {
         let detail = match &b.settings {
             config::BackendSettings::OpenAiCompatible {
                 base_url,
@@ -204,21 +204,21 @@ fn cmd_check(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
         );
     }
     println!();
-    println!("roles:");
-    for role in config.role_names() {
+    println!("agents:");
+    for role in config.agent_names() {
         let a = config
-            .assignment(role)
-            .expect("role_names only yields configured roles");
+            .agent(role)
+            .expect("agent_names only yields configured agents");
         let kind = if a.tools.is_empty() {
-            "think-only".to_string()
+            "ensemble, no tools".to_string()
         } else {
             let names: Vec<&str> = a.tools.iter().map(|t| t.as_str()).collect();
-            format!("agent: {}", names.join(", "))
+            format!("ensemble: {}", names.join(", "))
         };
-        println!("  {role}  ->  {} / {}  ({kind})", a.backend, a.model);
+        println!("  {role}  ->  {} / {}  ({kind})", a.llm_backend, a.model);
     }
-    if config.roles.is_empty() {
-        println!("  (none — add roles under `roles:`)");
+    if config.agents.is_empty() {
+        println!("  (none — add agents under `agents:`)");
     }
 
     // Constructing the Ensemble builds every backend, which is where a bad URL
@@ -231,9 +231,9 @@ fn cmd_check(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_roles(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
+fn cmd_agents(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
     let ensemble = build(config, dir)?;
-    for role in ensemble.roles() {
+    for role in ensemble.agents() {
         let (backend, model) = ensemble.route_of(role).map_err(|e| e.to_string())?;
         println!("{role}\t{backend}\t{model}");
     }
@@ -265,7 +265,7 @@ fn cmd_run(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
     let role = args
         .rest
         .first()
-        .ok_or("run: needs a role. Try `ensemble roles` to see them.")?;
+        .ok_or("run: needs an agent. Try `ensemble agents` to see them.")?;
     let task = args.rest[1..].join(" ");
     if task.trim().is_empty() {
         return Err(
@@ -282,7 +282,7 @@ fn cmd_run(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
     // end up in whatever consumed the answer.
     eprintln!(
         "ensemble: {} via {}/{} ({} in, {} out)",
-        outcome.role,
+        outcome.agent,
         outcome.backend,
         outcome.model,
         outcome.prompt_tokens,

@@ -1,13 +1,13 @@
 //! The Ensemble itself: the agent team, and where work goes.
 //!
-//! The harness names a **role**. The router turns that into a backend, a model
+//! The harness names a **agent**. The router turns that into a backend, a model
 //! and a prompt, and returns the answer. That indirection is the product
 //! requirement — "users should not need to select individual models or know
 //! which backends are being used" — so nothing a caller passes in may name a
 //! model or a backend, and nothing the router returns has to be interpreted
 //! differently depending on which one answered.
 
-use crate::config::{AgentTool, Assignment, Config};
+use crate::config::{AgentConfig, AgentTool, Config};
 use crate::port::{Error, Message, ModelPort, Request, Response};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -21,14 +21,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 /// which one did it.
 #[derive(Debug, Clone)]
 pub struct Outcome {
-    pub role: String,
+    pub agent: String,
     pub backend: String,
     pub model: String,
     pub text: String,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
-    /// Set when the role ran as an agent: how much it did to get there.
-    pub agent: Option<AgentStats>,
+    /// Set when the agent ran as an agent: how much it did to get there.
+    pub stats: Option<AgentStats>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +41,7 @@ pub struct AgentStats {
     pub changes: crate::agent::tools::Changes,
     /// `bash` commands it ran.
     pub commands: Vec<String>,
-    /// Another delegation was running at the same time and this role has
+    /// Another delegation was running at the same time and this agent has
     /// `bash`. Its changes are found by comparing the project, so `changes`
     /// may include the other run's files.
     pub overlapped: bool,
@@ -49,22 +49,22 @@ pub struct AgentStats {
 
 #[derive(Debug)]
 pub enum RouteError {
-    /// The role is not in the config. Carries the ones that are, because the
+    /// The agent is not in the config. Carries the ones that are, because the
     /// caller is usually a model that guessed a plausible name.
-    UnknownRole { asked: String, known: Vec<String> },
-    /// The role is configured but its backend could not be built.
-    Backend(Error),
+    UnknownAgent { asked: String, known: Vec<String> },
+    /// The agent is configured but its backend could not be built.
+    LlmBackend(Error),
 }
 
 impl std::fmt::Display for RouteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RouteError::UnknownRole { asked, known } => write!(
+            RouteError::UnknownAgent { asked, known } => write!(
                 f,
-                "no role '{asked}' is configured. Available roles: {}.",
+                "no agent '{asked}' is configured. Available agents: {}.",
                 known.join(", ")
             ),
-            RouteError::Backend(e) => write!(f, "{e}"),
+            RouteError::LlmBackend(e) => write!(f, "{e}"),
         }
     }
 }
@@ -74,16 +74,16 @@ impl std::error::Error for RouteError {}
 impl RouteError {
     pub fn is_retryable(&self) -> bool {
         match self {
-            RouteError::UnknownRole { .. } => false,
-            RouteError::Backend(e) => e.is_retryable(),
+            RouteError::UnknownAgent { .. } => false,
+            RouteError::LlmBackend(e) => e.is_retryable(),
         }
     }
 }
 
 pub struct Ensemble {
     config: Config,
-    /// One adapter per *backend*, shared by every role assigned to it. Building
-    /// one per role would mean several HTTP agents against the same endpoint
+    /// One adapter per *backend*, shared by every agent assigned to it. Building
+    /// one per agent would mean several HTTP agents against the same endpoint
     /// and several copies of the same settings drifting apart.
     ports: BTreeMap<String, Arc<dyn ModelPort>>,
     workdir: Option<PathBuf>,
@@ -101,7 +101,7 @@ impl Ensemble {
     /// already told the user the work is under way.
     pub fn new(config: Config, workdir: Option<PathBuf>) -> Result<Self, Error> {
         let mut ports = BTreeMap::new();
-        for (name, backend) in &config.backends {
+        for (name, backend) in &config.llm_backends {
             ports.insert(name.clone(), crate::backend::build(backend)?);
         }
         Ok(Self::with_ports(config, ports, workdir))
@@ -126,41 +126,41 @@ impl Ensemble {
         &self.config
     }
 
-    pub fn roles(&self) -> Vec<&str> {
-        self.config.role_names()
+    pub fn agents(&self) -> Vec<&str> {
+        self.config.agent_names()
     }
 
-    fn resolve(&self, role: &str) -> Result<(&Assignment, &Arc<dyn ModelPort>), RouteError> {
+    fn resolve(&self, role: &str) -> Result<(&AgentConfig, &Arc<dyn ModelPort>), RouteError> {
         let assignment = self
             .config
-            .assignment(role)
-            .ok_or_else(|| RouteError::UnknownRole {
+            .agent(role)
+            .ok_or_else(|| RouteError::UnknownAgent {
                 asked: role.to_string(),
-                known: self.roles().into_iter().map(str::to_string).collect(),
+                known: self.agents().into_iter().map(str::to_string).collect(),
             })?;
 
-        // A role whose backend is missing from `ports` cannot happen through
+        // An agent whose backend is missing from `ports` cannot happen through
         // `new`, which builds every declared backend, and config validation
-        // rejects a role naming an undeclared one. It can happen through
+        // rejects an agent naming an undeclared one. It can happen through
         // `with_ports`, so it is an error rather than an unwrap.
-        let port = self.ports.get(&assignment.backend).ok_or_else(|| {
-            RouteError::Backend(Error::Unsupported {
-                backend: assignment.backend.clone(),
-                detail: format!("no adapter was built for this backend (role '{role}')"),
+        let port = self.ports.get(&assignment.llm_backend).ok_or_else(|| {
+            RouteError::LlmBackend(Error::Unsupported {
+                backend: assignment.llm_backend.clone(),
+                detail: format!("no adapter was built for this backend (agent '{role}')"),
             })
         })?;
 
         Ok((assignment, port))
     }
 
-    /// Which backend and model a role would use. Used by `ensemble roles` and
+    /// Which backend and model an agent would use. Used by `ensemble agents` and
     /// by the health check; does not spend a model call.
     pub fn route_of(&self, role: &str) -> Result<(&str, &str), RouteError> {
         let (a, _) = self.resolve(role)?;
-        Ok((a.backend.as_str(), a.model.as_str()))
+        Ok((a.llm_backend.as_str(), a.model.as_str()))
     }
 
-    /// Send a task to a role and return what it produced.
+    /// Send a task to an agent and return what it produced.
     ///
     /// `context` is appended to the task as a separate user turn rather than
     /// concatenated into it, so a backend that distinguishes turns keeps the
@@ -174,9 +174,9 @@ impl Ensemble {
         self.delegate_reporting(role, task, context, &|_| {}, &AtomicBool::new(false))
     }
 
-    /// [`Self::delegate`], telling `progress` what an agent role is doing as it
-    /// goes. A think-only role makes one call and reports nothing. Setting
-    /// `cancel` stops an agent role at its next step.
+    /// [`Self::delegate`], telling `progress` what an agent is doing as it
+    /// goes. A think-only agent makes one call and reports nothing. Setting
+    /// `cancel` stops an agent at its next step.
     pub fn delegate_reporting(
         &self,
         role: &str,
@@ -211,26 +211,26 @@ impl Ensemble {
             port.as_ref(),
             &request,
             &|| cancel.load(Ordering::Relaxed),
-            &|l| progress(&format!("{} · {l}", assignment.role)),
+            &|l| progress(&format!("{} · {l}", assignment.name)),
         )
-        .map_err(RouteError::Backend)?;
+        .map_err(RouteError::LlmBackend)?;
 
         Ok(Outcome {
-            role: assignment.role.clone(),
-            backend: assignment.backend.clone(),
+            agent: assignment.name.clone(),
+            backend: assignment.llm_backend.clone(),
             model: response.model,
             text: response.text,
             prompt_tokens: response.usage.prompt_tokens,
             completion_tokens: response.usage.completion_tokens,
-            agent: None,
+            stats: None,
         })
     }
 
-    /// A role with tools is an agent: it loops over its tools inside the
+    /// An agent with tools is an agent: it loops over its tools inside the
     /// project directory instead of answering in one call.
     fn delegate_agent(
         &self,
-        assignment: &Assignment,
+        assignment: &AgentConfig,
         port: &dyn ModelPort,
         task: &str,
         context: Option<&str>,
@@ -240,9 +240,9 @@ impl Ensemble {
         let workdir = match &self.workdir {
             Some(dir) => dir.clone(),
             None => std::env::current_dir().map_err(|e| {
-                RouteError::Backend(Error::Unsupported {
-                    backend: assignment.backend.clone(),
-                    detail: format!("no working directory for role '{}': {e}", assignment.role),
+                RouteError::LlmBackend(Error::Unsupported {
+                    backend: assignment.llm_backend.clone(),
+                    detail: format!("no working directory for agent '{}': {e}", assignment.name),
                 })
             })?,
         };
@@ -251,15 +251,15 @@ impl Ensemble {
         let run = crate::agent::run(port, assignment, task, context, &workdir, progress, cancel);
         let overlapped = others_running || self.started.load(Ordering::SeqCst) != me;
         self.active.fetch_sub(1, Ordering::SeqCst);
-        let run = run.map_err(RouteError::Backend)?;
+        let run = run.map_err(RouteError::LlmBackend)?;
         Ok(Outcome {
-            role: assignment.role.clone(),
-            backend: assignment.backend.clone(),
+            agent: assignment.name.clone(),
+            backend: assignment.llm_backend.clone(),
             model: run.model,
             text: run.text,
             prompt_tokens: run.usage.prompt_tokens,
             completion_tokens: run.usage.completion_tokens,
-            agent: Some(AgentStats {
+            stats: Some(AgentStats {
                 steps: run.steps,
                 tool_calls: run.tool_calls,
                 trimmed: run.trimmed,
@@ -270,29 +270,29 @@ impl Ensemble {
         })
     }
 
-    /// The configured prompt for a role, if it has one.
+    /// The configured prompt for an agent, if it has one.
     pub fn prompt_of(&self, role: &str) -> Option<&str> {
         self.config
-            .assignment(role)
+            .agent(role)
             .and_then(|a| a.prompt.as_deref())
             .filter(|p| !p.trim().is_empty())
     }
 
-    /// Every role a caller may delegate to.
-    pub fn delegable_roles(&self) -> Vec<&str> {
-        self.config.roles.keys().map(String::as_str).collect()
+    /// Every agent a caller may delegate to.
+    pub fn delegable_agents(&self) -> Vec<&str> {
+        self.config.agents.keys().map(String::as_str).collect()
     }
 
-    /// Check every backend a role actually uses.
+    /// Check every backend an agent actually uses.
     ///
-    /// Keyed by backend, not by role: two roles on one endpoint are one thing
+    /// Keyed by backend, not by agent: two agents on one endpoint are one thing
     /// to check and one thing to fix.
     pub fn health(&self) -> Vec<(String, Result<(), Error>)> {
         let mut used: Vec<&str> = self
-            .roles()
+            .agents()
             .iter()
-            .filter_map(|r| self.config.assignment(r))
-            .map(|a| a.backend.as_str())
+            .filter_map(|r| self.config.agent(r))
+            .map(|a| a.llm_backend.as_str())
             .collect();
         used.sort_unstable();
         used.dedup();
@@ -321,7 +321,7 @@ mod tests {
 
     const YAML: &str = r#"
 version: 1
-backends:
+llm_backends:
   hosted:
     type: openai-compatible-api
     base_url_env: H
@@ -334,17 +334,23 @@ backends:
     type: openai-compatible-api
     base_url_env: R
     base_url_default: "http://10.10.10.5:8000/v1"
-roles:
+agents:
   planner:
-    backend: openai-local
-    model: qwen3-coder
     prompt: "You plan."
+    adapter:
+      type: ensemble
+      llm_backend: openai-local
+      model: qwen3-coder
   coder:
-    backend: openai-remote
-    model: qwen3-coder
+    adapter:
+      type: ensemble
+      llm_backend: openai-remote
+      model: qwen3-coder
   reviewer:
-    backend: hosted
-    model: hosted-model
+    adapter:
+      type: ensemble
+      llm_backend: hosted
+      model: hosted-model
 "#;
 
     fn cfg() -> Config {
@@ -441,19 +447,23 @@ roles:
     fn a_configured_temperature_is_sent_with_a_delegation() {
         const YAML_WITH_TEMP: &str = r#"
 version: 1
-backends:
+llm_backends:
   openai-local:
     type: openai-compatible-api
     base_url_env: L
     base_url_default: "http://127.0.0.1:8000/v1"
-roles:
+agents:
   scout:
-    backend: openai-local
-    model: qwen3.5:9b
-    temperature: 0.2
+    adapter:
+      type: ensemble
+      llm_backend: openai-local
+      model: qwen3.5:9b
+      temperature: 0.2
   plain:
-    backend: openai-local
-    model: qwen3.5:9b
+    adapter:
+      type: ensemble
+      llm_backend: openai-local
+      model: qwen3.5:9b
 "#;
         let cfg = config::parse(
             YAML_WITH_TEMP,
@@ -541,7 +551,7 @@ roles:
         let (e, _) = ensemble();
         let results = e.health();
         let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
-        // Three backends, one role on each.
+        // Three backends, one agent on each.
         assert_eq!(names, vec!["hosted", "openai-local", "openai-remote"]);
         assert!(results.iter().all(|(_, r)| r.is_ok()));
     }
