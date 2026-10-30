@@ -217,6 +217,24 @@
           "minimum": 0,
           "maximum": 2
         },
+        "presence_penalty": {
+          "description": "Penalty on tokens the model has already used at all, -2.0 to 2.0, overriding the model's default. A positive one (Ollama's qwen3.5 Modelfile sets 1.5) pushes the model away from repeating the paths, names and JSON keys tool calls and code are made of; 0 turns it off.",
+          "type": "number",
+          "minimum": -2,
+          "maximum": 2,
+          "examples": [
+            0
+          ]
+        },
+        "frequency_penalty": {
+          "description": "Penalty on tokens by how often they have been used, -2.0 to 2.0, overriding the model's default.",
+          "type": "number",
+          "minimum": -2,
+          "maximum": 2,
+          "examples": [
+            0
+          ]
+        },
         "reasoning_effort": {
           "description": "How much a reasoning model thinks before answering. `none` turns thinking off, which fixes small-context runs where thinking uses the whole reply.",
           "enum": [

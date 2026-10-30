@@ -233,6 +233,8 @@ impl Ensemble {
 
         let mut request = Request::new(adapter.model.clone(), messages);
         request.temperature = adapter.temperature;
+        request.presence_penalty = adapter.presence_penalty;
+        request.frequency_penalty = adapter.frequency_penalty;
         request.reasoning_effort = adapter.reasoning_effort.clone();
 
         let response: Response = crate::port::complete_retrying(

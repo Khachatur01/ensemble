@@ -74,6 +74,10 @@ llm_backends:
 #   temperature            overrides the model's default (0.0-2.0); for a
 #                          server whose baked-in sampling is too hot for
 #                          reliable tool calling
+#   presence_penalty,      override the model's defaults (-2.0-2.0). A
+#   frequency_penalty      positive one pushes the model away from repeating
+#                          the paths and names tool calls are made of; 0 for
+#                          agents with tools
 #   reasoning_effort       none, low, medium or high; `none` turns thinking off
 #
 # The `claude-code` adapter is the Claude Code CLI, run headless in the

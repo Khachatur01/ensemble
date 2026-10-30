@@ -168,6 +168,8 @@ agents:
       network: false        # bash may not open outbound TCP (the default)
       readable: [~/.m2]     # more paths bash may read (optional)
       temperature: 0.2      # overrides the model's own default (optional)
+      presence_penalty: 0   # -2.0 to 2.0, overrides the model's default (optional)
+      frequency_penalty: 0  # -2.0 to 2.0, overrides the model's default (optional)
       reasoning_effort: none  # none, low, medium or high (optional)
 ```
 
@@ -205,9 +207,11 @@ single tool result may take at most 1/8 of the window; longer output is cut and
 the model is told to ask for less (`offset`/`limit`, a narrower pattern).
 Tokens are estimated at 4 bytes each, with no tokenizer.
 
-`temperature` is for a server whose baked-in sampling is too hot for reliable
-tool calling (an Ollama Modelfile's `temperature`/`presence_penalty`, for
-instance). `reasoning_effort: none` turns a reasoning model's thinking off,
+`temperature`, `presence_penalty` and `frequency_penalty` override sampling
+the model server bakes in. A penalty pushes the model away from tokens it has
+already used — and agent work is made of repeated tokens: the same paths,
+names and JSON keys. Ollama's qwen3.5 Modelfile, for instance, sets
+`presence_penalty: 1.5`; set it to `0` for an agent with tools. `reasoning_effort: none` turns a reasoning model's thinking off,
 which keeps it from spending a small context's whole reply on thinking.
 
 - **Confined to the project.** Every path is resolved through the filesystem

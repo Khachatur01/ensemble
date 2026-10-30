@@ -160,6 +160,12 @@ pub fn request_body(request: &Request) -> String {
     if let Some(t) = request.temperature {
         body["temperature"] = serde_json::json!(t);
     }
+    if let Some(p) = request.presence_penalty {
+        body["presence_penalty"] = serde_json::json!(p);
+    }
+    if let Some(f) = request.frequency_penalty {
+        body["frequency_penalty"] = serde_json::json!(f);
+    }
     if let Some(effort) = &request.reasoning_effort {
         body["reasoning_effort"] = serde_json::json!(effort);
     }
@@ -691,6 +697,21 @@ mod tests {
         assert!(v.get("max_tokens").is_none());
         assert!(v.get("temperature").is_none());
         assert!(v.get("reasoning_effort").is_none());
+        assert!(v.get("presence_penalty").is_none());
+        assert!(v.get("frequency_penalty").is_none());
+    }
+
+    #[test]
+    fn penalties_are_sent_when_set() {
+        let mut req = Request::new("m", vec![Message::user("x")]);
+        req.presence_penalty = Some(0.0);
+        req.frequency_penalty = Some(-0.5);
+        let v: serde_json::Value = serde_json::from_str(&request_body(&req)).unwrap();
+        assert_eq!(
+            v["presence_penalty"], 0.0,
+            "zero is sent: it overrides a default"
+        );
+        assert_eq!(v["frequency_penalty"], -0.5);
     }
 
     #[test]

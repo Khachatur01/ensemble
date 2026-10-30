@@ -137,6 +137,8 @@ pub fn run(
     let request = |messages: &[Message], offer_tools: bool| {
         let mut r = Request::new(adapter.model.clone(), messages.to_vec());
         r.temperature = adapter.temperature;
+        r.presence_penalty = adapter.presence_penalty;
+        r.frequency_penalty = adapter.frequency_penalty;
         r.reasoning_effort = adapter.reasoning_effort.clone();
         r.deadline = Some(deadline);
         if offer_tools {
@@ -364,6 +366,8 @@ mod tests {
                 llm_backend: "b".into(),
                 model: "m".into(),
                 temperature: Some(0.1),
+                presence_penalty: Some(0.0),
+                frequency_penalty: None,
                 reasoning_effort: None,
                 tools,
                 max_steps,
@@ -442,6 +446,8 @@ mod tests {
         assert_eq!(req.tools.len(), 1);
         assert_eq!(req.tools[0].name, "read_file");
         assert_eq!(req.temperature, Some(0.1));
+        assert_eq!(req.presence_penalty, Some(0.0));
+        assert_eq!(req.frequency_penalty, None);
         let system = &req.messages[0];
         assert_eq!(system.role, Role::System);
         assert!(system.content.contains("autonomous agent"));

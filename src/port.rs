@@ -121,6 +121,11 @@ pub struct Request {
     pub messages: Vec<Message>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    /// Penalties on tokens already used: once at all (`presence_penalty`) or
+    /// by how often (`frequency_penalty`), each -2.0 to 2.0. Left to the
+    /// server's default when unset.
+    pub presence_penalty: Option<f32>,
+    pub frequency_penalty: Option<f32>,
     /// How hard a reasoning model should think before answering (`none`,
     /// `low`, `medium`, `high`). Left to the server's default when unset.
     pub reasoning_effort: Option<String>,
@@ -138,6 +143,8 @@ impl Request {
             messages,
             max_tokens: None,
             temperature: None,
+            presence_penalty: None,
+            frequency_penalty: None,
             reasoning_effort: None,
             tools: Vec::new(),
             deadline: None,

@@ -121,6 +121,15 @@ struct RawAdapter {
     /// business tuning an agent's reliability-critical sampling.
     #[serde(default)]
     temperature: Option<f32>,
+    /// Penalty on tokens the model has already used at all, -2.0 to 2.0.
+    /// Overrides the model's default; a positive one (Ollama's qwen3.5
+    /// Modelfile sets 1.5) pushes the model away from repeating the paths,
+    /// names and JSON keys that tool calls and code are made of.
+    #[serde(default)]
+    presence_penalty: Option<f32>,
+    /// Penalty on tokens by how often they have been used, -2.0 to 2.0.
+    #[serde(default)]
+    frequency_penalty: Option<f32>,
     /// How much a reasoning model thinks before it answers: `none`, `low`,
     /// `medium` or `high`. Thinking costs tokens, and in a small context
     /// window it can use the whole reply budget before any answer or tool call
@@ -264,6 +273,10 @@ pub struct EnsembleAdapter {
     pub llm_backend: String,
     pub model: String,
     pub temperature: Option<f32>,
+    /// See [`RawAdapter::presence_penalty`].
+    pub presence_penalty: Option<f32>,
+    /// See [`RawAdapter::frequency_penalty`].
+    pub frequency_penalty: Option<f32>,
     /// See [`RawAdapter::reasoning_effort`].
     pub reasoning_effort: Option<String>,
     /// Empty: one model call, text back.
@@ -695,10 +708,24 @@ fn ensemble_adapter(
             "{at}: `temperature` is {t}; must be between 0.0 and 2.0"
         ));
     }
+    for (key, value) in [
+        ("presence_penalty", ad.presence_penalty),
+        ("frequency_penalty", ad.frequency_penalty),
+    ] {
+        if let Some(v) = value
+            && !(-2.0..=2.0).contains(&v)
+        {
+            problems.push(format!(
+                "{at}: `{key}` is {v}; must be between -2.0 and 2.0"
+            ));
+        }
+    }
     EnsembleAdapter {
         llm_backend,
         model: ad.model.clone(),
         temperature: ad.temperature,
+        presence_penalty: ad.presence_penalty,
+        frequency_penalty: ad.frequency_penalty,
         reasoning_effort: ad.reasoning_effort.clone(),
         tools,
         max_steps: ad.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
@@ -714,6 +741,8 @@ fn claude_code_adapter(at: &str, ad: &RawAdapter, problems: &mut Vec<String>) ->
         &[
             ("llm_backend", ad.llm_backend.is_some()),
             ("temperature", ad.temperature.is_some()),
+            ("presence_penalty", ad.presence_penalty.is_some()),
+            ("frequency_penalty", ad.frequency_penalty.is_some()),
             ("reasoning_effort", ad.reasoning_effort.is_some()),
             ("max_steps", ad.max_steps.is_some()),
             ("network", ad.network.is_some()),
@@ -1406,6 +1435,26 @@ agents:
         // Unset is unset, not defaulted to something: the backend's own
         // default still applies.
         assert_eq!(ens(&c, "plain").temperature, None);
+    }
+
+    #[test]
+    fn penalties_are_read_and_bounded() {
+        let doc = AGENT_DOC.replace(
+            "max_steps: 5",
+            "max_steps: 5\n      presence_penalty: 0\n      frequency_penalty: -0.5",
+        );
+        let c = parse(&doc, &p(), &env(&[])).unwrap();
+        assert_eq!(ens(&c, "coder").presence_penalty, Some(0.0));
+        assert_eq!(ens(&c, "coder").frequency_penalty, Some(-0.5));
+        assert_eq!(ens(&c, "thinker").presence_penalty, None);
+
+        let bad = AGENT_DOC.replace(
+            "max_steps: 5",
+            "max_steps: 5\n      presence_penalty: 2.5\n      frequency_penalty: -3",
+        );
+        let joined = problems_of(parse(&bad, &p(), &env(&[])).unwrap_err()).join("\n");
+        assert!(joined.contains("`presence_penalty` is 2.5"), "{joined}");
+        assert!(joined.contains("`frequency_penalty` is -3"), "{joined}");
     }
 
     #[test]
