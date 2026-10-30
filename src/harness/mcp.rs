@@ -542,7 +542,7 @@ roles:
         let text = text_of(&r);
         assert!(text.contains("Connection refused"), "{text}");
         assert!(
-            text.contains("worth one retry"),
+            text.contains("already retried"),
             "says whether to retry: {text}"
         );
     }

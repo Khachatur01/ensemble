@@ -250,8 +250,12 @@ pub fn call_reporting(
                     // Telling the model whether another attempt could work is
                     // the difference between a useful retry and a loop against
                     // a typo'd role name.
-                    let hint = if e.is_retryable() {
+                    let timed_out =
+                        matches!(&e, RouteError::Backend(crate::port::Error::Timeout { .. }));
+                    let hint = if timed_out {
                         " This may be transient; the same call is worth one retry."
+                    } else if e.is_retryable() {
+                        " Ensemble already retried it; call `health`, and retry once the backend is back."
                     } else {
                         " Retrying this unchanged will fail the same way."
                     };

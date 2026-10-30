@@ -265,6 +265,63 @@ impl Error {
     }
 }
 
+/// Waits before each retry of a call that failed in a way worth retrying.
+#[cfg(not(test))]
+const RETRY_DELAYS: [std::time::Duration; 2] = [
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(8),
+];
+#[cfg(test)]
+const RETRY_DELAYS: [std::time::Duration; 2] = [
+    std::time::Duration::from_millis(1),
+    std::time::Duration::from_millis(1),
+];
+
+/// [`ModelPort::complete`], retried after a refused connection, a 429 or a
+/// 5xx — a server restarting or loading a model, which a long agent run would
+/// otherwise lose all its work to. A timeout is not retried: the same call
+/// would most likely spend the same time again. `stop` ends the waiting early.
+pub fn complete_retrying(
+    port: &dyn ModelPort,
+    request: &Request,
+    stop: &dyn Fn() -> bool,
+    progress: &dyn Fn(&str),
+) -> Result<Response, Error> {
+    let mut delays = RETRY_DELAYS.iter();
+    loop {
+        match port.complete(request) {
+            Err(e) if e.is_retryable() && !matches!(e, Error::Timeout { .. }) => {
+                let Some(delay) = delays.next() else {
+                    return Err(e);
+                };
+                progress(&format!(
+                    "{e}; retrying in {}s",
+                    delay.as_secs_f32().ceil() as u64
+                ));
+                if !sleep_unless(*delay, stop) {
+                    return Err(e);
+                }
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Sleep for `total`, waking early when `stop` turns true. False if it did.
+pub fn sleep_unless(total: std::time::Duration, stop: &dyn Fn() -> bool) -> bool {
+    let until = std::time::Instant::now() + total;
+    loop {
+        if stop() {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        if now >= until {
+            return true;
+        }
+        std::thread::sleep((until - now).min(std::time::Duration::from_millis(50)));
+    }
+}
+
 /// Messages are written for the model that will read them: what failed, on which
 /// backend, and where to look. A truncation marker is added rather than silently
 /// cutting, so nobody debugs a sentence that was never complete.
@@ -602,6 +659,42 @@ mod tests {
             }
             .is_retryable()
         );
+    }
+
+    #[test]
+    fn a_transient_failure_is_retried_and_the_retry_reported() {
+        use testing::{FakePort, Scripted};
+        let port = FakePort::scripted(
+            "b",
+            "fine",
+            vec![Scripted::Fail("Connection refused".into())],
+        );
+        let seen = std::cell::RefCell::new(Vec::new());
+        let r = complete_retrying(&port, &Request::new("m", vec![]), &|| false, &|l| {
+            seen.borrow_mut().push(l.to_string())
+        })
+        .unwrap();
+        assert_eq!(r.text, "fine");
+        assert_eq!(port.call_count(), 2);
+        let seen = seen.into_inner();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].contains("Connection refused") && seen[0].contains("retrying"));
+    }
+
+    #[test]
+    fn retries_give_up_after_the_last_delay() {
+        let port = testing::FakePort::failing("b", "Connection refused");
+        let err =
+            complete_retrying(&port, &Request::new("m", vec![]), &|| false, &|_| {}).unwrap_err();
+        assert!(err.to_string().contains("Connection refused"));
+        assert_eq!(port.call_count(), 1 + RETRY_DELAYS.len());
+    }
+
+    #[test]
+    fn a_stop_ends_the_retrying() {
+        let port = testing::FakePort::failing("b", "Connection refused");
+        assert!(complete_retrying(&port, &Request::new("m", vec![]), &|| true, &|_| {}).is_err());
+        assert_eq!(port.call_count(), 1);
     }
 
     #[test]

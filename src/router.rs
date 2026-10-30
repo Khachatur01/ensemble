@@ -198,7 +198,11 @@ impl Ensemble {
         request.temperature = assignment.temperature;
         request.reasoning_effort = assignment.reasoning_effort.clone();
 
-        let response: Response = port.complete(&request).map_err(RouteError::Backend)?;
+        let response: Response =
+            crate::port::complete_retrying(port.as_ref(), &request, &|| false, &|l| {
+                progress(&format!("{} · {l}", assignment.role))
+            })
+            .map_err(RouteError::Backend)?;
 
         Ok(Outcome {
             role: assignment.role.clone(),

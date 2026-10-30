@@ -4,7 +4,7 @@ use super::sandbox::Sandbox;
 use super::shell;
 use super::tools;
 use crate::config::Assignment;
-use crate::port::{Error, Message, ModelPort, Request, Role, Usage};
+use crate::port::{Error, Message, ModelPort, Request, Role, Usage, complete_retrying};
 use std::path::Path;
 
 const PREAMBLE: &str = "\
@@ -118,7 +118,8 @@ pub fn run(
         }
         out.trimmed += dropped;
         say(step, "waiting for the model");
-        let response = port.complete(&request(&messages, true))?;
+        let response =
+            complete_retrying(port, &request(&messages, true), &|| false, &|l| say(step, l))?;
         out.steps += 1;
         out.usage.prompt_tokens += response.usage.prompt_tokens;
         out.usage.completion_tokens += response.usage.completion_tokens;
@@ -158,7 +159,9 @@ pub fn run(
         "out of steps; asking for a report",
     );
     out.trimmed += trim_history(&mut messages, budget, defs_bytes);
-    let response = port.complete(&request(&messages, false))?;
+    let response = complete_retrying(port, &request(&messages, false), &|| false, &|l| {
+        say(assignment.max_steps + 1, l)
+    })?;
     out.steps += 1;
     out.usage.prompt_tokens += response.usage.prompt_tokens;
     out.usage.completion_tokens += response.usage.completion_tokens;
