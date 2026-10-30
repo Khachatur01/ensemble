@@ -116,7 +116,7 @@ fn stderr_of(out: &std::process::Output) -> String {
 fn check_accepts_a_valid_config_and_reports_the_team() {
     let s = Scratch::new("check-ok");
     s.write(
-        "ensemble.yaml",
+        ".ensemble/config.yaml",
         &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
 
@@ -133,7 +133,7 @@ fn check_accepts_a_valid_config_and_reports_the_team() {
 fn check_reports_several_problems_at_once() {
     let s = Scratch::new("check-many");
     s.write(
-        "ensemble.yaml",
+        ".ensemble/config.yaml",
         r#"
 version: 4
 llm_backends:
@@ -158,7 +158,7 @@ agents:
 fn an_api_key_written_into_the_config_is_refused() {
     let s = Scratch::new("inline-key");
     s.write(
-        "ensemble.yaml",
+        ".ensemble/config.yaml",
         r#"
 version: 1
 llm_backends:
@@ -178,7 +178,7 @@ llm_backends:
 fn a_config_in_a_parent_directory_is_not_used() {
     let s = Scratch::new("discover");
     s.write(
-        "ensemble.yaml",
+        ".ensemble/config.yaml",
         &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
     let deep = s.path().join("a/b/c");
@@ -192,7 +192,7 @@ fn a_config_in_a_parent_directory_is_not_used() {
         .unwrap();
     assert!(
         !out.status.success(),
-        "a parent's ensemble.yaml must not configure a subfolder"
+        "a parent's config must not configure a subfolder"
     );
     assert!(
         stderr_of(&out).contains("parent directories are not searched"),
@@ -207,7 +207,7 @@ fn a_missing_config_says_so_rather_than_guessing() {
     let out = ensemble(&s, &["check"]);
     assert!(!out.status.success());
     assert!(
-        stderr_of(&out).contains("ensemble.yaml"),
+        stderr_of(&out).contains(".ensemble/config.yaml"),
         "{}",
         stderr_of(&out)
     );
@@ -217,7 +217,7 @@ fn a_missing_config_says_so_rather_than_guessing() {
 fn agents_prints_the_routing_table() {
     let s = Scratch::new("agents");
     s.write(
-        "ensemble.yaml",
+        ".ensemble/config.yaml",
         &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
 
@@ -232,7 +232,7 @@ fn agents_prints_the_routing_table() {
 fn env_overrides_the_configured_default_base_url() {
     let s = Scratch::new("env-override");
     s.write(
-        "ensemble.yaml",
+        ".ensemble/config.yaml",
         &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
 
@@ -258,7 +258,7 @@ fn env_overrides_the_configured_default_base_url() {
 fn run_sends_one_task_to_a_role_and_prints_its_answer() {
     let (url, seen) = openai_stub(vec![text_body("ensemble-real-ok")]);
     let s = Scratch::new("run");
-    s.write("ensemble.yaml", &config_yaml(&url, NOWHERE));
+    s.write(".ensemble/config.yaml", &config_yaml(&url, NOWHERE));
 
     let out = ensemble(&s, &["run", "reviewer", "review", "this", "code"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -296,7 +296,7 @@ fn a_silent_endpoint_is_cut_off_at_the_backend_timeout() {
         "    timeout_seconds: 20\n  openai-local:",
         "    timeout_seconds: 2\n  openai-local:",
     );
-    s.write("ensemble.yaml", &cfg);
+    s.write(".ensemble/config.yaml", &cfg);
 
     let started = std::time::Instant::now();
     let out = ensemble(&s, &["run", "reviewer", "review this"]);
@@ -316,7 +316,7 @@ fn a_silent_endpoint_is_cut_off_at_the_backend_timeout() {
 #[test]
 fn an_unreachable_openai_endpoint_fails_with_a_transport_error_not_a_hang() {
     let s = Scratch::new("openai-down");
-    s.write("ensemble.yaml", &config_yaml(NOWHERE, NOWHERE));
+    s.write(".ensemble/config.yaml", &config_yaml(NOWHERE, NOWHERE));
 
     let out = ensemble(&s, &["run", "coder", "write something"]);
     assert!(!out.status.success());
@@ -416,7 +416,7 @@ fn tool_text(reply: &serde_json::Value) -> String {
 fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
     let s = Scratch::new("mcp-handshake");
     s.write(
-        "ensemble.yaml",
+        ".ensemble/config.yaml",
         &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
     let mut session = McpSession::start(&s);
@@ -450,7 +450,7 @@ fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
 fn a_harness_can_delegate_through_mcp_and_get_the_work_back() {
     let s = Scratch::new("mcp-delegate");
     let (url, seen) = openai_stub(vec![text_body("the review is clean")]);
-    s.write("ensemble.yaml", &config_yaml(&url, NOWHERE));
+    s.write(".ensemble/config.yaml", &config_yaml(&url, NOWHERE));
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
 
@@ -471,7 +471,7 @@ fn a_harness_can_delegate_through_mcp_and_get_the_work_back() {
 fn an_unknown_role_comes_back_as_a_readable_tool_error_and_the_session_survives() {
     let s = Scratch::new("mcp-bad-role");
     s.write(
-        "ensemble.yaml",
+        ".ensemble/config.yaml",
         &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
     let mut session = McpSession::start(&s);
@@ -499,7 +499,7 @@ fn an_unknown_role_comes_back_as_a_readable_tool_error_and_the_session_survives(
 fn a_backend_failure_reaches_the_model_as_a_readable_reason() {
     let s = Scratch::new("mcp-backend-down");
     s.write(
-        "ensemble.yaml",
+        ".ensemble/config.yaml",
         &config_yaml(NOWHERE, "http://127.0.0.1:1/v1"),
     );
     let mut session = McpSession::start(&s);
@@ -522,7 +522,7 @@ fn a_backend_failure_reaches_the_model_as_a_readable_reason() {
 fn the_tools_never_offer_a_way_to_pick_a_model_or_a_backend() {
     let s = Scratch::new("mcp-no-model-param");
     s.write(
-        "ensemble.yaml",
+        ".ensemble/config.yaml",
         &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
     let mut session = McpSession::start(&s);
@@ -545,7 +545,7 @@ fn nothing_but_protocol_is_ever_written_to_stdout() {
     // instead of a tool.
     let s = Scratch::new("mcp-clean-stdout");
     let (url, _) = openai_stub(vec![text_body("fine")]);
-    s.write("ensemble.yaml", &config_yaml(&url, NOWHERE));
+    s.write(".ensemble/config.yaml", &config_yaml(&url, NOWHERE));
 
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
@@ -564,7 +564,7 @@ fn nothing_but_protocol_is_ever_written_to_stdout() {
 fn a_malformed_message_does_not_end_the_session() {
     let s = Scratch::new("mcp-garbage");
     s.write(
-        "ensemble.yaml",
+        ".ensemble/config.yaml",
         &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
     let mut session = McpSession::start(&s);
@@ -588,7 +588,7 @@ fn a_malformed_message_does_not_end_the_session() {
 fn the_server_exits_cleanly_when_the_harness_closes_the_pipe() {
     let s = Scratch::new("mcp-eof");
     s.write(
-        "ensemble.yaml",
+        ".ensemble/config.yaml",
         &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
     );
     let mut session = McpSession::start(&s);
@@ -604,7 +604,7 @@ fn an_invalid_config_stops_the_mcp_server_before_it_serves_anything() {
     // Better to fail at spawn, where the harness reports a server that would
     // not start, than to accept a handshake and fail every delegation.
     let s = Scratch::new("mcp-bad-config");
-    s.write("ensemble.yaml", "version: 1\nbackends: {}\n");
+    s.write(".ensemble/config.yaml", "version: 1\nbackends: {}\n");
     let out = ensemble(&s, &["mcp"]);
     assert!(!out.status.success());
     assert!(stderr_of(&out).contains("backend"), "{}", stderr_of(&out));
@@ -697,7 +697,7 @@ fn a_role_with_tools_edits_the_project_through_its_own_loop_over_mcp() {
     ]);
     let s = Scratch::new("agent-mcp");
     s.write(
-        "ensemble.yaml",
+        ".ensemble/config.yaml",
         &format!(
             "version: 1\nllm_backends:\n  local:\n    type: openai-compatible-api\n    \
              base_url_env: ENSEMBLE_TEST_LOCAL_URL\n    base_url_default: \"{url}\"\n    \
@@ -747,13 +747,29 @@ fn init_writes_a_sample_that_checks_and_never_overwrites_by_accident() {
     let s = Scratch::new("init");
     let out = ensemble(&s, &["init"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let written = std::fs::read_to_string(s.path().join("ensemble.yaml")).unwrap();
+    let written = std::fs::read_to_string(s.path().join(".ensemble/config.yaml")).unwrap();
     assert!(written.contains("type: opencode"), "{written}");
+    assert_eq!(
+        std::fs::read_to_string(s.path().join(".ensemble/.gitignore")).unwrap(),
+        ".env\n"
+    );
+    let env = s.path().join(".ensemble/.env");
+    assert!(
+        std::fs::read_to_string(&env)
+            .unwrap()
+            .contains("OPENAI_LOCAL_API_KEY")
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&env).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "only its owner may read the secrets file");
+    }
 
     let check = ensemble(&s, &["check"]);
     assert!(check.status.success(), "{}", stderr_of(&check));
 
-    s.write("ensemble.yaml", "mine");
+    s.write(".ensemble/config.yaml", "mine");
     let again = ensemble(&s, &["init"]);
     assert!(!again.status.success());
     assert!(
@@ -762,15 +778,56 @@ fn init_writes_a_sample_that_checks_and_never_overwrites_by_accident() {
         stderr_of(&again)
     );
     assert_eq!(
-        std::fs::read_to_string(s.path().join("ensemble.yaml")).unwrap(),
+        std::fs::read_to_string(s.path().join(".ensemble/config.yaml")).unwrap(),
         "mine"
     );
 
     let printed = ensemble(&s, &["init", "--stdout"]);
     assert_eq!(stdout_of(&printed), written);
+    std::fs::write(&env, "MINE=1\n").unwrap();
     assert!(ensemble(&s, &["init", "--force"]).status.success());
     assert_eq!(
-        std::fs::read_to_string(s.path().join("ensemble.yaml")).unwrap(),
+        std::fs::read_to_string(&env).unwrap(),
+        "MINE=1\n",
+        "--force never overwrites the secrets"
+    );
+    assert_eq!(
+        std::fs::read_to_string(s.path().join(".ensemble/config.yaml")).unwrap(),
         written
+    );
+}
+
+#[test]
+fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
+    let s = Scratch::new("dotenv");
+    s.write(".ensemble/config.yaml", &config_yaml(NOWHERE, NOWHERE));
+    s.write(
+        ".ensemble/.env",
+        "ENSEMBLE_TEST_LOCAL_URL=http://10.0.0.7:7777/v1\n",
+    );
+    let out = ensemble(&s, &["check"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.contains("http://10.0.0.7:7777/v1"), "{text}");
+    assert!(text.contains(".env: read for variables"), "{text}");
+
+    let out = Command::new(BIN)
+        .args(["check"])
+        .current_dir(s.path())
+        .env("ENSEMBLE_TEST_LOCAL_URL", "http://10.0.0.9:9999/v1")
+        .output()
+        .unwrap();
+    assert!(
+        stdout_of(&out).contains("http://10.0.0.9:9999/v1"),
+        "the environment wins"
+    );
+
+    s.write(".ensemble/.env", "not a line\n");
+    let out = ensemble(&s, &["check"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("line 1: expected NAME=value"),
+        "{}",
+        stderr_of(&out)
     );
 }

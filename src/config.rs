@@ -1,4 +1,4 @@
-//! `ensemble.yaml`: load, resolve the environment, validate.
+//! `.ensemble/config.yaml`: load, resolve the environment, validate.
 //!
 //! Validation is deliberately loud and early. Every check here corresponds to a
 //! failure that would otherwise surface much later and much less clearly — as a
@@ -8,16 +8,21 @@
 //! Secrets never live in this file. An API key is named by the *variable* that
 //! holds it (`api_key_env`), and the value is read from the environment at load
 //! time. There is no `api_key` field; a config that tries one is rejected by
-//! name so the mistake is caught before the file is committed.
+//! name so the mistake is caught before the file is committed. The values can
+//! also live in `.ensemble/.env`, beside the config and out of git.
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-pub const CONFIG_FILENAME: &str = "ensemble.yaml";
+/// Everything Ensemble keeps in a project lives in this directory.
+pub const CONFIG_DIR: &str = ".ensemble";
+pub const CONFIG_FILENAME: &str = "config.yaml";
+/// Variables for the config's `*_env` settings, beside the config file.
+pub const ENV_FILENAME: &str = ".env";
 
-/// The JSON Schema for `ensemble.yaml`, for editors. `ensemble schema`
+/// The JSON Schema for `config.yaml`, for editors. `ensemble schema`
 /// prints it; the tests keep it in step with the structs below.
 pub const SCHEMA: &str = include_str!("../ensemble.schema.json");
 
@@ -490,15 +495,92 @@ impl Env for BTreeMap<String, String> {
     }
 }
 
-/// The project's own `ensemble.yaml`, and nothing else.
+/// Where a project's config lives: `.ensemble/config.yaml`.
+pub fn config_path(project: &Path) -> PathBuf {
+    project.join(CONFIG_DIR).join(CONFIG_FILENAME)
+}
+
+/// The project's own `.ensemble/config.yaml`, and nothing else.
 ///
 /// Parent directories are deliberately not searched: a team is a property of
 /// one project, and a file in `~/projects/` silently configuring every
 /// checkout below it is exactly the shared, out-of-sight config this rules
 /// out. There is no user-level fallback either.
 pub fn discover(project: &Path) -> Option<PathBuf> {
-    let candidate = project.join(CONFIG_FILENAME);
+    let candidate = config_path(project);
     candidate.is_file().then_some(candidate)
+}
+
+/// The `.env` beside a config file.
+pub fn env_path(config: &Path) -> PathBuf {
+    config.with_file_name(ENV_FILENAME)
+}
+
+/// The real environment, then the `.env` file: a variable that is set wins,
+/// as dotenv files are meant to behave.
+struct Layered<'a> {
+    first: &'a dyn Env,
+    then: &'a BTreeMap<String, String>,
+}
+
+impl Env for Layered<'_> {
+    fn get(&self, key: &str) -> Option<String> {
+        self.first.get(key).or_else(|| self.then.get(key).cloned())
+    }
+}
+
+/// Read a `.env` file: `NAME=value` per line, `#` comments, an optional
+/// `export ` prefix, values optionally in single or double quotes. No
+/// interpolation. Every malformed line is reported.
+pub fn parse_dotenv(text: &str, path: &Path) -> Result<BTreeMap<String, String>, ConfigError> {
+    let mut vars = BTreeMap::new();
+    let mut problems = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((name, value)) = line.split_once('=') else {
+            problems.push(format!("line {}: expected NAME=value", i + 1));
+            continue;
+        };
+        let name = name.trim();
+        let valid = name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            problems.push(format!("line {}: '{name}' is not a variable name", i + 1));
+            continue;
+        }
+        let value = value.trim();
+        let value = if let Some(inner) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+            inner
+                .replace("\\n", "\n")
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\")
+        } else if let Some(inner) = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) {
+            inner.to_string()
+        } else {
+            // An unquoted value ends at a comment.
+            value
+                .split_once(" #")
+                .map_or(value, |(v, _)| v)
+                .trim_end()
+                .to_string()
+        };
+        vars.insert(name.to_string(), value);
+    }
+    if problems.is_empty() {
+        Ok(vars)
+    } else {
+        Err(ConfigError::Invalid {
+            path: path.to_path_buf(),
+            problems,
+        })
+    }
 }
 
 pub fn load(path: &Path, env: &dyn Env) -> Result<Config, ConfigError> {
@@ -511,7 +593,24 @@ pub fn load(path: &Path, env: &dyn Env) -> Result<Config, ConfigError> {
         path: path.to_path_buf(),
         detail: e.to_string(),
     })?;
-    parse(&text, path, env)
+    let dotenv = env_path(path);
+    let file_vars = if dotenv.is_file() {
+        let vars = std::fs::read_to_string(&dotenv).map_err(|e| ConfigError::Unreadable {
+            path: dotenv.clone(),
+            detail: e.to_string(),
+        })?;
+        parse_dotenv(&vars, &dotenv)?
+    } else {
+        BTreeMap::new()
+    };
+    parse(
+        &text,
+        path,
+        &Layered {
+            first: env,
+            then: &file_vars,
+        },
+    )
 }
 
 pub fn parse(text: &str, path: &Path, env: &dyn Env) -> Result<Config, ConfigError> {
@@ -1353,6 +1452,66 @@ agents:
             DEFAULT_TIMEOUT_SECONDS
         );
         assert_eq!(schema["properties"]["version"]["const"], SUPPORTED_VERSION);
+    }
+
+    #[test]
+    fn a_dotenv_file_is_read_with_comments_quotes_and_export() {
+        let text =
+            "# keys\nexport A_KEY=sk-1 # trailing\n\nB=\"two words\"\nC='it#is'\nD=\nE = spaced \n";
+        let vars = parse_dotenv(text, Path::new(".env")).unwrap();
+        assert_eq!(vars["A_KEY"], "sk-1");
+        assert_eq!(vars["B"], "two words");
+        assert_eq!(vars["C"], "it#is");
+        assert_eq!(vars["D"], "");
+        assert_eq!(vars["E"], "spaced");
+        assert_eq!(vars.len(), 5);
+    }
+
+    #[test]
+    fn a_malformed_dotenv_line_is_reported_with_its_number() {
+        let Err(ConfigError::Invalid { problems, .. }) =
+            parse_dotenv("OK=1\njust words\n9X=1\n", Path::new(".env"))
+        else {
+            panic!("expected invalid");
+        };
+        assert_eq!(
+            problems,
+            [
+                "line 2: expected NAME=value",
+                "line 3: '9X' is not a variable name"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_dotenv_beside_the_config_fills_in_what_the_environment_lacks() {
+        let tmp = crate::agent::sandbox::testing::TempDir::new();
+        let dir = tmp.0.join(CONFIG_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(CONFIG_FILENAME),
+            REFERENCE.replace("    api_key_env: OPENAI_REMOTE_API_KEY\n", ""),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(ENV_FILENAME),
+            "OPENAI_LOCAL_API_KEY=from-file\nOPENAI_REMOTE_BASE_URL=http://10.0.0.1:1/v1\n",
+        )
+        .unwrap();
+        let path = discover(&tmp.0).expect("found in .ensemble");
+        let url = |c: &Config, name: &str| match &c.llm_backends[name].settings {
+            BackendSettings::OpenAiCompatible {
+                base_url, api_key, ..
+            } => (base_url.clone(), api_key.clone()),
+        };
+
+        let c = load(&path, &env(&[])).unwrap();
+        assert_eq!(url(&c, "openai-local").1.as_deref(), Some("from-file"));
+        assert_eq!(url(&c, "openai-remote").0, "http://10.0.0.1:1/v1");
+
+        // A variable that is really set wins over the file.
+        let c = load(&path, &env(&[("OPENAI_LOCAL_API_KEY", "from-env")])).unwrap();
+        assert_eq!(url(&c, "openai-local").1.as_deref(), Some("from-env"));
     }
 
     #[test]

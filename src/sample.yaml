@@ -1,6 +1,7 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json
 
-# ensemble.yaml — the agent team for this project, written by `ensemble init`.
+# .ensemble/config.yaml — the agent team for this project, written by
+# `ensemble init`. API keys go in .env beside it, which git ignores.
 #
 # Every setting is here at least once, most of them at their default, so this
 # is a map of what can be set rather than a team to keep as it is: delete the

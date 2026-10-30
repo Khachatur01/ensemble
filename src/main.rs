@@ -9,7 +9,7 @@ use ensemble::config::{self, Config, SystemEnv};
 use ensemble::harness::mcp;
 use ensemble::router::Ensemble;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
@@ -23,19 +23,21 @@ COMMANDS:
                             agent (Claude Code, OpenCode, ...) spawns, with the
                             project as its working directory; it is not meant
                             to be run by hand.
-    init [--force|--stdout] Write a sample ensemble.yaml with every setting, to
-                            edit. Refuses to overwrite one unless --force;
-                            --stdout prints it instead.
+    init [--force|--stdout] Write .ensemble/ with a sample config.yaml that has
+                            every setting, a .env for API keys and a .gitignore
+                            that keeps .env out of git. Refuses to overwrite
+                            config.yaml unless --force; --stdout prints it.
     check                   Load and validate the config, then report the team.
-    schema                  Print the JSON Schema for ensemble.yaml, so an editor
+    schema                  Print the JSON Schema for config.yaml, so an editor
                             can complete and check it. Needs no config.
     agents                  List the agents and what runs each.
     health                  Check that every backend in use is reachable.
     run <AGENT> <TASK>      Send one task to one agent and print the answer.
 
 OPTIONS:
-    -c, --config <PATH>     Path to ensemble.yaml.
-                            Default: ensemble.yaml in the project directory.
+    -c, --config <PATH>     Path to the config file. A .env beside it is read.
+                            Default: .ensemble/config.yaml in the project
+                            directory.
                             Parent directories are not searched.
     -d, --dir <PATH>        The project directory agents work in.
                             Default: the current directory.
@@ -45,7 +47,8 @@ OPTIONS:
 
 ENVIRONMENT:
     Backends name the variables they read; `ensemble check` lists them. API keys
-    are never read from the config file.
+    are never read from the config file. Variables missing from the environment
+    are read from .ensemble/.env, beside the config.
 ";
 
 fn main() -> ExitCode {
@@ -139,8 +142,8 @@ fn run() -> Result<ExitCode, String> {
         Some(p) => p.clone(),
         None => config::discover(&dir).ok_or_else(|| {
             format!(
-                "no {} in the project directory {}. Create one there (parent directories are not searched), or pass --config <path>.",
-                config::CONFIG_FILENAME,
+                "no {} in the project directory {}. Run `ensemble init` there (parent directories are not searched), or pass --config <path>.",
+                Path::new(config::CONFIG_DIR).join(config::CONFIG_FILENAME).display(),
                 dir.display()
             )
         })?,
@@ -175,21 +178,50 @@ fn cmd_init(args: &Args, dir: &std::path::Path) -> Result<ExitCode, String> {
     let path = args
         .config
         .clone()
-        .unwrap_or_else(|| dir.join(config::CONFIG_FILENAME));
+        .unwrap_or_else(|| config::config_path(dir));
     if path.exists() && !has("--force") {
         return Err(format!(
             "{} already exists. Pass --force to overwrite it, or --stdout to print the sample.",
             path.display()
         ));
     }
-    std::fs::write(&path, config::SAMPLE)
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    println!(
-        "wrote {}: a sample team with every setting. Edit the agents, then run `ensemble check`.",
-        path.display()
-    );
+    let folder = path.parent().unwrap_or(dir);
+    std::fs::create_dir_all(folder)
+        .map_err(|e| format!("cannot create {}: {e}", folder.display()))?;
+    let write = |file: &Path, text: &str| {
+        std::fs::write(file, text).map_err(|e| format!("cannot write {}: {e}", file.display()))
+    };
+    write(&path, config::SAMPLE)?;
+    println!("wrote {}: a sample team with every setting", path.display());
+    // The secrets file is the user's once it exists: never overwritten.
+    let env = config::env_path(&path);
+    if !env.exists() {
+        write(&env, SAMPLE_ENV)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&env, std::fs::Permissions::from_mode(0o600));
+        }
+        println!("wrote {}: put API keys here", env.display());
+    }
+    let ignore = folder.join(".gitignore");
+    if !ignore.exists() {
+        write(&ignore, ".env\n")?;
+        println!("wrote {}: keeps .env out of git", ignore.display());
+    }
+    println!("Edit the agents, then run `ensemble check`.");
     Ok(ExitCode::SUCCESS)
 }
+
+/// The `.env` `ensemble init` writes beside the sample config.
+const SAMPLE_ENV: &str = "\
+# Variables for config.yaml's base_url_env and api_key_env settings, read when
+# they are not set in the environment. A variable that is set wins over this
+# file. Keep it out of git; the .gitignore beside it does.
+#
+# OPENAI_LOCAL_BASE_URL=http://127.0.0.1:11434/v1
+# OPENAI_LOCAL_API_KEY=
+";
 
 fn build(config: Config, dir: PathBuf) -> Result<Ensemble, String> {
     Ensemble::new(config, Some(dir)).map_err(|e| e.to_string())
@@ -218,6 +250,13 @@ fn cmd_check(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
         config.source.display(),
         config.version
     );
+    let env = config::env_path(&config.source);
+    if env.is_file() {
+        println!(
+            "{}: read for variables the environment does not set",
+            env.display()
+        );
+    }
     println!();
     println!("llm_backends:");
     for (name, b) in &config.llm_backends {

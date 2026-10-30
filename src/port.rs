@@ -400,7 +400,7 @@ impl std::error::Error for Error {}
 /// conversation state, so one instance serves every agent assigned to it and the
 /// router can hand out shared references.
 pub trait ModelPort: Send + Sync {
-    /// The backend instance name from `ensemble.yaml`, for errors and logs.
+    /// The backend instance name from the config, for errors and logs.
     fn name(&self) -> &str;
 
     /// The backend type id — `openai-compatible-api`.

@@ -1,6 +1,6 @@
 //! Ensemble's own agent: a model, a tool loop, and a fenced-in project.
 //!
-//! An agent with `tools:` in `ensemble.yaml` is run here rather than as one
+//! An agent with `tools:` in the config is run here rather than as one
 //! completion. [`run`] offers the agent's tools to its model, executes the calls
 //! the model makes against the project directory ([`tools`], confined by
 //! [`sandbox`]), feeds the results back, and repeats until the model answers

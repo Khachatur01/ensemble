@@ -2,7 +2,7 @@
 
 An MCP server that gives your agent a team of agents.
 
-You describe the team in `ensemble.yaml`: agents, each with an adapter that
+You describe the team in `.ensemble/config.yaml`: agents, each with an adapter that
 says what runs it. Your own agent — Claude Code, OpenCode, anything that speaks
 MCP — is the manager. It sees the team as tools and delegates to an agent by
 name.
@@ -43,12 +43,12 @@ any of them the same way. Codex is meant to become a further adapter type.
 
    ```console
    $ cd /your/project
-   $ ensemble init     # writes ensemble.yaml: a sample team with every setting
+   $ ensemble init     # writes .ensemble/: config.yaml, .env, .gitignore
    $ ensemble check
    ```
 
    Edit the agents first: the sample has one of each adapter type, with every
-   setting and what it does.
+   setting and what it does. Put API keys in `.ensemble/.env`.
 
    `check` validates the config, prints the team and says whether the LLM
    backends can be built.
@@ -67,7 +67,7 @@ argument on any tool, deliberately.
 
 Ensemble is a standard MCP server on stdio. Any agent that can spawn one can
 use it; nothing in it is specific to one harness. Register it from the project
-directory, the one with `ensemble.yaml`.
+directory, the one with `.ensemble/`.
 
 **OpenCode**
 
@@ -92,8 +92,8 @@ ensemble: ensemble mcp - ✔ Connected
 `--scope project` writes it to `.mcp.json` for everyone who clones the repo.
 
 A registration for every project (`--global`, `--scope user`) works too, but
-only projects that have an `ensemble.yaml` get a team: elsewhere the server
-exits at once with "no ensemble.yaml in the project directory", and the agent
+only projects that have a `.ensemble/config.yaml` get a team: elsewhere the
+server exits at once with "no .ensemble/config.yaml in the project directory", and the agent
 lists it as failed. Ensemble reads no user-level config.
 
 Your agent sees three tools: `delegate` (send a task to an agent, get the work
@@ -102,11 +102,19 @@ backend reachable, and every agent CLI installed).
 
 ## Configuration
 
-Ensemble reads `ensemble.yaml` from the project directory (the working
-directory your agent spawned it in, or `--dir`) and nowhere else: parent
-directories are not searched and there is no user-level config. Each project
-defines its own team; to share one, copy the file. `ensemble init` writes a
-sample with every setting.
+Everything Ensemble keeps in a project lives in `.ensemble/`, in the project
+directory (the working directory your agent spawned it in, or `--dir`):
+
+| file | |
+| --- | --- |
+| `config.yaml` | the team. Commit it |
+| `.env` | API keys and other variables the config names. Not committed |
+| `.gitignore` | keeps `.env` out of git |
+
+`ensemble init` writes all three; `config.yaml` is a sample with every
+setting. Ensemble reads them from the project directory and nowhere else:
+parent directories are not searched and there is no user-level config. Each
+project defines its own team; to share one, copy the folder.
 
 ```yaml
 version: 1
@@ -362,12 +370,27 @@ client program, so they cost the manager no tokens.
 
 ### Secrets
 
-API keys are named by the **variable** that holds them and read from the
-environment at load time. There is no `api_key` field, and a config that tries
+API keys are named by the **variable** that holds them (`api_key_env`), never
+written in `config.yaml`: there is no `api_key` field, and a config that tries
 one is rejected by name — before it reaches a commit.
 
-Environment variables override `base_url_default`. A variable that is exported
-but empty falls through to the default.
+The values come from the environment, or from `.ensemble/.env`:
+
+```sh
+# .ensemble/.env — NAME=value per line, # comments, optional quotes
+OPENAI_LOCAL_API_KEY=sk-...
+OPENAI_LOCAL_BASE_URL=http://127.0.0.1:11434/v1
+```
+
+A variable set in the environment wins over the file. The file only feeds
+Ensemble's own settings: it is not passed on to `bash` commands or to the
+Claude Code and OpenCode CLIs, so a key in it cannot change how those log in.
+`ensemble init` creates it readable by you alone, and the `.gitignore` beside
+it keeps it out of git. With `--config <path>`, the `.env` beside that file
+is read.
+
+Environment variables override `base_url_default`. A variable that is set but
+empty falls through to the default.
 
 With Ollama, raise the context window before starting it. The default is 4096
 tokens, which a tool-using agent can exceed after a few file reads:
@@ -378,7 +401,7 @@ $ OLLAMA_CONTEXT_LENGTH=32768 ollama serve
 
 ### Editor support
 
-`ensemble.yaml` has a JSON Schema, [`ensemble.schema.json`](ensemble.schema.json):
+`config.yaml` has a JSON Schema, [`ensemble.schema.json`](ensemble.schema.json):
 completion for every key and value, hover descriptions, defaults, and errors for
 the mistakes `ensemble check` would also report (a missing `context_window`, a
 field the adapter type does not take, an unknown tool). The first line of the
@@ -400,7 +423,7 @@ Every independent problem is reported in one pass:
 
 ```console
 $ ensemble check
-ensemble: ensemble.yaml is invalid:
+ensemble: .ensemble/config.yaml is invalid:
   - version: 4 is not supported; this build understands version 1
   - llm_backends.x: type 'ollama' is unknown. Known types: openai-compatible-api.
   - agents.coder.adapter: LLM backend 'opanai-local' is not defined. Defined LLM backends: openai-local, x.
@@ -476,13 +499,13 @@ Day to day you do not run Ensemble — your agent does. These are for setting it
 up and for debugging it.
 
 ```console
-$ ensemble init                 # write a sample ensemble.yaml with every setting
+$ ensemble init                 # write .ensemble/ with a sample config.yaml, .env, .gitignore
 $ ensemble init --stdout        # print it instead (init refuses to overwrite without --force)
 $ ensemble check                # validate the config, print the team
 $ ensemble agents               # the routing table
 $ ensemble health               # every LLM backend reachable, every agent CLI installed? non-zero if not
 $ ensemble run <agent> <task>   # send one task to one agent (it works in --dir)
-$ ensemble schema               # print the JSON Schema for ensemble.yaml
+$ ensemble schema               # print the JSON Schema for config.yaml
 $ ensemble mcp                  # serve the team over stdio
 ```
 
@@ -501,8 +524,8 @@ current directory), `--context <text>` (for `run`).
 | `src/router.rs` | agents → adapters; the ensemble itself |
 | `src/harness/delegation.rs` | the three tools your agent calls: delegate, agents, health |
 | `src/harness/mcp.rs` | the MCP server, over stdio |
-| `src/config.rs` | `ensemble.yaml`: load, resolve the environment, validate |
-| `ensemble.schema.json` | the JSON Schema for `ensemble.yaml` |
+| `src/config.rs` | `.ensemble/config.yaml` and `.env`: load, resolve the environment, validate |
+| `ensemble.schema.json` | the JSON Schema for `config.yaml` |
 
 The layering is load-bearing in one direction: **a backend-specific detail may
 never travel upward.** The router knows agents and `ModelPort`; it does not
