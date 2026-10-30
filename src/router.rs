@@ -149,8 +149,29 @@ impl Ensemble {
         cancel: &AtomicBool,
     ) -> Result<Outcome, RouteError> {
         let agent = self.resolve(name)?;
+        let workdir = self.workdir().map_err(|e| {
+            RouteError::Agent(Error::Unsupported {
+                backend: agent.kind().to_string(),
+                detail: format!("no working directory for agent '{}': {e}", agent.name),
+            })
+        })?;
+        self.delegate_in(name, task, context, &workdir, progress, cancel)
+    }
+
+    /// [`Self::delegate_reporting`], with the agent working in `workdir`
+    /// instead of the project directory, such as a task's git worktree.
+    pub fn delegate_in(
+        &self,
+        name: &str,
+        task: &str,
+        context: Option<&str>,
+        workdir: &std::path::Path,
+        progress: &dyn Fn(&str),
+        cancel: &AtomicBool,
+    ) -> Result<Outcome, RouteError> {
+        let agent = self.resolve(name)?;
         match &agent.adapter {
-            Adapter::ClaudeCode(cc) => self.run_tracked(agent, |dir| {
+            Adapter::ClaudeCode(cc) => self.run_tracked(agent, workdir, |dir| {
                 crate::external::claude_code::run(agent, cc, task, context, dir, progress, cancel)
             }),
             Adapter::OpenCode(oc) => {
@@ -165,7 +186,7 @@ impl Ensemble {
                         })
                     })
                     .transpose()?;
-                self.run_tracked(agent, |dir| {
+                self.run_tracked(agent, workdir, |dir| {
                     crate::external::opencode::run(
                         agent, oc, backend, task, context, dir, progress, cancel,
                     )
@@ -179,23 +200,23 @@ impl Ensemble {
     fn run_tracked(
         &self,
         agent: &AgentConfig,
+        workdir: &std::path::Path,
         run: impl FnOnce(&std::path::Path) -> Result<AgentRun, Error>,
     ) -> Result<Outcome, RouteError> {
-        let workdir = match &self.workdir {
-            Some(dir) => dir.clone(),
-            None => std::env::current_dir().map_err(|e| {
-                RouteError::Agent(Error::Unsupported {
-                    backend: agent.kind().to_string(),
-                    detail: format!("no working directory for agent '{}': {e}", agent.name),
-                })
-            })?,
+        // Only runs in the project itself can see each other's changes; one in
+        // a worktree of its own neither counts nor is counted.
+        let in_project = self.workdir().is_ok_and(|dir| dir == workdir);
+        let run = if in_project {
+            let me = self.started.fetch_add(1, Ordering::SeqCst) + 1;
+            let others_running = self.active.fetch_add(1, Ordering::SeqCst) > 0;
+            let run = run(workdir);
+            let overlapped = others_running || self.started.load(Ordering::SeqCst) != me;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            run.map(|r| (r, overlapped))
+        } else {
+            run(workdir).map(|r| (r, false))
         };
-        let me = self.started.fetch_add(1, Ordering::SeqCst) + 1;
-        let others_running = self.active.fetch_add(1, Ordering::SeqCst) > 0;
-        let run = run(&workdir);
-        let overlapped = others_running || self.started.load(Ordering::SeqCst) != me;
-        self.active.fetch_sub(1, Ordering::SeqCst);
-        let run = run.map_err(RouteError::Agent)?;
+        let (run, overlapped) = run.map_err(RouteError::Agent)?;
         Ok(Outcome {
             agent: agent.name.clone(),
             runs_on: agent.runs_on(),
@@ -313,6 +334,7 @@ agents:
   looker:
     max_seconds: 1800
     max_concurrent: 2
+    isolation: shared
     adapter:
       type: opencode
       model: {{ type: provider, name: opencode/big-pickle }}
@@ -322,6 +344,7 @@ agents:
   doer:
     max_seconds: 1800
     max_concurrent: 2
+    isolation: shared
     adapter:
       type: opencode
       model: {{ type: llm_backend, backend: local, name: qwen3.5-9b, context_window: 32768 }}
@@ -331,6 +354,7 @@ agents:
   reviewer:
     max_seconds: 1800
     max_concurrent: 2
+    isolation: shared
     adapter:
       type: claude-code
       model: sonnet

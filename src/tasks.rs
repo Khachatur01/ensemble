@@ -189,6 +189,7 @@ impl Entry {
 /// The tasks and runs of one project: `.ensemble/tasks/` and `.ensemble/runs/`.
 #[derive(Debug, Clone)]
 pub struct Store {
+    root: PathBuf,
     tasks: PathBuf,
     runs: PathBuf,
 }
@@ -198,9 +199,15 @@ impl Store {
     /// until something is written.
     pub fn new(dir: &Path) -> Self {
         Store {
+            root: dir.to_path_buf(),
             tasks: dir.join(TASKS_DIR),
             runs: dir.join(RUNS_DIR),
         }
+    }
+
+    /// The project's `.ensemble/`.
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn tasks_dir(&self) -> &Path {

@@ -70,6 +70,10 @@ agents:
     # Most delegations to it that run at once; more wait for a free slot.
     # 1 suits a model server that serves one request at a time.
     max_concurrent: 1
+    # Where its tasks run: `shared` in the project, or `worktree`, each task in
+    # its own git worktree on the branch ensemble/<id>, committed there and
+    # never merged by Ensemble.
+    isolation: worktree
     adapter:
       type: opencode
       # Where the model comes from: `llm_backend` for one an entry of
@@ -96,6 +100,7 @@ agents:
       one-line note each. You do not edit.
     max_seconds: 1800
     max_concurrent: 1
+    isolation: shared
     adapter:
       type: opencode
       model:
@@ -114,6 +119,7 @@ agents:
       file:line — problem — fix. You do not rewrite the code.
     max_seconds: 1800
     max_concurrent: 1
+    isolation: shared
     adapter:
       type: claude-code
       # An alias (sonnet, opus, haiku) or a full model id.

@@ -389,6 +389,15 @@ mod tests {
 
     /// [`team`], each agent running at most `max_concurrent` at once.
     fn team_limited(scripts: &[(&str, &str, &str)], max_concurrent: u32) -> (Ensemble, TempDir) {
+        team_with(scripts, max_concurrent, "shared")
+    }
+
+    /// [`team_limited`], with each agent's tasks run as `isolation` says.
+    fn team_with(
+        scripts: &[(&str, &str, &str)],
+        max_concurrent: u32,
+        isolation: &str,
+    ) -> (Ensemble, TempDir) {
         let tmp = TempDir::new();
         let bin = tmp.0.join("bin");
         let project = tmp.0.join("project");
@@ -401,7 +410,7 @@ mod tests {
         for (name, tools, body) in scripts {
             let command = cli(&bin, name, body);
             yaml.push_str(&format!(
-                "  {name}:\n    prompt: \"The {name}. Second line.\"\n    max_seconds: 1800\n    max_concurrent: {max_concurrent}\n    adapter:\n      type: opencode\n      model: {{ type: provider, name: opencode/m-{name} }}\n      tools: [{tools}]\n      max_steps: 30\n      command: \"{command}\"\n"
+                "  {name}:\n    prompt: \"The {name}. Second line.\"\n    max_seconds: 1800\n    max_concurrent: {max_concurrent}\n    isolation: {isolation}\n    adapter:\n      type: opencode\n      model: {{ type: provider, name: opencode/m-{name} }}\n      tools: [{tools}]\n      max_steps: 30\n      command: \"{command}\"\n"
             ));
         }
         let cfg =
@@ -764,7 +773,7 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
         assert!(text_of(&good).contains(": ok"), "{}", text_of(&good));
 
         let cfg = config::parse(
-            "version: 1\nllm_backends: {}\ngates: {}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 4\n    adapter: { type: opencode, model: { type: provider, name: a/b }, tools: [read], max_steps: 3, command: /nonexistent/opencode }\n",
+            "version: 1\nllm_backends: {}\ngates: {}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 4\n    isolation: shared\n    adapter: { type: opencode, model: { type: provider, name: a/b }, tools: [read], max_steps: 3, command: /nonexistent/opencode }\n",
             std::path::Path::new("config.yaml"),
             &BTreeMap::new(),
         )
@@ -1412,5 +1421,80 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
             prompt.contains("Your previous reply was:\nfirst"),
             "{prompt}"
         );
+    }
+    #[test]
+    fn a_worktree_agent_works_on_a_branch_of_its_own_and_leaves_the_project_alone() {
+        let writer = r#"printf '%s' "$(pwd)" > ../where
+echo changed > a.txt
+touch done.txt
+printf '{"type":"text","part":{"text":"edited"}}\n'
+"#;
+        let (e, tmp) = team_with(&[("coder", "read, edit", writer)], 2, "worktree");
+        crate::worktree::testing::repo(&project(&tmp));
+        let dir = tasks(&tmp).join("0001-edit");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("task.md"),
+            "---\ntitle: Edit a.txt\nagent: coder\ngate: {name: done-file, attempts: 1}\n---\nEdit.\n",
+        )
+        .unwrap();
+        session(&e, |ask| {
+            let r = ask("wait", json!({"task": "0001-edit", "timeout_seconds": 20}));
+            assert!(r.starts_with("---\nstatus: done\n"), "{r}");
+            assert!(r.contains("branch: ensemble/0001-edit\ncommit: "), "{r}");
+            assert!(
+                r.contains("[files changed: a.txt (added), done.txt (added)]"),
+                "{r}"
+            );
+            assert!(
+                r.contains("[work committed on branch ensemble/0001-edit as "),
+                "{r}"
+            );
+            assert!(!r.contains("another delegation ran"), "{r}");
+        });
+        let wt = project(&tmp).join(".ensemble/worktrees/0001-edit");
+        let worked_in =
+            std::fs::read_to_string(project(&tmp).join(".ensemble/worktrees/where")).unwrap();
+        assert!(
+            worked_in.ends_with(".ensemble/worktrees/0001-edit"),
+            "{worked_in}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("a.txt")).unwrap(),
+            "changed\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project(&tmp).join("a.txt")).unwrap(),
+            "hello"
+        );
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(project(&tmp))
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        assert_eq!(
+            git(&["log", "--format=%s", "-1", "ensemble/0001-edit"]).trim(),
+            "0001-edit: Edit a.txt"
+        );
+        let status = git(&["status", "--porcelain"]);
+        assert!(!status.contains("worktrees"), "{status}");
+    }
+
+    #[test]
+    fn a_worktree_agent_outside_a_git_repository_fails_its_task_saying_why() {
+        let (e, tmp) = team_with(
+            &[("coder", "read", &emit(&step(vec![text("x")])))],
+            1,
+            "worktree",
+        );
+        write_task(&tmp, "0001-a", "coder", "a");
+        session(&e, |ask| {
+            let r = ask("wait", json!({"task": "0001-a", "timeout_seconds": 20}));
+            assert!(r.starts_with("---\nstatus: failed\n"), "{r}");
+            assert!(r.contains("git repository with at least one commit"), "{r}");
+        });
     }
 }

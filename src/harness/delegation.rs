@@ -292,7 +292,7 @@ pub fn call<'s>(
             // An unknown agent fails at once, so it takes the blocking path
             // and says so now rather than inside a background run.
             if !ensemble.agents().contains(&role) {
-                return run_delegation(ensemble, role, task, context, progress, cancel);
+                return run_delegation(ensemble, role, task, context, None, progress, cancel);
             }
             if background {
                 let id = queue.start_adhoc(role, task, context, spawn);
@@ -307,7 +307,7 @@ pub fn call<'s>(
                     "delegation cancelled while it waited for a free slot of '{role}'."
                 ));
             };
-            run_delegation(ensemble, role, task, context, progress, cancel)
+            run_delegation(ensemble, role, task, context, None, progress, cancel)
         }
 
         SUBMIT => {
@@ -476,16 +476,21 @@ pub fn call<'s>(
 
 /// Delegate and turn the outcome into a tool result: the agent's work and a
 /// footer of what it did, or why it failed and whether another attempt could
-/// work.
+/// work. The agent works in `workdir`, or in the project without one.
 pub(super) fn run_delegation(
     ensemble: &Ensemble,
     role: &str,
     task: &str,
     context: Option<&str>,
+    workdir: Option<&std::path::Path>,
     progress: &dyn Fn(&str),
     cancel: &AtomicBool,
 ) -> ToolResult {
-    match ensemble.delegate_reporting(role, task, context, progress, cancel) {
+    let outcome = match workdir {
+        Some(dir) => ensemble.delegate_in(role, task, context, dir, progress, cancel),
+        None => ensemble.delegate_reporting(role, task, context, progress, cancel),
+    };
+    match outcome {
         Ok(out) => ToolResult {
             text: format!("{}\n\n{}", out.text, agent_footer(role, &out.stats)),
             is_error: false,

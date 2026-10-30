@@ -23,9 +23,11 @@
 //! its agent first, so `max_concurrent` means what it says.
 
 use super::delegation::{ToolResult, run_delegation};
+use crate::config::Isolation;
 use crate::external::gate;
 use crate::router::Ensemble;
 use crate::tasks::{Entry, Status, Store, Ticket, waiting_for};
+use crate::worktree;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -245,6 +247,7 @@ impl<'e> Queue<'e> {
                         &agent,
                         &task,
                         context.as_deref(),
+                        None,
                         &|line| self.note(&run, line),
                         &cancel,
                     )
@@ -329,14 +332,52 @@ impl<'e> Queue<'e> {
     fn run_ticket(&self, store: &Store, ticket: Ticket, slot: Slot<'_>, cancel: &AtomicBool) {
         let since = SystemTime::now();
         store.set_state(&ticket.id, "running", since);
-        let (result, extra) = match self.ensemble.workdir() {
-            Ok(dir) => self.work_on(&ticket, &dir, cancel),
-            Err(e) => (
-                ToolResult::err(format!("no project directory to work in: {e}")),
-                Vec::new(),
-            ),
+        let place = self
+            .ensemble
+            .workdir()
+            .map_err(|e| format!("no project directory to work in: {e}"))
+            .and_then(
+                |project| match self.ensemble.config().agent(&ticket.agent) {
+                    Some(a) if a.isolation == Isolation::Worktree => {
+                        self.note(
+                            &ticket.id,
+                            &format!("{}: preparing a git worktree", ticket.agent),
+                        );
+                        worktree::prepare(&project, store.root(), &ticket.id)
+                            .map(|wt| (wt.dir.clone(), Some(wt)))
+                    }
+                    _ => Ok((project, None)),
+                },
+            );
+        let (mut result, mut extra) = match &place {
+            Ok((dir, _)) => self.work_on(&ticket, dir, cancel),
+            Err(e) => (ToolResult::err(e.clone()), Vec::new()),
         };
         drop(slot);
+        // Commit the work on the task's branch, unless the session ended under
+        // it: then the worktree is left as it is, for the next session.
+        let interrupted_now = cancel.load(Ordering::Relaxed)
+            && !self.lock().live.get(&ticket.id).is_some_and(|l| l.asked);
+        if let Ok((_, Some(wt))) = &place
+            && !interrupted_now
+        {
+            extra.push(("branch", wt.branch.clone()));
+            let note = match worktree::commit(wt, &format!("{}: {}", ticket.id, ticket.title)) {
+                Ok(Some(sha)) => {
+                    extra.push(("commit", sha.clone()));
+                    format!(
+                        "[work committed on branch {} as {sha}; Ensemble does not merge it]",
+                        wt.branch
+                    )
+                }
+                Ok(None) => format!("[no changes to commit on branch {}]", wt.branch),
+                Err(e) => format!(
+                    "[the work in {} could not be committed: {e}]",
+                    wt.dir.display()
+                ),
+            };
+            result.text = format!("{}\n{note}", result.text);
+        }
         let mut inner = self.lock();
         let asked = inner.live.get(&ticket.id).is_some_and(|l| l.asked);
         if cancel.load(Ordering::Relaxed) && !asked {
@@ -384,6 +425,7 @@ impl<'e> Queue<'e> {
                 &ticket.agent,
                 prompt,
                 ticket.context.as_deref(),
+                Some(dir),
                 &note,
                 cancel,
             )

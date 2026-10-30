@@ -424,6 +424,7 @@ mod tests {
             prompt: Some("You review code.".into()),
             max_seconds,
             max_concurrent: 1,
+            isolation: crate::config::Isolation::Shared,
             adapter: Adapter::OpenCode(oc.clone()),
         };
         (a, oc)

@@ -110,6 +110,7 @@
       "required": [
         "max_seconds",
         "max_concurrent",
+        "isolation",
         "adapter"
       ],
       "additionalProperties": false,
@@ -127,6 +128,13 @@
           "description": "Most delegations to this agent that run at once in a session, background tasks and blocking calls alike; more wait for a free slot. 1 suits a model server that serves one request at a time.",
           "type": "integer",
           "minimum": 1
+        },
+        "isolation": {
+          "description": "Where its tasks run. shared: in the project directory. worktree: each task in its own git worktree (.ensemble/worktrees/<id>) on the branch ensemble/<id>, where its work is committed; Ensemble never merges it. Delegations, blocking or in the background, always run in the project.",
+          "enum": [
+            "shared",
+            "worktree"
+          ]
         },
         "adapter": {
           "description": "What runs this agent. `type` decides which other settings there are.",

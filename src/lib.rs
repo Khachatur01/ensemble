@@ -27,3 +27,4 @@ pub mod port;
 pub mod router;
 pub mod tasks;
 pub mod workspace;
+pub mod worktree;

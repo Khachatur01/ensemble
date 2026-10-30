@@ -122,6 +122,9 @@ struct RawAgent {
     /// wait for a free slot. 1 for a model server that can serve one request
     /// at a time.
     max_concurrent: u32,
+    /// Where its tasks run: in the project itself, or each in a git worktree
+    /// of its own.
+    isolation: Isolation,
     /// What runs the agent, and how.
     adapter: RawAdapter,
 }
@@ -234,7 +237,20 @@ pub struct AgentConfig {
     pub max_seconds: u32,
     /// See [`RawAgent::max_concurrent`].
     pub max_concurrent: u32,
+    pub isolation: Isolation,
     pub adapter: Adapter,
+}
+
+/// Where an agent's tasks run. Delegations, blocking or in the background,
+/// always run in the project: their caller is waiting to see the change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Isolation {
+    /// In the project directory, alongside everything else.
+    Shared,
+    /// Each task in its own git worktree, on a branch named after the task,
+    /// where the agent's work is committed. Ensemble never merges it.
+    Worktree,
 }
 
 /// What runs an agent.
@@ -707,6 +723,7 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
                 prompt: ra.prompt.clone(),
                 max_seconds: ra.max_seconds,
                 max_concurrent: ra.max_concurrent,
+                isolation: ra.isolation,
                 adapter,
             },
         );
@@ -962,6 +979,7 @@ agents:
   planner:
     max_seconds: 1800
     max_concurrent: 1
+    isolation: shared
     adapter:
       type: opencode
       model:
@@ -975,6 +993,7 @@ agents:
   coder:
     max_seconds: 900
     max_concurrent: 1
+    isolation: shared
     adapter:
       type: opencode
       model:
@@ -988,6 +1007,7 @@ agents:
   reviewer:
     max_seconds: 1800
     max_concurrent: 1
+    isolation: shared
     adapter:
       type: claude-code
       model: sonnet
@@ -1128,14 +1148,14 @@ agents:
 
         // The window belongs to the model on an LLM backend, nowhere else.
         let doc = REFERENCE.replace(
-            "    max_concurrent: 1\n    adapter:\n      type: claude-code",
-            "    max_concurrent: 1\n    context_window: 8000\n    adapter:\n      type: claude-code",
+            "    isolation: shared\n    adapter:\n      type: claude-code",
+            "    isolation: shared\n    context_window: 8000\n    adapter:\n      type: claude-code",
         );
         assert!(refusal(&doc).contains("context_window"));
 
         let provider = "model:\n        type: provider\n        name: opencode/big-pickle\n        context_window: 1\n";
         let doc = format!(
-            "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    adapter:\n      type: opencode\n      {provider}      tools: []\n      max_steps: 3\n      command: opencode\n"
+            "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    adapter:\n      type: opencode\n      {provider}      tools: []\n      max_steps: 3\n      command: opencode\n"
         );
         assert!(refusal(&doc).contains("context_window"));
     }
@@ -1144,7 +1164,7 @@ agents:
     fn an_opencode_model_is_a_provider_model_or_an_llm_backend_model() {
         let doc = |model: &str| {
             format!(
-                "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      max_steps: 3\n      command: opencode\n"
+                "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      max_steps: 3\n      command: opencode\n"
             )
         };
         let c = parse(
@@ -1487,6 +1507,7 @@ agents:
   doer:
     max_seconds: 600
     max_concurrent: 1
+    isolation: shared
     adapter:
       type: opencode
       model: { type: provider, name: "ollama/qwen3.5:9b" }
@@ -1509,6 +1530,7 @@ agents:
   x:
     max_seconds: 60
     max_concurrent: 1
+    isolation: shared
     adapter:
       type: opencode
       model: { type: provider, name: big-pickle }
@@ -1548,6 +1570,19 @@ agents:
                 && detail.contains("unknown variant `codex`")
                 && detail.contains("claude-code")
                 && detail.contains("opencode"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn isolation_is_shared_or_worktree() {
+        let doc = REFERENCE.replacen("isolation: shared", "isolation: worktree", 1);
+        let c = parse(&doc, &p(), &env(&[])).unwrap();
+        assert_eq!(c.agents["planner"].isolation, Isolation::Worktree);
+        let bad = REFERENCE.replacen("isolation: shared", "isolation: branch", 1);
+        let detail = refusal(&bad);
+        assert!(
+            detail.contains("unknown variant `branch`") && detail.contains("worktree"),
             "{detail}"
         );
     }
@@ -1728,6 +1763,7 @@ agents:
   r:
     max_seconds: 0
     max_concurrent: 1
+    isolation: shared
     adapter:
       type: opencode
       model: { type: llm_backend, backend: missing, name: "", context_window: 0 }
@@ -1763,8 +1799,8 @@ agents: {}
         let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
         assert_eq!(c.agents["coder"].prompt, None);
         let with = REFERENCE.replacen(
-            "  coder:\n    max_seconds: 900\n    max_concurrent: 1\n",
-            "  coder:\n    prompt: Writes code.\n    max_seconds: 900\n    max_concurrent: 1\n",
+            "  coder:\n    max_seconds: 900\n    max_concurrent: 1\n    isolation: shared\n",
+            "  coder:\n    prompt: Writes code.\n    max_seconds: 900\n    max_concurrent: 1\n    isolation: shared\n",
             1,
         );
         let c = parse(&with, &p(), &env(&[])).unwrap();

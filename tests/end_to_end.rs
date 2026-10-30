@@ -104,6 +104,7 @@ agents:
     prompt: "Reviews code and reports findings."
     max_seconds: 1800
     max_concurrent: 2
+    isolation: shared
     adapter:
       type: opencode
       model: {{ type: provider, name: opencode/reviewer-model }}
@@ -113,6 +114,7 @@ agents:
   coder:
     max_seconds: 1800
     max_concurrent: 2
+    isolation: shared
     adapter:
       type: opencode
       model:
@@ -214,6 +216,7 @@ agents:
   r:
     max_seconds: 60
     max_concurrent: 2
+    isolation: shared
     adapter:
       type: opencode
       model: { type: llm_backend, backend: nowhere, name: "", context_window: 8000 }
@@ -235,7 +238,7 @@ fn a_config_with_the_removed_ensemble_type_says_what_to_use_instead() {
     let s = Scratch::new("removed-type");
     s.write(
         ".ensemble/config.yaml",
-        "version: 1\nllm_backends: {}\ngates: {}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 2\n    adapter: { type: ensemble, model: m }\n",
+        "version: 1\nllm_backends: {}\ngates: {}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 2\n    isolation: shared\n    adapter: { type: ensemble, model: m }\n",
     );
     let out = ensemble(&s, &["check"]);
     assert!(!out.status.success());

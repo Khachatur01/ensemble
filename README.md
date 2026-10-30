@@ -137,6 +137,7 @@ agents:
     prompt: You implement exactly what is asked, in the style of the code around it.
     max_seconds: 1800
     max_concurrent: 1
+    isolation: shared
     adapter:
       type: opencode
       model:
@@ -152,6 +153,7 @@ agents:
     prompt: You review code for correctness and report findings as file:line — problem.
     max_seconds: 1800
     max_concurrent: 1
+    isolation: shared
     adapter:
       type: claude-code
       model: sonnet
@@ -177,6 +179,7 @@ hardcoded as planner, coder or reviewer. It has:
 | `prompt` | what it is for. The first line is what your agent sees in `agents`; the whole of it is the agent's system prompt. Optional: without it the agent has none |
 | `max_seconds` | wall-clock limit for one delegation. At the limit the CLI and its whole process tree are killed and what it did is returned, marked unfinished |
 | `max_concurrent` | most delegations to it that run at once in a session: tasks, background and blocking delegations alike. More wait for a free slot. `1` suits a model server that serves one request at a time |
+| `isolation` | where its tasks run: `shared`, in the project directory, or `worktree`, each task in a git worktree of its own (see [Tasks](#tasks-and-background-delegations)). Delegations always run in the project |
 | `adapter` | what runs it. `type` decides which other fields the adapter takes |
 
 An **LLM backend** is a model server of yours, defined once. An OpenCode agent
@@ -207,6 +210,7 @@ agents:
     prompt: You fix exactly what is asked, then say what you changed.
     max_seconds: 1800
     max_concurrent: 1
+    isolation: shared
     adapter:
       type: opencode
       model:
@@ -221,6 +225,7 @@ agents:
   explorer:
     max_seconds: 1800
     max_concurrent: 1
+    isolation: shared
     adapter:
       type: opencode
       model:
@@ -277,6 +282,7 @@ agents:
     prompt: You review code for correctness and report findings as file:line — problem.
     max_seconds: 1800
     max_concurrent: 1
+    isolation: shared
     adapter:
       type: claude-code
       model: sonnet         # an alias (sonnet, opus, haiku) or a full model id
@@ -411,11 +417,23 @@ git. `ensemble init` writes `.ensemble/tasks/README.md` with the format, and
 `ensemble check` reports a `task.md` that cannot be read or names an agent
 that does not exist.
 
+An agent with `isolation: worktree` runs each task in a git worktree of its
+own, `.ensemble/worktrees/<id>`, on the branch `ensemble/<id>` made from the
+project's `HEAD`. The project directory is not touched, so such tasks can run
+side by side. The gate runs in the worktree too. When the task ends, everything
+it changed is committed on its branch (`--no-verify`, your git identity), and
+`result.md` records `branch` and `commit`. Ensemble never merges: review the
+branch and merge it yourself, or have the manager do it, then
+`git worktree remove .ensemble/worktrees/<id>`. A task run again, or one the
+session's end interrupted, carries on in the worktree it had. The project must
+be a git repository with at least one commit; `.ensemble/worktrees/` ignores
+itself.
+
 When the caller closes the pipe, running tasks and background delegations are
 stopped. A task stopped that way gets no result, so it runs again in the next
-session; tasks that had not started stay queued. Tasks share the project like
-any other parallel delegations, so give two tasks that change the same files to
-an agent with `max_concurrent: 1`, or one after the other. A blocking
+session; tasks that had not started stay queued. Tasks of a `shared` agent share the
+project like any other parallel delegations, so give two of them that change
+the same files to an agent with `max_concurrent: 1`, or `isolation: worktree`. A blocking
 `delegate` takes a slot of its agent too, waiting for one if needed; raising
 the MCP timeout in the manager's config is the other fix for a client that
 times out.
@@ -568,6 +586,7 @@ current directory), `--context <text>` (for `run`).
 | `src/llm_backend.rs` | asking a model server which models it serves, for `health` |
 | `src/port.rs` | the shared error type |
 | `src/tasks.rs` | tasks as files: `task.md`, `result.md`, and the git-ignored `runs/` |
+| `src/worktree.rs` | a git worktree and branch per task, and committing its work there |
 | `src/harness/delegation.rs` | the tools your agent calls: delegate, submit, status, wait, cancel, agents, health |
 | `src/harness/queue.rs` | the worker that runs tasks, background delegations, agent slots (`max_concurrent`), wait and cancel |
 | `src/harness/mcp.rs` | the MCP server, over stdio |
