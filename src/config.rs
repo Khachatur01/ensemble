@@ -16,6 +16,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILENAME: &str = "ensemble.yaml";
+
+/// The JSON Schema for `ensemble.yaml`, for editors. `ensemble schema`
+/// prints it; the tests keep it in step with the structs below.
+pub const SCHEMA: &str = include_str!("../ensemble.schema.json");
 pub const SUPPORTED_VERSION: u32 = 1;
 
 /// The backend types that ship. Adding one is adding an adapter and a variant.
@@ -57,14 +61,39 @@ struct RawBackend {
     // --- claude-code-cli ---
     /// Path to the CLI. Defaults to `claude` on PATH.
     command: Option<String>,
-    /// Tools Claude Code may run on its own. Read-only by default: a role that
-    /// should edit files has to say so.
-    allowed_tools: Option<String>,
+    /// Claude Code's own tools (`Read`, `Edit`, `Bash(git:*)`, ...) that it
+    /// may run without asking. Read-only by default: a role that should edit
+    /// files has to say so. Not the same as a role's `tools`, which are
+    /// Ensemble's own agent tools.
+    #[serde(default, deserialize_with = "tool_list")]
+    allowed_tools: Option<Vec<String>>,
     permission_mode: Option<String>,
     max_turns: Option<u32>,
 
     // --- both ---
     timeout_seconds: Option<u64>,
+}
+
+/// A list of names. A string, such as the comma-separated form Claude Code's
+/// own flag takes, is refused with the fix rather than a type error.
+fn tool_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Listed {
+        List(Vec<String>),
+        Text(String),
+    }
+    match Option::<Listed>::deserialize(d)? {
+        None => Ok(None),
+        Some(Listed::List(list)) => Ok(Some(list)),
+        Some(Listed::Text(text)) => Err(serde::de::Error::custom(format!(
+            "`allowed_tools` is a list, not a string; write [{}]",
+            text.split(',')
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -634,8 +663,8 @@ fn resolve_backend(name: &str, rb: &RawBackend, env: &dyn Env) -> Result<Backend
                 command: rb.command.clone().unwrap_or_else(|| "claude".into()),
                 allowed_tools: rb
                     .allowed_tools
-                    .clone()
-                    .unwrap_or_else(|| "Read,Grep,Glob".into()),
+                    .as_ref()
+                    .map_or_else(|| "Read,Grep,Glob".into(), |list| list.join(",")),
                 permission_mode: rb
                     .permission_mode
                     .clone()
@@ -970,6 +999,123 @@ roles:
             problems.iter().any(|p| p.contains("`network`")),
             "{problems:?}"
         );
+    }
+
+    /// The keys serde accepts for `T`, read from its unknown-field error.
+    fn accepted_keys<T: serde::de::DeserializeOwned>() -> Vec<String> {
+        let err = serde_norway::from_str::<T>("zzz_unknown: 1")
+            .err()
+            .expect("an unknown key is refused")
+            .to_string();
+        let list = err.split("expected").nth(1).expect("the error lists keys");
+        let mut keys: Vec<String> = list
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    fn schema() -> serde_json::Value {
+        serde_json::from_str(SCHEMA).expect("the schema is JSON")
+    }
+
+    fn schema_keys(node: &serde_json::Value) -> Vec<String> {
+        let mut keys: Vec<String> = node["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    fn schema_enum(node: &serde_json::Value) -> Vec<String> {
+        node["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_schema_names_exactly_the_keys_the_config_accepts() {
+        let schema = schema();
+        let mut top = accepted_keys::<RawConfig>();
+        top.retain(|k| k != "manager"); // removed; refused with its own message
+        assert_eq!(schema_keys(&schema), top, "top level");
+        assert_eq!(
+            schema_keys(&schema["definitions"]["backend"]),
+            accepted_keys::<RawBackend>(),
+            "backends"
+        );
+        assert_eq!(
+            schema_keys(&schema["definitions"]["role"]),
+            accepted_keys::<RawAssignment>(),
+            "roles"
+        );
+    }
+
+    #[test]
+    fn the_schemas_choices_and_defaults_are_the_codes() {
+        let schema = schema();
+        let backend = &schema["definitions"]["backend"]["properties"];
+        let role = &schema["definitions"]["role"]["properties"];
+
+        let mut types = schema_enum(&backend["type"]);
+        types.sort();
+        assert_eq!(types, [CLAUDE_CODE_CLI, OPENAI_COMPATIBLE_API]);
+
+        let mut tools = schema_enum(&role["tools"]["items"]);
+        tools.sort();
+        let mut known: Vec<String> = AgentTool::ALL
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect();
+        known.sort();
+        assert_eq!(tools, known);
+
+        assert_eq!(schema_enum(&role["reasoning_effort"]), REASONING_EFFORTS);
+        assert_eq!(role["max_steps"]["default"], DEFAULT_MAX_STEPS);
+        assert_eq!(role["max_seconds"]["default"], DEFAULT_MAX_SECONDS);
+        assert_eq!(
+            backend["timeout_seconds"]["default"],
+            DEFAULT_TIMEOUT_SECONDS
+        );
+        assert_eq!(schema["properties"]["version"]["const"], SUPPORTED_VERSION);
+    }
+
+    #[test]
+    fn the_shipped_example_names_the_schema_for_editors() {
+        let example = include_str!("../ensemble.yaml");
+        let id = schema()["$id"].as_str().unwrap().to_string();
+        assert!(
+            example.contains(&format!("# yaml-language-server: $schema={id}")),
+            "ensemble.yaml should start with the schema modeline"
+        );
+    }
+
+    #[test]
+    fn allowed_tools_is_a_list_and_a_string_is_refused_with_the_fix() {
+        let doc = |value: &str| {
+            format!(
+                "version: 1\nbackends:\n  c:\n    type: claude-code-cli\n    allowed_tools: {value}\nroles:\n  r: {{backend: c, model: m}}\n"
+            )
+        };
+        let c = parse(&doc("[Read, \"Bash(git:*)\"]"), &p(), &env(&[])).unwrap();
+        let BackendSettings::ClaudeCodeCli { allowed_tools, .. } = &c.backends["c"].settings else {
+            panic!("claude backend");
+        };
+        assert_eq!(allowed_tools, "Read,Bash(git:*)");
+
+        let err = parse(&doc("\"Read,Grep\""), &p(), &env(&[]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("write [Read, Grep]"), "{err}");
     }
 
     #[test]

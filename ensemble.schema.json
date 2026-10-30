@@ -1,0 +1,189 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json",
+  "title": "ensemble.yaml",
+  "description": "The agent team for one project: the backends that reach models, and the roles an agent can delegate to.",
+  "type": "object",
+  "required": ["version"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "description": "Config format version. Always 1.",
+      "const": 1
+    },
+    "backends": {
+      "description": "How models are reached. The key is the backend's name, which roles refer to.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/backend" }
+    },
+    "roles": {
+      "description": "The team. The key is the role's name, which the calling agent sees as a delegation target. No model is hardcoded as planner, coder or reviewer: the names are yours.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/role" }
+    }
+  },
+  "definitions": {
+    "backend": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "openai-compatible-api: any /chat/completions endpoint (llama-server, vLLM, Ollama, a hosted API); roles on it can be agents. claude-code-cli: the official `claude` CLI on your own subscription; it does its own work with Claude Code's tools and returns prose.",
+          "enum": ["openai-compatible-api", "claude-code-cli"]
+        },
+        "base_url_env": {
+          "description": "openai-compatible-api, required. The NAME of the environment variable holding the base URL, e.g. OPENAI_LOCAL_BASE_URL. Not the URL itself.",
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "base_url_default": {
+          "description": "openai-compatible-api. Used when the variable named by base_url_env is unset or empty, e.g. http://127.0.0.1:11434/v1.",
+          "type": "string",
+          "examples": ["http://127.0.0.1:11434/v1", "http://127.0.0.1:8000/v1"]
+        },
+        "api_key_env": {
+          "description": "openai-compatible-api. The NAME of the environment variable holding the API key. Keys are never written in this file.",
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "command": {
+          "description": "claude-code-cli. The claude binary, if it is not `claude` on PATH.",
+          "type": "string",
+          "default": "claude"
+        },
+        "allowed_tools": {
+          "description": "claude-code-cli. Claude Code's OWN tools that it may run without asking, for every role on this backend. Names are Claude Code's, e.g. Read, Grep, Glob, Edit, Write, Bash, or a rule like Bash(git:*). Not the same as a role's `tools`, which are Ensemble's own agent tools and need an openai-compatible-api backend. Read-only by default: a role that should edit files needs Edit and Write here (use a separate backend for it).",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "default": ["Read", "Grep", "Glob"],
+          "examples": [["Read", "Grep", "Glob"], ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]]
+        },
+        "permission_mode": {
+          "description": "claude-code-cli. Claude Code's --permission-mode. `dontAsk` denies anything not in allowed_tools instead of waiting for a person who is not there.",
+          "type": "string",
+          "default": "dontAsk",
+          "examples": ["dontAsk", "acceptEdits", "plan", "default", "bypassPermissions"]
+        },
+        "max_turns": {
+          "description": "claude-code-cli. Most agent turns Claude Code may take for one delegation.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 12
+        },
+        "timeout_seconds": {
+          "description": "Seconds one request to this backend may take before it is cut off.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 600
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "openai-compatible-api" } }, "required": ["type"] },
+          "then": {
+            "required": ["base_url_env"],
+            "properties": {
+              "command": false,
+              "allowed_tools": false,
+              "permission_mode": false,
+              "max_turns": false
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "claude-code-cli" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "base_url_env": false,
+              "base_url_default": false,
+              "api_key_env": false
+            }
+          }
+        }
+      ]
+    },
+    "role": {
+      "type": "object",
+      "required": ["backend", "model"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "description": "Name of a backend defined under `backends`.",
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "description": "The model id as the backend names it, e.g. qwen3-coder or, for claude-code-cli, an alias such as sonnet.",
+          "type": "string",
+          "minLength": 1
+        },
+        "prompt": {
+          "description": "What this role is for. Sent as the system prompt, and its first line is what the calling agent sees when it lists the roles. Keep it short for small local models.",
+          "type": "string"
+        },
+        "temperature": {
+          "description": "Sampling temperature for this role, overriding the model's own default.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "reasoning_effort": {
+          "description": "How much a reasoning model thinks before answering. `none` turns thinking off, which fixes small-context runs where thinking uses the whole reply. openai-compatible-api only.",
+          "enum": ["none", "low", "medium", "high"]
+        },
+        "tools": {
+          "description": "Ensemble's own agent tools this role may use, inside the project. Listing any makes the role an agent (needs an openai-compatible-api backend, context_window and a model that calls tools). Absent or empty: a think-only role, one model call, text back. edit, write and bash change files, so a role gets them only by name. These are not Claude Code's tools; see the backend's `allowed_tools` for those.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": ["read", "glob", "grep", "edit", "write", "bash", "fetch"],
+            "description": "read: read a file. glob: list files by pattern. grep: find a literal string. edit: replace one exact, unique occurrence in a file. write: create or replace a file. bash: run a shell command in a Landlock sandbox (writes only in the project and /tmp, reads limited, no network unless `network: true`). fetch: read a public web page as text."
+          },
+          "examples": [["read", "glob", "grep"], ["read", "glob", "grep", "edit", "write", "bash"]]
+        },
+        "context_window": {
+          "description": "Required with `tools`. Tokens of context your server really runs the model with (Ollama: OLLAMA_CONTEXT_LENGTH, 4096 unless raised). A server that overflows silently drops the oldest messages, so Ensemble trims old tool output to stay within it.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [16384, 32768]
+        },
+        "max_steps": {
+          "description": "Most model calls one delegation may make. At the limit the agent gets one last call, without tools, to report what it did.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 20
+        },
+        "max_seconds": {
+          "description": "Wall-clock limit for one delegation. At the limit the run stops and returns what it did, marked unfinished. Roles with `tools` only.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 1800
+        },
+        "network": {
+          "description": "Let `bash` commands open outbound TCP connections. Off by default: a command that can read files and reach the network can send what it reads anywhere. Needs the `bash` tool; restricting it needs Linux 6.7+.",
+          "type": "boolean",
+          "default": false
+        },
+        "readable": {
+          "description": "Extra paths `bash` commands may read, besides the project, the system directories and common toolchain directories. Absolute, or starting with ~/. Needs the `bash` tool.",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^(/|~/)" },
+          "examples": [["~/.m2", "/srv/data"]]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["tools"], "properties": { "tools": { "minItems": 1 } } },
+          "then": { "required": ["context_window"] },
+          "else": { "properties": { "context_window": false, "max_seconds": false } }
+        },
+        {
+          "if": { "required": ["tools"], "properties": { "tools": { "contains": { "const": "bash" } } } },
+          "else": { "properties": { "network": false, "readable": false } }
+        }
+      ]
+    }
+  }
+}

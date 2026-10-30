@@ -1,4 +1,12 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json
+
 # ensemble.yaml — the agent team, and what runs each member.
+#
+# The line above gives an editor with the YAML language server (VS Code's YAML
+# extension, Neovim, Zed, JetBrains) completion, hover docs and error checking
+# for every key. Offline, or to pin your version:
+#   ensemble schema > ensemble.schema.json
+# and point the line at that file instead.
 #
 # This is the shipped example. Copy it to your project root and edit the
 # `roles` block; the backends are already pointed at the
@@ -19,7 +27,7 @@ backends:
     type: claude-code-cli
     # Optional. Defaults shown.
     # command: claude              # the binary, if it is not on PATH
-    # allowed_tools: Read,Grep,Glob  # what Claude Code may run on its own
+    # allowed_tools: [Read, Grep, Glob]  # Claude Code's own tools it may run without asking
     # permission_mode: dontAsk
     # max_turns: 12
     # timeout_seconds: 600

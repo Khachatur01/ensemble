@@ -24,6 +24,8 @@ COMMANDS:
                             project as its working directory; it is not meant
                             to be run by hand.
     check                   Load and validate the config, then report the team.
+    schema                  Print the JSON Schema for ensemble.yaml, so an editor
+                            can complete and check it. Needs no config.
     roles                   List the roles and what runs each.
     health                  Check that every backend in use is reachable.
     run <ROLE> <TASK>       Send one task to one role and print the answer.
@@ -112,6 +114,11 @@ fn run() -> Result<ExitCode, String> {
     let Some(args) = parse_args(std::env::args().skip(1).collect())? else {
         return Ok(ExitCode::SUCCESS);
     };
+
+    if args.command == "schema" {
+        print!("{}", config::SCHEMA);
+        return Ok(ExitCode::SUCCESS);
+    }
 
     let dir = match &args.dir {
         Some(d) => d

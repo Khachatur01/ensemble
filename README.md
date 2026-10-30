@@ -311,8 +311,15 @@ old config that still has one is rejected with a message saying so.
 
 Both accept `timeout_seconds` (default 600).
 `openai-compatible-api` requires `base_url_env`.
-`claude-code-cli` accepts `command`, `allowed_tools` (default `Read,Grep,Glob`
-— read-only unless you say otherwise), `permission_mode` and `max_turns`.
+`claude-code-cli` accepts `command`, `allowed_tools` (a list; default
+`[Read, Grep, Glob]`, read-only unless you say otherwise), `permission_mode` and
+`max_turns`.
+
+`allowed_tools` and a role's `tools` are different things. `allowed_tools` names
+**Claude Code's own** tools (`Read`, `Edit`, `Bash(git:*)`), for every role on
+that backend; Claude Code runs them itself. A role's `tools` are **Ensemble's
+own** agent tools (`read`, `edit`, `bash`, ...), which Ensemble runs for a model
+on an `openai-compatible-api` backend. Both are lists.
 
 Settings from the wrong type are **rejected**, not ignored: a `base_url_env`
 on a `claude-code-cli` backend means somebody believes a URL is being used.
@@ -332,6 +339,23 @@ tokens, which a tool-using role can exceed after a few file reads:
 ```console
 $ OLLAMA_CONTEXT_LENGTH=32768 ollama serve
 ```
+
+### Editor support
+
+`ensemble.yaml` has a JSON Schema, [`ensemble.schema.json`](ensemble.schema.json):
+completion for every key and value, hover descriptions, defaults, and errors for
+the mistakes `ensemble check` would also report (a missing `context_window`,
+`allowed_tools` on the wrong backend type, an unknown tool). The first line of
+the shipped `ensemble.yaml` points an editor with the YAML language server at it:
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json
+```
+
+That works in VS Code (the YAML extension), Neovim, Zed and JetBrains IDEs.
+Offline or pinned to your installed version: `ensemble schema > ensemble.schema.json`
+and put that path after `$schema=`. The schema is checked against the code by
+the tests, so it cannot list a key the config rejects.
 
 ### Validation
 
