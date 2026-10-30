@@ -127,6 +127,11 @@ llm_backends:
     api_key_env: OPENAI_LOCAL_API_KEY
     timeout_seconds: 600
 
+gates:
+  test:
+    command: cargo test
+    timeout_seconds: 900
+
 agents:
   coder:
     prompt: You implement exactly what is asked, in the style of the code around it.
@@ -183,6 +188,11 @@ API. It requires `base_url` (the URL itself; no variable overrides it) and
 `timeout_seconds` (per request), and takes `api_key_env`, the name of the
 variable holding the key, when the server wants one. Only the `opencode` adapter
 can run on one today; Claude Code speaks the Anthropic API, not this one.
+
+A **gate** is a check a task's work must pass: a shell command (`sh -c`, run
+in the task's working directory, exit status 0 passes) and the `timeout_seconds`
+it may take. A task names one; it cannot bring a command of its own, so what
+runs on your machine is what this file says. `gates: {}` says there are none.
 
 There is no manager in the file: the agent that calls Ensemble is the manager.
 
@@ -373,6 +383,7 @@ constraints: [No new dependency]
 files: [src/fetch.rs]
 done_when: [cargo test passes]
 after: [0001-add-ureq]
+gate: { name: test, attempts: 3 }
 ---
 Retry a failed request three times, waiting 1s, 2s, 4s.
 ```
@@ -382,7 +393,14 @@ The agent is sent the text, then the goal, constraints, files and
 delegation's context. A task with `after` waits until every task it names has
 ended `done`; `status` shows it as `blocked by 0001-add-ureq (not done yet)`.
 If one of them failed or was cancelled, it stays blocked until that task is run
-again. `ensemble check` reports an `after` that names no task, and tasks whose
+again.
+
+With `gate`, the named check from `config.yaml` runs after the agent is done.
+If it fails, the same agent runs again, told the command, how it ended, the
+last 60 lines of its output and its own previous reply, up to `attempts` runs
+in all. The task is `done` once the gate passes and `failed` when the attempts
+run out; `result.md` records `gate`, `gate_result` (`passed`, `failed`, or `not
+run` when the agent itself failed) and `attempts`. `ensemble check` reports an `after` that names no task, and tasks whose
 `after` leads back to themselves.
 
 Its `result.md` starts with `status` (`done`, `failed` or `cancelled`),

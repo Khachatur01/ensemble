@@ -38,6 +38,20 @@ llm_backends:
     timeout_seconds: 600
 
 # ---------------------------------------------------------------------------
+# Gates: commands a task's work must pass. A task names one with
+# `gate: { name: test, attempts: 3 }`; when the command fails, the same agent
+# tries again with its output, up to `attempts` runs in all. Commands live
+# here, not in tasks, so a task cannot bring a command of its own. `{}` when
+# there are none.
+# ---------------------------------------------------------------------------
+gates:
+  test:
+    # Run with sh -c in the task's working directory; exit status 0 passes.
+    command: make test
+    # Seconds it may run before it is stopped and counts as failed.
+    timeout_seconds: 900
+
+# ---------------------------------------------------------------------------
 # Agents: the team. The names are yours; your agent delegates by name. Each
 # runs an agent CLI you have installed, headless in this project.
 # ---------------------------------------------------------------------------

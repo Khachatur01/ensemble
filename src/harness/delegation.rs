@@ -133,6 +133,18 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                         "type": "array", "items": { "type": "string" },
                         "description": "Optional: ids of tasks that must be done first. The task \
                                         waits until each has ended `done`."
+                    },
+                    "gate": {
+                        "type": "object",
+                        "description": "Optional: a check from the project's config the work must \
+                                        pass. When it fails, the agent runs again with its output, up \
+                                        to `attempts` runs in all.",
+                        "properties": {
+                            "name": { "type": "string", "description": "One of the config's gates." },
+                            "attempts": { "type": "integer", "minimum": 1 }
+                        },
+                        "required": ["name", "attempts"],
+                        "additionalProperties": false
                     }
                 },
                 "required": ["agent", "title", "task"],
@@ -340,6 +352,35 @@ pub fn call<'s>(
             }
             let [constraints, files, done_when, after] =
                 <[Vec<String>; 4]>::try_from(lists).expect("four lists");
+            let gate = match args.get("gate") {
+                None | Some(Value::Null) => None,
+                Some(g) => match serde_json::from_value::<crate::tasks::GateRef>(g.clone()) {
+                    Ok(g) if g.attempts == 0 => {
+                        return ToolResult::err(format!(
+                            "{SUBMIT}: `gate.attempts` must be at least 1"
+                        ));
+                    }
+                    Ok(g) if !ensemble.config().gates.contains_key(&g.name) => {
+                        let known: Vec<&str> =
+                            ensemble.config().gates.keys().map(String::as_str).collect();
+                        return ToolResult::err(format!(
+                            "{SUBMIT}: no gate '{}' is configured. Gates: {}.",
+                            g.name,
+                            if known.is_empty() {
+                                "(none)".to_string()
+                            } else {
+                                known.join(", ")
+                            }
+                        ));
+                    }
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        return ToolResult::err(format!(
+                            "{SUBMIT}: `gate` must be {{name, attempts}}: {e}"
+                        ));
+                    }
+                },
+            };
             let optional = |key: &str| text(key).filter(|s| !s.is_empty()).map(str::to_string);
             queue.submit(&crate::tasks::Ticket {
                 title: title.to_string(),
@@ -350,6 +391,7 @@ pub fn call<'s>(
                 files,
                 done_when,
                 after,
+                gate,
                 text: task.to_string(),
                 ..Default::default()
             })

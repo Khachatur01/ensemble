@@ -395,7 +395,9 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join("a.txt"), "hello").unwrap();
-        let mut yaml = String::from("version: 1\nllm_backends: {}\nagents:\n");
+        let mut yaml = String::from(
+            "version: 1\nllm_backends: {}\ngates:\n  done-file: { command: \"test -e done.txt\", timeout_seconds: 10 }\nagents:\n",
+        );
         for (name, tools, body) in scripts {
             let command = cli(&bin, name, body);
             yaml.push_str(&format!(
@@ -762,7 +764,7 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
         assert!(text_of(&good).contains(": ok"), "{}", text_of(&good));
 
         let cfg = config::parse(
-            "version: 1\nllm_backends: {}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 4\n    adapter: { type: opencode, model: { type: provider, name: a/b }, tools: [read], max_steps: 3, command: /nonexistent/opencode }\n",
+            "version: 1\nllm_backends: {}\ngates: {}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 4\n    adapter: { type: opencode, model: { type: provider, name: a/b }, tools: [read], max_steps: 3, command: /nonexistent/opencode }\n",
             std::path::Path::new("config.yaml"),
             &BTreeMap::new(),
         )
@@ -1350,6 +1352,65 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
                 Some("g".to_string()),
                 vec!["x".to_string()]
             )
+        );
+    }
+    #[test]
+    fn a_gate_that_fails_sends_the_agent_back_with_its_output() {
+        // The first run leaves no done.txt; the run after it does.
+        let fixer = r#"printf '%s' "$*" > .last-prompt
+if [ -e .tried ]; then touch done.txt; t=fixed; else touch .tried; t=first; fi
+printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
+"#;
+        let (e, tmp) = team(&[("coder", "read, edit", fixer)]);
+        let write = |id: &str, attempts: u32| {
+            let dir = tasks(&tmp).join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("task.md"),
+                format!("---\ntitle: {id}\nagent: coder\ngate: {{name: done-file, attempts: {attempts}}}\n---\nMake done.txt.\n"),
+            )
+            .unwrap();
+        };
+        write("0001-once", 1);
+        session(&e, |ask| {
+            let r = ask("wait", json!({"task": "0001-once", "timeout_seconds": 20}));
+            assert!(r.starts_with("---\nstatus: failed\n"), "{r}");
+            assert!(
+                r.contains("gate: \"done-file\"\ngate_result: failed\nattempts: 1\n"),
+                "{r}"
+            );
+            assert!(
+                r.contains("[gate done-file: failed (exit 1) on attempt 1 of 1]"),
+                "{r}"
+            );
+        });
+        std::fs::remove_file(project(&tmp).join(".tried")).unwrap();
+        write("0002-twice", 2);
+        session(&e, |ask| {
+            let r = ask("wait", json!({"task": "0002-twice", "timeout_seconds": 20}));
+            assert!(r.starts_with("---\nstatus: done\n"), "{r}");
+            assert!(r.contains("gate_result: passed\nattempts: 2\n"), "{r}");
+            assert!(
+                r.contains("fixed") && r.contains("[gate done-file: passed on attempt 2 of 2]"),
+                "{r}"
+            );
+            let r = ask(
+                "submit",
+                json!({"agent": "coder", "title": "x", "task": "x", "gate": {"name": "lint", "attempts": 1}}),
+            );
+            assert!(
+                r.contains("no gate 'lint'") && r.contains("done-file"),
+                "{r}"
+            );
+        });
+        let prompt = std::fs::read_to_string(project(&tmp).join(".last-prompt")).unwrap();
+        assert!(
+            prompt.contains("did not pass the check `test -e done.txt` (exit 1)"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Your previous reply was:\nfirst"),
+            "{prompt}"
         );
     }
 }

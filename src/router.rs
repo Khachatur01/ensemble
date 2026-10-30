@@ -308,6 +308,7 @@ llm_backends:
     type: openai-compatible-api
     base_url: "http://127.0.0.1:9/v1"
     timeout_seconds: 600
+gates: {{}}
 agents:
   looker:
     max_seconds: 1800

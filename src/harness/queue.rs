@@ -23,9 +23,11 @@
 //! its agent first, so `max_concurrent` means what it says.
 
 use super::delegation::{ToolResult, run_delegation};
+use crate::external::gate;
 use crate::router::Ensemble;
 use crate::tasks::{Entry, Status, Store, Ticket, waiting_for};
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
@@ -313,7 +315,7 @@ impl<'e> Queue<'e> {
                     Self::live(&ticket.agent, &ticket.title, cancel.clone(), false),
                 );
                 spawn(Box::new(move || {
-                    self.run_ticket(store, ticket, slot, &cancel)
+                    self.run_ticket(store, *ticket, slot, &cancel)
                 }));
             }
             drop(
@@ -327,14 +329,13 @@ impl<'e> Queue<'e> {
     fn run_ticket(&self, store: &Store, ticket: Ticket, slot: Slot<'_>, cancel: &AtomicBool) {
         let since = SystemTime::now();
         store.set_state(&ticket.id, "running", since);
-        let result = run_delegation(
-            self.ensemble,
-            &ticket.agent,
-            &ticket.prompt(),
-            ticket.context.as_deref(),
-            &|line| self.note(&ticket.id, line),
-            cancel,
-        );
+        let (result, extra) = match self.ensemble.workdir() {
+            Ok(dir) => self.work_on(&ticket, &dir, cancel),
+            Err(e) => (
+                ToolResult::err(format!("no project directory to work in: {e}")),
+                Vec::new(),
+            ),
+        };
         drop(slot);
         let mut inner = self.lock();
         let asked = inner.live.get(&ticket.id).is_some_and(|l| l.asked);
@@ -351,15 +352,100 @@ impl<'e> Queue<'e> {
                 Status::Done
             };
             store.set_state(&ticket.id, status.as_str(), since);
-            if let Err(e) =
-                store.write_result(&ticket.id, &ticket.agent, status, since, &result.text)
-            {
+            if let Err(e) = store.write_result(
+                &ticket.id,
+                &ticket.agent,
+                status,
+                since,
+                &extra,
+                &result.text,
+            ) {
                 eprintln!("ensemble: cannot write the result of {}: {e}", ticket.id);
             }
         }
         inner.live.remove(&ticket.id);
         drop(inner);
         self.changed.notify_all();
+    }
+
+    /// Run the agent on `ticket` in `dir`, then its gate if it has one. While
+    /// the gate fails and attempts remain, the agent runs again with the
+    /// gate's output. Returns the outcome and front matter for `result.md`.
+    fn work_on(
+        &self,
+        ticket: &Ticket,
+        dir: &Path,
+        cancel: &AtomicBool,
+    ) -> (ToolResult, Vec<(&'static str, String)>) {
+        let note = |line: &str| self.note(&ticket.id, line);
+        let delegate = |prompt: &str| {
+            run_delegation(
+                self.ensemble,
+                &ticket.agent,
+                prompt,
+                ticket.context.as_deref(),
+                &note,
+                cancel,
+            )
+        };
+        let Some(gate) = &ticket.gate else {
+            return (delegate(&ticket.prompt()), Vec::new());
+        };
+        let Some(check) = self.ensemble.config().gates.get(&gate.name) else {
+            return (
+                ToolResult::err(format!(
+                    "gate '{}' is not defined under `gates` in config.yaml, so the task did not run.",
+                    gate.name
+                )),
+                Vec::new(),
+            );
+        };
+        let attempts = gate.attempts.max(1);
+        let name = serde_json::to_string(&gate.name).expect("a string serializes");
+        let mut prompt = ticket.prompt();
+        let mut attempt = 1;
+        loop {
+            let reported = |verdict: &str| {
+                vec![
+                    ("gate", name.clone()),
+                    ("gate_result", verdict.to_string()),
+                    ("attempts", attempt.to_string()),
+                ]
+            };
+            let result = delegate(&prompt);
+            if result.is_error || cancel.load(Ordering::Relaxed) {
+                return (result, reported("not run"));
+            }
+            note(&format!("gate {}: running `{}`", gate.name, check.command));
+            let verdict = gate::run(check, dir, cancel);
+            if verdict.passed {
+                let text = format!(
+                    "{}\n\n[gate {}: passed on attempt {attempt} of {attempts}]",
+                    result.text, gate.name
+                );
+                return (ToolResult::ok(text), reported("passed"));
+            }
+            note(&format!(
+                "gate {}: failed ({}) on attempt {attempt} of {attempts}",
+                gate.name, verdict.ended
+            ));
+            if attempt >= attempts || cancel.load(Ordering::Relaxed) {
+                let text = format!(
+                    "{}\n\n[gate {}: failed ({}) on attempt {attempt} of {attempts}]\n```\n{}\n```",
+                    result.text, gate.name, verdict.ended, verdict.output
+                );
+                return (ToolResult::err(text), reported("failed"));
+            }
+            attempt += 1;
+            prompt = format!(
+                "{}\n\nYour previous attempt did not pass the check `{}` ({}). Its output:\n```\n{}\n```\n\nYour previous reply was:\n{}\n\nFix what the check reports.",
+                ticket.prompt(),
+                check.command,
+                verdict.ended,
+                verdict.output,
+                result.text
+            );
+        }
     }
 
     /// Write a new task for the worker, and return at once.
@@ -534,6 +620,7 @@ impl<'e> Queue<'e> {
             &agent,
             Status::Cancelled,
             SystemTime::now(),
+            &[],
             "Cancelled before it started.",
         );
         drop(inner);

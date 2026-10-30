@@ -73,6 +73,18 @@ struct RawConfig {
     llm_backends: BTreeMap<String, RawLlmBackend>,
     /// The team.
     agents: BTreeMap<String, RawAgent>,
+    /// Commands a task's work must pass. Defined here, by a person, so a task
+    /// names a gate and cannot bring a command of its own.
+    gates: BTreeMap<String, RawGate>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGate {
+    /// A shell command run in the project; exit status 0 passes.
+    command: String,
+    /// Seconds it may run before it is stopped and counted as failed.
+    timeout_seconds: u32,
 }
 
 /// A model endpoint. `type` decides which settings it has.
@@ -378,8 +390,16 @@ pub struct Config {
     pub llm_backends: BTreeMap<String, LlmBackend>,
     /// The team. There is no manager: the agent that calls Ensemble is it.
     pub agents: BTreeMap<String, AgentConfig>,
+    pub gates: BTreeMap<String, Gate>,
     /// Where it was loaded from, for error messages.
     pub source: PathBuf,
+}
+
+/// A command a task's work must pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gate {
+    pub command: String,
+    pub timeout_seconds: u32,
 }
 
 impl Config {
@@ -634,6 +654,26 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
         }
     }
 
+    // --- gates ---
+    let mut gates = BTreeMap::new();
+    for (name, g) in &raw.gates {
+        if g.command.trim().is_empty() {
+            problems.push(format!("gates.{name}: `command` is empty"));
+        }
+        if g.timeout_seconds == 0 {
+            problems.push(format!(
+                "gates.{name}: `timeout_seconds` must be greater than 0"
+            ));
+        }
+        gates.insert(
+            name.clone(),
+            Gate {
+                command: g.command.clone(),
+                timeout_seconds: g.timeout_seconds,
+            },
+        );
+    }
+
     // --- agents ---
     let mut agents: BTreeMap<String, AgentConfig> = BTreeMap::new();
     for (name, ra) in &raw.agents {
@@ -687,6 +727,7 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             version: raw.version,
             llm_backends: backends,
             agents,
+            gates,
             source: path.to_path_buf(),
         })
     } else {
@@ -916,6 +957,7 @@ llm_backends:
     base_url: "http://10.10.10.5:8000/v1"
     api_key_env: OPENAI_REMOTE_API_KEY
     timeout_seconds: 300
+gates: {}
 agents:
   planner:
     max_seconds: 1800
@@ -1059,13 +1101,15 @@ agents:
 
     #[test]
     fn a_config_without_its_agents_or_backends_is_refused() {
-        let detail = refusal("version: 1\nagents: {}\n");
+        let detail = refusal("version: 1\ngates: {}\nagents: {}\n");
         assert!(detail.contains("`llm_backends` is required"), "{detail}");
         let detail = refusal("version: 1\nllm_backends: {}\n");
         assert!(detail.contains("`agents` is required"), "{detail}");
+        let detail = refusal("version: 1\nllm_backends: {}\nagents: {}\n");
+        assert!(detail.contains("`gates` is required"), "{detail}");
         assert!(
             parse(
-                "version: 1\nllm_backends: {}\nagents: {}\n",
+                "version: 1\nllm_backends: {}\ngates: {}\nagents: {}\n",
                 &p(),
                 &env(&[])
             )
@@ -1091,7 +1135,7 @@ agents:
 
         let provider = "model:\n        type: provider\n        name: opencode/big-pickle\n        context_window: 1\n";
         let doc = format!(
-            "version: 1\nllm_backends: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    adapter:\n      type: opencode\n      {provider}      tools: []\n      max_steps: 3\n      command: opencode\n"
+            "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    adapter:\n      type: opencode\n      {provider}      tools: []\n      max_steps: 3\n      command: opencode\n"
         );
         assert!(refusal(&doc).contains("context_window"));
     }
@@ -1100,7 +1144,7 @@ agents:
     fn an_opencode_model_is_a_provider_model_or_an_llm_backend_model() {
         let doc = |model: &str| {
             format!(
-                "version: 1\nllm_backends: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      max_steps: 3\n      command: opencode\n"
+                "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      max_steps: 3\n      command: opencode\n"
             )
         };
         let c = parse(
@@ -1210,6 +1254,7 @@ agents:
                 "openai-compatible-api backend",
             ),
             ("agent", accepted_keys::<RawAgent>(), "agents"),
+            ("gate", accepted_keys::<RawGate>(), "gates"),
             (
                 "claude_code_adapter",
                 accepted_keys::<RawClaudeCodeAdapter>(),
@@ -1252,6 +1297,7 @@ agents:
         for (def, keys) in [
             ("openai_compatible_api_backend", vec!["api_key_env"]),
             ("agent", vec!["prompt"]),
+            ("gate", vec![]),
             ("claude_code_adapter", vec![]),
             ("opencode_adapter", vec![]),
             ("opencode_provider_model", vec![]),
@@ -1378,6 +1424,7 @@ agents:
         for (def, objects) in [
             ("openai_compatible_api_backend", backends),
             ("agent", agents.clone()),
+            ("gate", doc["gates"].as_object().unwrap().values().collect()),
             ("claude_code_adapter", adapters(CLAUDE_CODE_AGENT)),
             ("opencode_adapter", adapters(OPENCODE_AGENT)),
             ("opencode_provider_model", models(PROVIDER_MODEL)),
@@ -1435,6 +1482,7 @@ agents:
         let doc = r#"
 version: 1
 llm_backends: {}
+gates: {}
 agents:
   doer:
     max_seconds: 600
@@ -1456,6 +1504,7 @@ agents:
         let bad = r#"
 version: 1
 llm_backends: {}
+gates: {}
 agents:
   x:
     max_seconds: 60
@@ -1558,6 +1607,7 @@ agents:
 version: 1
 llm_backends:
   x: { type: openai-compatible-api, base_url: "http://127.0.0.1:1/v1", timeout_seconds: 5 }
+gates: {}
 agents: {}
 "#;
         let c = parse(yaml, &p(), &env(&[])).unwrap();
@@ -1576,6 +1626,7 @@ llm_backends:
     base_url: "http://127.0.0.1:1/v1"
     timeout_seconds: 5
     api_key: "sk-oops"
+gates: {}
 agents: {}
 "#;
         let detail = refusal(yaml);
@@ -1592,7 +1643,7 @@ agents: {}
             "base_url_default: \"http://127.0.0.1:1/v1\"",
         ] {
             let yaml = format!(
-                "version: 1\nllm_backends:\n  x:\n    type: openai-compatible-api\n    base_url: \"http://127.0.0.1:1/v1\"\n    timeout_seconds: 5\n    {key}\nagents: {{}}\n"
+                "version: 1\nllm_backends:\n  x:\n    type: openai-compatible-api\n    base_url: \"http://127.0.0.1:1/v1\"\n    timeout_seconds: 5\n    {key}\ngates: {{}}\nagents: {{}}\n"
             );
             let detail = refusal(&yaml);
             assert!(detail.contains("unknown field"), "{detail}");
@@ -1615,6 +1666,7 @@ agents: {}
 version: 1
 llm_backends:
   x: { type: ollama }
+gates: {}
 agents: {}
 "#;
         let detail = refusal(yaml);
@@ -1629,6 +1681,7 @@ agents: {}
 version: 1
 llm_backends:
   x: { type: openai-compatible-api, base_url: "127.0.0.1:8000/v1", timeout_seconds: 5 }
+gates: {}
 agents: {}
 "#;
         assert!(joined_problems(yaml).contains("http://"));
@@ -1640,6 +1693,7 @@ agents: {}
 version: 1
 llm_backends:
   x: { type: openai-compatible-api, base_url: "http://127.0.0.1:8000/v1/", timeout_seconds: 5 }
+gates: {}
 agents: {}
 "#;
         let c = parse(yaml, &p(), &env(&[])).unwrap();
@@ -1652,7 +1706,7 @@ agents: {}
 
     #[test]
     fn an_unsupported_version_is_refused() {
-        let yaml = "version: 2\nllm_backends: {}\nagents: {}\n";
+        let yaml = "version: 2\nllm_backends: {}\ngates: {}\nagents: {}\n";
         assert!(joined_problems(yaml).contains("version"));
     }
 
@@ -1669,6 +1723,7 @@ agents: {}
 version: 9
 llm_backends:
   x: { type: openai-compatible-api, base_url: "nope", timeout_seconds: 0 }
+gates: {}
 agents:
   r:
     max_seconds: 0
@@ -1690,6 +1745,7 @@ agents:
 version: 1
 llm_backends:
   x: { type: openai-compatible-api, base_url: "http://127.0.0.1:1/v1", timeout_seconds: 0 }
+gates: {}
 agents: {}
 "#;
         assert!(joined_problems(yaml).contains("timeout_seconds"));

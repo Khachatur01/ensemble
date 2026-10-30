@@ -319,6 +319,17 @@ fn cmd_check(config: Config, dir: &Path) -> Result<ExitCode, String> {
                 "{}: agent '{}' is not configured; it would fail at once",
                 t.id, t.agent
             )),
+            tasks::Entry::Task(t, None)
+                if t.gate
+                    .as_ref()
+                    .is_some_and(|g| !config.gates.contains_key(&g.name)) =>
+            {
+                bad.push(format!(
+                    "{}: gate '{}' is not configured under `gates`; it would fail at once",
+                    t.id,
+                    t.gate.as_ref().map_or("", |g| g.name.as_str())
+                ))
+            }
             _ => {}
         }
     }

@@ -6,8 +6,8 @@
 //! a ticket and its resolution:
 //!
 //! - `task.md`: YAML front matter (`title`, `agent`, and optionally `context`,
-//!   `goal`, `constraints`, `files`, `done_when`, `after`), then the task
-//!   itself. Written once; nothing rewrites it.
+//!   `goal`, `constraints`, `files`, `done_when`, `after`, `gate`), then the
+//!   task itself. Written once; nothing rewrites it.
 //! - `result.md`: written once, when the task ends: front matter (`status`,
 //!   `agent`, `started`, `ended`), then the agent's reply. A task with a
 //!   `result.md` is over; delete it to run the task again.
@@ -51,6 +51,7 @@ agent's `max_concurrent`.
     files: [src/fetch.rs]
     done_when: [cargo test passes]
     after: [0001-add-ureq]     # tasks that must be done first
+    gate: { name: test, attempts: 3 }   # a check from config.yaml's gates
     ---
     Retry a failed request three times, waiting 1s, 2s, 4s.
 
@@ -72,6 +73,17 @@ struct FrontMatter {
     files: Option<Vec<String>>,
     done_when: Option<Vec<String>>,
     after: Option<Vec<String>>,
+    gate: Option<GateRef>,
+}
+
+/// A task's gate: which of the config's `gates` its work must pass, and how
+/// many runs of the agent it gets to pass it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GateRef {
+    pub name: String,
+    /// Runs of the agent in all, the first included.
+    pub attempts: u32,
 }
 
 /// One task, read from its `task.md`. The optional parts are empty when the
@@ -93,6 +105,7 @@ pub struct Ticket {
     pub done_when: Vec<String>,
     /// Tasks that must be done before this one starts.
     pub after: Vec<String>,
+    pub gate: Option<GateRef>,
     pub text: String,
 }
 
@@ -159,7 +172,7 @@ pub struct Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     /// A ticket, and its outcome once it has one.
-    Task(Ticket, Option<Status>),
+    Task(Box<Ticket>, Option<Status>),
     /// A `task.md` that could not be read, and why. It never stops a scan.
     Unreadable { id: String, error: String },
 }
@@ -219,6 +232,10 @@ impl Store {
                 front.push_str(&format!("{key}: {list}\n"));
             }
         }
+        if let Some(gate) = &ticket.gate {
+            let gate = serde_json::to_string(gate).expect("a gate serializes");
+            front.push_str(&format!("gate: {gate}\n"));
+        }
         let body = format!("---\n{front}---\n{}\n", ticket.text.trim_end());
         let slug = slug(&ticket.title);
         let mut number = self.next_number();
@@ -262,7 +279,7 @@ impl Store {
             .map(|id| match self.read(&id) {
                 Ok(ticket) => {
                     let status = self.outcome(&id).map(|o| o.status);
-                    Entry::Task(ticket, status)
+                    Entry::Task(Box::new(ticket), status)
                 }
                 Err(error) => Entry::Unreadable { id, error },
             })
@@ -301,22 +318,28 @@ impl Store {
         Some(Outcome { status, text })
     }
 
-    /// Write a task's `result.md`. It is written once: a second call for the
-    /// same task leaves the first result in place.
+    /// Write a task's `result.md`, with `extra` front matter after the usual.
+    /// It is written once: a second call for the same task leaves the first
+    /// result in place.
     pub fn write_result(
         &self,
         id: &str,
         agent: &str,
         status: Status,
         started: SystemTime,
+        extra: &[(&str, String)],
         reply: &str,
     ) -> io::Result<()> {
         let path = self.tasks.join(id).join(RESULT_FILE);
         if path.exists() {
             return Ok(());
         }
+        let extra: String = extra
+            .iter()
+            .map(|(key, value)| format!("{key}: {value}\n"))
+            .collect();
         let text = format!(
-            "---\nstatus: {}\nagent: {}\nstarted: {}\nended: {}\n---\n{}\n",
+            "---\nstatus: {}\nagent: {}\nstarted: {}\nended: {}\n{extra}---\n{}\n",
             status.as_str(),
             yaml_str(agent),
             utc(started),
@@ -480,6 +503,14 @@ fn parse_ticket(id: &str, text: &str) -> Result<Ticket, String> {
     if after.iter().any(|a| a == id) {
         return Err("`after` names the task itself".into());
     }
+    if let Some(gate) = &front.gate {
+        if gate.name.trim().is_empty() {
+            return Err("`gate.name` is empty".into());
+        }
+        if gate.attempts == 0 {
+            return Err("`gate.attempts` must be at least 1".into());
+        }
+    }
     let some = |s: Option<String>| s.filter(|s| !s.trim().is_empty());
     Ok(Ticket {
         id: id.to_string(),
@@ -491,6 +522,7 @@ fn parse_ticket(id: &str, text: &str) -> Result<Ticket, String> {
         files: front.files.unwrap_or_default(),
         done_when: front.done_when.unwrap_or_default(),
         after,
+        gate: front.gate,
         text: text.to_string(),
     })
 }
@@ -572,6 +604,10 @@ mod tests {
             files: vec!["src/fetch.rs".into()],
             done_when: vec!["cargo test passes".into()],
             after: vec!["0000-setup".into()],
+            gate: Some(GateRef {
+                name: "test".into(),
+                attempts: 3,
+            }),
             ..draft(
                 "Add retry: to the fetcher!",
                 "coder",
@@ -588,7 +624,7 @@ mod tests {
                 ..written
             }
         );
-        assert_eq!(store.scan(), vec![Entry::Task(t.clone(), None)]);
+        assert_eq!(store.scan(), vec![Entry::Task(Box::new(t.clone()), None)]);
         assert_eq!(
             t.prompt(),
             "Retry three times.\n\n---\nNot front matter.\n\nGoal: Requests survive a flaky network.\n\nConstraints:\n- No new dependency\n- Keep: the API\n\nFiles to work on:\n- src/fetch.rs\n\nDone when:\n- cargo test passes"
@@ -599,11 +635,11 @@ mod tests {
     fn a_task_waits_for_every_task_in_after_to_be_done() {
         let task = |id: &str, after: &[&str], status: Option<Status>| {
             Entry::Task(
-                Ticket {
+                Box::new(Ticket {
                     id: id.into(),
                     after: after.iter().map(|a| a.to_string()).collect(),
                     ..draft(id, "x", "t")
-                },
+                }),
                 status,
             )
         };
@@ -644,6 +680,22 @@ mod tests {
             parse_ticket("0001-a", "---\ntitle: a\nagent: x\nafter: [../b]\n---\nt\n")
                 .unwrap_err()
                 .contains("not a task id")
+        );
+        assert!(
+            parse_ticket(
+                "0001-a",
+                "---\ntitle: a\nagent: x\ngate: {name: t, attempts: 0}\n---\nt\n"
+            )
+            .unwrap_err()
+            .contains("at least 1")
+        );
+        assert!(
+            parse_ticket(
+                "0001-a",
+                "---\ntitle: a\nagent: x\ngate: {name: t}\n---\nt\n"
+            )
+            .unwrap_err()
+            .contains("attempts")
         );
     }
 
@@ -694,10 +746,17 @@ mod tests {
         let id = store.create(&draft("Look", "scout", "t")).unwrap();
         let started = UNIX_EPOCH + Duration::from_secs(1_793_448_000);
         store
-            .write_result(&id, "scout", Status::Failed, started, "it broke\n")
+            .write_result(
+                &id,
+                "scout",
+                Status::Failed,
+                started,
+                &[("attempts", "2".into())],
+                "it broke\n",
+            )
             .unwrap();
         store
-            .write_result(&id, "scout", Status::Done, started, "second")
+            .write_result(&id, "scout", Status::Done, started, &[], "second")
             .unwrap();
         let out = store.outcome(&id).unwrap();
         assert_eq!(out.status, Status::Failed);
@@ -706,6 +765,7 @@ mod tests {
             "{}",
             out.text
         );
+        assert!(out.text.contains("Z\nattempts: 2\n---\n"), "{}", out.text);
         assert!(out.text.ends_with("---\nit broke\n"), "{}", out.text);
         assert!(matches!(
             &store.scan()[0],

@@ -7,7 +7,8 @@
   "required": [
     "version",
     "llm_backends",
-    "agents"
+    "agents",
+    "gates"
   ],
   "additionalProperties": false,
   "properties": {
@@ -28,9 +29,40 @@
       "additionalProperties": {
         "$ref": "#/definitions/agent"
       }
+    },
+    "gates": {
+      "description": "Commands a task's work must pass. The key is the gate's name, which a task's `gate` refers to. Defined here so a task names a gate and cannot bring a command of its own. `{}` when there are none.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/gate"
+      }
     }
   },
   "definitions": {
+    "gate": {
+      "type": "object",
+      "required": [
+        "command",
+        "timeout_seconds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "description": "A shell command (sh -c) run in the task's working directory after the agent is done. Exit status 0 passes.",
+          "type": "string",
+          "minLength": 1,
+          "examples": [
+            "cargo test",
+            "npm test"
+          ]
+        },
+        "timeout_seconds": {
+          "description": "Seconds the command may run; at the limit it is stopped and the gate fails.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
     "llm_backend": {
       "description": "How the model is reached. `type` decides which other settings there are.",
       "oneOf": [
