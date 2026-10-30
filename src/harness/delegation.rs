@@ -76,9 +76,10 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
 
     out.push(Tool {
         name: HEALTH,
-        description: "Check that every backend the ensemble routes to is reachable. Spends no \
-                      model tokens. Use it when a delegation fails, to tell a configuration \
-                      problem from a bad answer."
+        description: "Check that every agent CLI the ensemble runs starts, and that every LLM \
+                      backend answers and serves its agents' models. Spends no model tokens. \
+                      Use it when a delegation fails, to tell a configuration problem from a \
+                      bad answer."
             .into(),
         parameters: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
     });
@@ -114,7 +115,7 @@ impl ToolResult {
 
 /// Run one of the ensemble's own tools, passing along what a delegated agent
 /// is doing as it does it.
-/// Setting `cancel` stops a delegation at its next step.
+/// Setting `cancel` stops a delegation.
 pub fn call(
     ensemble: &Ensemble,
     name: &str,
@@ -143,30 +144,25 @@ pub fn call(
 
             match ensemble.delegate_reporting(role, task, context, progress, cancel) {
                 Ok(out) => ToolResult {
-                    text: match &out.stats {
-                        Some(a) => format!("{}\n\n{}", out.text, agent_footer(role, a)),
-                        None => out.text,
-                    },
+                    text: format!("{}\n\n{}", out.text, agent_footer(role, &out.stats)),
                     is_error: false,
                 },
                 Err(e) => {
                     // Telling the model whether another attempt could work is
                     // the difference between a useful retry and a loop against
                     // a typo'd agent name.
-                    let timed_out = matches!(
-                        &e,
-                        RouteError::LlmBackend(crate::port::Error::Timeout { .. })
-                    );
+                    let timed_out =
+                        matches!(&e, RouteError::Agent(crate::port::Error::Timeout { .. }));
                     let hint = if timed_out {
                         " This may be transient; the same call is worth one retry."
                     } else if e.is_retryable() {
-                        " Ensemble already retried it; call `health`, and retry once the backend is back."
+                        " Call `health`, and retry once what it reports is fixed."
                     } else {
                         " Retrying this unchanged will fail the same way."
                     };
                     let detail = match &e {
                         RouteError::UnknownAgent { .. } => String::new(),
-                        RouteError::LlmBackend(_) => format!(" (agent '{role}')"),
+                        RouteError::Agent(_) => format!(" (agent '{role}')"),
                     };
                     ToolResult::err(format!("delegation failed{detail}: {e}{hint}"))
                 }
@@ -176,7 +172,7 @@ pub fn call(
         AGENTS => {
             let mut lines = Vec::new();
             for role in ensemble.agents() {
-                // LlmBackend and model are deliberately absent: the caller must
+                // Where it runs and the model are deliberately absent: the caller must
                 // not start choosing them.
                 let purpose = ensemble
                     .config()
@@ -202,7 +198,7 @@ pub fn call(
                     Ok(()) => lines.push(format!("{backend}: ok")),
                     Err(e) => {
                         any_bad = true;
-                        lines.push(format!("{backend}: UNREACHABLE — {e}"));
+                        lines.push(format!("{backend}: FAILED — {e}"));
                     }
                 }
             }
@@ -221,21 +217,15 @@ pub fn call(
     }
 }
 
-/// Most `bash` commands listed in a footer; the rest are counted.
+/// Most shell commands listed in a footer; the rest are counted.
 const MAX_LISTED_COMMANDS: usize = 10;
 
 /// What an agent did, under its report: enough for the caller to review the
 /// work without asking the agent to describe it.
 fn agent_footer(role: &str, a: &crate::router::AgentStats) -> String {
     let mut out = format!(
-        "[{role}: {} step(s), {} tool call(s){}]",
-        a.steps,
-        a.tool_calls,
-        if a.trimmed > 0 {
-            format!(", {} old tool output(s) dropped", a.trimmed)
-        } else {
-            String::new()
-        }
+        "[{role}: {} step(s), {} tool call(s)]",
+        a.steps, a.tool_calls
     );
     if !a.changes.is_empty() {
         let files: Vec<String> = a

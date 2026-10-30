@@ -1,11 +1,12 @@
-//! End-to-end tests: the real binary, a real config file on disk, and a stub
-//! model server on loopback.
+//! End-to-end tests: the real binary, a real config file on disk, and a stand-in
+//! for the OpenCode CLI.
 //!
 //! The unit suites cover the request path with fakes injected. These cover what
-//! fakes cannot: that the binary parses its arguments, finds its config, speaks
-//! MCP over real pipes, and talks HTTP to a real socket.
+//! fakes cannot: that the binary parses its arguments, finds its config, starts
+//! the agent's CLI with the right command line and environment, speaks MCP over
+//! real pipes, and asks a real socket which models it serves.
 //!
-//! No test here needs the network or a model server.
+//! No test here needs the network, a model server or an agent CLI.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_ensemble");
 /// Port 1 is reserved and nothing listens there.
 const NOWHERE: &str = "http://127.0.0.1:1/v1";
 
-/// A scratch directory that cleans itself up.
+/// A scratch project that cleans itself up.
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -43,61 +44,91 @@ impl Scratch {
         std::fs::write(&p, contents).expect("write scratch file");
         p
     }
+
+    fn read(&self, name: &str) -> String {
+        std::fs::read_to_string(self.0.join(name)).unwrap_or_else(|e| panic!("read {name}: {e}"))
+    }
+
+    /// What the stand-in CLI saved: `args` or `config`.
+    fn seen(&self, name: &str) -> String {
+        std::fs::read_to_string(self.0.with_extension("bin").join(name))
+            .unwrap_or_else(|e| panic!("read {name}: {e}"))
+    }
+
+    /// A stand-in for `opencode`, kept outside the project so it is not one
+    /// of the files a run changes. It answers `--version`; otherwise it saves
+    /// its arguments (one per line) and its inline config beside itself,
+    /// runs `body`, and prints `answer` as OpenCode's JSON events.
+    fn opencode(&self, answer: &str, body: &str) -> String {
+        let bin = self.0.with_extension("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let path = bin.join("opencode");
+        let event = serde_json::json!({"type": "text", "part": {"text": answer}}).to_string();
+        let script = format!(
+            "#!/bin/sh\n[ \"$1\" = --version ] && exit 0\nprintf '%s\\n' \"$@\" > '{seen}/args'\nprintf '%s' \"$OPENCODE_CONFIG_CONTENT\" > '{seen}/config'\n{body}\nprintf '%s\\n' '{{\"type\":\"step_start\",\"part\":{{}}}}'\nprintf '%s\\n' '{}'\n",
+            event.replace('\'', "'\\''"),
+            seen = bin.display()
+        );
+        std::fs::write(&path, script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.display().to_string()
+    }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir_all(self.0.with_extension("bin"));
     }
 }
 
-/// Two backends: `coder` on `openai-local` at `openai_url`, and `reviewer`
-/// on `hosted` at `hosted_url`. A URL nothing listens on is fine for any test
-/// that does not delegate to that role.
-fn config_yaml(hosted_url: &str, openai_url: &str) -> String {
+/// Two OpenCode agents run by `command`: `reviewer` on a provider OpenCode
+/// knows, and `coder` on the `openai-local` LLM backend at `backend_url`.
+fn config_yaml(command: &str, backend_url: &str) -> String {
     format!(
         r#"
 version: 1
 
 llm_backends:
-  hosted:
-    type: openai-compatible-api
-    base_url_env: ENSEMBLE_TEST_HOSTED_URL
-    base_url_default: "{hosted}"
-    timeout_seconds: 20
   openai-local:
     type: openai-compatible-api
     base_url_env: ENSEMBLE_TEST_LOCAL_URL
-    base_url_default: "{url}"
+    base_url_default: "{backend_url}"
+    api_key_env: ENSEMBLE_TEST_LOCAL_KEY
     timeout_seconds: 20
 
 agents:
   reviewer:
     prompt: "Reviews code and reports findings."
     adapter:
-      type: ensemble
-      llm_backend: hosted
-      model: hosted-model
+      type: opencode
+      model: opencode/reviewer-model
+      command: "{command}"
   coder:
+    context_window: 32768
     adapter:
-      type: ensemble
+      type: opencode
       llm_backend: openai-local
       model: qwen3-coder
-"#,
-        hosted = hosted_url,
-        url = openai_url,
+      tools: [read, edit]
+      command: "{command}"
+"#
     )
 }
 
-fn ensemble(scratch: &Scratch, args: &[&str]) -> std::process::Output {
-    Command::new(BIN)
-        .args(args)
-        .current_dir(scratch.path())
-        // A stale variable in the test runner's environment would silently
-        // override base_url_default and change what is being tested.
+/// The binary, run in `scratch` with none of the test variables inherited:
+/// a stale one would silently change what is being tested.
+fn command(scratch: &Scratch) -> Command {
+    let mut c = Command::new(BIN);
+    c.current_dir(scratch.path())
         .env_remove("ENSEMBLE_TEST_LOCAL_URL")
-        .output()
-        .expect("run ensemble")
+        .env_remove("ENSEMBLE_TEST_LOCAL_KEY");
+    c
+}
+
+fn ensemble(scratch: &Scratch, args: &[&str]) -> std::process::Output {
+    command(scratch).args(args).output().expect("run ensemble")
 }
 
 fn stdout_of(out: &std::process::Output) -> String {
@@ -108,6 +139,36 @@ fn stderr_of(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stderr).to_string()
 }
 
+/// Answer every request with `body` (200, JSON) until the test ends.
+fn models_stub(body: &str) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    let body = body.to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            let mut reader = BufReader::new(&stream);
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).is_err() || header.trim().is_empty() {
+                    break;
+                }
+            }
+            let mut stream = &stream;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.flush();
+        }
+    });
+    url
+}
+
 // ---------------------------------------------------------------------------
 // The CLI
 // ---------------------------------------------------------------------------
@@ -115,17 +176,17 @@ fn stderr_of(out: &std::process::Output) -> String {
 #[test]
 fn check_accepts_a_valid_config_and_reports_the_team() {
     let s = Scratch::new("check-ok");
-    s.write(
-        ".ensemble/config.yaml",
-        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
-    );
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
 
     let out = ensemble(&s, &["check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(text.contains("ok (version 1)"), "{text}");
     assert!(text.contains("mcp: ready"), "{text}");
-    assert!(text.contains("reviewer"), "{text}");
+    assert!(
+        text.contains("coder  ->  opencode on openai-local / qwen3-coder"),
+        "{text}"
+    );
     assert!(text.contains("openai-compatible-api"), "{text}");
 }
 
@@ -141,7 +202,7 @@ llm_backends:
 agents:
   r:
     adapter:
-      type: ensemble
+      type: opencode
       llm_backend: nowhere
       model: ""
 "#,
@@ -152,6 +213,22 @@ agents:
     assert!(err.contains("version"), "{err}");
     assert!(err.contains("made-up-backend"), "{err}");
     assert!(err.contains("nowhere"), "{err}");
+}
+
+#[test]
+fn a_config_with_the_removed_ensemble_type_says_what_to_use_instead() {
+    let s = Scratch::new("removed-type");
+    s.write(
+        ".ensemble/config.yaml",
+        "version: 1\nagents:\n  coder:\n    adapter: { type: ensemble, model: m }\n",
+    );
+    let out = ensemble(&s, &["check"]);
+    assert!(!out.status.success());
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("type 'ensemble' was removed") && err.contains("llm_backend"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -177,17 +254,13 @@ llm_backends:
 #[test]
 fn a_config_in_a_parent_directory_is_not_used() {
     let s = Scratch::new("discover");
-    s.write(
-        ".ensemble/config.yaml",
-        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
-    );
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
     let deep = s.path().join("a/b/c");
     std::fs::create_dir_all(&deep).unwrap();
 
-    let out = Command::new(BIN)
-        .args(["check"])
+    let out = command(&s)
+        .arg("check")
         .current_dir(&deep)
-        .env_remove("ENSEMBLE_TEST_LOCAL_URL")
         .output()
         .unwrap();
     assert!(
@@ -216,29 +289,28 @@ fn a_missing_config_says_so_rather_than_guessing() {
 #[test]
 fn agents_prints_the_routing_table() {
     let s = Scratch::new("agents");
-    s.write(
-        ".ensemble/config.yaml",
-        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
-    );
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
 
     let out = ensemble(&s, &["agents"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
-    assert!(text.contains("coder\topenai-local\tqwen3-coder"), "{text}");
-    assert!(text.contains("reviewer\thosted\thosted-model"), "{text}");
+    assert!(
+        text.contains("coder\topencode on openai-local\tqwen3-coder"),
+        "{text}"
+    );
+    assert!(
+        text.contains("reviewer\topencode\topencode/reviewer-model"),
+        "{text}"
+    );
 }
 
 #[test]
 fn env_overrides_the_configured_default_base_url() {
     let s = Scratch::new("env-override");
-    s.write(
-        ".ensemble/config.yaml",
-        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
-    );
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
 
-    let out = Command::new(BIN)
-        .args(["check"])
-        .current_dir(s.path())
+    let out = command(&s)
+        .arg("check")
         .env("ENSEMBLE_TEST_LOCAL_URL", "http://10.0.0.9:9999/v1")
         .output()
         .unwrap();
@@ -251,80 +323,148 @@ fn env_overrides_the_configured_default_base_url() {
 }
 
 // ---------------------------------------------------------------------------
-// One task to one role, against a real socket
+// Starting the agent's CLI
 // ---------------------------------------------------------------------------
 
 #[test]
-fn run_sends_one_task_to_a_role_and_prints_its_answer() {
-    let (url, seen) = openai_stub(vec![text_body("ensemble-real-ok")]);
+fn run_starts_the_agents_cli_with_the_task_and_prints_its_answer() {
     let s = Scratch::new("run");
-    s.write(".ensemble/config.yaml", &config_yaml(&url, NOWHERE));
+    let cli = s.opencode("the review is clean", "");
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
 
     let out = ensemble(&s, &["run", "reviewer", "review", "this", "code"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(stdout_of(&out).trim(), "ensemble-real-ok");
+    assert!(
+        stdout_of(&out).starts_with("the review is clean"),
+        "{}",
+        stdout_of(&out)
+    );
     // Provenance goes to stderr so stdout stays pipeable.
     assert!(
-        stderr_of(&out).contains("reviewer via hosted/stub"),
+        stderr_of(&out).contains("reviewer via opencode / opencode/reviewer-model"),
         "{}",
         stderr_of(&out)
     );
-    let body: serde_json::Value = serde_json::from_str(&seen.lock().unwrap()[0]).unwrap();
-    assert_eq!(body["model"], "hosted-model");
-    let sent = body["messages"].to_string();
+    let args = s.seen("args");
     assert!(
-        sent.contains("Reviews code and reports findings."),
-        "{sent}"
+        args.contains("-m\nopencode/reviewer-model\n--\nreview this code\n"),
+        "{args}"
     );
-    assert!(sent.contains("review this code"), "{sent}");
+    let config: serde_json::Value = serde_json::from_str(&s.seen("config")).unwrap();
+    assert_eq!(
+        config["agent"]["ensemble-reviewer"]["prompt"],
+        "Reviews code and reports findings."
+    );
+    assert!(config.get("provider").is_none(), "{config}");
 }
 
 #[test]
-fn a_silent_endpoint_is_cut_off_at_the_backend_timeout() {
-    // Accepts the connection, never answers.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!(
-        "http://127.0.0.1:{}/v1",
-        listener.local_addr().unwrap().port()
+fn an_agent_on_an_llm_backend_gets_its_endpoint_and_the_key_from_dotenv() {
+    let s = Scratch::new("run-backend");
+    let cli = s.opencode("done", "");
+    s.write(
+        ".ensemble/config.yaml",
+        &config_yaml(&cli, "http://127.0.0.1:8888/v1"),
     );
-    std::thread::spawn(move || {
-        let _held: Vec<_> = listener.incoming().take(3).collect();
-        std::thread::sleep(std::time::Duration::from_secs(60));
-    });
-    let s = Scratch::new("silent");
-    let cfg = config_yaml(&url, NOWHERE).replace(
-        "    timeout_seconds: 20\n  openai-local:",
-        "    timeout_seconds: 2\n  openai-local:",
-    );
-    s.write(".ensemble/config.yaml", &cfg);
+    s.write(".ensemble/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-from-dotenv\n");
 
-    let started = std::time::Instant::now();
-    let out = ensemble(&s, &["run", "reviewer", "review this"]);
+    let out = ensemble(&s, &["run", "coder", "do it"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        s.seen("args")
+            .contains("-m\nensemble-openai-local/qwen3-coder\n"),
+        "{}",
+        s.seen("args")
+    );
+    let config: serde_json::Value = serde_json::from_str(&s.seen("config")).unwrap();
+    let provider = &config["provider"]["ensemble-openai-local"];
+    assert_eq!(provider["options"]["baseURL"], "http://127.0.0.1:8888/v1");
+    assert_eq!(provider["options"]["apiKey"], "sk-from-dotenv");
+    assert_eq!(provider["models"]["qwen3-coder"]["limit"]["context"], 32768);
+}
+
+#[test]
+fn show_prints_how_an_agent_starts_with_the_key_hidden() {
+    let s = Scratch::new("show");
+    s.write(
+        ".ensemble/config.yaml",
+        &config_yaml("opencode", "http://127.0.0.1:8888/v1"),
+    );
+    s.write(
+        ".ensemble/.env",
+        "ENSEMBLE_TEST_LOCAL_KEY=sk-secret-value\n",
+    );
+
+    let out = ensemble(&s, &["show", "coder"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(
+        text.starts_with("opencode run --standalone --format json --agent ensemble-coder -m ensemble-openai-local/qwen3-coder -- '<task>'"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"baseURL\": \"http://127.0.0.1:8888/v1\""),
+        "{text}"
+    );
+    assert!(text.contains("<redacted>"), "{text}");
+    assert!(!text.contains("sk-secret-value"), "the key leaked: {text}");
+
+    let out = ensemble(&s, &["show", "nobody"]);
     assert!(!out.status.success());
     assert!(
-        stderr_of(&out).contains("no answer within 2s"),
+        stderr_of(&out).contains("coder, reviewer"),
         "{}",
         stderr_of(&out)
     );
-    assert!(
-        started.elapsed().as_secs() < 15,
-        "took {:?}",
-        started.elapsed()
-    );
 }
 
 #[test]
-fn an_unreachable_openai_endpoint_fails_with_a_transport_error_not_a_hang() {
-    let s = Scratch::new("openai-down");
-    s.write(".ensemble/config.yaml", &config_yaml(NOWHERE, NOWHERE));
+fn files_the_agent_changed_are_reported() {
+    let s = Scratch::new("changes");
+    let cli = s.opencode("renamed it", "echo bar > a.txt");
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("a.txt", "foo\n");
 
-    let out = ensemble(&s, &["run", "coder", "write something"]);
-    assert!(!out.status.success());
-    let err = stderr_of(&out);
-    assert!(err.contains("openai-local"), "{err}");
+    let out = ensemble(&s, &["run", "coder", "rename foo to bar"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(s.read("a.txt"), "bar\n");
+}
+
+#[test]
+fn health_checks_the_cli_and_that_the_backend_serves_the_model() {
+    let s = Scratch::new("health");
+    let cli = s.opencode("", "");
+    let serving = models_stub(r#"{"object":"list","data":[{"id":"qwen3-coder"}]}"#);
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, &serving));
+    let out = ensemble(&s, &["health"]);
     assert!(
-        err.contains("could not reach") || err.contains("endpoint returned"),
-        "{err}"
+        out.status.success(),
+        "{}{}",
+        stdout_of(&out),
+        stderr_of(&out)
+    );
+    let text = stdout_of(&out);
+    assert!(text.contains(&format!("opencode ({cli}): ok")), "{text}");
+    assert!(text.contains("openai-local: ok"), "{text}");
+
+    let other = models_stub(r#"{"object":"list","data":[{"id":"something-else"}]}"#);
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, &other));
+    let out = ensemble(&s, &["health"]);
+    assert!(!out.status.success());
+    let text = stdout_of(&out);
+    assert!(text.contains("openai-local: FAILED"), "{text}");
+    assert!(
+        text.contains("does not serve 'qwen3-coder'. It serves: something-else."),
+        "{text}"
+    );
+
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    let out = ensemble(&s, &["health"]);
+    assert!(!out.status.success());
+    assert!(
+        stdout_of(&out).contains("could not reach the endpoint"),
+        "{}",
+        stdout_of(&out)
     );
 }
 
@@ -341,10 +481,8 @@ struct McpSession {
 
 impl McpSession {
     fn start(scratch: &Scratch) -> Self {
-        let mut child = Command::new(BIN)
+        let mut child = command(scratch)
             .arg("mcp")
-            .current_dir(scratch.path())
-            .env_remove("ENSEMBLE_TEST_LOCAL_URL")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -415,10 +553,7 @@ fn tool_text(reply: &serde_json::Value) -> String {
 #[test]
 fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
     let s = Scratch::new("mcp-handshake");
-    s.write(
-        ".ensemble/config.yaml",
-        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
-    );
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
     let mut session = McpSession::start(&s);
 
     let init = session.request(
@@ -449,31 +584,39 @@ fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
 #[test]
 fn a_harness_can_delegate_through_mcp_and_get_the_work_back() {
     let s = Scratch::new("mcp-delegate");
-    let (url, seen) = openai_stub(vec![text_body("the review is clean")]);
-    s.write(".ensemble/config.yaml", &config_yaml(&url, NOWHERE));
+    let cli = s.opencode("renamed it", "echo bar > a.txt");
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("a.txt", "foo\n");
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
 
+    let agents = tool_text(&session.call("agents", serde_json::json!({})));
+    assert!(agents.contains("coder [can change files]"), "{agents}");
+
     let reply = session.call(
         "delegate",
-        serde_json::json!({"agent": "reviewer", "task": "review src/main.rs", "context": "it is new"}),
+        serde_json::json!({"agent": "coder", "task": "rename foo to bar", "context": "in a.txt"}),
     );
     assert_eq!(reply["result"]["isError"], false, "{reply}");
-    assert_eq!(tool_text(&reply), "the review is clean");
-
-    // And it really went to the reviewer's backend, with the context attached.
-    let sent = seen.lock().unwrap()[0].clone();
-    assert!(sent.contains("review src/main.rs"), "{sent}");
-    assert!(sent.contains("it is new"), "{sent}");
+    let text = tool_text(&reply);
+    assert!(text.starts_with("renamed it"), "{text}");
+    assert!(
+        text.ends_with("[coder: 1 step(s), 0 tool call(s)]\n[files changed: a.txt (modified)]"),
+        "{text}"
+    );
+    // The task and its context reached the CLI.
+    assert!(
+        s.seen("args")
+            .contains("Context:\nin a.txt\n\nrename foo to bar"),
+        "{}",
+        s.seen("args")
+    );
 }
 
 #[test]
-fn an_unknown_role_comes_back_as_a_readable_tool_error_and_the_session_survives() {
-    let s = Scratch::new("mcp-bad-role");
-    s.write(
-        ".ensemble/config.yaml",
-        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
-    );
+fn an_unknown_agent_comes_back_as_a_readable_tool_error_and_the_session_survives() {
+    let s = Scratch::new("mcp-bad-agent");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
 
@@ -488,7 +631,7 @@ fn an_unknown_role_comes_back_as_a_readable_tool_error_and_the_session_survives(
     assert_eq!(reply["result"]["isError"], true);
     let text = tool_text(&reply);
     assert!(text.contains("architect"), "{text}");
-    assert!(text.contains("reviewer"), "lists the real roles: {text}");
+    assert!(text.contains("reviewer"), "lists the real agents: {text}");
 
     // The session continues — the point of returning this as a result.
     let after = session.call("agents", serde_json::json!({}));
@@ -496,12 +639,10 @@ fn an_unknown_role_comes_back_as_a_readable_tool_error_and_the_session_survives(
 }
 
 #[test]
-fn a_backend_failure_reaches_the_model_as_a_readable_reason() {
-    let s = Scratch::new("mcp-backend-down");
-    s.write(
-        ".ensemble/config.yaml",
-        &config_yaml(NOWHERE, "http://127.0.0.1:1/v1"),
-    );
+fn an_agent_failure_reaches_the_model_as_a_readable_reason() {
+    let s = Scratch::new("mcp-agent-fails");
+    let cli = s.opencode("", "echo 'Model unavailable: qwen3-coder' >&2\nexit 1");
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
 
@@ -511,9 +652,10 @@ fn a_backend_failure_reaches_the_model_as_a_readable_reason() {
     );
     assert_eq!(reply["result"]["isError"], true);
     let text = tool_text(&reply);
-    assert!(text.contains("delegation failed"), "{text}");
+    assert!(text.contains("delegation failed (agent 'coder')"), "{text}");
+    assert!(text.contains("Model unavailable"), "{text}");
     assert!(
-        text.contains("retry"),
+        text.contains("Retrying"),
         "tells the model what to do next: {text}"
     );
 }
@@ -521,10 +663,7 @@ fn a_backend_failure_reaches_the_model_as_a_readable_reason() {
 #[test]
 fn the_tools_never_offer_a_way_to_pick_a_model_or_a_backend() {
     let s = Scratch::new("mcp-no-model-param");
-    s.write(
-        ".ensemble/config.yaml",
-        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
-    );
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
 
@@ -533,19 +672,19 @@ fn the_tools_never_offer_a_way_to_pick_a_model_or_a_backend() {
     assert!(!schema.contains("\"model\""), "{schema}");
     assert!(!schema.contains("\"backend\""), "{schema}");
 
-    // And the role listing does not leak them either.
-    let roles = tool_text(&session.call("agents", serde_json::json!({})));
-    assert!(!roles.contains("qwen3-coder"), "{roles}");
-    assert!(!roles.contains("hosted-model"), "{roles}");
+    // And the agent listing does not leak them either.
+    let agents = tool_text(&session.call("agents", serde_json::json!({})));
+    assert!(!agents.contains("qwen3-coder"), "{agents}");
+    assert!(!agents.contains("reviewer-model"), "{agents}");
 }
 
 #[test]
 fn nothing_but_protocol_is_ever_written_to_stdout() {
     // One stray println corrupts the stream and the harness sees a parse error
-    // instead of a tool.
+    // instead of a tool. The stand-in CLI's own output must not leak either.
     let s = Scratch::new("mcp-clean-stdout");
-    let (url, _) = openai_stub(vec![text_body("fine")]);
-    s.write(".ensemble/config.yaml", &config_yaml(&url, NOWHERE));
+    let cli = s.opencode("fine", "echo 'not json, from the CLI'");
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
 
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
@@ -563,10 +702,7 @@ fn nothing_but_protocol_is_ever_written_to_stdout() {
 #[test]
 fn a_malformed_message_does_not_end_the_session() {
     let s = Scratch::new("mcp-garbage");
-    s.write(
-        ".ensemble/config.yaml",
-        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
-    );
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
     let mut session = McpSession::start(&s);
 
     {
@@ -587,10 +723,7 @@ fn a_malformed_message_does_not_end_the_session() {
 #[test]
 fn the_server_exits_cleanly_when_the_harness_closes_the_pipe() {
     let s = Scratch::new("mcp-eof");
-    s.write(
-        ".ensemble/config.yaml",
-        &config_yaml(NOWHERE, "http://127.0.0.1:8000/v1"),
-    );
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
 
@@ -608,138 +741,6 @@ fn an_invalid_config_stops_the_mcp_server_before_it_serves_anything() {
     let out = ensemble(&s, &["mcp"]);
     assert!(!out.status.success());
     assert!(stderr_of(&out).contains("backend"), "{}", stderr_of(&out));
-}
-
-// ---------------------------------------------------------------------------
-// A role that is an agent, end to end
-// ---------------------------------------------------------------------------
-
-/// Answer one POST per entry of `bodies` (a chat-completions JSON body each),
-/// in order, and record every request body.
-fn openai_stub(bodies: Vec<String>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
-    use std::io::Read;
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let url = format!(
-        "http://127.0.0.1:{}/v1",
-        listener.local_addr().unwrap().port()
-    );
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let seen_for_thread = std::sync::Arc::clone(&seen);
-    std::thread::spawn(move || {
-        for body in bodies {
-            let Ok((stream, _)) = listener.accept() else {
-                return;
-            };
-            let mut reader = BufReader::new(&stream);
-            let mut length = 0usize;
-            loop {
-                let mut header = String::new();
-                if reader.read_line(&mut header).is_err() || header.trim().is_empty() {
-                    break;
-                }
-                if let Some(v) = header.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = v.trim().parse().unwrap_or(0);
-                }
-            }
-            let mut buf = vec![0u8; length];
-            if reader.read_exact(&mut buf).is_err() {
-                return;
-            }
-            seen_for_thread
-                .lock()
-                .unwrap()
-                .push(String::from_utf8_lossy(&buf).to_string());
-            let mut stream = &stream;
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.flush();
-        }
-    });
-    (url, seen)
-}
-
-fn tool_call_body(id: &str, name: &str, arguments: &str) -> String {
-    serde_json::json!({
-        "id": "c", "object": "chat.completion", "model": "stub",
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": null,
-            "tool_calls": [{"id": id, "type": "function",
-                            "function": {"name": name, "arguments": arguments}}]},
-            "finish_reason": "tool_calls"}],
-        "usage": {"prompt_tokens": 4, "completion_tokens": 6}
-    })
-    .to_string()
-}
-
-fn text_body(text: &str) -> String {
-    serde_json::json!({
-        "id": "c", "object": "chat.completion", "model": "stub",
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
-                     "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 4, "completion_tokens": 6}
-    })
-    .to_string()
-}
-
-#[test]
-fn a_role_with_tools_edits_the_project_through_its_own_loop_over_mcp() {
-    let (url, seen) = openai_stub(vec![
-        tool_call_body("t1", "read_file", r#"{"path":"a.txt"}"#),
-        tool_call_body(
-            "t2",
-            "edit_file",
-            r#"{"path":"a.txt","old_string":"foo","new_string":"bar"}"#,
-        ),
-        tool_call_body("t3", "read_file", r#"{"path":"../outside"}"#),
-        text_body("renamed it"),
-    ]);
-    let s = Scratch::new("agent-mcp");
-    s.write(
-        ".ensemble/config.yaml",
-        &format!(
-            "version: 1\nllm_backends:\n  local:\n    type: openai-compatible-api\n    \
-             base_url_env: ENSEMBLE_TEST_LOCAL_URL\n    base_url_default: \"{url}\"\n    \
-             timeout_seconds: 20\nagents:\n  coder:\n    context_window: 8000\n    adapter:\n      \
-             type: ensemble\n      llm_backend: local\n      model: coder-model\n      \
-             tools: [read, edit]\n"
-        ),
-    );
-    s.write("a.txt", "foo\n");
-    let mut session = McpSession::start(&s);
-    session.request(
-        "initialize",
-        serde_json::json!({"protocolVersion": "2025-06-18"}),
-    );
-
-    let roles = tool_text(&session.call("agents", serde_json::json!({})));
-    assert!(roles.contains("coder [can change files]"), "{roles}");
-
-    let reply = session.call(
-        "delegate",
-        serde_json::json!({"agent": "coder", "task": "rename foo to bar in a.txt"}),
-    );
-    let text = tool_text(&reply);
-    assert!(text.starts_with("renamed it"), "{text}");
-    assert!(
-        text.ends_with("[coder: 4 step(s), 3 tool call(s)]\n[files changed: a.txt (modified)]"),
-        "{text}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(s.path().join("a.txt")).unwrap(),
-        "bar\n"
-    );
-
-    // The escape attempt reached the model as an error, not as file content.
-    let seen = seen.lock().unwrap();
-    assert!(
-        seen[3].contains("outside the project") || seen[3].contains("'..'"),
-        "{}",
-        seen[3]
-    );
-    let first: serde_json::Value = serde_json::from_str(&seen[0]).unwrap();
-    assert_eq!(first["model"], "coder-model");
 }
 
 #[test]
@@ -800,7 +801,7 @@ fn init_writes_a_sample_that_checks_and_never_overwrites_by_accident() {
 #[test]
 fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
     let s = Scratch::new("dotenv");
-    s.write(".ensemble/config.yaml", &config_yaml(NOWHERE, NOWHERE));
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
     s.write(
         ".ensemble/.env",
         "ENSEMBLE_TEST_LOCAL_URL=http://10.0.0.7:7777/v1\n",
@@ -811,9 +812,8 @@ fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
     assert!(text.contains("http://10.0.0.7:7777/v1"), "{text}");
     assert!(text.contains(".env: read for variables"), "{text}");
 
-    let out = Command::new(BIN)
-        .args(["check"])
-        .current_dir(s.path())
+    let out = command(&s)
+        .arg("check")
         .env("ENSEMBLE_TEST_LOCAL_URL", "http://10.0.0.9:9999/v1")
         .output()
         .unwrap();

@@ -5,7 +5,8 @@
 //! config, checking the backends are reachable, and sending one task to one
 //! agent with no harness in the way.
 
-use ensemble::config::{self, Config, SystemEnv};
+use ensemble::config::{self, Adapter, Config, SystemEnv};
+use ensemble::external::{claude_code, opencode};
 use ensemble::harness::mcp;
 use ensemble::router::Ensemble;
 use std::io::IsTerminal;
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-ensemble — one interface for several models, delegating work between them
+ensemble — a team of coding agents behind one MCP server
 
 USAGE:
     ensemble <COMMAND> [OPTIONS]
@@ -27,11 +28,14 @@ COMMANDS:
                             every setting, a .env for API keys and a .gitignore
                             that keeps .env out of git. Refuses to overwrite
                             config.yaml unless --force; --stdout prints it.
+    show <AGENT>            Print how an agent is started: its command line and
+                            the config handed to its CLI, API keys hidden.
     check                   Load and validate the config, then report the team.
     schema                  Print the JSON Schema for config.yaml, so an editor
                             can complete and check it. Needs no config.
     agents                  List the agents and what runs each.
-    health                  Check that every backend in use is reachable.
+    health                  Check that every agent CLI starts and every LLM
+                            backend in use answers and serves its models.
     run <AGENT> <TASK>      Send one task to one agent and print the answer.
 
 OPTIONS:
@@ -46,7 +50,7 @@ OPTIONS:
     -V, --version           Print the version.
 
 ENVIRONMENT:
-    Backends name the variables they read; `ensemble check` lists them. API keys
+    LLM backends name the variables they read; `ensemble check` lists them. API keys
     are never read from the config file. Variables missing from the environment
     are read from .ensemble/.env, beside the config.
 ";
@@ -153,8 +157,9 @@ fn run() -> Result<ExitCode, String> {
 
     match args.command.as_str() {
         "mcp" => cmd_mcp(config, dir),
-        "check" => cmd_check(config, dir),
+        "check" => cmd_check(config),
         "agents" => cmd_agents(config, dir),
+        "show" => cmd_show(&config, &args),
         "health" => cmd_health(config, dir),
         "run" => cmd_run(config, dir, &args),
         other => Err(format!("unknown command '{other}'. Try --help.")),
@@ -223,10 +228,6 @@ const SAMPLE_ENV: &str = "\
 # OPENAI_LOCAL_API_KEY=
 ";
 
-fn build(config: Config, dir: PathBuf) -> Result<Ensemble, String> {
-    Ensemble::new(config, Some(dir)).map_err(|e| e.to_string())
-}
-
 fn cmd_mcp(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
     // A friendly nudge, on stderr so it cannot corrupt the protocol stream.
     if std::io::stdin().is_terminal() {
@@ -235,14 +236,14 @@ fn cmd_mcp(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
              ensemble: a harness spawns this; for a one-off try `ensemble run <agent> <task>`."
         );
     }
-    let ensemble = build(config, dir)?;
+    let ensemble = Ensemble::new(config, Some(dir));
     let stdin = std::io::stdin();
     // Not locked: delegations reply from their own threads.
     mcp::serve(&ensemble, stdin.lock(), std::io::stdout()).map_err(|e| format!("mcp: {e}"))?;
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_check(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
+fn cmd_check(config: Config) -> Result<ExitCode, String> {
     // Reaching here means the config already loaded and validated; `load`
     // returns an error otherwise.
     println!(
@@ -299,34 +300,29 @@ fn cmd_check(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
         println!("  (none — add agents under `agents:`)");
     }
 
-    // Constructing the Ensemble builds every backend, which is where a bad URL
-    // shows up.
     println!();
-    match Ensemble::new(config, Some(dir)) {
-        Ok(_) => println!("mcp: ready"),
-        Err(e) => println!("mcp: unavailable — {e}"),
-    }
+    println!("mcp: ready. `ensemble health` checks the agent CLIs and LLM backends.");
     Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_agents(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
-    let ensemble = build(config, dir)?;
+    let ensemble = Ensemble::new(config, Some(dir));
     for role in ensemble.agents() {
-        let (backend, model) = ensemble.route_of(role).map_err(|e| e.to_string())?;
-        println!("{role}\t{backend}\t{model}");
+        let (runs_on, model) = ensemble.route_of(role).map_err(|e| e.to_string())?;
+        println!("{role}\t{runs_on}\t{model}");
     }
     Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_health(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
-    let ensemble = build(config, dir)?;
+    let ensemble = Ensemble::new(config, Some(dir));
     let mut all_ok = true;
     for (backend, result) in ensemble.health() {
         match result {
             Ok(()) => println!("{backend}: ok"),
             Err(e) => {
                 all_ok = false;
-                println!("{backend}: UNREACHABLE");
+                println!("{backend}: FAILED");
                 println!("  {e}");
             }
         }
@@ -351,7 +347,7 @@ fn cmd_run(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
         );
     }
 
-    let ensemble = build(config, dir)?;
+    let ensemble = Ensemble::new(config, Some(dir));
     let outcome = ensemble
         .delegate(role, &task, args.context.as_deref())
         .map_err(|e| e.to_string())?;
@@ -359,13 +355,71 @@ fn cmd_run(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
     // The answer to stdout so it pipes; the provenance to stderr so it does not
     // end up in whatever consumed the answer.
     eprintln!(
-        "ensemble: {} via {}/{} ({} in, {} out)",
+        "ensemble: {} via {} / {} ({} in, {} out)",
         outcome.agent,
-        outcome.backend,
+        outcome.runs_on,
         outcome.model,
         outcome.prompt_tokens,
         outcome.completion_tokens
     );
     println!("{}", outcome.text);
     Ok(ExitCode::SUCCESS)
+}
+
+/// How an agent is started, without starting it: the command line, and the
+/// config its CLI is handed. API keys are hidden.
+fn cmd_show(config: &Config, args: &Args) -> Result<ExitCode, String> {
+    let name = args
+        .rest
+        .first()
+        .ok_or("show: needs an agent. Try `ensemble agents` to see them.")?;
+    let agent = config.agent(name).ok_or_else(|| {
+        format!(
+            "show: no agent '{name}'. Agents: {}.",
+            config.agent_names().join(", ")
+        )
+    })?;
+    const TASK: &str = "<task>";
+    match &agent.adapter {
+        Adapter::ClaudeCode(cc) => {
+            let argv = claude_code::arguments(agent, cc, TASK);
+            println!("{}", command_line(&cc.command, &argv));
+        }
+        Adapter::OpenCode(oc) => {
+            let backend = oc
+                .llm_backend
+                .as_ref()
+                .and_then(|b| config.llm_backends.get(b));
+            let argv = opencode::arguments(agent, oc, backend, TASK);
+            println!("{}", command_line(&oc.command, &argv));
+            let mut inline = opencode::config(agent, oc, backend);
+            opencode::redact(&mut inline);
+            println!();
+            println!("OPENCODE_CONFIG_CONTENT:");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&inline).map_err(|e| e.to_string())?
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `program` and `args` as one line a shell would read back the same way.
+fn command_line(program: &str, args: &[String]) -> String {
+    let quote = |s: &str| {
+        let plain = !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_-./:=@,+".contains(c));
+        if plain {
+            s.to_string()
+        } else {
+            format!("'{}'", s.replace('\'', r"'\''"))
+        }
+    };
+    std::iter::once(program)
+        .chain(args.iter().map(String::as_str))
+        .map(quote)
+        .collect::<Vec<_>>()
+        .join(" ")
 }

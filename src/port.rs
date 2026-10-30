@@ -1,202 +1,16 @@
-//! The Model Port: the one interface every backend adapter implements.
-//!
-//! Everything above this line (the router, the MCP server, the CLI) is written
-//! against `ModelPort` and the types in this module. Everything below it — how
-//! an HTTP endpoint is addressed, what an API error body looks like — lives
-//! inside an adapter and is not visible from here.
+//! What every adapter and probe shares: the error type and token usage.
 //!
 //! The error type is shared rather than per-adapter on purpose. An agent failing
-//! because a connection was refused and an agent failing because an endpoint
-//! returned 503 are the same event to the harness: this agent did not answer, and
+//! because its program would not start and an agent failing because an endpoint
+//! returned 503 are the same event to the caller: this agent did not answer, and
 //! here is why in one sentence.
 
 use std::fmt;
-
-/// Who is speaking in a turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    System,
-    User,
-    Assistant,
-    /// The result of a tool the *caller* ran, answering one [`ToolCall`].
-    Tool,
-}
-
-impl Role {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Role::System => "system",
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::Tool => "tool",
-        }
-    }
-}
-
-/// A tool the *caller* can run, offered to the model.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ToolDef {
-    pub name: String,
-    pub description: String,
-    /// JSON Schema for the arguments, carried verbatim. Deliberately not
-    /// modelled: it is the caller's schema, and re-encoding it here could only
-    /// lose detail.
-    pub parameters: serde_json::Value,
-}
-
-/// A model's request to run one tool.
-///
-/// Both fields are passed through this crate byte for byte. The caller pairs a
-/// result to its call on `id`, and a model that writes malformed `arguments`
-/// has to be reported as having done so rather than quietly corrected.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    /// Arguments as the model wrote them — a JSON *string*, not a value.
-    pub arguments: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Message {
-    pub role: Role,
-    pub content: String,
-    /// Set on an assistant turn the model ended by asking for tools. Empty
-    /// otherwise.
-    pub tool_calls: Vec<ToolCall>,
-    /// Set on [`Role::Tool`] turns only: which call this answers.
-    pub tool_call_id: Option<String>,
-}
-
-impl Message {
-    fn plain(role: Role, content: impl Into<String>) -> Self {
-        Message {
-            role,
-            content: content.into(),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-        }
-    }
-    pub fn system(content: impl Into<String>) -> Self {
-        Self::plain(Role::System, content)
-    }
-    pub fn user(content: impl Into<String>) -> Self {
-        Self::plain(Role::User, content)
-    }
-    /// An assistant turn that ended in tool calls.
-    ///
-    /// `content` is usually empty here, which is not the same as the turn being
-    /// absent: the calls themselves are what the model said.
-    pub fn assistant_calling(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
-        Message {
-            role: Role::Assistant,
-            content: content.into(),
-            tool_calls,
-            tool_call_id: None,
-        }
-    }
-    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
-        Message {
-            role: Role::Tool,
-            content: content.into(),
-            tool_calls: Vec::new(),
-            tool_call_id: Some(tool_call_id.into()),
-        }
-    }
-}
-
-/// One completion request, in the only shape the port understands.
-///
-/// `tools` is what the *caller* can run, offered to the model. It is empty for
-/// a think-only agent, and non-empty for an agent with `tools:`, where
-/// Ensemble's own agent loop runs the calls the model makes.
-///
-/// A silently dropped `tools` array is worse than no field at all, because
-/// the caller believes it was honoured. So no adapter may drop it.
-#[derive(Debug, Clone)]
-pub struct Request {
-    /// The model id as the *backend* names it. The router fills this in from
-    /// config; callers name an agent, never a model.
-    pub model: String,
-    pub messages: Vec<Message>,
-    pub max_tokens: Option<u32>,
-    pub temperature: Option<f32>,
-    /// Penalties on tokens already used: once at all (`presence_penalty`) or
-    /// by how often (`frequency_penalty`), each -2.0 to 2.0. Left to the
-    /// server's default when unset.
-    pub presence_penalty: Option<f32>,
-    pub frequency_penalty: Option<f32>,
-    /// How hard a reasoning model should think before answering (`none`,
-    /// `low`, `medium`, `high`). Left to the server's default when unset.
-    pub reasoning_effort: Option<String>,
-    /// Tools the *caller* can run. See the note on this struct.
-    pub tools: Vec<ToolDef>,
-    /// When the whole delegation must end. An adapter waits no later than
-    /// this, even if its own timeout is longer.
-    pub deadline: Option<std::time::Instant>,
-}
-
-impl Request {
-    pub fn new(model: impl Into<String>, messages: Vec<Message>) -> Self {
-        Request {
-            model: model.into(),
-            messages,
-            max_tokens: None,
-            temperature: None,
-            presence_penalty: None,
-            frequency_penalty: None,
-            reasoning_effort: None,
-            tools: Vec::new(),
-            deadline: None,
-        }
-    }
-
-    /// `timeout`, shortened to what is left before [`Self::deadline`]. `None`
-    /// when the deadline has already passed.
-    pub fn time_left(&self, timeout: std::time::Duration) -> Option<std::time::Duration> {
-        match self.deadline {
-            None => Some(timeout),
-            Some(d) => {
-                let left = d.saturating_duration_since(std::time::Instant::now());
-                (!left.is_zero()).then(|| left.min(timeout))
-            }
-        }
-    }
-
-    /// Does this request ask the model to drive a caller-supplied tool schema?
-    pub fn offers_tools(&self) -> bool {
-        !self.tools.is_empty()
-    }
-
-    /// The concatenated `system` turns, which is how both adapters want them.
-    pub fn system_text(&self) -> String {
-        self.messages
-            .iter()
-            .filter(|m| m.role == Role::System)
-            .map(|m| m.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    }
-}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct Response {
-    pub text: String,
-    /// What the model asked the *caller* to run. Empty unless the request
-    /// offered tools; an adapter never invents one.
-    pub tool_calls: Vec<ToolCall>,
-    /// What actually answered, as reported by the backend. Not necessarily what
-    /// was asked for — an endpoint is free to serve something else, and the
-    /// difference belongs in the record rather than being smoothed over.
-    pub model: String,
-    pub usage: Usage,
-    pub finish_reason: Option<String>,
 }
 
 /// Everything that can go wrong between asking an agent for work and getting it.
@@ -261,63 +75,6 @@ impl Error {
     }
 }
 
-/// Waits before each retry of a call that failed in a way worth retrying.
-#[cfg(not(test))]
-const RETRY_DELAYS: [std::time::Duration; 2] = [
-    std::time::Duration::from_secs(2),
-    std::time::Duration::from_secs(8),
-];
-#[cfg(test)]
-const RETRY_DELAYS: [std::time::Duration; 2] = [
-    std::time::Duration::from_millis(1),
-    std::time::Duration::from_millis(1),
-];
-
-/// [`ModelPort::complete`], retried after a refused connection, a 429 or a
-/// 5xx — a server restarting or loading a model, which a long agent run would
-/// otherwise lose all its work to. A timeout is not retried: the same call
-/// would most likely spend the same time again. `stop` ends the waiting early.
-pub fn complete_retrying(
-    port: &dyn ModelPort,
-    request: &Request,
-    stop: &dyn Fn() -> bool,
-    progress: &dyn Fn(&str),
-) -> Result<Response, Error> {
-    let mut delays = RETRY_DELAYS.iter();
-    loop {
-        match port.complete(request) {
-            Err(e) if e.is_retryable() && !matches!(e, Error::Timeout { .. }) => {
-                let Some(delay) = delays.next() else {
-                    return Err(e);
-                };
-                progress(&format!(
-                    "{e}; retrying in {}s",
-                    delay.as_secs_f32().ceil() as u64
-                ));
-                if !sleep_unless(*delay, stop) {
-                    return Err(e);
-                }
-            }
-            other => return other,
-        }
-    }
-}
-
-/// Sleep for `total`, waking early when `stop` turns true. False if it did.
-fn sleep_unless(total: std::time::Duration, stop: &dyn Fn() -> bool) -> bool {
-    let until = std::time::Instant::now() + total;
-    loop {
-        if stop() {
-            return false;
-        }
-        let now = std::time::Instant::now();
-        if now >= until {
-            return true;
-        }
-        std::thread::sleep((until - now).min(std::time::Duration::from_millis(50)));
-    }
-}
-
 /// Messages are written for the model that will read them: what failed, on which
 /// backend, and where to look. A truncation marker is added rather than silently
 /// cutting, so nobody debugs a sentence that was never complete.
@@ -359,7 +116,7 @@ impl fmt::Display for Error {
             Error::Timeout { backend, seconds } => write!(
                 f,
                 "backend '{backend}': no answer within {seconds}s, killed. \
-                 Raise timeout_seconds on the backend if this is normal for the task."
+                 Raise max_seconds if this is normal for the task."
             ),
             Error::Transport { backend, detail } => {
                 write!(
@@ -394,196 +151,9 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// The port itself.
-///
-/// `&self` rather than `&mut self`: adapters hold configuration, not
-/// conversation state, so one instance serves every agent assigned to it and the
-/// router can hand out shared references.
-pub trait ModelPort: Send + Sync {
-    /// The backend instance name from the config, for errors and logs.
-    fn name(&self) -> &str;
-
-    /// The backend type id — `openai-compatible-api`.
-    fn type_id(&self) -> &'static str;
-
-    fn complete(&self, request: &Request) -> Result<Response, Error>;
-
-    /// Cheap reachability check. Must not spend a model call.
-    fn health(&self) -> Result<(), Error>;
-}
-
-#[cfg(test)]
-pub mod testing {
-    //! Fakes used by several test modules. Kept beside the trait they implement
-    //! so a change to the port breaks them here rather than in six files.
-
-    use super::*;
-    use std::collections::VecDeque;
-    use std::sync::Mutex;
-
-    /// One scripted answer, for a test that needs several turns in a row.
-    ///
-    /// An agent loop is several model calls, and each one has to be able to
-    /// say something different; a single canned reply cannot express
-    /// "read a file, then answer".
-    #[derive(Debug, Clone)]
-    pub enum Scripted {
-        Text(String),
-        /// Tool calls, with optional leading prose.
-        Calls(String, Vec<ToolCall>),
-        /// Text the backend reports as cut off at the token limit. Says
-        /// nothing about what the model would have produced.
-        Truncated(String),
-        Fail(String),
-    }
-
-    impl Scripted {
-        pub fn text(s: &str) -> Self {
-            Scripted::Text(s.into())
-        }
-        pub fn truncated(s: &str) -> Self {
-            Scripted::Truncated(s.into())
-        }
-        /// One call to `name` with the given raw JSON arguments.
-        pub fn call(id: &str, name: &str, arguments: &str) -> Self {
-            Scripted::Calls(
-                String::new(),
-                vec![ToolCall {
-                    id: id.into(),
-                    name: name.into(),
-                    arguments: arguments.into(),
-                }],
-            )
-        }
-        pub fn calls(calls: Vec<ToolCall>) -> Self {
-            Scripted::Calls(String::new(), calls)
-        }
-    }
-
-    pub fn call(id: &str, name: &str, arguments: &str) -> ToolCall {
-        ToolCall {
-            id: id.into(),
-            name: name.into(),
-            arguments: arguments.into(),
-        }
-    }
-
-    /// Records what it was asked and returns a canned answer or a canned error.
-    ///
-    /// `script` is consumed one entry per call; when it runs dry the standing
-    /// `reply` answers every further call. That way a test scripts only the
-    /// turns it cares about.
-    pub struct FakePort {
-        pub name: String,
-        pub reply: Mutex<Result<String, String>>,
-        pub script: Mutex<VecDeque<Scripted>>,
-        pub seen: Mutex<Vec<Request>>,
-    }
-
-    impl FakePort {
-        fn build(name: &str, reply: Result<String, String>) -> Self {
-            FakePort {
-                name: name.into(),
-                reply: Mutex::new(reply),
-                script: Mutex::new(VecDeque::new()),
-                seen: Mutex::new(Vec::new()),
-            }
-        }
-
-        pub fn ok(name: &str, reply: &str) -> Self {
-            Self::build(name, Ok(reply.into()))
-        }
-
-        pub fn failing(name: &str, detail: &str) -> Self {
-            Self::build(name, Err(detail.into()))
-        }
-
-        /// A port that answers the given turns in order, then falls back to
-        /// `reply` for anything after them.
-        pub fn scripted(name: &str, reply: &str, script: Vec<Scripted>) -> Self {
-            let p = Self::build(name, Ok(reply.into()));
-            *p.script.lock().unwrap() = script.into();
-            p
-        }
-
-        pub fn last(&self) -> Option<Request> {
-            self.seen.lock().unwrap().last().cloned()
-        }
-
-        pub fn nth(&self, i: usize) -> Option<Request> {
-            self.seen.lock().unwrap().get(i).cloned()
-        }
-
-        pub fn call_count(&self) -> usize {
-            self.seen.lock().unwrap().len()
-        }
-    }
-
-    impl ModelPort for FakePort {
-        fn name(&self) -> &str {
-            &self.name
-        }
-        fn type_id(&self) -> &'static str {
-            "fake"
-        }
-        fn complete(&self, request: &Request) -> Result<Response, Error> {
-            self.seen.lock().unwrap().push(request.clone());
-
-            let scripted = self.script.lock().unwrap().pop_front();
-            let (text, tool_calls, finish) = match scripted {
-                Some(Scripted::Text(t)) => (t, Vec::new(), "stop"),
-                Some(Scripted::Calls(t, calls)) => (t, calls, "tool_calls"),
-                Some(Scripted::Truncated(t)) => (t, Vec::new(), "length"),
-                Some(Scripted::Fail(detail)) => {
-                    return Err(Error::Transport {
-                        backend: self.name.clone(),
-                        detail,
-                    });
-                }
-                None => match &*self.reply.lock().unwrap() {
-                    Ok(text) => (text.clone(), Vec::new(), "stop"),
-                    Err(detail) => {
-                        return Err(Error::Transport {
-                            backend: self.name.clone(),
-                            detail: detail.clone(),
-                        });
-                    }
-                },
-            };
-
-            Ok(Response {
-                text,
-                tool_calls,
-                model: request.model.clone(),
-                usage: Usage {
-                    prompt_tokens: 1,
-                    completion_tokens: 2,
-                },
-                finish_reason: Some(finish.into()),
-            })
-        }
-        fn health(&self) -> Result<(), Error> {
-            Ok(())
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn system_turns_are_concatenated_in_order() {
-        let req = Request::new(
-            "m",
-            vec![
-                Message::system("first"),
-                Message::user("ignored"),
-                Message::system("second"),
-            ],
-        );
-        assert_eq!(req.system_text(), "first\n\nsecond");
-    }
 
     #[test]
     fn retryability_follows_the_class_of_failure() {
@@ -602,22 +172,16 @@ mod tests {
             }
             .is_retryable()
         );
-        assert!(
-            Error::Api {
-                backend: b(),
-                status: 503,
-                message: String::new()
-            }
-            .is_retryable()
-        );
-        assert!(
-            Error::Api {
-                backend: b(),
-                status: 429,
-                message: String::new()
-            }
-            .is_retryable()
-        );
+        for status in [429, 503] {
+            assert!(
+                Error::Api {
+                    backend: b(),
+                    status,
+                    message: String::new()
+                }
+                .is_retryable()
+            );
+        }
         // A bad request will be just as bad the second time.
         assert!(
             !Error::Api {
@@ -637,60 +201,11 @@ mod tests {
     }
 
     #[test]
-    fn time_left_is_the_timeout_shortened_to_the_deadline() {
-        use std::time::{Duration, Instant};
-        let mut r = Request::new("m", vec![]);
-        let long = Duration::from_secs(600);
-        assert_eq!(r.time_left(long), Some(long));
-        r.deadline = Some(Instant::now() + Duration::from_secs(5));
-        assert!(r.time_left(long).unwrap() <= Duration::from_secs(5));
-        r.deadline = Some(Instant::now() - Duration::from_secs(1));
-        assert_eq!(r.time_left(long), None);
-    }
-
-    #[test]
-    fn a_transient_failure_is_retried_and_the_retry_reported() {
-        use testing::{FakePort, Scripted};
-        let port = FakePort::scripted(
-            "b",
-            "fine",
-            vec![Scripted::Fail("Connection refused".into())],
-        );
-        let seen = std::cell::RefCell::new(Vec::new());
-        let r = complete_retrying(&port, &Request::new("m", vec![]), &|| false, &|l| {
-            seen.borrow_mut().push(l.to_string())
-        })
-        .unwrap();
-        assert_eq!(r.text, "fine");
-        assert_eq!(port.call_count(), 2);
-        let seen = seen.into_inner();
-        assert_eq!(seen.len(), 1);
-        assert!(seen[0].contains("Connection refused") && seen[0].contains("retrying"));
-    }
-
-    #[test]
-    fn retries_give_up_after_the_last_delay() {
-        let port = testing::FakePort::failing("b", "Connection refused");
-        let err =
-            complete_retrying(&port, &Request::new("m", vec![]), &|| false, &|_| {}).unwrap_err();
-        assert!(err.to_string().contains("Connection refused"));
-        assert_eq!(port.call_count(), 1 + RETRY_DELAYS.len());
-    }
-
-    #[test]
-    fn a_stop_ends_the_retrying() {
-        let port = testing::FakePort::failing("b", "Connection refused");
-        assert!(complete_retrying(&port, &Request::new("m", vec![]), &|| true, &|_| {}).is_err());
-        assert_eq!(port.call_count(), 1);
-    }
-
-    #[test]
     fn long_payloads_are_marked_as_truncated_not_silently_cut() {
-        let long = "x".repeat(5000);
         let msg = Error::Api {
             backend: "b".into(),
             status: 500,
-            message: long,
+            message: "x".repeat(5000),
         }
         .to_string();
         assert!(msg.contains("[truncated]"), "{msg}");

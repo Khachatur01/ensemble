@@ -286,48 +286,71 @@ pub fn serve<W: Write + Send>(
 mod tests {
     use super::*;
     use crate::config;
-    use crate::port::ModelPort;
-    use crate::port::testing::FakePort;
+    use crate::workspace::testing::{TempDir, executable};
     use std::collections::BTreeMap;
-    use std::sync::Arc;
 
-    const YAML: &str = r#"
-version: 1
-llm_backends:
-  local: { type: openai-compatible-api, base_url_env: L, base_url_default: "http://127.0.0.1:8000/v1" }
-  hosted: { type: openai-compatible-api, base_url_env: H, base_url_default: "http://127.0.0.1:9000/v1" }
-agents:
-  coder:
-    prompt: "Writes code to a stated spec."
-    adapter:
-      type: ensemble
-      llm_backend: local
-      model: qwen3-coder
-  reviewer:
-    adapter:
-      type: ensemble
-      llm_backend: hosted
-      model: hosted-model
-"#;
-
-    fn ensemble_with(local: Arc<FakePort>, hosted: Arc<FakePort>) -> Ensemble {
-        let cfg = config::parse(
-            YAML,
-            std::path::Path::new("ensemble.yaml"),
-            &BTreeMap::new(),
-        )
-        .unwrap();
-        let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
-        ports.insert("local".into(), local);
-        ports.insert("hosted".into(), hosted);
-        Ensemble::with_ports(cfg, ports, None)
+    /// One OpenCode JSON event per line, as `printf` commands.
+    fn emit(events: &[Value]) -> String {
+        events
+            .iter()
+            .map(|e| {
+                format!(
+                    "printf '%s\\n' '{}'\n",
+                    e.to_string().replace('\'', "'\\''")
+                )
+            })
+            .collect()
     }
 
-    fn working() -> Ensemble {
-        ensemble_with(
-            Arc::new(FakePort::ok("local", "work done")),
-            Arc::new(FakePort::ok("hosted", "reviewed")),
+    fn step(events: Vec<Value>) -> Vec<Value> {
+        let mut v = vec![json!({"type": "step_start", "part": {}})];
+        v.extend(events);
+        v.push(json!({"type": "step_finish", "part": {"tokens": {"input": 5, "output": 2}}}));
+        v
+    }
+
+    fn text(t: &str) -> Value {
+        json!({"type": "text", "part": {"text": t}})
+    }
+
+    /// A stand-in for `opencode` that answers `--version` and otherwise runs
+    /// `body` in the project.
+    fn cli(dir: &std::path::Path, name: &str, body: &str) -> String {
+        executable(
+            dir,
+            name,
+            &format!("[ \"$1\" = --version ] && exit 0\n{body}"),
         )
+        .display()
+        .to_string()
+    }
+
+    /// A team of OpenCode agents, each running its own stand-in script, in a
+    /// fresh project. `scripts` is (agent, tools, body).
+    fn team(scripts: &[(&str, &str, &str)]) -> (Ensemble, TempDir) {
+        let tmp = TempDir::new();
+        let bin = tmp.0.join("bin");
+        let project = tmp.0.join("project");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("a.txt"), "hello").unwrap();
+        let mut yaml = String::from("version: 1\nagents:\n");
+        for (name, tools, body) in scripts {
+            let command = cli(&bin, name, body);
+            yaml.push_str(&format!(
+                "  {name}:\n    prompt: \"The {name}. Second line.\"\n    adapter:\n      type: opencode\n      model: opencode/m-{name}\n      tools: [{tools}]\n      command: \"{command}\"\n"
+            ));
+        }
+        let cfg =
+            config::parse(&yaml, std::path::Path::new("config.yaml"), &BTreeMap::new()).unwrap();
+        (Ensemble::new(cfg, Some(project)), tmp)
+    }
+
+    fn working() -> (Ensemble, TempDir) {
+        team(&[
+            ("coder", "read, edit", &emit(&step(vec![text("work done")]))),
+            ("reviewer", "read", &emit(&step(vec![text("reviewed")]))),
+        ])
     }
 
     fn rpc(method: &str, params: Value) -> Value {
@@ -346,114 +369,47 @@ agents:
         response["result"]["content"][0]["text"].as_str().unwrap()
     }
 
+    /// `scout` reads a.txt, then answers.
+    fn scouting() -> (Ensemble, TempDir) {
+        let events = step(vec![
+            json!({"type": "tool_use", "part": {"tool": "read",
+                "state": {"status": "completed", "input": {"filePath": "a.txt"}}}}),
+            text("it says hello"),
+        ]);
+        team(&[("scout", "read", &emit(&events))])
+    }
+
     #[test]
-    fn an_agent_role_is_labelled_and_its_delegation_reports_what_it_did() {
-        let yaml = YAML.replace(
-            "  reviewer:",
-            "  scout:\n    context_window: 8000\n    adapter:\n      type: ensemble\n      llm_backend: local\n      model: m\n      tools: [read]\n  fixer:\n    context_window: 8000\n    adapter:\n      type: ensemble\n      llm_backend: local\n      model: m\n      tools: [read, edit]\n  reviewer:",
+    fn agents_are_labelled_and_a_delegation_reports_what_it_did() {
+        let (e, _tmp) = team(&[("coder", "read, edit", "true"), ("scout", "read", "true")]);
+        let listing = call(&e, "agents", json!({}));
+        let listing = text_of(&listing);
+        assert!(
+            listing.starts_with("coder [can change files]: The coder. Second line."),
+            "{listing}"
         );
-        let cfg = config::parse(
-            &yaml,
-            std::path::Path::new("ensemble.yaml"),
-            &BTreeMap::new(),
-        )
-        .unwrap();
-        let tmp = crate::agent::sandbox::testing::TempDir::new();
-        std::fs::write(tmp.0.join("a.txt"), "hello").unwrap();
-        let local = Arc::new(FakePort::scripted(
-            "local",
-            "unused",
-            vec![
-                crate::port::testing::Scripted::call("c1", "read_file", r#"{"path":"a.txt"}"#),
-                crate::port::testing::Scripted::text("it says hello"),
-            ],
-        ));
-        let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
-        ports.insert("local".into(), local);
-        ports.insert("hosted".into(), Arc::new(FakePort::ok("hosted", "r")));
-        let e = Ensemble::with_ports(cfg, ports, Some(tmp.0.clone()));
-
-        let roles = call(&e, "agents", json!({}));
-        let listing = text_of(&roles);
         assert!(listing.contains("scout [read-only]"), "{listing}");
-        assert!(listing.contains("fixer [can change files]"), "{listing}");
-        assert!(listing.starts_with("coder:"), "{listing}");
 
+        let (e, _tmp) = scouting();
         let r = call(&e, "delegate", json!({"agent": "scout", "task": "look"}));
         let text = text_of(&r);
         assert!(text.starts_with("it says hello"), "{text}");
         assert!(
-            text.ends_with("[scout: 2 step(s), 1 tool call(s)]"),
+            text.ends_with("[scout: 1 step(s), 1 tool call(s)]"),
             "{text}"
         );
     }
 
     #[test]
-    fn an_agents_delegation_lists_the_files_it_changed() {
-        let yaml = YAML.replace(
-            "  reviewer:",
-            "  fixer:\n    context_window: 8000\n    adapter:\n      type: ensemble\n      llm_backend: local\n      model: m\n      tools: [edit]\n  reviewer:",
-        );
-        let cfg = config::parse(
-            &yaml,
-            std::path::Path::new("ensemble.yaml"),
-            &BTreeMap::new(),
-        )
-        .unwrap();
-        let tmp = crate::agent::sandbox::testing::TempDir::new();
-        std::fs::write(tmp.0.join("a.txt"), "hello").unwrap();
-        let local = Arc::new(FakePort::scripted(
-            "local",
-            "unused",
-            vec![
-                crate::port::testing::Scripted::call(
-                    "c1",
-                    "edit_file",
-                    r#"{"path":"a.txt","old_string":"hello","new_string":"bye"}"#,
-                ),
-                crate::port::testing::Scripted::text("fixed"),
-            ],
-        ));
-        let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
-        ports.insert("local".into(), local);
-        ports.insert("hosted".into(), Arc::new(FakePort::ok("hosted", "r")));
-        let e = Ensemble::with_ports(cfg, ports, Some(tmp.0.clone()));
-
+    fn a_delegation_lists_the_files_the_agent_changed() {
+        let body = format!("echo bye > a.txt\n{}", emit(&step(vec![text("fixed")])));
+        let (e, _tmp) = team(&[("fixer", "read, edit", &body)]);
         let r = call(&e, "delegate", json!({"agent": "fixer", "task": "fix"}));
         let text = text_of(&r);
         assert!(
             text.ends_with("tool call(s)]\n[files changed: a.txt (modified)]"),
             "{text}"
         );
-    }
-
-    /// An ensemble whose `scout` is an agent that reads a file, then answers.
-    fn scouting() -> (Ensemble, crate::agent::sandbox::testing::TempDir) {
-        let yaml = YAML.replace(
-            "  reviewer:",
-            "  scout:\n    context_window: 8000\n    adapter:\n      type: ensemble\n      llm_backend: local\n      model: m\n      tools: [read]\n  reviewer:",
-        );
-        let cfg = config::parse(
-            &yaml,
-            std::path::Path::new("ensemble.yaml"),
-            &BTreeMap::new(),
-        )
-        .unwrap();
-        let tmp = crate::agent::sandbox::testing::TempDir::new();
-        std::fs::write(tmp.0.join("a.txt"), "hello").unwrap();
-        let local = Arc::new(FakePort::scripted(
-            "local",
-            "unused",
-            vec![
-                crate::port::testing::Scripted::call("c1", "read_file", r#"{"path":"a.txt"}"#),
-                crate::port::testing::Scripted::text("it says hello"),
-            ],
-        ));
-        let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
-        ports.insert("local".into(), local);
-        ports.insert("hosted".into(), Arc::new(FakePort::ok("hosted", "r")));
-        let e = Ensemble::with_ports(cfg, ports, Some(tmp.0.clone()));
-        (e, tmp)
     }
 
     fn served(e: &Ensemble, input: &str) -> Vec<Value> {
@@ -480,7 +436,7 @@ agents:
             .iter()
             .filter(|m| m["method"] == "notifications/progress")
             .collect();
-        assert_eq!(progress.len(), 4, "{before:?}");
+        assert_eq!(progress.len(), 3, "{before:?}");
         assert!(
             progress
                 .iter()
@@ -490,19 +446,19 @@ agents:
             .iter()
             .map(|m| m["params"]["progress"].as_u64().unwrap())
             .collect();
-        assert_eq!(counters, [1, 2, 3, 4], "the counter rises");
+        assert_eq!(counters, [1, 2, 3], "the counter rises");
         assert_eq!(
             progress[1]["params"]["message"],
-            r#"scout · step 1 · read_file({"path":"a.txt"})"#
+            "scout · step 1 · read(a.txt)"
         );
 
         let logs: Vec<&Value> = before
             .iter()
             .filter(|m| m["method"] == "notifications/message")
             .collect();
-        assert_eq!(logs.len(), 4);
-        assert_eq!(logs[3]["params"]["data"], "scout · step 2 · done");
-        assert_eq!(logs[3]["params"]["level"], "info");
+        assert_eq!(logs.len(), 3);
+        assert_eq!(logs[2]["params"]["data"], "scout · done");
+        assert_eq!(logs[2]["params"]["level"], "info");
     }
 
     #[test]
@@ -530,158 +486,72 @@ agents:
         assert!(out.iter().any(|m| m["method"] == "notifications/progress"));
     }
 
-    /// Answers once `want` calls are waiting at the same time ("met"), or
-    /// after five seconds alone ("alone"). Calls handled one at a time can
-    /// never meet.
-    struct Meeting {
-        waiting: Mutex<usize>,
-        arrived: std::sync::Condvar,
-        want: usize,
-    }
-
-    impl ModelPort for Meeting {
-        fn name(&self) -> &str {
-            "local"
-        }
-        fn type_id(&self) -> &'static str {
-            "fake"
-        }
-        fn complete(
-            &self,
-            r: &crate::port::Request,
-        ) -> Result<crate::port::Response, crate::port::Error> {
-            let mut n = self.waiting.lock().unwrap();
-            *n += 1;
-            self.arrived.notify_all();
-            let (_n, wait) = self
-                .arrived
-                .wait_timeout_while(n, std::time::Duration::from_secs(5), |n| *n < self.want)
-                .unwrap();
-            Ok(crate::port::Response {
-                text: if wait.timed_out() { "alone" } else { "met" }.into(),
-                tool_calls: Vec::new(),
-                model: r.model.clone(),
-                usage: Default::default(),
-                finish_reason: Some("stop".into()),
-            })
-        }
-        fn health(&self) -> Result<(), crate::port::Error> {
-            Ok(())
-        }
-    }
-
     #[test]
     fn delegations_run_at_the_same_time() {
-        let meeting = Arc::new(Meeting {
-            waiting: Mutex::new(0),
-            arrived: std::sync::Condvar::new(),
-            want: 2,
-        });
-        let e = ensemble_with_port(meeting);
+        // Each run leaves a mark and waits up to five seconds for a second
+        // one. Runs handled one at a time can never meet.
+        let meet = r#"touch ".mark.$$"
+i=0
+while [ "$(ls -a | grep -c '^\.mark\.')" -lt 2 ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+if [ $i -lt 50 ]; then t=met; else t=alone; fi
+printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
+"#;
+        let (e, _tmp) = team(&[("coder", "read", meet)]);
         let call = |id: u32| {
             format!(
                 r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"delegate","arguments":{{"agent":"coder","task":"t"}}}}}}"#
             )
         };
         let out = served(&e, &format!("{}\n{}\n", call(1), call(2)));
-        let mut replies: Vec<(u64, &str)> = out
+        let mut replies: Vec<(u64, String)> = out
             .iter()
             .filter(|m| m.get("id").is_some())
             .map(|m| {
+                let text = m["result"]["content"][0]["text"].as_str().unwrap();
                 (
                     m["id"].as_u64().unwrap(),
-                    m["result"]["content"][0]["text"].as_str().unwrap(),
+                    text.lines().next().unwrap().to_string(),
                 )
             })
             .collect();
         replies.sort();
-        assert_eq!(replies, vec![(1, "met"), (2, "met")]);
-    }
-
-    fn ensemble_with_port(local: Arc<dyn ModelPort>) -> Ensemble {
-        let cfg = config::parse(
-            YAML,
-            std::path::Path::new("ensemble.yaml"),
-            &BTreeMap::new(),
-        )
-        .unwrap();
-        let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
-        ports.insert("local".into(), local);
-        ports.insert("hosted".into(), Arc::new(FakePort::ok("hosted", "r")));
-        Ensemble::with_ports(cfg, ports, None)
-    }
-
-    /// A [`FakePort`] that takes its time over every answer.
-    struct Slow(FakePort);
-
-    impl ModelPort for Slow {
-        fn name(&self) -> &str {
-            self.0.name()
-        }
-        fn type_id(&self) -> &'static str {
-            "fake"
-        }
-        fn complete(
-            &self,
-            r: &crate::port::Request,
-        ) -> Result<crate::port::Response, crate::port::Error> {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            self.0.complete(r)
-        }
-        fn health(&self) -> Result<(), crate::port::Error> {
-            Ok(())
-        }
+        assert_eq!(replies, vec![(1, "met".into()), (2, "met".into())]);
     }
 
     #[test]
     fn a_cancelled_delegation_stops_and_gets_no_reply() {
-        let yaml = YAML.replace(
-            "  reviewer:",
-            "  scout:\n    context_window: 8000\n    adapter:\n      type: ensemble\n      llm_backend: local\n      model: m\n      tools: [glob]\n  reviewer:",
+        let body = format!(
+            "{}sleep 30\n",
+            emit(&[json!({"type": "step_start", "part": {}})])
         );
-        let cfg = config::parse(
-            &yaml,
-            std::path::Path::new("ensemble.yaml"),
-            &BTreeMap::new(),
-        )
-        .unwrap();
-        let tmp = crate::agent::sandbox::testing::TempDir::new();
-        let looping = (0..20)
-            .map(|i| {
-                crate::port::testing::Scripted::call(&format!("c{i}"), "glob", r#"{"pattern":"*"}"#)
-            })
-            .collect();
-        let slow = Arc::new(Slow(FakePort::scripted("local", "x", looping)));
-        let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
-        ports.insert("local".into(), slow.clone());
-        ports.insert("hosted".into(), Arc::new(FakePort::ok("hosted", "r")));
-        let e = Ensemble::with_ports(cfg, ports, Some(tmp.0.clone()));
-
+        let (e, _tmp) = team(&[("scout", "read", &body)]);
         let input = format!(
             "{SCOUT_CALL}\n{}\n{}\n",
             r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#,
             r#"{"jsonrpc":"2.0","id":8,"method":"ping"}"#
         );
+        let started = std::time::Instant::now();
         let out = served(&e, &input);
         assert!(out.iter().all(|m| m["id"] != 7), "no reply: {out:?}");
         assert!(out.iter().any(|m| m["id"] == 8), "ping answered: {out:?}");
         assert!(
-            slow.0.call_count() <= 1,
-            "stopped after {} calls",
-            slow.0.call_count()
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the agent was stopped, not waited for"
         );
     }
 
     #[test]
     fn initialize_advertises_logging() {
-        let r = handle(&working(), &rpc("initialize", json!({}))).unwrap();
+        let (e, _tmp) = working();
+        let r = handle(&e, &rpc("initialize", json!({}))).unwrap();
         assert!(r["result"]["capabilities"]["logging"].is_object());
     }
 
     #[test]
     fn initialize_reports_the_server_and_echoes_the_clients_protocol_version() {
+        let (e, _tmp) = working();
         let r = handle(
-            &working(),
+            &e,
             &rpc("initialize", json!({"protocolVersion": "2024-11-05"})),
         )
         .unwrap();
@@ -692,112 +562,109 @@ agents:
 
     #[test]
     fn initialize_falls_back_to_our_version_when_the_client_sends_none() {
-        let r = handle(&working(), &rpc("initialize", json!({}))).unwrap();
+        let (e, _tmp) = working();
+        let r = handle(&e, &rpc("initialize", json!({}))).unwrap();
         assert_eq!(r["result"]["protocolVersion"], PROTOCOL_VERSION);
     }
 
     #[test]
-    fn tools_list_advertises_the_three_tools_with_the_real_role_names() {
-        let r = handle(&working(), &rpc("tools/list", json!({}))).unwrap();
+    fn tools_list_advertises_the_three_tools_with_the_real_agent_names() {
+        let (e, _tmp) = working();
+        let r = handle(&e, &rpc("tools/list", json!({}))).unwrap();
         let tools = r["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, vec!["delegate", "agents", "health"]);
 
         let enum_ = &tools[0]["inputSchema"]["properties"]["agent"]["enum"];
-        let roles: Vec<&str> = enum_
+        let agents: Vec<&str> = enum_
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert_eq!(roles, vec!["coder", "reviewer"]);
+        assert_eq!(agents, vec!["coder", "reviewer"]);
     }
 
     #[test]
     fn no_tool_accepts_a_model_or_a_backend_parameter() {
         // The indirection is the product. A `model` parameter would undo it at
         // the first opportunity, so its absence is asserted rather than assumed.
-        let r = handle(&working(), &rpc("tools/list", json!({}))).unwrap();
+        let (e, _tmp) = working();
+        let r = handle(&e, &rpc("tools/list", json!({}))).unwrap();
         let schema = r["result"]["tools"].to_string();
         assert!(!schema.contains("\"model\""), "{schema}");
         assert!(!schema.contains("\"backend\""), "{schema}");
     }
 
     #[test]
-    fn delegate_returns_the_roles_work_and_routes_to_its_backend() {
-        let local = Arc::new(FakePort::ok("local", "work done"));
-        let hosted = Arc::new(FakePort::ok("hosted", "reviewed"));
-        let e = ensemble_with(local.clone(), hosted.clone());
-
+    fn delegate_returns_the_work_of_the_agent_it_names() {
+        let (e, _tmp) = working();
         let r = call(
             &e,
             "delegate",
             json!({"agent": "coder", "task": "write a parser"}),
         );
-        assert_eq!(text_of(&r), "work done");
+        assert!(text_of(&r).starts_with("work done"), "{}", text_of(&r));
         assert_eq!(r["result"]["isError"], false);
-        assert_eq!(local.call_count(), 1);
-        assert_eq!(hosted.call_count(), 0);
 
         let r = call(
             &e,
             "delegate",
             json!({"agent": "reviewer", "task": "review it"}),
         );
-        assert_eq!(text_of(&r), "reviewed");
-        assert_eq!(hosted.call_count(), 1);
+        assert!(text_of(&r).starts_with("reviewed"), "{}", text_of(&r));
     }
 
     #[test]
-    fn delegate_passes_context_through_to_the_backend() {
-        let local = Arc::new(FakePort::ok("local", "ok"));
-        let e = ensemble_with(local.clone(), Arc::new(FakePort::ok("hosted", "ok")));
+    fn delegate_passes_the_task_and_its_context_to_the_agent() {
+        // The prompt is the CLI's last argument.
+        let body = format!(
+            "for last; do :; done\nprintf '%s' \"$last\" > prompt.txt\n{}",
+            emit(&step(vec![text("ok")]))
+        );
+        let (e, tmp) = team(&[("coder", "read", &body)]);
         call(
             &e,
             "delegate",
             json!({"agent": "coder", "task": "fix it", "context": "the test fails on line 9"}),
         );
-        let sent = local.last().unwrap();
-        assert!(
-            sent.messages.iter().any(|m| m.content.contains("line 9")),
-            "{:?}",
-            sent.messages
-        );
+        let prompt = std::fs::read_to_string(tmp.0.join("project/prompt.txt")).unwrap();
+        assert_eq!(prompt, "Context:\nthe test fails on line 9\n\nfix it");
     }
 
     #[test]
     fn a_failed_delegation_is_an_is_error_result_not_a_jsonrpc_error() {
         // The model must be able to read the reason. A JSON-RPC error is
         // handled by the harness and never reaches it.
-        let e = ensemble_with(
-            Arc::new(FakePort::failing("local", "Connection refused")),
-            Arc::new(FakePort::ok("hosted", "ok")),
-        );
+        let (e, _tmp) = team(&[("coder", "read", "echo 'provider exploded' >&2\nexit 3\n")]);
         let r = call(&e, "delegate", json!({"agent": "coder", "task": "t"}));
         assert!(r.get("error").is_none(), "{r}");
         assert_eq!(r["result"]["isError"], true);
         let text = text_of(&r);
-        assert!(text.contains("Connection refused"), "{text}");
         assert!(
-            text.contains("already retried"),
+            text.contains("(agent 'coder')") && text.contains("provider exploded"),
+            "{text}"
+        );
+        assert!(
+            text.contains("fail the same way"),
             "says whether to retry: {text}"
         );
     }
 
     #[test]
-    fn a_permanent_failure_tells_the_model_not_to_loop() {
-        let e = working();
+    fn an_unknown_agent_tells_the_model_not_to_loop() {
+        let (e, _tmp) = working();
         let r = call(&e, "delegate", json!({"agent": "architect", "task": "t"}));
         assert_eq!(r["result"]["isError"], true);
         let text = text_of(&r);
         assert!(text.contains("architect"), "{text}");
-        assert!(text.contains("coder"), "lists the real roles: {text}");
+        assert!(text.contains("coder"), "lists the real agents: {text}");
         assert!(text.contains("fail the same way"), "{text}");
     }
 
     #[test]
     fn missing_or_empty_arguments_are_refused_with_a_usable_message() {
-        let e = working();
+        let (e, _tmp) = working();
         for args in [
             json!({"task": "t"}),
             json!({"agent": "coder"}),
@@ -809,49 +676,44 @@ agents:
     }
 
     #[test]
-    fn roles_lists_the_team_without_naming_backends_or_models() {
-        let r = call(&working(), "agents", json!({}));
+    fn agents_lists_the_team_without_naming_models() {
+        let (e, _tmp) = working();
+        let r = call(&e, "agents", json!({}));
         let text = text_of(&r);
         assert!(
             text.contains("coder") && text.contains("reviewer"),
             "{text}"
         );
-        assert!(text.contains("Writes code to a stated spec."), "{text}");
-        assert!(
-            !text.contains("qwen3-coder"),
-            "must not leak the model: {text}"
-        );
-        assert!(
-            !text.contains("hosted-model"),
-            "must not leak the model: {text}"
-        );
+        assert!(text.contains("The coder. Second line."), "{text}");
+        assert!(!text.contains("m-coder"), "must not leak the model: {text}");
     }
 
     #[test]
-    fn health_reports_each_backend_and_flags_a_broken_one() {
-        let good = call(&working(), "health", json!({}));
-        assert_eq!(good["result"]["isError"], false);
-        assert!(text_of(&good).contains("local: ok"), "{}", text_of(&good));
+    fn health_reports_each_cli_and_flags_a_broken_one() {
+        let (e, _tmp) = working();
+        let good = call(&e, "health", json!({}));
+        assert_eq!(good["result"]["isError"], false, "{}", text_of(&good));
+        assert!(text_of(&good).contains(": ok"), "{}", text_of(&good));
 
-        // FakePort::health always succeeds, so a genuinely missing adapter is
-        // the available way to produce an unhealthy backend here.
         let cfg = config::parse(
-            YAML,
-            std::path::Path::new("ensemble.yaml"),
+            "version: 1\nagents:\n  x:\n    adapter: { type: opencode, model: a/b, command: /nonexistent/opencode }\n",
+            std::path::Path::new("config.yaml"),
             &BTreeMap::new(),
         )
         .unwrap();
-        let mut ports: BTreeMap<String, Arc<dyn ModelPort>> = BTreeMap::new();
-        ports.insert("local".into(), Arc::new(FakePort::ok("local", "ok")));
-        let e = Ensemble::with_ports(cfg, ports, None);
-        let bad = call(&e, "health", json!({}));
+        let bad = call(&Ensemble::new(cfg, None), "health", json!({}));
         assert_eq!(bad["result"]["isError"], true);
-        assert!(text_of(&bad).contains("UNREACHABLE"), "{}", text_of(&bad));
+        assert!(
+            text_of(&bad).contains("opencode (/nonexistent/opencode): FAILED"),
+            "{}",
+            text_of(&bad)
+        );
     }
 
     #[test]
     fn an_unknown_tool_names_the_ones_that_exist() {
-        let r = call(&working(), "ensemble_do_everything", json!({}));
+        let (e, _tmp) = working();
+        let r = call(&e, "ensemble_do_everything", json!({}));
         assert_eq!(r["result"]["isError"], true);
         assert!(text_of(&r).contains("delegate"), "{}", text_of(&r));
     }
@@ -859,16 +721,17 @@ agents:
     #[test]
     fn notifications_are_never_answered() {
         // Answering one is a protocol violation some clients treat as fatal.
+        let (e, _tmp) = working();
         assert!(
             handle(
-                &working(),
+                &e,
                 &json!({"jsonrpc":"2.0","method":"notifications/initialized"})
             )
             .is_none()
         );
         assert!(
             handle(
-                &working(),
+                &e,
                 &json!({"jsonrpc":"2.0","method":"notifications/cancelled"})
             )
             .is_none()
@@ -877,13 +740,15 @@ agents:
 
     #[test]
     fn an_unknown_method_with_an_id_gets_method_not_found() {
-        let r = handle(&working(), &rpc("resources/list", json!({}))).unwrap();
+        let (e, _tmp) = working();
+        let r = handle(&e, &rpc("resources/list", json!({}))).unwrap();
         assert_eq!(r["error"]["code"], -32601);
     }
 
     #[test]
     fn ping_is_answered_so_liveness_checks_pass() {
-        let r = handle(&working(), &rpc("ping", json!({}))).unwrap();
+        let (e, _tmp) = working();
+        let r = handle(&e, &rpc("ping", json!({}))).unwrap();
         assert!(r["result"].is_object());
     }
 
@@ -898,8 +763,9 @@ agents:
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
             "\n",
         );
+        let (e, _tmp) = working();
         let mut out = Vec::new();
-        serve(&working(), std::io::Cursor::new(input), &mut out).unwrap();
+        serve(&e, std::io::Cursor::new(input), &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
@@ -916,8 +782,9 @@ agents:
     #[test]
     fn a_malformed_line_is_a_parse_error_and_does_not_end_the_session() {
         let input = "{not json\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n";
+        let (e, _tmp) = working();
         let mut out = Vec::new();
-        serve(&working(), std::io::Cursor::new(input), &mut out).unwrap();
+        serve(&e, std::io::Cursor::new(input), &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2, "{text}");

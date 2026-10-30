@@ -1,5 +1,5 @@
 {
-  description = "ensemble — one interface for several models, delegating work between them";
+  description = "ensemble — a team of coding agents behind one MCP server";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -17,13 +17,13 @@
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
 
-          # The integration suite spawns the built binary and binds loopback
-          # sockets. All of that works in the sandbox; none of it needs the
-          # network or a model server.
+          # The integration suite spawns the built binary, shell scripts that
+          # stand in for the agent CLIs, and loopback sockets. All of that works
+          # in the sandbox; none of it needs the network or a model server.
           doCheck = true;
 
           meta = {
-            description = "One interface for several models, delegating work between them";
+            description = "A team of coding agents (Claude Code, OpenCode) behind one MCP server";
             mainProgram = "ensemble";
           };
         };

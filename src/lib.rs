@@ -1,33 +1,28 @@
-//! Ensemble: one interface for interacting with different models, delegating
-//! work between them.
+//! Ensemble: a team of coding agents behind one MCP server.
 //!
 //! ```text
-//!        Agent (Claude Code, OpenCode, ...)  = the manager
+//!        Your agent (Claude Code, OpenCode, ...)  = the manager
 //!                       |  MCP over stdio          (src/harness/)
 //!                       v
 //!                   Ensemble                      (src/router.rs)
 //!                  /        \
 //!                 v          v
-//!       agent loop           one completion       (src/agent/)
-//!    (tools in the project)  (think-only agent)
-//!                 \          /
-//!                  v        v
-//!                  ModelPort                      (src/port.rs)
-//!                      |
-//!                      v
-//!              OpenAI-compatible API              (src/backend/)
+//!       claude -p ...      opencode run ...       (src/external/)
+//!                           |  provider from an LLM backend
+//!                           v
+//!                 OpenAI-compatible endpoint      (config: llm_backends)
 //! ```
 //!
-//! The layering is the design: a backend-specific detail may never travel
-//! upward. The router knows agents and `ModelPort`; it does not know how an
-//! adapter reaches its model. The harness knows the
-//! router and nothing about backends. The agent loop knows `ModelPort` and the
-//! project directory, and nothing about which model is behind it.
+//! Ensemble runs no model itself. Each agent is a CLI the user already has,
+//! started headless in the project with the task; Ensemble reads what it does
+//! as it works and reports what it changed. The harness knows the router and
+//! nothing about the CLIs; the router knows agents, and the adapters in
+//! `external` know how each CLI is started and read.
 
-pub mod agent;
-pub mod backend;
 pub mod config;
 pub mod external;
 pub mod harness;
+pub mod llm_backend;
 pub mod port;
 pub mod router;
+pub mod workspace;

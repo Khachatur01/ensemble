@@ -18,12 +18,12 @@
 //! and reads its `stream-json` output as it goes, which is where progress, the
 //! commands it ran and its final answer come from.
 
+use super::AgentRun;
 use super::process;
-use crate::agent::AgentRun;
-use crate::agent::sandbox::Sandbox;
-use crate::agent::tools::{self, Changes};
 use crate::config::{AgentConfig, CLAUDE_CODE_AGENT, ClaudeCodeAdapter, claude_tool_writes};
 use crate::port::{Error, Usage};
+use crate::workspace::Changes;
+use crate::workspace::{self, Workspace};
 use serde_json::Value;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -92,7 +92,7 @@ fn run_program(
     cancel: &AtomicBool,
 ) -> Result<AgentRun, Error> {
     let backend = CLAUDE_CODE_AGENT.to_string();
-    let sandbox = Sandbox::new(workdir).map_err(|detail| Error::Unsupported {
+    let workspace = Workspace::new(workdir).map_err(|detail| Error::Unsupported {
         backend: backend.clone(),
         detail: format!("agent '{}' cannot start: {detail}", agent.name),
     })?;
@@ -108,17 +108,17 @@ fn run_program(
         .tools
         .iter()
         .any(|t| claude_tool_writes(t))
-        .then(|| tools::snapshot(&sandbox))
+        .then(|| workspace::snapshot(&workspace))
         .flatten();
 
     say("starting Claude Code");
-    let mut stream = Stream::new(&sandbox, &say);
+    let mut stream = Stream::new(&workspace, &say);
     let ended = process::Run {
         backend: CLAUDE_CODE_AGENT,
         program,
         args: arguments(agent, cc, &prompt),
         env: Vec::new(),
-        workdir: sandbox.root(),
+        workdir: workspace.root(),
         max_seconds: agent.max_seconds,
         cancel,
     }
@@ -131,14 +131,13 @@ fn run_program(
         usage: Usage::default(),
         steps: stream.turns,
         tool_calls: stream.tool_calls,
-        trimmed: 0,
         changes: Changes::new(),
         commands: std::mem::take(&mut stream.commands),
     };
     if let Some(before) = &baseline
-        && let Some(after) = tools::snapshot(&sandbox)
+        && let Some(after) = workspace::snapshot(&workspace)
     {
-        tools::diff(before, &after, &mut out.changes);
+        workspace::diff(before, &after, &mut out.changes);
     }
 
     if let Some(why) = stopped {
@@ -261,7 +260,7 @@ fn finish(
 
 /// What the `stream-json` events have said so far.
 struct Stream<'a> {
-    sandbox: &'a Sandbox,
+    workspace: &'a Workspace,
     say: &'a dyn Fn(&str),
     model: Option<String>,
     turns: u32,
@@ -276,9 +275,9 @@ struct Stream<'a> {
 }
 
 impl<'a> Stream<'a> {
-    fn new(sandbox: &'a Sandbox, say: &'a dyn Fn(&str)) -> Self {
+    fn new(workspace: &'a Workspace, say: &'a dyn Fn(&str)) -> Self {
         Stream {
-            sandbox,
+            workspace,
             say,
             model: None,
             turns: 0,
@@ -367,16 +366,16 @@ impl<'a> Stream<'a> {
     fn describe(&self, input: &Value) -> String {
         for key in ["file_path", "notebook_path", "path"] {
             if let Some(p) = input.get(key).and_then(Value::as_str) {
-                let shown = self.sandbox.show(Path::new(p));
+                let shown = self.workspace.show(Path::new(p));
                 return if shown.is_empty() { ".".into() } else { shown };
             }
         }
         for key in ["command", "pattern", "url", "query"] {
             if let Some(s) = input.get(key).and_then(Value::as_str) {
-                return crate::agent::run::brief(s);
+                return super::brief(s);
             }
         }
-        crate::agent::run::brief(&input.to_string())
+        super::brief(&input.to_string())
     }
 }
 
@@ -390,8 +389,8 @@ pub fn health(command: &str) -> Result<(), Error> {
 mod tests {
     use super::process::testing::{emitting, fake};
     use super::*;
-    use crate::agent::sandbox::testing::TempDir;
     use crate::config::Adapter;
+    use crate::workspace::testing::TempDir;
     use std::time::{Duration, Instant};
 
     fn agent(tools: &[&str], max_seconds: u32) -> (AgentConfig, ClaudeCodeAdapter) {
@@ -529,7 +528,7 @@ mod tests {
         let r = r.unwrap();
         assert_eq!(
             r.changes.get("made.txt"),
-            Some(&crate::agent::tools::Change::Added),
+            Some(&crate::workspace::Change::Added),
             "{:?}",
             r.changes
         );

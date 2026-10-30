@@ -5,7 +5,9 @@
 #
 # Every setting is here at least once, most of them at their default, so this
 # is a map of what can be set rather than a team to keep as it is: delete the
-# agents you do not want and change the rest. Check it with `ensemble check`.
+# agents you do not want and change the rest. Check it with `ensemble check`,
+# see how an agent is started with `ensemble show <agent>`, and check that
+# everything it needs is there with `ensemble health`.
 #
 # Register Ensemble with your agent from this directory, which makes your
 # agent the manager of the team:
@@ -15,13 +17,14 @@
 version: 1
 
 # ---------------------------------------------------------------------------
-# LLM backends: model endpoints that agents with the `ensemble` adapter run
-# on. Agents with the `claude-code` or `opencode` adapter need none.
+# LLM backends: model endpoints, such as a local model server. An agent names
+# one with `llm_backend`, and Ensemble hands its CLI the endpoint and key for
+# each run, so they are set here and nowhere else.
 # ---------------------------------------------------------------------------
 llm_backends:
   local:
-    # Any POST /chat/completions endpoint: Ollama, llama-server, vLLM, a
-    # hosted API.
+    # Any POST /chat/completions endpoint: llama-server, vLLM, Ollama,
+    # Unsloth, a hosted API.
     type: openai-compatible-api
     # The NAME of the variable holding the base URL, not the URL itself.
     base_url_env: OPENAI_LOCAL_BASE_URL
@@ -33,11 +36,11 @@ llm_backends:
     timeout_seconds: 600
 
 # ---------------------------------------------------------------------------
-# Agents: the team. The names are yours; your agent delegates by name.
+# Agents: the team. The names are yours; your agent delegates by name. Each
+# runs an agent CLI you have installed, headless in this project.
 # ---------------------------------------------------------------------------
 agents:
-  # Ensemble's own agent, running a tool loop in the project on a model from
-  # llm_backends.
+  # The OpenCode CLI on a model from llm_backends.
   coder:
     # What it is for. The first line is what your agent sees in `agents`; the
     # whole of it is the agent's system prompt.
@@ -45,46 +48,37 @@ agents:
       You implement exactly what is asked, in the style of the surrounding
       code. Read the relevant files first, make the change, and report what
       you changed.
-    # Tokens of context the server really runs the model with. Required for
-    # an ensemble agent with tools (Ollama: OLLAMA_CONTEXT_LENGTH).
-    context_window: 16384
+    # Tokens of context the server really runs the model with. Required on an
+    # llm_backend, so OpenCode knows when to compact (Ollama:
+    # OLLAMA_CONTEXT_LENGTH).
+    context_window: 32768
     # Wall-clock limit for one delegation.
     max_seconds: 1800
     adapter:
-      type: ensemble
+      type: opencode
       llm_backend: local
+      # The id the endpoint serves the model under, as its /models lists it.
       model: qwen3.5:9b
-      # Sampling, overriding the model's own defaults. A presence penalty
-      # pushes the model away from repeating the paths and names tool calls
-      # are made of; 0 turns it off.
-      temperature: 0.2
-      presence_penalty: 0
-      frequency_penalty: 0
-      # How much a reasoning model thinks first: none, low, medium or high.
-      reasoning_effort: none
-      # read, glob, grep, edit, write, bash, fetch. edit, write and bash
-      # change files. bash is sandboxed: it writes only in the project and
-      # /tmp, and reads only the project, the system and toolchains.
-      tools: [read, glob, grep, edit, write, bash, fetch]
-      # Model calls per delegation.
-      max_steps: 20
-      # Let bash open outbound TCP connections.
-      network: false
-      # More paths bash may read, absolute or ~/.
-      readable: ["~/.m2"]
+      # OpenCode permissions, such as read, edit, bash or bash(git *);
+      # everything else is denied.
+      tools: [read, glob, grep, list, edit, bash]
+      max_steps: 30
+      # The CLI, if it is not `opencode` on PATH.
+      command: opencode
 
-  # An ensemble agent without tools: one model call, text back.
-  planner:
+  # The OpenCode CLI on a provider OpenCode is already set up for.
+  explorer:
     prompt: |
-      You turn a goal into an ordered plan of small, verifiable steps. State
-      what you are unsure about rather than guessing.
+      You find where things are in the codebase and report file:line with a
+      one-line note each. You do not edit.
     adapter:
-      type: ensemble
-      llm_backend: local
-      model: qwen3.5:9b
-      reasoning_effort: high
+      type: opencode
+      # provider/model, as `opencode models` lists it.
+      model: opencode/big-pickle
+      # This is the default: read-only.
+      tools: [read, glob, grep, list]
 
-  # The Claude Code CLI, headless in the project, on your own subscription.
+  # The Claude Code CLI, on your own subscription.
   reviewer:
     prompt: |
       You review code for correctness and report findings as
@@ -102,21 +96,3 @@ agents:
       max_turns: 30
       # The CLI, if it is not `claude` on PATH.
       command: claude
-
-  # The OpenCode CLI, headless in the project, on any provider it is set up
-  # for.
-  explorer:
-    prompt: |
-      You find where things are in the codebase and report file:line with a
-      one-line note each. You do not edit.
-    max_seconds: 1800
-    adapter:
-      type: opencode
-      # provider/model, as `opencode models` lists it.
-      model: opencode/big-pickle
-      # OpenCode permissions, such as read, edit, bash or bash(git *);
-      # everything else is denied. This is the default: read-only.
-      tools: [read, glob, grep, list]
-      max_steps: 30
-      # The CLI, if it is not `opencode` on PATH.
-      command: opencode

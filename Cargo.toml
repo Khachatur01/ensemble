@@ -2,7 +2,7 @@
 name = "ensemble"
 version = "0.1.0"
 edition = "2024"
-description = "One interface for interacting with different models, delegating work between them."
+description = "A team of coding agents (Claude Code, OpenCode) behind one MCP server."
 license = "MIT"
 
 [[bin]]
@@ -15,20 +15,20 @@ path = "src/main.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_norway = "0.9"
-# Blocking HTTP client for the OpenAI-compatible adapter. Chosen over reqwest so
-# the whole program stays synchronous: no async runtime is pulled in for what is
-# a handful of request/response round trips.
+# Blocking HTTP client for `health`, which asks an LLM backend which models it
+# serves. Chosen over reqwest so the whole program stays synchronous: no async
+# runtime is pulled in for one request.
 ureq = "3"
 
 [dev-dependencies]
-# Nothing. The test suites use the std harness and the fake backends in
-# src/port.rs, so `cargo test` needs no network and no model server.
+# Nothing. The test suites use the std harness and shell scripts standing in for
+# the agent CLIs, so `cargo test` needs no network, model server or agent CLI.
 
 [profile.release]
 strip = true
 
 [target.'cfg(unix)'.dependencies]
-# Landlock syscalls and killpg for the bash tool: a timeout must take a
-# command's whole process tree down, and std can signal one pid. Already in the tree via ureq, so this costs no
-# extra compilation.
+# killpg: a time limit or a cancel must take an agent CLI's whole process tree
+# down, and std can signal one pid. Already in the tree via ureq, so this costs
+# no extra compilation.
 libc = "0.2"

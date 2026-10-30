@@ -63,7 +63,7 @@ impl Run<'_> {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
-        let mut child = cmd.spawn().map_err(|e| Error::Spawn {
+        let mut child = spawn(&mut cmd).map_err(|e| Error::Spawn {
             backend: self.backend.into(),
             program: exe.clone(),
             detail: e.to_string(),
@@ -122,19 +122,34 @@ impl Run<'_> {
     }
 }
 
+/// Start `cmd`, trying again for a moment if its program is busy: a binary
+/// being replaced, or a script another thread still had open for writing when
+/// this process forked, is briefly `ETXTBSY`.
+fn spawn(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    let mut tries = 0;
+    loop {
+        match cmd.spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Check that a CLI is there and starts. `--version` spends nothing.
 pub fn health(backend: &str, command: &str) -> Result<(), Error> {
-    let mut child = Command::new(command)
-        .arg("--version")
+    let mut cmd = Command::new(command);
+    cmd.arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| Error::Spawn {
-            backend: backend.into(),
-            program: command.into(),
-            detail: e.to_string(),
-        })?;
+        .stderr(Stdio::piped());
+    let mut child = spawn(&mut cmd).map_err(|e| Error::Spawn {
+        backend: backend.into(),
+        program: command.into(),
+        detail: e.to_string(),
+    })?;
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if let Some(status) = child.try_wait().ok().flatten() {

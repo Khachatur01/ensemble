@@ -8,25 +8,43 @@
 //! denies everything (`"*": "deny"`) but the tools listed. OpenCode hides
 //! denied tools from the model, so it cannot even try them.
 //!
+//! An agent on one of the LLM backends gets that backend as an OpenCode
+//! provider in the same inline config, so the endpoint and its key are set
+//! once, in Ensemble's config, and never written anywhere else.
+//!
 //! `opencode run --standalone` starts a private server for the run, which
 //! inherits this environment; the shared background service would not.
 //! `--format json` prints one event per line, which is where progress, the
 //! commands it ran and its answer come from.
 
+use super::AgentRun;
 use super::process;
-use crate::agent::AgentRun;
-use crate::agent::sandbox::Sandbox;
-use crate::agent::tools::{self, Changes};
-use crate::config::{AgentConfig, OPENCODE_AGENT, OpenCodeAdapter, opencode_tool_writes};
+use crate::config::{
+    AgentConfig, BackendSettings, LlmBackend, OPENCODE_AGENT, OpenCodeAdapter, opencode_tool_writes,
+};
 use crate::port::{Error, Usage};
+use crate::workspace::{self, Changes, Workspace};
 use serde_json::{Map, Value, json};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-/// Run an `opencode` agent on one task, in `workdir`.
+/// The AI SDK package OpenCode talks to an OpenAI-compatible endpoint with.
+const OPENAI_COMPATIBLE_PACKAGE: &str = "@ai-sdk/openai-compatible";
+
+/// Most tokens a reply on an LLM backend may take; a quarter of the context
+/// when that is less.
+const MAX_OUTPUT_TOKENS: u32 = 32_768;
+
+/// Shown by `ensemble show` in place of an API key.
+pub const REDACTED: &str = "<redacted>";
+
+/// Run an `opencode` agent on one task, in `workdir`. `backend` is the LLM
+/// backend the agent names, if it names one.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     agent: &AgentConfig,
     oc: &OpenCodeAdapter,
+    backend: Option<&LlmBackend>,
     task: &str,
     context: Option<&str>,
     workdir: &Path,
@@ -37,6 +55,7 @@ pub fn run(
         std::slice::from_ref(&oc.command),
         agent,
         oc,
+        backend,
         task,
         context,
         workdir,
@@ -47,9 +66,17 @@ pub fn run(
 
 /// The name the agent runs under inside OpenCode.
 pub fn agent_id(agent: &AgentConfig) -> String {
-    let safe: String = agent
-        .name
-        .chars()
+    format!("ensemble-{}", safe(&agent.name))
+}
+
+/// The name an LLM backend is given as an OpenCode provider.
+pub fn provider_id(backend: &LlmBackend) -> String {
+    format!("ensemble-{}", safe(&backend.name))
+}
+
+/// `name` with anything but letters, digits, `-` and `_` turned into `-`.
+fn safe(name: &str) -> String {
+    name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -57,8 +84,7 @@ pub fn agent_id(agent: &AgentConfig) -> String {
                 '-'
             }
         })
-        .collect();
-    format!("ensemble-{safe}")
+        .collect()
 }
 
 /// OpenCode's permission set for `tools`: everything denied but what is
@@ -86,8 +112,10 @@ pub fn permissions(tools: &[String]) -> Value {
     Value::Object(p)
 }
 
-/// The inline OpenCode config that defines the agent.
-pub fn config(agent: &AgentConfig, oc: &OpenCodeAdapter) -> Value {
+/// The inline OpenCode config that defines the agent and, when it runs on an
+/// LLM backend, the provider for it. It holds the backend's API key: it goes
+/// only into the CLI's environment, and [`redact`] hides it for display.
+pub fn config(agent: &AgentConfig, oc: &OpenCodeAdapter, backend: Option<&LlmBackend>) -> Value {
     let mut def = json!({
         "description": format!("Ensemble agent '{}'", agent.name),
         "mode": "primary",
@@ -97,12 +125,69 @@ pub fn config(agent: &AgentConfig, oc: &OpenCodeAdapter) -> Value {
     if let Some(prompt) = agent.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
         def["prompt"] = json!(prompt);
     }
-    json!({ "agent": { agent_id(agent): def } })
+    let mut cfg = json!({ "agent": { agent_id(agent): def } });
+    if let Some(backend) = backend {
+        cfg["provider"] =
+            json!({ provider_id(backend): provider(backend, oc, agent.context_window) });
+    }
+    cfg
+}
+
+/// An LLM backend as an OpenCode provider serving the agent's one model.
+fn provider(backend: &LlmBackend, oc: &OpenCodeAdapter, context_window: Option<u32>) -> Value {
+    let BackendSettings::OpenAiCompatible {
+        base_url, api_key, ..
+    } = &backend.settings;
+    let mut options = json!({
+        "baseURL": base_url,
+        "timeout": backend.timeout_seconds.saturating_mul(1000),
+    });
+    if let Some(key) = api_key {
+        options["apiKey"] = json!(key);
+    }
+    let mut model = json!({ "name": oc.model });
+    if let Some(context) = context_window {
+        model["limit"] = json!({
+            "context": context,
+            "output": (context / 4).min(MAX_OUTPUT_TOKENS),
+        });
+    }
+    json!({
+        "npm": OPENAI_COMPATIBLE_PACKAGE,
+        "name": format!("Ensemble LLM backend '{}'", backend.name),
+        "options": options,
+        "models": { oc.model.clone(): model },
+    })
+}
+
+/// [`config`] with every API key in it replaced by [`REDACTED`], for showing.
+pub fn redact(cfg: &mut Value) {
+    if let Some(providers) = cfg.get_mut("provider").and_then(Value::as_object_mut) {
+        for p in providers.values_mut() {
+            if let Some(key) = p.pointer_mut("/options/apiKey") {
+                *key = json!(REDACTED);
+            }
+        }
+    }
+}
+
+/// The model as OpenCode names it: `provider/model`, with the provider made
+/// from the LLM backend when the agent runs on one.
+pub fn model_ref(oc: &OpenCodeAdapter, backend: Option<&LlmBackend>) -> String {
+    match backend {
+        Some(b) => format!("{}/{}", provider_id(b), oc.model),
+        None => oc.model.clone(),
+    }
 }
 
 /// The command line, less the program. `--` keeps a task that starts with a
 /// dash from being read as a flag.
-pub fn arguments(agent: &AgentConfig, oc: &OpenCodeAdapter, prompt: &str) -> Vec<String> {
+pub fn arguments(
+    agent: &AgentConfig,
+    oc: &OpenCodeAdapter,
+    backend: Option<&LlmBackend>,
+    prompt: &str,
+) -> Vec<String> {
     vec![
         "run".into(),
         "--standalone".into(),
@@ -111,7 +196,7 @@ pub fn arguments(agent: &AgentConfig, oc: &OpenCodeAdapter, prompt: &str) -> Vec
         "--agent".into(),
         agent_id(agent),
         "-m".into(),
-        oc.model.clone(),
+        model_ref(oc, backend),
         "--".into(),
         prompt.into(),
     ]
@@ -124,13 +209,14 @@ fn run_program(
     program: &[String],
     agent: &AgentConfig,
     oc: &OpenCodeAdapter,
+    backend: Option<&LlmBackend>,
     task: &str,
     context: Option<&str>,
     workdir: &Path,
     progress: &dyn Fn(&str),
     cancel: &AtomicBool,
 ) -> Result<AgentRun, Error> {
-    let sandbox = Sandbox::new(workdir).map_err(|detail| Error::Unsupported {
+    let workspace = Workspace::new(workdir).map_err(|detail| Error::Unsupported {
         backend: OPENCODE_AGENT.into(),
         detail: format!("agent '{}' cannot start: {detail}", agent.name),
     })?;
@@ -146,20 +232,20 @@ fn run_program(
         .tools
         .iter()
         .any(|t| opencode_tool_writes(t))
-        .then(|| tools::snapshot(&sandbox))
+        .then(|| workspace::snapshot(&workspace))
         .flatten();
 
     say("starting OpenCode");
-    let mut stream = Stream::new(&sandbox, &say);
+    let mut stream = Stream::new(&workspace, &say);
     let ended = process::Run {
         backend: OPENCODE_AGENT,
         program,
-        args: arguments(agent, oc, &prompt),
+        args: arguments(agent, oc, backend, &prompt),
         env: vec![(
             "OPENCODE_CONFIG_CONTENT".into(),
-            config(agent, oc).to_string(),
+            config(agent, oc, backend).to_string(),
         )],
-        workdir: sandbox.root(),
+        workdir: workspace.root(),
         max_seconds: agent.max_seconds,
         cancel,
     }
@@ -171,14 +257,13 @@ fn run_program(
         usage: stream.usage,
         steps: stream.steps,
         tool_calls: stream.tool_calls,
-        trimmed: 0,
         changes: Changes::new(),
         commands: std::mem::take(&mut stream.commands),
     };
     if let Some(before) = &baseline
-        && let Some(after) = tools::snapshot(&sandbox)
+        && let Some(after) = workspace::snapshot(&workspace)
     {
-        tools::diff(before, &after, &mut out.changes);
+        workspace::diff(before, &after, &mut out.changes);
     }
 
     if let Some(why) = ended.stopped {
@@ -220,7 +305,7 @@ fn run_program(
 
 /// What the `--format json` events have said so far.
 struct Stream<'a> {
-    sandbox: &'a Sandbox,
+    workspace: &'a Workspace,
     say: &'a dyn Fn(&str),
     steps: u32,
     tool_calls: u32,
@@ -233,9 +318,9 @@ struct Stream<'a> {
 }
 
 impl<'a> Stream<'a> {
-    fn new(sandbox: &'a Sandbox, say: &'a dyn Fn(&str)) -> Self {
+    fn new(workspace: &'a Workspace, say: &'a dyn Fn(&str)) -> Self {
         Stream {
-            sandbox,
+            workspace,
             say,
             steps: 0,
             tool_calls: 0,
@@ -301,16 +386,16 @@ impl<'a> Stream<'a> {
     fn describe(&self, input: &Value) -> String {
         for key in ["filePath", "path", "file_path"] {
             if let Some(p) = input.get(key).and_then(Value::as_str) {
-                let shown = self.sandbox.show(Path::new(p));
+                let shown = self.workspace.show(Path::new(p));
                 return if shown.is_empty() { ".".into() } else { shown };
             }
         }
         for key in ["command", "pattern", "url", "query"] {
             if let Some(s) = input.get(key).and_then(Value::as_str) {
-                return crate::agent::run::brief(s);
+                return super::brief(s);
             }
         }
-        crate::agent::run::brief(&input.to_string())
+        super::brief(&input.to_string())
     }
 }
 
@@ -323,13 +408,14 @@ pub fn health(command: &str) -> Result<(), Error> {
 mod tests {
     use super::process::testing::{emitting, fake};
     use super::*;
-    use crate::agent::sandbox::testing::TempDir;
     use crate::config::Adapter;
+    use crate::workspace::testing::TempDir;
 
     fn agent(tools: &[&str], max_seconds: u32) -> (AgentConfig, OpenCodeAdapter) {
         let oc = OpenCodeAdapter {
             command: "opencode".into(),
             model: "ollama/qwen3.5:9b".into(),
+            llm_backend: None,
             tools: tools.iter().map(|t| t.to_string()).collect(),
             max_steps: 9,
         };
@@ -370,6 +456,7 @@ mod tests {
             program,
             a,
             oc,
+            None,
             "review it",
             None,
             dir,
@@ -379,10 +466,71 @@ mod tests {
         (r, seen.into_inner())
     }
 
+    fn local_backend(api_key: Option<&str>) -> LlmBackend {
+        LlmBackend {
+            name: "local box".into(),
+            timeout_seconds: 600,
+            settings: BackendSettings::OpenAiCompatible {
+                base_url: "http://127.0.0.1:8888/v1".into(),
+                api_key: api_key.map(String::from),
+                base_url_env: "L".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn an_agent_on_an_llm_backend_gets_it_as_its_provider() {
+        let (mut a, mut oc) = agent(&["read"], 60);
+        oc.model = "qwen3.5-9b".into();
+        oc.llm_backend = Some("local box".into());
+        a.context_window = Some(65536);
+        let b = local_backend(Some("sk-secret"));
+        let cfg = config(&a, &oc, Some(&b));
+        assert_eq!(
+            cfg["provider"]["ensemble-local-box"],
+            json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Ensemble LLM backend 'local box'",
+                "options": {
+                    "baseURL": "http://127.0.0.1:8888/v1",
+                    "timeout": 600000,
+                    "apiKey": "sk-secret"
+                },
+                "models": {"qwen3.5-9b": {"name": "qwen3.5-9b",
+                    "limit": {"context": 65536, "output": 16384}}}
+            })
+        );
+        let args = arguments(&a, &oc, Some(&b), "go");
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["-m", "ensemble-local-box/qwen3.5-9b"]),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn a_backend_without_a_key_sends_none_and_a_shown_config_hides_one() {
+        let (a, mut oc) = agent(&["read"], 60);
+        oc.llm_backend = Some("local box".into());
+        let keyless = config(&a, &oc, Some(&local_backend(None)));
+        assert!(
+            keyless
+                .pointer("/provider/ensemble-local-box/options/apiKey")
+                .is_none()
+        );
+
+        let mut shown = config(&a, &oc, Some(&local_backend(Some("sk-secret"))));
+        redact(&mut shown);
+        let text = shown.to_string();
+        assert!(!text.contains("sk-secret"), "{text}");
+        assert!(text.contains(REDACTED), "{text}");
+    }
+
     #[test]
     fn the_agent_is_defined_inline_with_everything_denied_but_its_tools() {
         let (a, oc) = agent(&["read", "glob", "bash(git *)", "bash(cargo test*)"], 60);
-        let cfg = config(&a, &oc);
+        let cfg = config(&a, &oc, None);
+        assert!(cfg.get("provider").is_none(), "no backend, no provider");
         let def = &cfg["agent"]["ensemble-code-reviewer"];
         assert_eq!(def["prompt"], "You review code.");
         assert_eq!(def["steps"], 9);
@@ -397,7 +545,7 @@ mod tests {
             })
         );
 
-        let args = arguments(&a, &oc, "-v do it");
+        let args = arguments(&a, &oc, None, "-v do it");
         assert_eq!(
             args,
             [
@@ -470,7 +618,7 @@ mod tests {
         let (r, _) = go(&fake(&tmp.0, &script), &a, &oc, &tmp.0);
         assert_eq!(
             r.unwrap().changes.get("made.txt"),
-            Some(&crate::agent::tools::Change::Added)
+            Some(&crate::workspace::Change::Added)
         );
     }
 
