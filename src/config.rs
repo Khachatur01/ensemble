@@ -27,11 +27,17 @@ pub const SUPPORTED_VERSION: u32 = 1;
 pub const OPENAI_COMPATIBLE_API: &str = "openai-compatible-api";
 
 /// The adapter types that ship. `ensemble` is Ensemble's own harness, run on
-/// an LLM backend; `claude-code` is the Claude Code CLI, a whole agent of its
-/// own. Others (OpenCode, Codex) will sit beside them.
+/// an LLM backend; `claude-code` and `opencode` are the Claude Code and
+/// OpenCode CLIs, whole agents of their own.
 pub const ENSEMBLE_AGENT: &str = "ensemble";
 pub const CLAUDE_CODE_AGENT: &str = "claude-code";
-const AGENT_TYPES: [&str; 2] = [ENSEMBLE_AGENT, CLAUDE_CODE_AGENT];
+pub const OPENCODE_AGENT: &str = "opencode";
+const AGENT_TYPES: [&str; 3] = [ENSEMBLE_AGENT, CLAUDE_CODE_AGENT, OPENCODE_AGENT];
+
+/// OpenCode tools an `opencode` agent gets when it names none: it may look,
+/// not change anything.
+pub const OPENCODE_DEFAULT_TOOLS: [&str; 4] = ["read", "glob", "grep", "list"];
+const OPENCODE_DEFAULT_MAX_STEPS: u32 = 30;
 
 /// Claude Code tools a `claude-code` agent gets when it names none: it may
 /// look, not change anything.
@@ -99,14 +105,15 @@ struct RawAgent {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAdapter {
-    /// `ensemble` or `claude-code`.
+    /// `ensemble`, `claude-code` or `opencode`.
     #[serde(rename = "type")]
     kind: String,
-    /// Both: the model, as the backend or Claude Code names it.
+    /// All: the model, as the backend, Claude Code or OpenCode names it.
     model: String,
-    /// Both: what the agent may do. Ensemble's own tool names for
-    /// `ensemble`, Claude Code's (`Read`, `Edit`, `Bash(git:*)`) for
-    /// `claude-code`.
+    /// All: what the agent may do, in its harness's own tool names: Ensemble's
+    /// for `ensemble`, Claude Code's (`Read`, `Bash(git:*)`) for
+    /// `claude-code`, OpenCode's permissions (`read`, `bash(git *)`) for
+    /// `opencode`.
     #[serde(default)]
     tools: Option<Vec<String>>,
 
@@ -136,8 +143,7 @@ struct RawAdapter {
     /// appears; `none` turns it off.
     #[serde(default)]
     reasoning_effort: Option<String>,
-    /// Cap on model calls within one delegation. Defaults to
-    /// [`DEFAULT_MAX_STEPS`].
+    /// `ensemble` and `opencode`: cap on steps within one delegation.
     #[serde(default)]
     max_steps: Option<u32>,
     /// Let the agent's `bash` commands open outbound TCP connections. Off by
@@ -151,8 +157,8 @@ struct RawAdapter {
     #[serde(default)]
     readable: Vec<String>,
 
-    // --- claude-code ---
-    /// The `claude` binary, if it is not `claude` on PATH.
+    // --- claude-code and opencode ---
+    /// The CLI, if it is not `claude` or `opencode` on PATH.
     #[serde(default)]
     command: Option<String>,
     /// Claude Code's `--permission-mode`. `dontAsk` denies what `tools` does
@@ -264,6 +270,7 @@ pub struct AgentConfig {
 pub enum Adapter {
     Ensemble(EnsembleAdapter),
     ClaudeCode(ClaudeCodeAdapter),
+    OpenCode(OpenCodeAdapter),
 }
 
 /// Ensemble's own harness: a model on one of the LLM backends, in a tool loop.
@@ -299,11 +306,24 @@ pub struct ClaudeCodeAdapter {
     pub max_turns: u32,
 }
 
+/// The OpenCode CLI, run headless in the project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenCodeAdapter {
+    pub command: String,
+    /// `provider/model`, as OpenCode names it.
+    pub model: String,
+    /// OpenCode permission names, each allowed; everything else is denied.
+    /// `name(pattern)` allows only matching uses, such as `bash(git *)`.
+    pub tools: Vec<String>,
+    pub max_steps: u32,
+}
+
 impl AgentConfig {
     pub fn kind(&self) -> &'static str {
         match self.adapter {
             Adapter::Ensemble(_) => ENSEMBLE_AGENT,
             Adapter::ClaudeCode(_) => CLAUDE_CODE_AGENT,
+            Adapter::OpenCode(_) => OPENCODE_AGENT,
         }
     }
 
@@ -311,6 +331,7 @@ impl AgentConfig {
         match &self.adapter {
             Adapter::Ensemble(e) => &e.model,
             Adapter::ClaudeCode(c) => &c.model,
+            Adapter::OpenCode(o) => &o.model,
         }
     }
 
@@ -320,6 +341,7 @@ impl AgentConfig {
         match &self.adapter {
             Adapter::Ensemble(e) => &e.llm_backend,
             Adapter::ClaudeCode(_) => CLAUDE_CODE_AGENT,
+            Adapter::OpenCode(_) => OPENCODE_AGENT,
         }
     }
 
@@ -328,6 +350,7 @@ impl AgentConfig {
         match &self.adapter {
             Adapter::Ensemble(e) => !e.tools.is_empty(),
             Adapter::ClaudeCode(c) => !c.tools.is_empty(),
+            Adapter::OpenCode(o) => !o.tools.is_empty(),
         }
     }
 
@@ -336,6 +359,7 @@ impl AgentConfig {
         match &self.adapter {
             Adapter::Ensemble(e) => e.tools.iter().any(|t| t.writes()),
             Adapter::ClaudeCode(c) => c.tools.iter().any(|t| claude_tool_writes(t)),
+            Adapter::OpenCode(o) => o.tools.iter().any(|t| opencode_tool_writes(t)),
         }
     }
 
@@ -344,8 +368,16 @@ impl AgentConfig {
         match &self.adapter {
             Adapter::Ensemble(e) => e.tools.iter().map(|t| t.as_str()).collect(),
             Adapter::ClaudeCode(c) => c.tools.iter().map(String::as_str).collect(),
+            Adapter::OpenCode(o) => o.tools.iter().map(String::as_str).collect(),
         }
     }
+}
+
+/// Can this OpenCode permission (or rule, such as `bash(git *)`) change
+/// files? `task` starts subagents, which can.
+pub fn opencode_tool_writes(tool: &str) -> bool {
+    let name = tool.split('(').next().unwrap_or(tool).trim();
+    matches!(name, "edit" | "write" | "patch" | "bash" | "task" | "*")
 }
 
 /// Can this Claude Code tool (or rule, such as `Bash(git:*)`) change files?
@@ -559,6 +591,14 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
                 }
                 Adapter::ClaudeCode(claude_code_adapter(&at, ad, &mut problems))
             }
+            OPENCODE_AGENT => {
+                if ra.context_window.is_some() {
+                    problems.push(format!(
+                        "agents.{name}: `context_window` does not apply to an {OPENCODE_AGENT} agent; OpenCode manages its own context"
+                    ));
+                }
+                Adapter::OpenCode(opencode_adapter(&at, ad, &mut problems))
+            }
             other => {
                 problems.push(format!(
                     "{at}: type '{other}' is unknown. Known types: {}.",
@@ -731,6 +771,63 @@ fn ensemble_adapter(
         max_steps: ad.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
         network: ad.network.unwrap_or(false),
         readable: ad.readable.clone(),
+    }
+}
+
+fn opencode_adapter(at: &str, ad: &RawAdapter, problems: &mut Vec<String>) -> OpenCodeAdapter {
+    reject_foreign(
+        at,
+        OPENCODE_AGENT,
+        &[
+            ("llm_backend", ad.llm_backend.is_some()),
+            ("temperature", ad.temperature.is_some()),
+            ("presence_penalty", ad.presence_penalty.is_some()),
+            ("frequency_penalty", ad.frequency_penalty.is_some()),
+            ("reasoning_effort", ad.reasoning_effort.is_some()),
+            ("network", ad.network.is_some()),
+            ("readable", !ad.readable.is_empty()),
+            ("permission_mode", ad.permission_mode.is_some()),
+            ("max_turns", ad.max_turns.is_some()),
+        ],
+        problems,
+    );
+    let tools = match &ad.tools {
+        Some(list) => list.clone(),
+        None => OPENCODE_DEFAULT_TOOLS.map(String::from).to_vec(),
+    };
+    for tool in &tools {
+        let (name, pattern) = match tool.split_once('(') {
+            Some((n, rest)) => (n, rest.strip_suffix(')')),
+            None => (tool.as_str(), Some("")),
+        };
+        let name_ok = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_-*.".contains(c));
+        if !name_ok || pattern.is_none_or(|p| p.contains(')')) {
+            problems.push(format!(
+                "{at}: tool '{tool}' must be an OpenCode permission, such as read or edit, or a rule such as bash(git *)"
+            ));
+        }
+    }
+    if ad.max_steps == Some(0) {
+        problems.push(format!("{at}: `max_steps` must be greater than 0"));
+    }
+    if !ad.model.contains('/') {
+        problems.push(format!(
+            "{at}: model '{}' must be provider/model, as `opencode models` lists it",
+            ad.model
+        ));
+    }
+    let command = ad.command.clone().unwrap_or_else(|| "opencode".into());
+    if command.trim().is_empty() {
+        problems.push(format!("{at}: `command` is empty"));
+    }
+    OpenCodeAdapter {
+        command,
+        model: ad.model.clone(),
+        tools,
+        max_steps: ad.max_steps.unwrap_or(OPENCODE_DEFAULT_MAX_STEPS),
     }
 }
 
@@ -1192,6 +1289,7 @@ agents:
         // Every adapter key belongs to exactly one adapter type, or to both.
         let mut adapters = schema_keys(&defs["ensemble_adapter"]);
         adapters.extend(schema_keys(&defs["claude_code_adapter"]));
+        adapters.extend(schema_keys(&defs["opencode_adapter"]));
         adapters.sort();
         adapters.dedup();
         assert_eq!(adapters, accepted_keys::<RawAdapter>(), "adapters");
@@ -1206,7 +1304,17 @@ agents:
         assert_eq!(role["type"]["const"], ENSEMBLE_AGENT);
         let claude = &schema["definitions"]["claude_code_adapter"]["properties"];
         assert_eq!(claude["type"]["const"], CLAUDE_CODE_AGENT);
-        assert_eq!(AGENT_TYPES, [ENSEMBLE_AGENT, CLAUDE_CODE_AGENT]);
+        assert_eq!(
+            AGENT_TYPES,
+            [ENSEMBLE_AGENT, CLAUDE_CODE_AGENT, OPENCODE_AGENT]
+        );
+        let opencode = &schema["definitions"]["opencode_adapter"]["properties"];
+        assert_eq!(opencode["type"]["const"], OPENCODE_AGENT);
+        assert_eq!(
+            opencode["tools"]["default"],
+            serde_json::json!(OPENCODE_DEFAULT_TOOLS)
+        );
+        assert_eq!(opencode["max_steps"]["default"], OPENCODE_DEFAULT_MAX_STEPS);
         assert_eq!(
             claude["tools"]["default"],
             serde_json::json!(CLAUDE_CODE_DEFAULT_TOOLS)
@@ -1364,6 +1472,63 @@ agents:
     }
 
     #[test]
+    fn an_opencode_agent_defaults_to_read_only_and_checks_its_fields() {
+        let doc = r#"
+version: 1
+agents:
+  looker:
+    adapter: { type: opencode, model: opencode/big-pickle }
+  doer:
+    max_seconds: 600
+    adapter:
+      type: opencode
+      model: ollama/qwen3.5:9b
+      tools: [read, edit, "bash(git *)"]
+      max_steps: 12
+      command: /opt/opencode
+"#;
+        let c = parse(doc, &p(), &env(&[])).unwrap();
+        let Adapter::OpenCode(looker) = &c.agents["looker"].adapter else {
+            panic!("an opencode agent");
+        };
+        assert_eq!(looker.tools, OPENCODE_DEFAULT_TOOLS);
+        assert_eq!(
+            (looker.command.as_str(), looker.max_steps),
+            ("opencode", OPENCODE_DEFAULT_MAX_STEPS)
+        );
+        assert!(!c.agents["looker"].can_change_files());
+        let Adapter::OpenCode(doer) = &c.agents["doer"].adapter else {
+            panic!("an opencode agent");
+        };
+        assert_eq!(doer.tools, ["read", "edit", "bash(git *)"]);
+        assert_eq!(doer.max_steps, 12);
+        assert!(c.agents["doer"].can_change_files());
+
+        let bad = r#"
+version: 1
+agents:
+  x:
+    context_window: 8000
+    adapter: { type: opencode, model: big-pickle, tools: ["read,edit"], max_turns: 3, temperature: 0.1 }
+"#;
+        let joined = problems_of(parse(bad, &p(), &env(&[])).unwrap_err()).join("\n");
+        assert!(
+            joined.contains("OpenCode manages its own context"),
+            "{joined}"
+        );
+        assert!(joined.contains("must be provider/model"), "{joined}");
+        assert!(
+            joined.contains("tool 'read,edit' must be an OpenCode permission"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("`max_turns` is not a field of adapter type 'opencode'"),
+            "{joined}"
+        );
+        assert!(joined.contains("`temperature` is not a field"), "{joined}");
+    }
+
+    #[test]
     fn an_unknown_adapter_type_lists_the_known_ones() {
         let doc = AGENT_DOC.replace(
             "  thinker:\n    adapter:\n      type: ensemble",
@@ -1373,7 +1538,7 @@ agents:
         assert!(
             problems.iter().any(
                 |p| p.contains("agents.thinker.adapter: type 'codex' is unknown")
-                    && p.contains("ensemble, claude-code")
+                    && p.contains("ensemble, claude-code, opencode")
             ),
             "{problems:?}"
         );

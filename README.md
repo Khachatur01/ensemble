@@ -7,7 +7,7 @@ says what runs it. Your own agent — Claude Code, OpenCode, anything that speak
 MCP — is the manager. It sees the team as tools and delegates to an agent by
 name.
 
-Two adapters ship:
+Three adapters ship:
 
 - **`ensemble`**, Ensemble's own agent harness. It runs on any
   OpenAI-compatible model (llama-server, vLLM, Ollama, a hosted API) and reads,
@@ -15,10 +15,11 @@ Two adapters ship:
   needs nothing installed but a model server.
 - **`claude-code`**, the Claude Code CLI, run headless in the project on your
   own subscription, with the tools you allow it.
+- **`opencode`**, the OpenCode CLI, run headless in the project on any
+  provider OpenCode is set up for, with the tools you allow it.
 
 They are at the same level: a team can mix them, and your agent delegates to
-either the same way. OpenCode and Codex are meant to become further adapter
-types.
+any of them the same way. Codex is meant to become a further adapter type.
 
 ```
    Your agent (Claude Code, OpenCode, ...)      = the manager
@@ -26,10 +27,10 @@ types.
         v
      Ensemble                                   src/router.rs
         |  agents, by adapter type
-        +--------------------------------+
-        v                                v
-     ensemble: agent loop            claude-code: `claude -p`
-     (src/agent/)                    (src/claude_code.rs)
+        +----------------------+-----------------------+
+        v                      v                       v
+     ensemble: agent loop   claude-code: claude -p   opencode: opencode run
+     (src/agent/)           (src/external/)          (src/external/)
         |  the Model Port (src/port.rs)
         v
      LLM backend: OpenAI-compatible API (src/backend/)
@@ -93,7 +94,7 @@ lists it as failed. Ensemble reads no user-level config.
 
 Your agent sees three tools: `delegate` (send a task to an agent, get the work
 back), `agents` (the team and what each is for) and `health` (is every LLM
-backend reachable, and Claude Code installed).
+backend reachable, and every agent CLI installed).
 
 ## Configuration
 
@@ -142,7 +143,7 @@ hardcoded as planner, coder or reviewer. It has:
 | `adapter` | what runs it. `type` decides which other fields the adapter takes |
 
 An **LLM backend** is a model endpoint, for agents with the `ensemble` adapter;
-a team of `claude-code` agents needs none.
+a team of `claude-code` and `opencode` agents needs none.
 Its one type today, `openai-compatible-api`, is any `/chat/completions`
 endpoint. It requires `base_url_env` and takes `base_url_default`,
 `api_key_env` and `timeout_seconds` (default 600, per request).
@@ -307,6 +308,42 @@ refused. Unlike `ensemble`'s `bash`, Claude Code's own tools are not in a
 Landlock sandbox: what they may do is what `tools` and `permission_mode`
 allow.
 
+### The `opencode` adapter
+
+The OpenCode CLI as a member of the team: a whole agent of its own, on any
+provider and model OpenCode is set up for, managing its own context.
+
+```yaml
+agents:
+  fixer:
+    prompt: You fix exactly what is asked, then say what you changed.
+    max_seconds: 1800     # wall-clock limit per delegation (the default)
+    adapter:
+      type: opencode
+      model: opencode/big-pickle  # provider/model, as `opencode models` lists it
+      tools: [read, glob, grep, list, edit, "bash(git *)"]  # default: read, glob, grep, list
+      max_steps: 30         # the default
+      command: opencode     # if it is not `opencode` on PATH
+```
+
+`opencode run` has no flags for a system prompt or allowed tools, so Ensemble
+hands OpenCode an agent of its own through `OPENCODE_CONFIG_CONTENT`: the
+prompt, `max_steps` as its step cap, and a permission set that denies
+everything (`"*": "deny"`) except the tools listed. OpenCode hides denied tools
+from the model, so it cannot even try them; that includes reaching outside the
+project (`external_directory`). `tools` takes OpenCode's permission names —
+`read`, `glob`, `grep`, `list`, `edit`, `bash`, `webfetch`, `websearch`,
+`task` — or a rule such as `bash(git *)`. It runs with `--standalone`, a
+private OpenCode server for the run, not the shared background service.
+
+It reports like the other adapters: a progress line per tool call, and a
+footer with steps, tool calls, the files it changed (found by comparing the
+project, when it has a tool that writes) and the `bash` commands that ran.
+`max_seconds` and cancellation kill it and its whole process tree. Your
+OpenCode configuration — providers, models, the project's `opencode.json` —
+still applies; the agent definition is added to it. Like Claude Code's, its
+tools are not in a Landlock sandbox: `tools` is what limits them.
+
 ### Progress
 
 An agent can run for minutes on a local model. While it does, `ensemble mcp`
@@ -425,7 +462,7 @@ $ cargo install --git https://github.com/Khachatur01/ensemble
 This puts `ensemble` in `~/.cargo/bin`, which must be on `PATH`. Run the same
 command again to update.
 
-The `claude` CLI is needed only for `claude-code` agents. Nothing else is:
+The `claude` and `opencode` CLIs are needed only for agents of those types. Nothing else is:
 there is no runtime service, no daemon and no port.
 
 ## Usage
@@ -436,7 +473,7 @@ up and for debugging it.
 ```console
 $ ensemble check                # validate the config, print the team
 $ ensemble agents               # the routing table
-$ ensemble health               # is every LLM backend reachable, and claude installed? non-zero if not
+$ ensemble health               # every LLM backend reachable, every agent CLI installed? non-zero if not
 $ ensemble run <agent> <task>   # send one task to one agent (it works in --dir)
 $ ensemble schema               # print the JSON Schema for ensemble.yaml
 $ ensemble mcp                  # serve the team over stdio
@@ -453,7 +490,7 @@ current directory), `--context <text>` (for `run`).
 | `src/port.rs` | the Model Port — the one interface every LLM adapter implements, and the shared error type |
 | `src/backend/openai.rs` | anything speaking `/chat/completions` |
 | `src/agent/` | the `ensemble` adapter: the agent loop, its tools and the sandboxes |
-| `src/claude_code.rs` | the `claude-code` adapter: `claude -p` as a subprocess, its `stream-json` read as it goes |
+| `src/external/` | the `claude-code` and `opencode` adapters: each CLI as a subprocess, its JSON events read as it goes |
 | `src/router.rs` | agents → adapters; the ensemble itself |
 | `src/harness/delegation.rs` | the three tools your agent calls: delegate, agents, health |
 | `src/harness/mcp.rs` | the MCP server, over stdio |
@@ -498,7 +535,7 @@ None of the tests need the network or a model server.
 | `src/config.rs` | every validation rule, environment precedence, secrets, typos, the schema kept in step with the code |
 | `src/agent/` | the tools, path confinement (`..`, absolute, symlinks), the bash sandbox, the loop, its limits |
 | `src/backend/openai.rs` | request construction, response parsing, every error path, with the transport injected |
-| `src/claude_code.rs` | the command line, the event stream, denials, turn limits, failures, the time limit killing the process tree, against stand-in scripts |
+| `src/external/` | each CLI's command line, agent definition and event stream, denials, limits, failures, the time limit killing the process tree, against stand-in scripts |
 | `src/router.rs` | agent → backend routing, prompts, context, provenance |
 | `src/harness/mcp.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation |
 | `tests/end_to_end.rs` | the real binary: CLI, MCP over real pipes, an agent editing a file against a stub model server |
@@ -506,8 +543,8 @@ None of the tests need the network or a model server.
 
 ## Limitations
 
-- **Two adapters so far.** `ensemble` and `claude-code`. OpenCode and Codex
-  are planned, not built.
+- **Three adapters so far.** `ensemble`, `claude-code` and `opencode`.
+  Codex is planned, not built.
 - **Delegation is single-shot.** An agent cannot ask a clarifying question; the
   caller must pass everything in `task` and `context`.
 - **`bash` is Linux-only.** See above. `grep` is a literal-string search, not

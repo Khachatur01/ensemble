@@ -91,7 +91,16 @@ llm_backends:
 #   max_turns              default 30
 #   command                default claude
 #
-# Other adapters (OpenCode, Codex) will be further types.
+# The `opencode` adapter is the OpenCode CLI, run headless in the project
+# on any provider OpenCode is set up for. No LLM backend, no context_window:
+#   model                  provider/model, as `opencode models` lists it
+#   tools                  OpenCode permissions, such as read, edit, bash or
+#                          bash(git *). Default: [read, glob, grep, list],
+#                          read-only; everything else is denied
+#   max_steps              default 30
+#   command                default opencode
+#
+# Codex will be a further type.
 # ---------------------------------------------------------------------------
 agents:
   planner:
@@ -134,6 +143,15 @@ agents:
   #   adapter:
   #     type: claude-code
   #     model: sonnet
+
+  # An OpenCode agent. Uncomment if `opencode` is installed.
+  # explorer:
+  #   prompt: |
+  #     You find where things are in the codebase and report file:line with a
+  #     one-line note each. You do not edit.
+  #   adapter:
+  #     type: opencode
+  #     model: opencode/big-pickle
 
 # ---------------------------------------------------------------------------
 # Environment

@@ -26,8 +26,8 @@
 
 pub mod agent;
 pub mod backend;
-pub mod claude_code;
 pub mod config;
+pub mod external;
 pub mod harness;
 pub mod port;
 pub mod router;

@@ -8,7 +8,9 @@
 //! differently depending on which one answered.
 
 use crate::agent::AgentRun;
-use crate::config::{Adapter, AgentConfig, AgentTool, CLAUDE_CODE_AGENT, Config, EnsembleAdapter};
+use crate::config::{
+    Adapter, AgentConfig, AgentTool, CLAUDE_CODE_AGENT, Config, EnsembleAdapter, OPENCODE_AGENT,
+};
 use crate::port::{Error, Message, ModelPort, Request, Response};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -206,7 +208,10 @@ impl Ensemble {
                 })
             }
             Adapter::ClaudeCode(cc) => self.run_tracked(agent, |dir| {
-                crate::claude_code::run(agent, cc, task, context, dir, progress, cancel)
+                crate::external::claude_code::run(agent, cc, task, context, dir, progress, cancel)
+            }),
+            Adapter::OpenCode(oc) => self.run_tracked(agent, |dir| {
+                crate::external::opencode::run(agent, oc, task, context, dir, progress, cancel)
             }),
         }
     }
@@ -281,7 +286,7 @@ impl Ensemble {
         // Changes found by comparing the project can include another run's.
         let compared = match &agent.adapter {
             Adapter::Ensemble(e) => e.tools.contains(&AgentTool::Bash),
-            Adapter::ClaudeCode(_) => agent.can_change_files(),
+            Adapter::ClaudeCode(_) | Adapter::OpenCode(_) => agent.can_change_files(),
         };
         Ok(Outcome {
             agent: agent.name.clone(),
@@ -302,17 +307,18 @@ impl Ensemble {
     }
 
     /// Check everything an agent actually runs on: each LLM backend in use,
-    /// and each Claude Code command.
+    /// and each external agent's command.
     ///
     /// Keyed by backend, not by agent: two agents on one endpoint are one thing
     /// to check and one thing to fix.
     pub fn health(&self) -> Vec<(String, Result<(), Error>)> {
         let mut backends: Vec<&str> = Vec::new();
-        let mut commands: Vec<&str> = Vec::new();
+        let mut commands: Vec<(&str, &str)> = Vec::new();
         for a in self.config.agents.values() {
             match &a.adapter {
                 Adapter::Ensemble(e) => backends.push(&e.llm_backend),
-                Adapter::ClaudeCode(cc) => commands.push(&cc.command),
+                Adapter::ClaudeCode(cc) => commands.push((CLAUDE_CODE_AGENT, &cc.command)),
+                Adapter::OpenCode(oc) => commands.push((OPENCODE_AGENT, &oc.command)),
             }
         }
         backends.sort_unstable();
@@ -333,11 +339,13 @@ impl Ensemble {
                 (name.to_string(), result)
             })
             .collect();
-        out.extend(commands.into_iter().map(|command| {
-            (
-                format!("{CLAUDE_CODE_AGENT} ({command})"),
-                crate::claude_code::health(command),
-            )
+        out.extend(commands.into_iter().map(|(kind, command)| {
+            let result = if kind == OPENCODE_AGENT {
+                crate::external::opencode::health(command)
+            } else {
+                crate::external::claude_code::health(command)
+            };
+            (format!("{kind} ({command})"), result)
         }));
         out
     }

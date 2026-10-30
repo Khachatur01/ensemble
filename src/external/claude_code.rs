@@ -18,22 +18,15 @@
 //! and reads its `stream-json` output as it goes, which is where progress, the
 //! commands it ran and its final answer come from.
 
+use super::process;
 use crate::agent::AgentRun;
 use crate::agent::sandbox::Sandbox;
 use crate::agent::tools::{self, Changes};
 use crate::config::{AgentConfig, CLAUDE_CODE_AGENT, ClaudeCodeAdapter, claude_tool_writes};
 use crate::port::{Error, Usage};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
-
-/// How long to wait for stderr after the child has gone. Something it left
-/// running may still hold the pipe; the answer does not depend on stderr.
-const READER_GRACE: Duration = Duration::from_secs(2);
+use std::sync::atomic::AtomicBool;
 
 /// Run a `claude-code` agent on one task, in `workdir`.
 pub fn run(
@@ -109,11 +102,6 @@ fn run_program(
         Some(ctx) => format!("Context:\n{ctx}\n\n{task}"),
         None => task.to_string(),
     };
-    let (exe, prefix) = program.split_first().ok_or_else(|| Error::Unsupported {
-        backend: backend.clone(),
-        detail: "no command to run".into(),
-    })?;
-
     // Claude Code's own edits are not visible from here one by one, so what
     // it changed is found by comparing the project before and after.
     let baseline = cc
@@ -123,73 +111,19 @@ fn run_program(
         .then(|| tools::snapshot(&sandbox))
         .flatten();
 
-    let mut cmd = Command::new(exe);
-    cmd.args(prefix)
-        .args(arguments(agent, cc, &prompt))
-        .current_dir(sandbox.root())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    // Its own process group, so a stop can take the whole tree down: `claude`
-    // is a node program that starts children of its own.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    let mut child = cmd.spawn().map_err(|e| Error::Spawn {
-        backend: backend.clone(),
-        program: exe.clone(),
-        detail: e.to_string(),
-    })?;
-    let pid = child.id();
     say("starting Claude Code");
-
-    // Read both pipes on their own threads: a child that fills a pipe nobody
-    // reads blocks forever.
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let (lines_tx, lines) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            if lines_tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    let mut stderr = child.stderr.take().expect("stderr was piped");
-    let (err_tx, err_rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stderr.read_to_string(&mut s);
-        let _ = err_tx.send(s);
-    });
-
-    let deadline = Instant::now() + Duration::from_secs(u64::from(agent.max_seconds));
     let mut stream = Stream::new(&sandbox, &say);
-    let mut stopped: Option<String> = None;
-    loop {
-        match lines.recv_timeout(Duration::from_millis(50)) {
-            Ok(line) => stream.read(&line),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-        let why = if cancel.load(Ordering::Relaxed) {
-            Some("cancelled".to_string())
-        } else if Instant::now() >= deadline {
-            Some(format!("stopped at the {}s time limit", agent.max_seconds))
-        } else {
-            None
-        };
-        if why.is_some() {
-            kill_group(pid);
-            let _ = child.kill();
-            stopped = why;
-            break;
-        }
+    let ended = process::Run {
+        backend: CLAUDE_CODE_AGENT,
+        program,
+        args: arguments(agent, cc, &prompt),
+        env: Vec::new(),
+        workdir: sandbox.root(),
+        max_seconds: agent.max_seconds,
+        cancel,
     }
-    let status = child.wait().ok().and_then(|s| s.code());
-    let stderr = err_rx.recv_timeout(READER_GRACE).unwrap_or_default();
+    .stream(&mut |line| stream.read(line))?;
+    let (status, stderr, stopped) = (ended.status, ended.stderr, ended.stopped);
 
     let mut out = AgentRun {
         text: String::new(),
@@ -433,7 +367,8 @@ impl<'a> Stream<'a> {
     fn describe(&self, input: &Value) -> String {
         for key in ["file_path", "notebook_path", "path"] {
             if let Some(p) = input.get(key).and_then(Value::as_str) {
-                return self.sandbox.show(Path::new(p));
+                let shown = self.sandbox.show(Path::new(p));
+                return if shown.is_empty() { ".".into() } else { shown };
             }
         }
         for key in ["command", "pattern", "url", "query"] {
@@ -448,64 +383,16 @@ impl<'a> Stream<'a> {
 /// Check that the CLI is there and starts. `--version` does not touch the
 /// subscription, which is the whole requirement for a health check.
 pub fn health(command: &str) -> Result<(), Error> {
-    let backend = CLAUDE_CODE_AGENT.to_string();
-    let mut child = Command::new(command)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| Error::Spawn {
-            backend: backend.clone(),
-            program: command.into(),
-            detail: e.to_string(),
-        })?;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if let Some(status) = child.try_wait().ok().flatten() {
-            return if status.success() {
-                Ok(())
-            } else {
-                let mut err = String::new();
-                if let Some(mut s) = child.stderr.take() {
-                    let _ = s.read_to_string(&mut err);
-                }
-                Err(Error::ProcessFailed {
-                    backend,
-                    code: status.code(),
-                    stderr: err,
-                })
-            };
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            return Err(Error::Timeout {
-                backend,
-                seconds: 20,
-            });
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    process::health(CLAUDE_CODE_AGENT, command)
 }
-
-/// Kill the child's whole process group. The child was put in its own group
-/// at spawn, so the group id is its pid and this reaches nothing else.
-#[cfg(unix)]
-fn kill_group(pid: u32) {
-    // SAFETY: a plain libc call with no memory arguments, on our own group.
-    unsafe {
-        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_group(_pid: u32) {}
 
 #[cfg(test)]
 mod tests {
+    use super::process::testing::{emitting, fake};
     use super::*;
     use crate::agent::sandbox::testing::TempDir;
     use crate::config::Adapter;
+    use std::time::{Duration, Instant};
 
     fn agent(tools: &[&str], max_seconds: u32) -> (AgentConfig, ClaudeCodeAdapter) {
         let cc = ClaudeCodeAdapter {
@@ -523,26 +410,6 @@ mod tests {
             adapter: Adapter::ClaudeCode(cc.clone()),
         };
         (a, cc)
-    }
-
-    /// A stand-in for `claude`: a shell script, run through `sh` so nothing
-    /// executes a file still open for writing.
-    fn fake(dir: &Path, body: &str) -> Vec<String> {
-        let script = dir.join("fake-claude.sh");
-        std::fs::write(&script, body).unwrap();
-        vec!["sh".into(), script.display().to_string()]
-    }
-
-    /// Print `events` one per line, as `claude --output-format stream-json` does.
-    fn emitting(events: &[Value]) -> String {
-        let mut body = String::new();
-        for e in events {
-            body.push_str(&format!(
-                "printf '%s\\n' '{}'\n",
-                e.to_string().replace('\'', "'\\''")
-            ));
-        }
-        body
     }
 
     fn tool_use(id: &str, name: &str, input: Value) -> Value {

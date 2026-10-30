@@ -81,7 +81,7 @@
           "type": "string"
         },
         "context_window": {
-          "description": "Tokens of context the model really runs with. Required for an ensemble agent with `tools` (Ollama: OLLAMA_CONTEXT_LENGTH, 4096 unless raised); a server that overflows silently drops the oldest messages, so Ensemble trims old tool output to stay within it. Not for claude-code, which manages its own context.",
+          "description": "Tokens of context the model really runs with. Required for an ensemble agent with `tools` (Ollama: OLLAMA_CONTEXT_LENGTH, 4096 unless raised); a server that overflows silently drops the oldest messages, so Ensemble trims old tool output to stay within it. Not for claude-code or opencode, which manage their own context.",
           "type": "integer",
           "minimum": 1,
           "examples": [
@@ -90,7 +90,7 @@
           ]
         },
         "max_seconds": {
-          "description": "Wall-clock limit for one delegation. At the limit the run stops and returns what it did, marked unfinished. Any claude-code agent, or an ensemble agent with `tools`.",
+          "description": "Wall-clock limit for one delegation. At the limit the run stops and returns what it did, marked unfinished. Any claude-code or opencode agent, or an ensemble agent with `tools`.",
           "type": "integer",
           "minimum": 1,
           "default": 1800
@@ -103,6 +103,9 @@
             },
             {
               "$ref": "#/definitions/claude_code_adapter"
+            },
+            {
+              "$ref": "#/definitions/opencode_adapter"
             }
           ]
         }
@@ -175,6 +178,27 @@
                 "properties": {
                   "type": {
                     "const": "claude-code"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "context_window": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "adapter": {
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "const": "opencode"
                   }
                 }
               }
@@ -400,6 +424,72 @@
           "type": "string",
           "minLength": 1,
           "default": "claude"
+        }
+      }
+    },
+    "opencode_adapter": {
+      "type": "object",
+      "required": [
+        "type",
+        "model"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "opencode: the OpenCode CLI (`opencode run`), run headless in the project, on any provider OpenCode is set up for. It brings its own tools and manages its own context.",
+          "const": "opencode"
+        },
+        "model": {
+          "description": "provider/model, as `opencode models` lists it, e.g. anthropic/claude-sonnet-4-5 or a local provider's model.",
+          "type": "string",
+          "pattern": "/",
+          "examples": [
+            "opencode/big-pickle",
+            "ollama/qwen3.5:9b"
+          ]
+        },
+        "tools": {
+          "description": "OpenCode permissions this agent is granted: read, glob, grep, list, edit, bash, webfetch, websearch, task, todowrite, ..., or a rule such as bash(git *). Everything else is denied, and OpenCode hides denied tools from the model. Default: [read, glob, grep, list], read-only.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_*.-]+(\\([^)]+\\))?$"
+          },
+          "default": [
+            "read",
+            "glob",
+            "grep",
+            "list"
+          ],
+          "examples": [
+            [
+              "read",
+              "glob",
+              "grep",
+              "list"
+            ],
+            [
+              "read",
+              "glob",
+              "grep",
+              "list",
+              "edit",
+              "bash"
+            ]
+          ]
+        },
+        "max_steps": {
+          "description": "Most agentic steps OpenCode may take for one delegation; at the limit it reports what it did.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 30
+        },
+        "command": {
+          "description": "The opencode binary, if it is not `opencode` on PATH.",
+          "type": "string",
+          "minLength": 1,
+          "default": "opencode"
         }
       }
     }
