@@ -741,3 +741,36 @@ fn a_role_with_tools_edits_the_project_through_its_own_loop_over_mcp() {
     let first: serde_json::Value = serde_json::from_str(&seen[0]).unwrap();
     assert_eq!(first["model"], "coder-model");
 }
+
+#[test]
+fn init_writes_a_sample_that_checks_and_never_overwrites_by_accident() {
+    let s = Scratch::new("init");
+    let out = ensemble(&s, &["init"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let written = std::fs::read_to_string(s.path().join("ensemble.yaml")).unwrap();
+    assert!(written.contains("type: opencode"), "{written}");
+
+    let check = ensemble(&s, &["check"]);
+    assert!(check.status.success(), "{}", stderr_of(&check));
+
+    s.write("ensemble.yaml", "mine");
+    let again = ensemble(&s, &["init"]);
+    assert!(!again.status.success());
+    assert!(
+        stderr_of(&again).contains("--force"),
+        "{}",
+        stderr_of(&again)
+    );
+    assert_eq!(
+        std::fs::read_to_string(s.path().join("ensemble.yaml")).unwrap(),
+        "mine"
+    );
+
+    let printed = ensemble(&s, &["init", "--stdout"]);
+    assert_eq!(stdout_of(&printed), written);
+    assert!(ensemble(&s, &["init", "--force"]).status.success());
+    assert_eq!(
+        std::fs::read_to_string(s.path().join("ensemble.yaml")).unwrap(),
+        written
+    );
+}

@@ -23,6 +23,9 @@ COMMANDS:
                             agent (Claude Code, OpenCode, ...) spawns, with the
                             project as its working directory; it is not meant
                             to be run by hand.
+    init [--force|--stdout] Write a sample ensemble.yaml with every setting, to
+                            edit. Refuses to overwrite one unless --force;
+                            --stdout prints it instead.
     check                   Load and validate the config, then report the team.
     schema                  Print the JSON Schema for ensemble.yaml, so an editor
                             can complete and check it. Needs no config.
@@ -128,6 +131,10 @@ fn run() -> Result<ExitCode, String> {
             .map_err(|e| format!("cannot read the current directory: {e}"))?,
     };
 
+    if args.command == "init" {
+        return cmd_init(&args, &dir);
+    }
+
     let config_path = match &args.config {
         Some(p) => p.clone(),
         None => config::discover(&dir).ok_or_else(|| {
@@ -149,6 +156,39 @@ fn run() -> Result<ExitCode, String> {
         "run" => cmd_run(config, dir, &args),
         other => Err(format!("unknown command '{other}'. Try --help.")),
     }
+}
+
+/// Write the sample config, or print it.
+fn cmd_init(args: &Args, dir: &std::path::Path) -> Result<ExitCode, String> {
+    let has = |flag: &str| args.rest.iter().any(|a| a == flag);
+    if let Some(other) = args
+        .rest
+        .iter()
+        .find(|a| !["--force", "--stdout"].contains(&a.as_str()))
+    {
+        return Err(format!("init: unknown argument '{other}'. Try --help."));
+    }
+    if has("--stdout") {
+        print!("{}", config::SAMPLE);
+        return Ok(ExitCode::SUCCESS);
+    }
+    let path = args
+        .config
+        .clone()
+        .unwrap_or_else(|| dir.join(config::CONFIG_FILENAME));
+    if path.exists() && !has("--force") {
+        return Err(format!(
+            "{} already exists. Pass --force to overwrite it, or --stdout to print the sample.",
+            path.display()
+        ));
+    }
+    std::fs::write(&path, config::SAMPLE)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    println!(
+        "wrote {}: a sample team with every setting. Edit the agents, then run `ensemble check`.",
+        path.display()
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 fn build(config: Config, dir: PathBuf) -> Result<Ensemble, String> {

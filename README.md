@@ -42,9 +42,13 @@ any of them the same way. Codex is meant to become a further adapter type.
 2. Give the project a team, then check it:
 
    ```console
-   $ cp ensemble.yaml /your/project/      # the shipped example; edit the agents
-   $ cd /your/project && ensemble check
+   $ cd /your/project
+   $ ensemble init     # writes ensemble.yaml: a sample team with every setting
+   $ ensemble check
    ```
+
+   Edit the agents first: the sample has one of each adapter type, with every
+   setting and what it does.
 
    `check` validates the config, prints the team and says whether the LLM
    backends can be built.
@@ -471,6 +475,8 @@ Day to day you do not run Ensemble — your agent does. These are for setting it
 up and for debugging it.
 
 ```console
+$ ensemble init                 # write a sample ensemble.yaml with every setting
+$ ensemble init --stdout        # print it instead (init refuses to overwrite without --force)
 $ ensemble check                # validate the config, print the team
 $ ensemble agents               # the routing table
 $ ensemble health               # every LLM backend reachable, every agent CLI installed? non-zero if not

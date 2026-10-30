@@ -20,6 +20,10 @@ pub const CONFIG_FILENAME: &str = "ensemble.yaml";
 /// The JSON Schema for `ensemble.yaml`, for editors. `ensemble schema`
 /// prints it; the tests keep it in step with the structs below.
 pub const SCHEMA: &str = include_str!("../ensemble.schema.json");
+
+/// The config `ensemble init` writes: every setting at least once, with what
+/// it does. The tests keep it loading and complete.
+pub const SAMPLE: &str = include_str!("sample.yaml");
 pub const SUPPORTED_VERSION: u32 = 1;
 
 /// The LLM backend types that ship. Adding one is adding an adapter and a
@@ -1349,6 +1353,62 @@ agents:
             DEFAULT_TIMEOUT_SECONDS
         );
         assert_eq!(schema["properties"]["version"]["const"], SUPPORTED_VERSION);
+    }
+
+    #[test]
+    fn the_sample_loads_and_sets_every_setting_the_schema_has() {
+        let c = parse(SAMPLE, &p(), &env(&[])).expect("the sample is a valid config");
+        let kinds: Vec<&str> = c.agents.values().map(|a| a.kind()).collect();
+        for kind in AGENT_TYPES {
+            assert!(kinds.contains(&kind), "the sample has no {kind} agent");
+        }
+
+        let doc: serde_json::Value = serde_norway::from_str(SAMPLE).unwrap();
+        let schema = schema();
+        let defs = &schema["definitions"];
+        let missing = |def: &str, objects: Vec<&serde_json::Value>| -> Vec<String> {
+            schema_keys(&defs[def])
+                .into_iter()
+                .filter(|k| !objects.iter().any(|o| o.get(k).is_some()))
+                .collect()
+        };
+        let backends: Vec<&serde_json::Value> =
+            doc["llm_backends"].as_object().unwrap().values().collect();
+        let agents: Vec<&serde_json::Value> = doc["agents"].as_object().unwrap().values().collect();
+        let adapters = |kind: &str| -> Vec<&serde_json::Value> {
+            agents
+                .iter()
+                .map(|a| &a["adapter"])
+                .filter(|a| a["type"] == kind)
+                .collect()
+        };
+        assert_eq!(
+            missing("llm_backend", backends),
+            Vec::<String>::new(),
+            "llm_backends"
+        );
+        assert_eq!(
+            missing("agent", agents.clone()),
+            Vec::<String>::new(),
+            "agents"
+        );
+        assert_eq!(
+            missing("ensemble_adapter", adapters(ENSEMBLE_AGENT)),
+            Vec::<String>::new(),
+            "ensemble adapter"
+        );
+        assert_eq!(
+            missing("claude_code_adapter", adapters(CLAUDE_CODE_AGENT)),
+            Vec::<String>::new(),
+            "claude-code adapter"
+        );
+        assert_eq!(
+            missing("opencode_adapter", adapters(OPENCODE_AGENT)),
+            Vec::<String>::new(),
+            "opencode adapter"
+        );
+        let id = schema["$id"].as_str().unwrap().to_string();
+        assert!(SAMPLE.starts_with(&format!("# yaml-language-server: $schema={id}")));
     }
 
     #[test]
