@@ -93,6 +93,7 @@ agents:
       # OpenCode permissions, such as read, edit, bash or bash(git *);
       # everything else is denied.
       tools: [read, glob, grep, list, edit, bash]
+      system_prompt: append
       max_steps: 30
       # The CLI: `opencode` if it is on PATH.
       command: opencode
@@ -115,6 +116,7 @@ agents:
         name: opencode/big-pickle
       # Read-only.
       tools: [read, glob, grep, list]
+      system_prompt: append
       max_steps: 30
       command: opencode
 

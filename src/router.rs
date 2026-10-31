@@ -354,6 +354,7 @@ agents:
       type: opencode
       model: {{ type: provider, name: opencode/big-pickle }}
       tools: [read, glob, grep, list]
+      system_prompt: append
       max_steps: 30
       command: "{program}"
   doer:
@@ -366,6 +367,7 @@ agents:
       type: opencode
       model: {{ type: llm_backend, backend: local, name: qwen3.5-9b, context_window: 32768 }}
       tools: [read, edit]
+      system_prompt: append
       max_steps: 30
       command: "{program}"
   reviewer:

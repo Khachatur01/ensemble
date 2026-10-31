@@ -470,7 +470,12 @@ fn cmd_show(config: &Config, args: &Args) -> Result<ExitCode, String> {
             let backend = oc.llm_backend().and_then(|b| config.llm_backends.get(b));
             let argv = opencode::arguments(agent, oc, backend, TASK);
             println!("{}", command_line(&oc.command, &argv));
-            let mut inline = opencode::config(agent, oc, backend);
+            let mut inline = opencode::config(
+                agent,
+                oc,
+                backend,
+                std::path::Path::new(opencode::SHOWN_PROMPT_FILE),
+            );
             opencode::redact(&mut inline);
             println!();
             println!("OPENCODE_CONFIG_CONTENT:");

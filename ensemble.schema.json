@@ -149,7 +149,7 @@
       "additionalProperties": false,
       "properties": {
         "prompt": {
-          "description": "What this agent is for. Its first line is what the calling agent sees when it lists the team; the whole of it is the agent's system prompt. Keep it short for small local models. Leave it out for an agent with no system prompt.",
+          "description": "What this agent is for. Its first line is what the calling agent sees when it lists the team; the whole of it goes into the agent's system prompt: added to Claude Code's own, added to or in place of OpenCode's own (see the adapter's `system_prompt`), and alone for an `llm` agent. Keep it short for small local models. Leave it out and a CLI agent runs on its CLI's own system prompt alone; an `llm` agent then has none.",
           "type": "string"
         },
         "max_seconds": {
@@ -277,6 +277,7 @@
         "type",
         "model",
         "tools",
+        "system_prompt",
         "max_steps",
         "command"
       ],
@@ -320,6 +321,13 @@
               "edit",
               "bash"
             ]
+          ]
+        },
+        "system_prompt": {
+          "description": "What the agent's `prompt` does to OpenCode's own system prompt, the one that teaches the model OpenCode's tools. `append`: the prompt follows it, sent as an instruction file for the run. `replace`: the prompt takes its place, for a small model whose context cannot spare it; it needs a `prompt`. Either way OpenCode adds the environment and the project's AGENTS.md.",
+          "enum": [
+            "append",
+            "replace"
           ]
         },
         "max_steps": {

@@ -113,8 +113,9 @@ struct RawOpenAiBackend {
 #[serde(deny_unknown_fields)]
 struct RawAgent {
     /// What the agent is for. Its first line is what the calling agent sees
-    /// when it lists the team, and the whole of it is the agent's system
-    /// prompt. Absent: the agent has no system prompt, a model with a name.
+    /// when it lists the team, and the whole of it goes into the agent's
+    /// system prompt. Absent: a CLI agent runs on its CLI's own system prompt
+    /// alone, and an `llm` agent has none.
     prompt: Option<String>,
     /// Wall-clock cap on one delegation, in seconds. A run that reaches it
     /// stops and reports what it did, so a hung model cannot hold the caller
@@ -206,6 +207,9 @@ struct RawOpenCodeAdapter {
     /// What the agent may do, in OpenCode's permissions (`read`,
     /// `bash(git *)`).
     tools: Vec<String>,
+    /// What the agent's `prompt` does to OpenCode's own system prompt: adds
+    /// to it, or takes its place.
+    system_prompt: SystemPrompt,
     /// Cap on steps within one delegation.
     max_steps: u32,
     /// The CLI: `opencode` if it is on PATH.
@@ -333,7 +337,23 @@ pub struct OpenCodeAdapter {
     /// OpenCode permission names, each allowed; everything else is denied.
     /// `name(pattern)` allows only matching uses, such as `bash(git *)`.
     pub tools: Vec<String>,
+    pub system_prompt: SystemPrompt,
     pub max_steps: u32,
+}
+
+/// What an OpenCode agent's `prompt` does to OpenCode's own system prompt,
+/// the one written for the model's family that teaches it OpenCode's tools.
+/// Either way OpenCode still adds what it knows of the machine and the
+/// project's `AGENTS.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SystemPrompt {
+    /// After OpenCode's own: the agent's prompt goes to OpenCode as an
+    /// instruction file.
+    Append,
+    /// In place of OpenCode's own, for a small model whose context cannot
+    /// spare it. It needs a `prompt`.
+    Replace,
 }
 
 /// One chat request to an LLM backend: a light agent with no tools.
@@ -792,9 +812,13 @@ fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, Config
             RawAdapter::ClaudeCode(c) => {
                 Adapter::ClaudeCode(claude_code_adapter(&at, c, &mut problems))
             }
-            RawAdapter::OpenCode(o) => {
-                Adapter::OpenCode(opencode_adapter(&at, o, &raw.llm_backends, &mut problems))
-            }
+            RawAdapter::OpenCode(o) => Adapter::OpenCode(opencode_adapter(
+                &at,
+                o,
+                ra.prompt.as_deref(),
+                &raw.llm_backends,
+                &mut problems,
+            )),
             RawAdapter::Llm(l) => {
                 Adapter::Llm(llm_adapter(&at, l, &raw.llm_backends, &mut problems))
             }
@@ -881,6 +905,7 @@ fn undefined_backend(
 fn opencode_adapter(
     at: &str,
     ad: &RawOpenCodeAdapter,
+    prompt: Option<&str>,
     declared: &BTreeMap<String, RawLlmBackend>,
     problems: &mut Vec<String>,
 ) -> OpenCodeAdapter {
@@ -901,6 +926,11 @@ fn opencode_adapter(
     }
     if ad.max_steps == 0 {
         problems.push(format!("{at}: `max_steps` must be greater than 0"));
+    }
+    if ad.system_prompt == SystemPrompt::Replace && prompt.is_none_or(|p| p.trim().is_empty()) {
+        problems.push(format!(
+            "{at}: `system_prompt: replace` needs the agent's `prompt`: it is what takes the place of OpenCode's own"
+        ));
     }
     let model = match &ad.model {
         RawOpenCodeModel::Provider(p) => {
@@ -944,6 +974,7 @@ fn opencode_adapter(
         command: ad.command.clone(),
         model,
         tools: ad.tools.clone(),
+        system_prompt: ad.system_prompt,
         max_steps: ad.max_steps,
     }
 }
@@ -1104,6 +1135,7 @@ agents:
         name: qwen3-coder
         context_window: 32768
       tools: [read, glob, grep, list]
+      system_prompt: append
       max_steps: 30
       command: opencode
   coder:
@@ -1120,6 +1152,7 @@ agents:
         name: qwen3-coder
         context_window: 32768
       tools: [read, edit, bash]
+      system_prompt: append
       max_steps: 30
       command: opencode
   reviewer:
@@ -1205,6 +1238,11 @@ agents:
                 "agents.coder",
                 "max_steps",
             ),
+            (
+                "      system_prompt: append\n      max_steps: 30\n      command: opencode\n  reviewer:",
+                "agents.coder",
+                "system_prompt",
+            ),
             ("      max_turns: 30\n", "agents.reviewer", "max_turns"),
             ("      command: claude\n", "agents.reviewer", "command"),
             (
@@ -1226,6 +1264,7 @@ agents:
             // Put back what follows the line, so only the one key is gone.
             let kept = match key {
                 "max_steps" => "      command: opencode\n  reviewer:",
+                "system_prompt" => "      max_steps: 30\n      command: opencode\n  reviewer:",
                 "context_window" => "      tools: [read, edit, bash]",
                 _ => "",
             };
@@ -1275,7 +1314,7 @@ agents:
 
         let provider = "model:\n        type: provider\n        name: opencode/big-pickle\n        context_window: 1\n";
         let doc = format!(
-            "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      {provider}      tools: []\n      max_steps: 3\n      command: opencode\n"
+            "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      {provider}      tools: []\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n"
         );
         assert!(refusal(&doc).contains("context_window"));
     }
@@ -1284,7 +1323,7 @@ agents:
     fn an_opencode_model_is_a_provider_model_or_an_llm_backend_model() {
         let doc = |model: &str| {
             format!(
-                "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      max_steps: 3\n      command: opencode\n"
+                "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n"
             )
         };
         let c = parse(
@@ -1306,6 +1345,31 @@ agents:
         );
         let detail = refusal(&doc("opencode/big-pickle"));
         assert!(detail.contains("agents.x"), "{detail}");
+    }
+
+    #[test]
+    fn opencode_s_own_prompt_is_kept_or_replaced_and_only_a_prompt_replaces_it() {
+        let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
+        assert_eq!(opencode(&c, "coder").system_prompt, SystemPrompt::Append);
+
+        let replaced = REFERENCE.replacen("system_prompt: append", "system_prompt: replace", 1);
+        let detail = joined_problems(&replaced);
+        assert!(
+            detail.contains("agents.planner.adapter")
+                && detail.contains("`system_prompt: replace` needs the agent's `prompt`"),
+            "{detail}"
+        );
+        let with_prompt =
+            replaced.replacen("  planner:\n", "  planner:\n    prompt: You plan.\n", 1);
+        let c = parse(&with_prompt, &p(), &env(&[])).unwrap();
+        assert_eq!(opencode(&c, "planner").system_prompt, SystemPrompt::Replace);
+
+        let detail =
+            refusal(&REFERENCE.replacen("system_prompt: append", "system_prompt: drop", 1));
+        assert!(
+            detail.contains("unknown variant `drop`") && detail.contains("append"),
+            "{detail}"
+        );
     }
 
     #[test]
@@ -1658,6 +1722,7 @@ agents:
       type: opencode
       model: { type: provider, name: "ollama/qwen3.5:9b" }
       tools: [read, edit, "bash(git *)"]
+      system_prompt: append
       max_steps: 12
       command: /opt/opencode
 "#;
@@ -1683,6 +1748,7 @@ agents:
       type: opencode
       model: { type: provider, name: big-pickle }
       tools: ["read,edit"]
+      system_prompt: append
       max_steps: 0
       command: opencode
 "#;
@@ -1981,6 +2047,7 @@ agents:
       type: opencode
       model: { type: llm_backend, backend: missing, name: "", context_window: 0 }
       tools: []
+      system_prompt: append
       max_steps: 1
       command: opencode
 "#;

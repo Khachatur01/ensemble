@@ -410,7 +410,7 @@ mod tests {
         for (name, tools, body) in scripts {
             let command = cli(&bin, name, body);
             yaml.push_str(&format!(
-                "  {name}:\n    prompt: \"The {name}. Second line.\"\n    max_seconds: 1800\n    max_concurrent: {max_concurrent}\n    isolation: {isolation}\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {{ type: provider, name: opencode/m-{name} }}\n      tools: [{tools}]\n      max_steps: 30\n      command: \"{command}\"\n"
+                "  {name}:\n    prompt: \"The {name}. Second line.\"\n    max_seconds: 1800\n    max_concurrent: {max_concurrent}\n    isolation: {isolation}\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {{ type: provider, name: opencode/m-{name} }}\n      tools: [{tools}]\n      system_prompt: append\n      max_steps: 30\n      command: \"{command}\"\n"
             ));
         }
         let cfg =
@@ -773,7 +773,7 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
         assert!(text_of(&good).contains(": ok"), "{}", text_of(&good));
 
         let cfg = config::parse(
-            "version: 1\nllm_backends: {}\ngates: {}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 4\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter: { type: opencode, model: { type: provider, name: a/b }, tools: [read], max_steps: 3, command: /nonexistent/opencode }\n",
+            "version: 1\nllm_backends: {}\ngates: {}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 4\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter: { type: opencode, model: { type: provider, name: a/b }, tools: [read], system_prompt: append, max_steps: 3, command: /nonexistent/opencode }\n",
             std::path::Path::new("config.yaml"),
             &BTreeMap::new(),
         )

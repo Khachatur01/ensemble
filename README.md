@@ -151,6 +151,7 @@ agents:
         name: qwen3.5-9b
         context_window: 262144
       tools: [read, glob, grep, list, edit, bash]
+      system_prompt: append
       max_steps: 30
       command: opencode
 
@@ -175,15 +176,16 @@ missing one is refused by name (``agents.coder: `max_seconds` is required``).
 What differs between cases is a tagged variant (`type:`) carrying exactly its
 own settings, so a setting that does not apply cannot be written and one that
 does cannot be forgotten. Only two settings may be left out, because leaving
-them out means "not used": an agent's `prompt` (no system prompt) and a
-backend's `api_key_env` (no key). `llm_backends: {}` says there are none.
+them out means "not used": an agent's `prompt` (the CLI's own system prompt
+alone) and a backend's `api_key_env` (no key). `llm_backends: {}` says there
+are none.
 
 An **agent** is a member of the team. Its names are yours; nothing is
 hardcoded as planner, coder or reviewer. It has:
 
 | key | |
 | --- | --- |
-| `prompt` | what it is for. The first line is what your agent sees in `agents`; the whole of it is the agent's system prompt. Optional: without it the agent has none |
+| `prompt` | what it is for. The first line is what your agent sees in `agents`; the whole of it goes into the agent's system prompt, added to the CLI's own (OpenCode can also replace its own; see `system_prompt`). Optional: without it a CLI agent runs on its CLI's own system prompt alone, and an `llm` agent has none |
 | `max_seconds` | wall-clock limit for one delegation. At the limit the CLI and its whole process tree are killed and what it did is returned, marked unfinished |
 | `max_concurrent` | most delegations to it that run at once in a session: tasks, background and blocking delegations alike. More wait for a free slot. `1` suits a model server that serves one request at a time |
 | `isolation` | where its tasks run: `shared`, in the project directory, or `worktree`, each task in a git worktree of its own (see [Tasks](#tasks-and-background-delegations)). Delegations always run in the project |
@@ -229,6 +231,7 @@ agents:
         name: qwen3.5-9b       # the id the server serves
         context_window: 262144 # what the server runs it with
       tools: [read, glob, grep, list, edit, "bash(git *)"]
+      system_prompt: append
       max_steps: 30
       command: opencode        # `opencode` if it is on PATH
 
@@ -244,19 +247,36 @@ agents:
         type: provider         # a model OpenCode is already set up for
         name: opencode/big-pickle  # provider/model, as `opencode models` lists it
       tools: [read, glob, grep, list]
+      system_prompt: append
       max_steps: 30
       command: opencode
 ```
 
 `opencode run` has no flags for a system prompt or allowed tools, so Ensemble
-hands OpenCode an agent of its own through `OPENCODE_CONFIG_CONTENT`: the
-prompt, `max_steps` as its step cap, and a permission set that denies
-everything (`"*": "deny"`) except the tools listed. OpenCode hides denied tools
-from the model, so it cannot even try them; that includes reaching outside the
-project (`external_directory`). `tools` takes OpenCode's permission names
-(`read`, `glob`, `grep`, `list`, `edit`, `bash`, `webfetch`, `websearch`,
-`task`) or a rule such as `bash(git *)`. It runs with `--standalone`, a private
-OpenCode server for the run, not the shared background service.
+hands OpenCode an agent of its own through `OPENCODE_CONFIG_CONTENT`:
+`max_steps` as its step cap, and a permission set that denies everything
+(`"*": "deny"`) except the tools listed. OpenCode hides denied tools from the
+model, so it cannot even try them; that includes reaching outside the project
+(`external_directory`). `tools` takes OpenCode's permission names (`read`,
+`glob`, `grep`, `list`, `edit`, `bash`, `webfetch`, `websearch`, `task`) or a
+rule such as `bash(git *)`. It runs with `--standalone`, a private OpenCode
+server for the run, not the shared background service.
+
+OpenCode has a system prompt of its own, written for each model family, that
+teaches the model its tools; it also adds the working directory, the date and
+the project's `AGENTS.md`. `system_prompt` says what the agent's `prompt` does
+to it:
+
+- `append`: the prompt follows OpenCode's own. OpenCode has no flag for that,
+  so Ensemble writes the prompt to a temporary file for the run and lists it
+  under `instructions`. Right for most agents.
+- `replace`: the prompt takes the place of OpenCode's own, as the agent's
+  `prompt`. For a small model whose context cannot spare the few thousand
+  tokens OpenCode's own takes on every step. It needs a `prompt`.
+
+OpenCode also reads your global `~/.config/opencode/AGENTS.md` and
+`~/.claude/CLAUDE.md` into every agent. Set `OPENCODE_DISABLE_CLAUDE_CODE=1`
+in the environment you start Ensemble from to keep `.claude` files out.
 
 With a model of type `llm_backend`, the same inline config also defines that
 backend as an OpenCode provider (`@ai-sdk/openai-compatible`, its base URL, its

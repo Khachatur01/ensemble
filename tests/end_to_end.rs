@@ -8,7 +8,7 @@
 //!
 //! No test here needs the network, a model server or an agent CLI.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -111,6 +111,7 @@ agents:
       type: opencode
       model: {{ type: provider, name: opencode/reviewer-model }}
       tools: [read, glob, grep, list]
+      system_prompt: replace
       max_steps: 30
       command: "{command}"
   coder:
@@ -127,6 +128,7 @@ agents:
         name: qwen3-coder
         context_window: 32768
       tools: [read, edit]
+      system_prompt: append
       max_steps: 30
       command: "{command}"
 "#
@@ -167,12 +169,19 @@ fn models_stub(body: &str) -> String {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { return };
             let mut reader = BufReader::new(&stream);
+            let mut length = 0;
             loop {
                 let mut header = String::new();
                 if reader.read_line(&mut header).is_err() || header.trim().is_empty() {
                     break;
                 }
+                if let Some(v) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap_or(0);
+                }
             }
+            // Read the body too: closing with it unread resets the connection,
+            // and the client can see the reset before the answer.
+            let _ = reader.read_exact(&mut vec![0; length]);
             let mut stream = &stream;
             let _ = write!(
                 stream,
@@ -227,6 +236,7 @@ agents:
       type: opencode
       model: { type: llm_backend, backend: nowhere, name: "", context_window: 8000 }
       tools: []
+      system_prompt: append
       max_steps: 3
       command: opencode
 "#,
