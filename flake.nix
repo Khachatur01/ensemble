@@ -21,6 +21,8 @@
           # stand in for the agent CLIs, and loopback sockets. All of that works
           # in the sandbox; none of it needs the network or a model server.
           doCheck = true;
+          # The worktree tests make real git repositories and worktrees.
+          nativeCheckInputs = [ pkgs.git ];
 
           meta = {
             description = "A team of coding agents (Claude Code, OpenCode) behind one MCP server";
