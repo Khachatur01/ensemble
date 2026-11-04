@@ -1649,7 +1649,6 @@ agents:
         for (def, objects) in [
             ("openai_compatible_api_backend", backends),
             ("agent", agents.clone()),
-            ("gate", doc["gates"].as_object().unwrap().values().collect()),
             ("budget_unlimited", budgets("unlimited")),
             ("budget_per_hour", budgets("per_hour")),
             ("claude_code_adapter", adapters(CLAUDE_CODE_AGENT)),

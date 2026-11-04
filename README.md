@@ -202,10 +202,27 @@ API. It requires `base_url` (the URL itself; no variable overrides it) and
 variable holding the key, when the server wants one. Only the `opencode` adapter
 can run on one today; Claude Code speaks the Anthropic API, not this one.
 
-A **gate** is a check a task's work must pass: a shell command (`sh -c`, run
-in the task's working directory, exit status 0 passes) and the `timeout_seconds`
-it may take. A task names one; it cannot bring a command of its own, so what
-runs on your machine is what this file says. `gates: {}` says there are none.
+A **gate** is a check a task's work must pass, so an agent that says "done"
+too early gets sent back instead of being believed. You define each gate once,
+under `gates`, with a name of your choice:
+
+```yaml
+gates:
+  test:
+    command: cargo test
+    timeout_seconds: 900
+```
+
+| key | |
+| --- | --- |
+| `command` | what to run: a shell command (`sh -c`), in the task's working directory (its worktree, if the agent has `isolation: worktree`). Exit status 0 passes; anything else fails, and its output (stdout and stderr together) is what the agent is shown |
+| `timeout_seconds` | how long it may run. At the limit it is stopped and counts as failed |
+
+Nothing runs a gate until a task asks for it: a task names one with `gate:
+{ name: test, attempts: 3 }` (see [Tasks](#tasks-and-background-delegations)).
+A task cannot bring a command of its own, so what runs on your machine is
+what this file says. `gates: {}` says there are none, which is fine: tasks
+then simply have no check. Blocking `delegate` calls never run gates.
 
 There is no manager in the file: the agent that calls Ensemble is the manager.
 
@@ -456,20 +473,44 @@ gate: { name: test, attempts: 3 }
 Retry a failed request three times, waiting 1s, 2s, 4s.
 ```
 
-The agent is sent the text, then the goal, constraints, files and
-`done_when` as sections it can check its work against; `context` goes as the
-delegation's context. A task with `after` waits until every task it names has
-ended `done`; `status` shows it as `blocked by 0001-add-ureq (not done yet)`.
-If one of them failed or was cancelled, it stays blocked until that task is run
-again.
+What each field is for:
 
-With `gate`, the named check from `config.yaml` runs after the agent is done.
-If it fails, the same agent runs again, told the command, how it ended, the
-last 60 lines of its output and its own previous reply, up to `attempts` runs
-in all. The task is `done` once the gate passes and `failed` when the attempts
-run out; `result.md` records `gate`, `gate_result` (`passed`, `failed`, or `not
-run` when the agent itself failed) and `attempts`. `ensemble check` reports an `after` that names no task, and tasks whose
-`after` leads back to themselves.
+| field | |
+| --- | --- |
+| `title` | required. A short name; it makes the task's folder name (`0002-add-retry-to-the-fetcher`) |
+| `agent` | required. Which agent of the team does it |
+| the text below the `---` | what to do |
+| `context` | background the agent needs, sent as the delegation's context |
+| `goal` | the outcome wanted, in a sentence, as opposed to the steps |
+| `constraints` | what the agent must not do or must keep |
+| `files` | where to look or work |
+| `done_when` | conditions that mean it is finished. The agent is told to check its work against them. They are advice to the agent; nothing runs them (that is what `gate` is for) |
+| `after` | ids of tasks that must end `done` first |
+| `gate` | `name`: a check defined under `gates` in `config.yaml`. `attempts`: how many runs the agent gets in all, the first included, so `1` means no retry |
+
+The agent is sent the text, then the goal, constraints, files and
+`done_when` as sections it can check its work against. A task with `after`
+waits until every task it names has ended `done`; `status` shows it as
+`blocked by 0001-add-ureq (not done yet)`. If one of them failed or was
+cancelled, it stays blocked until that task is run again. `ensemble check`
+reports an `after` that names no task, and tasks whose `after` leads back to
+themselves.
+
+**Using a gate.** `done_when` tells the agent what finished means; `gate`
+makes Ensemble check it. With `gate`, the named command from `config.yaml`
+runs once the agent is done:
+
+1. It passes: the task is `done`.
+2. It fails: the same agent runs again, told the command, how it ended, the
+   last 60 lines of its output and its own previous reply.
+3. This repeats until it passes or the agent has had `attempts` runs in all.
+   Then the task is `failed`.
+
+Each retry takes a run from the agent's `budget`; over it, no retry is made.
+`result.md` records `gate`, `gate_result` (`passed`, `failed`, or `not run`
+when the agent itself failed) and `attempts`. A gate that is not defined in
+`config.yaml` fails the task at once, and `ensemble check` reports it before
+that.
 
 Its `result.md` starts with `status` (`done`, `failed` or `cancelled`),
 `agent`, `started` and `ended`, then the agent's reply. A task with a result is
