@@ -20,6 +20,7 @@ pub const WAIT: &str = "wait";
 pub const CANCEL: &str = "cancel";
 pub const ANSWER: &str = "answer";
 pub const ASSIGN: &str = "assign";
+pub const REVIEW: &str = "review";
 
 /// Seconds `wait` waits when the caller names no time, and the most it may.
 const DEFAULT_WAIT_SECONDS: u64 = 30;
@@ -252,6 +253,25 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                     "answer": { "type": "string", "description": "The decision or information it asked for." }
                 },
                 "required": ["task", "answer"],
+                "additionalProperties": false
+            }),
+        });
+    }
+
+    if !agents.is_empty() {
+        out.push(Tool {
+            name: REVIEW,
+            description:
+                "Look at the work of a finished task of an agent that works in a git worktree: \
+                      its branch, what changed on it, and its result. It changes nothing, and \
+                      there is no tool that merges: the owner merges, with `ensemble merge`."
+                    .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "The task id." }
+                },
+                "required": ["task"],
                 "additionalProperties": false
             }),
         });
@@ -612,6 +632,29 @@ pub fn call<'s>(
             )),
         },
 
+        REVIEW => {
+            let Some(id) = args.get("task").and_then(Value::as_str) else {
+                return ToolResult::err(format!(
+                    "{REVIEW}: `task` is required and must be a task id"
+                ));
+            };
+            let state = match ensemble.state_dir() {
+                Ok(state) => state,
+                Err(e) => return ToolResult::err(format!("{REVIEW}: {e}")),
+            };
+            let workdir = match ensemble.workdir() {
+                Ok(dir) => dir,
+                Err(e) => return ToolResult::err(format!("{REVIEW}: {e}")),
+            };
+            let store = crate::tasks::Store::new(&state);
+            match crate::review::find(&store, &workdir, id)
+                .and_then(|task| crate::review::review(&task))
+            {
+                Ok(text) => ToolResult::ok(text),
+                Err(e) => ToolResult::err(format!("{REVIEW}: {e}")),
+            }
+        }
+
         ASSIGN => {
             let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::trim);
             match (text("task"), text("agent")) {
@@ -708,7 +751,7 @@ pub fn call<'s>(
 
         other => ToolResult::err(format!(
             "no such tool: '{other}'. This server provides: \
-             {DELEGATE}, {SUBMIT}, {STATUS}, {WAIT}, {CANCEL}, {ANSWER}, {ASSIGN}, {AGENTS}, {HEALTH}."
+             {DELEGATE}, {SUBMIT}, {STATUS}, {WAIT}, {CANCEL}, {ANSWER}, {ASSIGN}, {REVIEW}, {AGENTS}, {HEALTH}."
         )),
     }
 }
@@ -882,7 +925,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                DELEGATE, SUBMIT, STATUS, WAIT, CANCEL, ASSIGN, ANSWER, AGENTS, HEALTH
+                DELEGATE, SUBMIT, STATUS, WAIT, CANCEL, ASSIGN, ANSWER, REVIEW, AGENTS, HEALTH
             ]
         );
     }

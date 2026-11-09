@@ -611,9 +611,13 @@ own, `worktrees/<id>` in the state directory, on the branch `ensemble/<id>` made
 from the repository's `HEAD`. The repository's own files are not touched, so such tasks can run
 side by side. The gate runs in the worktree too. When the task ends, everything
 it changed is committed on its branch (`--no-verify`, your git identity), and
-`result.md` records `branch` and `commit`. Ensemble never merges: review the
-branch and merge it yourself, or have the manager do it, then
-`git worktree remove <state>/worktrees/<id>`. A task run again, or one the
+`result.md` records `branch` and `commit`. Ensemble never merges on its own, and the manager has no tool that does. Look at
+the work with `ensemble review <id>` (the branch, what changed on it, the result;
+the manager has a read-only `review` tool for the same) and `ensemble diff <id>`.
+Take it in with `ensemble merge <id>`, which only you run: it refuses a task that
+is not done, a repository with uncommitted changes, and a merge that conflicts
+(which it undoes, naming the files). `--squash` makes one commit; `--cleanup`
+then removes the task's worktree and branch, and nothing is deleted without it. A task run again, or one the
 session's end interrupted, carries on in the worktree it had. The working folder, or
 the task's `repo`, must be a git repository with at least one commit.
 
@@ -884,6 +888,9 @@ $ ensemble connect --manager M --org <dir> [--only T,T] [--global]  # register w
 $ ensemble doctor --org <dir>      # what is wrong, and how to fix each thing
 $ ensemble add-agent <team/name> --adapter A --org <dir>   # add an agent, every setting written
 $ ensemble remove-agent <team/name> --org <dir>
+$ ensemble review <id>            # a worktree task: its branch, what changed, its result
+$ ensemble diff <id>              # the whole change
+$ ensemble merge <id> [--squash] [--cleanup]   # only you run this; undone on a conflict
 $ ensemble tasks [--status S]      # the tasks of this working folder and where each stands
 $ ensemble task <id>               # one task: ticket, state, question or result
 $ ensemble submit <agent> <title> --text T   # write a task (also --goal --context --repo --gate --after ...)
@@ -921,6 +928,7 @@ state directory), `--context <text>` (for `run`).
 | `src/workspace.rs` | the working folder, a `repo` inside it, and what a run changed |
 | `src/llm_backend.rs` | asking a model server which models it serves, for `health` |
 | `src/port.rs` | the shared error type |
+| `src/review.rs` | `review`, `diff` and `merge` of a worktree task's branch |
 | `src/records.rs` | the record of every run, and the sums `ensemble stats` prints |
 | `src/tracker.rs` | the `Tracker` trait the queue works through, and `LocalMarkdown`, its one implementation |
 | `src/tasks.rs` | tasks as files: `task.md`, `result.md`, and the git-ignored `runs/` |

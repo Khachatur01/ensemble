@@ -51,6 +51,15 @@ COMMANDS:
     org update URL#COMMIT [--ref R]
                             Show what changed in a remote organization since
                             COMMIT and print its new pin. Trusts nothing.
+    review ID               The branch, the change and the result of a task that
+                            worked in a git worktree. Changes nothing.
+    diff ID                 The whole change on that branch.
+    merge ID [--squash] [--cleanup]
+                            Merge that branch into the repository, once the task
+                            is done. Refuses a dirty repository and a conflict,
+                            and undoes the latter. --cleanup then removes the
+                            task's worktree and branch. Only you run this: the
+                            manager has no tool for it.
     tasks [--status S]      List the tasks of this working folder and where each
                             stands. Reads files; starts nothing.
     task ID                 Show one task: its ticket, where it stands, its
@@ -215,6 +224,7 @@ fn run() -> Result<ExitCode, String> {
         return cmd_migrate(&args);
     }
     match args.command.as_str() {
+        "review" | "diff" | "merge" => return cmd_review(&args, &dir),
         "tasks" => return cmd_tasks(&args, &dir),
         "task" => return cmd_task(&args, &dir),
         "answer" => return cmd_answer(&args, &dir),
@@ -1334,5 +1344,49 @@ fn cmd_assign(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, Stri
         .assign(id, &to)
         .map_err(|e| format!("assign: cannot write: {e}"))?;
     println!("{id} is assigned to {to}.");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `review`, `diff` and `merge`: a task's branch, for a person.
+fn cmd_review(args: &Args, dir: &Path) -> Result<ExitCode, String> {
+    let id = args
+        .rest
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .ok_or_else(|| {
+            format!(
+                "{}: needs a task id. `ensemble tasks` lists them.",
+                args.command
+            )
+        })?;
+    let store = store_for(dir, args)?;
+    let task =
+        ensemble::review::find(&store, dir, id).map_err(|e| format!("{}: {e}", args.command))?;
+    match args.command.as_str() {
+        "review" => print!(
+            "{}",
+            ensemble::review::review(&task).map_err(|e| format!("review: {e}"))?
+        ),
+        "diff" => println!(
+            "{}",
+            ensemble::review::diff(&task).map_err(|e| format!("diff: {e}"))?
+        ),
+        _ => {
+            let worktree = store
+                .root()
+                .join(ensemble::worktree::WORKTREES_DIR)
+                .join(id);
+            let said = ensemble::review::merge(
+                &task,
+                &worktree,
+                ensemble::review::MergeOptions {
+                    squash: has(args, "--squash"),
+                    cleanup: has(args, "--cleanup"),
+                },
+            )
+            .map_err(|e| format!("merge: {e}"))?;
+            println!("{said}");
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }

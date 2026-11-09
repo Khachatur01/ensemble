@@ -27,6 +27,7 @@ pub mod llm_backend;
 pub mod port;
 pub mod records;
 pub mod remote;
+pub mod review;
 pub mod router;
 pub mod setup;
 pub mod state;

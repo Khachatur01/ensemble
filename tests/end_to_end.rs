@@ -657,8 +657,8 @@ fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
     assert_eq!(
         names,
         vec![
-            "delegate", "submit", "status", "wait", "cancel", "assign", "answer", "agents",
-            "health"
+            "delegate", "submit", "status", "wait", "cancel", "assign", "answer", "review",
+            "agents", "health"
         ]
     );
 }
@@ -2073,4 +2073,115 @@ fn a_light_agent_on_an_anthropic_backend_shows_a_messages_request() {
     assert!(text.contains("\"system\": \"You help.\""), "{text}");
     let check = stdout_of(&ensemble(&s, &["check"]));
     assert!(check.contains("claude-api  [anthropic-api]"), "{check}");
+}
+
+// ---------------------------------------------------------------------------
+// Reviewing and merging a worktree task
+// ---------------------------------------------------------------------------
+
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(["-c", "user.name=T", "-c", "user.email=t@t"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types_it() {
+    let s = Scratch::new("review-merge");
+    let cli = s.opencode("renamed it", "echo bar > a.txt");
+    s.write(
+        ".ensemble/config.yaml",
+        &config_v1(&cli, NOWHERE).replace("isolation: shared", "isolation: worktree"),
+    );
+    s.write("a.txt", "foo\n");
+    git_in(s.path(), &["init", "--quiet", "-b", "main"]);
+    git_in(s.path(), &["add", "a.txt"]);
+    git_in(s.path(), &["commit", "--quiet", "-m", "start"]);
+
+    let out = ensemble(
+        &s,
+        &[
+            "submit",
+            "coder",
+            "Rename foo",
+            "--text",
+            "rename foo to bar",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let served = command(&s)
+        .args(["serve", "--exit-when-idle"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(served.status.success(), "{}", stderr_of(&served));
+    assert_eq!(
+        std::fs::read_to_string(s.path().join("a.txt")).unwrap(),
+        "foo\n",
+        "the project is untouched"
+    );
+
+    let review = ensemble(&s, &["review", "0001-rename-foo"]);
+    let text = stdout_of(&review);
+    assert!(review.status.success(), "{}", stderr_of(&review));
+    assert!(
+        text.contains("branch ensemble/0001-rename-foo") && text.contains("a.txt | 2"),
+        "{text}"
+    );
+    assert!(text.contains("Result:"), "{text}");
+    let diff = stdout_of(&ensemble(&s, &["diff", "0001-rename-foo"]));
+    assert!(diff.contains("-foo\n+bar"), "{diff}");
+
+    // The manager can look, through the review tool, and has nothing to merge with.
+    let mut session = McpSession::start(&s);
+    session.request("initialize", serde_json::json!({}));
+    let looked = session.call("review", serde_json::json!({"task": "0001-rename-foo"}));
+    assert!(
+        tool_text(&looked).contains("a.txt | 2"),
+        "{}",
+        tool_text(&looked)
+    );
+    let tools = session.request("tools/list", serde_json::json!({}));
+    let names: Vec<String> = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!names.iter().any(|n| n.contains("merge")), "{names:?}");
+    drop(session);
+
+    std::fs::write(s.path().join("a.txt"), "dirty\n").unwrap();
+    let dirty = ensemble(&s, &["merge", "0001-rename-foo"]);
+    assert!(!dirty.status.success());
+    assert!(
+        stderr_of(&dirty).contains("uncommitted changes"),
+        "{}",
+        stderr_of(&dirty)
+    );
+    git_in(s.path(), &["checkout", "--quiet", "a.txt"]);
+
+    let merged = ensemble(&s, &["merge", "0001-rename-foo", "--squash", "--cleanup"]);
+    assert!(merged.status.success(), "{}", stderr_of(&merged));
+    assert!(
+        stdout_of(&merged).contains("squashed"),
+        "{}",
+        stdout_of(&merged)
+    );
+    assert_eq!(
+        std::fs::read_to_string(s.path().join("a.txt")).unwrap(),
+        "bar\n"
+    );
+    assert!(!s.place(".ensemble/worktrees/0001-rename-foo").exists());
+    let again = ensemble(&s, &["review", "0001-rename-foo"]);
+    assert!(!again.status.success(), "its branch is gone");
 }
