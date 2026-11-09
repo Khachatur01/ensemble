@@ -19,6 +19,21 @@ pub fn root() -> Result<PathBuf, String> {
     Ok(base.join("ensemble"))
 }
 
+/// `$XDG_CACHE_HOME/ensemble`, or `~/.cache/ensemble`: what can be fetched again,
+/// such as remote organizations.
+pub fn cache_root() -> Result<PathBuf, String> {
+    let base = match std::env::var_os("XDG_CACHE_HOME").filter(|v| !v.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            let home = std::env::var_os("HOME")
+                .filter(|v| !v.is_empty())
+                .ok_or("cannot find a cache directory: neither XDG_CACHE_HOME nor HOME is set")?;
+            PathBuf::from(home).join(".cache")
+        }
+    };
+    Ok(base.join("ensemble"))
+}
+
 /// The state of the work done in `workdir`: its tasks, runs and worktrees.
 /// Named for the folder, with a hash of its whole path so two folders of the
 /// same name do not share one.
@@ -37,6 +52,10 @@ pub fn org_dir(config: &Path) -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|e| format!("{}: {e}", config.display()))?;
     Ok(root()?.join("orgs").join(labelled(&canonical)))
+}
+
+pub(crate) fn labelled_text(text: &str) -> String {
+    labelled(Path::new(text))
 }
 
 fn labelled(path: &Path) -> String {

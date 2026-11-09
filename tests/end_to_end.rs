@@ -1320,3 +1320,197 @@ fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
     let missing = ensemble(&s, &["remove-agent", "default/tester"]);
     assert!(!missing.status.success());
 }
+
+// ---------------------------------------------------------------------------
+// Remote organizations
+// ---------------------------------------------------------------------------
+
+/// A git repository holding `config.yaml`, as a `file://` URL and its commit.
+fn origin(scratch: &Scratch, config: &str) -> (String, String) {
+    let dir = scratch.0.with_extension("origin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    if !dir.join(".git").exists() {
+        git(&["init", "--quiet", "-b", "main"]);
+    }
+    std::fs::write(dir.join("config.yaml"), config).unwrap();
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "c"]);
+    (
+        format!("file://{}", dir.display()),
+        git(&["rev-parse", "HEAD"]),
+    )
+}
+
+/// The binary with its state and cache kept in the scratch place.
+fn remote_cmd(scratch: &Scratch, bin: Option<&Path>) -> Command {
+    let mut c = Command::new(BIN);
+    c.current_dir(scratch.path())
+        .env("XDG_STATE_HOME", scratch.state())
+        .env("XDG_CACHE_HOME", scratch.0.with_extension("cache"))
+        .env("HOME", scratch.0.with_extension("home"));
+    if let Some(bin) = bin {
+        c.env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+    }
+    c
+}
+
+#[test]
+fn a_remote_organization_is_pinned_trusted_and_then_used() {
+    let s = Scratch::new("remote");
+    let (url, sha) = origin(&s, &config_yaml("true", NOWHERE));
+    let pinned = format!("{url}#{sha}");
+
+    let out = remote_cmd(&s, None)
+        .args(["check", "--org", &pinned])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "an untrusted organization is not used"
+    );
+    assert!(
+        stderr_of(&out).contains("ensemble org trust"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    let unpinned = remote_cmd(&s, None)
+        .args(["check", "--org", &format!("{url}@main")])
+        .output()
+        .unwrap();
+    assert!(!unpinned.status.success());
+    assert!(
+        stderr_of(&unpinned).contains("never follows a branch"),
+        "{}",
+        stderr_of(&unpinned)
+    );
+
+    let no_pin = remote_cmd(&s, None)
+        .args(["org", "trust", &url, "--yes"])
+        .output()
+        .unwrap();
+    assert!(!no_pin.status.success(), "trust needs the commit");
+
+    let trusted = remote_cmd(&s, None)
+        .args(["org", "trust", &pinned, "--yes"])
+        .output()
+        .unwrap();
+    assert!(trusted.status.success(), "{}", stderr_of(&trusted));
+    let said = stdout_of(&trusted);
+    assert!(said.contains("default/coder: runs `true`"), "{said}");
+    assert!(said.contains("Trusted"), "{said}");
+
+    let out = remote_cmd(&s, None)
+        .args(["check", "--org", &pinned])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("default/coder"),
+        "{}",
+        stdout_of(&out)
+    );
+
+    // Without a terminal and without --yes there is nobody to ask: a refusal.
+    let (url2, sha2) = origin(&s, &config_yaml("opencode", NOWHERE));
+    assert_eq!(url, url2);
+    let refused = remote_cmd(&s, None)
+        .args(["org", "trust", &format!("{url}#{sha2}")])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr_of(&refused).contains("--yes"),
+        "{}",
+        stderr_of(&refused)
+    );
+}
+
+#[test]
+fn connect_pins_a_remote_organization_shows_it_and_registers_the_pin() {
+    let s = Scratch::new("remote-connect");
+    let (url, sha) = origin(&s, &config_yaml("true", NOWHERE));
+    let bin = stub_clis(&s, &["claude"]);
+    let out = remote_cmd(&s, Some(&bin))
+        .args([
+            "connect",
+            "--manager",
+            "claude-code",
+            "--yes",
+            "--org",
+            &format!("{url}@main"),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let said = stdout_of(&out);
+    assert!(said.contains("Trusted"), "{said}");
+    let args = std::fs::read_to_string(bin.join("claude.args")).unwrap();
+    assert!(args.contains(&format!("{url}#{sha}")), "{args}");
+
+    // What it registered is usable now: it was trusted on the way.
+    let used = remote_cmd(&s, None)
+        .args(["agents", "--org", &format!("{url}#{sha}")])
+        .output()
+        .unwrap();
+    assert!(used.status.success(), "{}", stderr_of(&used));
+}
+
+#[test]
+fn org_update_shows_what_changed_and_pins_nothing_by_itself() {
+    let s = Scratch::new("remote-update");
+    let (url, old) = origin(&s, &config_yaml("true", NOWHERE));
+    let (_, new) = origin(&s, &config_yaml("opencode", NOWHERE));
+    let out = remote_cmd(&s, None)
+        .args(["org", "update", &format!("{url}#{old}"), "--ref", "main"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let said = stdout_of(&out);
+    assert!(
+        said.contains(&format!("The new pin is {url}#{new}")),
+        "{said}"
+    );
+    assert!(
+        said.contains("-      command: \"true\"") || said.contains("command"),
+        "{said}"
+    );
+    assert!(said.contains("ensemble org trust"), "{said}");
+    let again = remote_cmd(&s, None)
+        .args(["org", "update", &format!("{url}#{new}"), "--ref", "main"])
+        .output()
+        .unwrap();
+    assert!(
+        stdout_of(&again).contains("Already at"),
+        "{}",
+        stdout_of(&again)
+    );
+    // Updating trusts nothing.
+    let used = remote_cmd(&s, None)
+        .args(["agents", "--org", &format!("{url}#{new}")])
+        .output()
+        .unwrap();
+    assert!(!used.status.success());
+}

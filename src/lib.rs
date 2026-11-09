@@ -25,6 +25,7 @@ pub mod external;
 pub mod harness;
 pub mod llm_backend;
 pub mod port;
+pub mod remote;
 pub mod router;
 pub mod setup;
 pub mod state;

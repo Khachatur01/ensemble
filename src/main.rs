@@ -8,6 +8,7 @@
 use ensemble::config::{self, Adapter, Config, SystemEnv};
 use ensemble::external::{claude_code, opencode};
 use ensemble::harness::mcp;
+use ensemble::remote;
 use ensemble::router::Ensemble;
 use ensemble::setup;
 use ensemble::state;
@@ -44,6 +45,12 @@ COMMANDS:
     add-agent TEAM/NAME --adapter A [--model M] [--backend B] [--prompt P] [--writes]
                             Add an agent to a team, every setting written.
     remove-agent TEAM/NAME  Remove an agent from its team.
+    org trust URL#COMMIT [--yes]
+                            Read what a remote organization would run on this
+                            machine and, if you approve, trust that commit.
+    org update URL#COMMIT [--ref R]
+                            Show what changed in a remote organization since
+                            COMMIT and print its new pin. Trusts nothing.
     show <AGENT>            Print how an agent is started: its command line and
                             the config handed to its CLI, API keys hidden.
     check                   Load and validate the config, then report the team.
@@ -55,8 +62,11 @@ COMMANDS:
     run <AGENT> <TASK>      Send one task to one agent and print the answer.
 
 OPTIONS:
-    -o, --org <DIR>         The organization: the directory with config.yaml, its
-                            llm_backends and teams. Nothing is searched for.
+    -o, --org <DIR|URL>     The organization: the directory with config.yaml, its
+                            llm_backends and teams. Nothing is searched for. A
+                            git repository is github.com/acme/org#COMMIT (a pin,
+                            which it must be and be trusted), or @TAG for
+                            `connect`, which pins it.
         --env-file <PATH>   A file of NAME=value lines read for variables the
                             environment does not set.
         --state <DIR>       Keep tasks, runs and worktrees here instead of in
@@ -86,7 +96,9 @@ fn main() -> ExitCode {
 struct Args {
     command: String,
     rest: Vec<String>,
-    org: Option<PathBuf>,
+    org: Option<String>,
+    /// Where usage counters live, when the organization is remote.
+    usage: Option<PathBuf>,
     env_file: Option<PathBuf>,
     state: Option<PathBuf>,
     dir: Option<PathBuf>,
@@ -121,7 +133,7 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
                 println!("ensemble {}", env!("CARGO_PKG_VERSION"));
                 return Ok(None);
             }
-            "-o" | "--org" => org = Some(PathBuf::from(value("--org")?)),
+            "-o" | "--org" => org = Some(value("--org")?),
             "--env-file" => env_file = Some(PathBuf::from(value("--env-file")?)),
             "--state" => state = Some(PathBuf::from(value("--state")?)),
             "-d" | "--dir" => dir = Some(PathBuf::from(value("--dir")?)),
@@ -147,6 +159,7 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             command,
             rest,
             org,
+            usage: None,
             env_file,
             state,
             dir,
@@ -157,7 +170,7 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
 }
 
 fn run() -> Result<ExitCode, String> {
-    let Some(args) = parse_args(std::env::args().skip(1).collect())? else {
+    let Some(mut args) = parse_args(std::env::args().skip(1).collect())? else {
         return Ok(ExitCode::SUCCESS);
     };
 
@@ -188,8 +201,13 @@ fn run() -> Result<ExitCode, String> {
         _ => {}
     }
 
-    let org = org_of(&args, &args.command)?;
-    let config_path = config::config_path(&org);
+    if args.command == "org" {
+        return cmd_org(&args);
+    }
+
+    let resolved = resolve_org(&args, &args.command)?;
+    args.usage = resolved.usage.clone();
+    let config_path = config::config_path(&resolved.dir);
     let mut config = config::load(&config_path, args.env_file.as_deref(), &SystemEnv)
         .map_err(|e| e.to_string())?;
     if let Some(only) = opt(&args, "--only") {
@@ -214,21 +232,53 @@ fn run() -> Result<ExitCode, String> {
 /// The organization directory, which every command but `init`, `migrate` and
 /// `schema` needs. It is named, never found.
 fn org_of(args: &Args, command: &str) -> Result<PathBuf, String> {
-    match &args.org {
-        Some(org) => Ok(org.clone()),
-        None => Err(format!(
-            "{command}: no organization given. Pass --org <dir>, the directory with config.yaml. `ensemble init --org <dir>` makes one."
+    let spec = args.org.as_deref().ok_or_else(|| missing_org(command))?;
+    match remote::parse_source(spec)? {
+        remote::Source::Local(dir) => Ok(dir),
+        remote::Source::Remote { .. } => Err(format!(
+            "{command}: a remote organization is read-only. Clone it, edit your copy, and give {command} that directory."
         )),
     }
 }
 
+fn missing_org(command: &str) -> String {
+    format!(
+        "{command}: no organization given. Pass --org <dir>, the directory with config.yaml. `ensemble init --org <dir>` makes one."
+    )
+}
+
+/// The organization to run: a directory, or a remote one that is pinned,
+/// fetched and trusted.
+fn resolve_org(args: &Args, command: &str) -> Result<remote::Resolved, String> {
+    let spec = args.org.as_deref().ok_or_else(|| missing_org(command))?;
+    remote::use_source(&remote::parse_source(spec)?)
+}
+
+/// Ask yes or no, or take `--yes` for the answer. Without a terminal and
+/// without `--yes` there is nobody to ask, which is a refusal.
+fn confirm(question: &str, args: &Args) -> Result<bool, String> {
+    if has(args, "--yes") {
+        return Ok(true);
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(format!(
+            "{question} There is no terminal to ask on: pass --yes to approve."
+        ));
+    }
+    let answer = ask(&format!("{question} [y/N]"), Some("n"))?;
+    Ok(matches!(answer.to_lowercase().as_str(), "y" | "yes"))
+}
+
 /// An `Ensemble` for `config`, keeping its state where `--state` says.
 fn ensemble_for(config: Config, dir: PathBuf, args: &Args) -> Ensemble {
-    let ensemble = Ensemble::new(config, Some(dir));
-    match &args.state {
-        Some(state) => ensemble.with_state(state.clone()),
-        None => ensemble,
+    let mut ensemble = Ensemble::new(config, Some(dir));
+    if let Some(state) = &args.state {
+        ensemble = ensemble.with_state(state.clone());
     }
+    if let Some(usage) = &args.usage {
+        ensemble = ensemble.with_usage_dir(usage.clone());
+    }
+    ensemble
 }
 
 /// Where tasks and runs are kept for the work done in `dir`.
@@ -651,7 +701,20 @@ fn cmd_connect(args: &Args) -> Result<ExitCode, String> {
         "connect: needs --manager, the agent you talk to: {}",
         setup::MANAGERS.join(" or ")
     ))?;
-    let org = absolute(&org_of(args, "connect")?)?;
+    let spec = args.org.as_deref().ok_or_else(|| missing_org("connect"))?;
+    let org = match remote::parse_source(spec)? {
+        remote::Source::Local(dir) => absolute(&dir)?,
+        remote::Source::Remote { url, sha, git_ref } => {
+            // Pin it to the commit it is now, show what it would run, and
+            // record the approval, before anything is registered.
+            let sha = match sha {
+                Some(sha) => sha,
+                None => remote::resolve(&url, git_ref.as_deref())?,
+            };
+            approve(&url, &sha, args)?;
+            PathBuf::from(remote::pinned(&url, &sha))
+        }
+    };
     let env_file = args.env_file.as_deref().map(absolute).transpose()?;
     let reg = setup::registration(
         manager,
@@ -705,7 +768,7 @@ fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
         },
     };
     let org = match &args.org {
-        Some(org) => org.clone(),
+        Some(org) => PathBuf::from(org),
         None if interactive => {
             let home = setup::home().unwrap_or_else(|| dir.to_path_buf());
             PathBuf::from(ask(
@@ -858,4 +921,94 @@ fn cmd_remove_agent(args: &Args) -> Result<ExitCode, String> {
     std::fs::write(&path, edited).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     println!("removed {team}/{name} from {}", path.display());
     Ok(ExitCode::SUCCESS)
+}
+
+/// Fetch `url` at `sha`, say what its config would run, and, if the person
+/// approves, record that they trust exactly this commit.
+fn approve(url: &str, sha: &str, args: &Args) -> Result<(), String> {
+    let dir = remote::fetch(url, sha)?;
+    let config = config::load(
+        &config::config_path(&dir),
+        None,
+        &std::collections::BTreeMap::<String, String>::new(),
+    )
+    .map_err(|e| format!("{url} at {sha} has no usable config: {e}"))?;
+    println!("{url} at {sha}\n");
+    print!("{}", remote::describe(&config));
+    println!();
+    if remote::is_trusted(url, sha)? {
+        println!("Already trusted.");
+        return Ok(());
+    }
+    if !confirm(
+        "Trust this commit? It will run the commands above on this machine.",
+        args,
+    )? {
+        return Err("not trusted, so nothing was done.".into());
+    }
+    remote::trust(url, sha)?;
+    println!("Trusted {}.", remote::pinned(url, sha));
+    Ok(())
+}
+
+/// `ensemble org trust <url>#<sha>` and `ensemble org update <url>#<sha>`.
+fn cmd_org(args: &Args) -> Result<ExitCode, String> {
+    let what = args
+        .rest
+        .first()
+        .map(String::as_str)
+        .ok_or("org: needs trust or update. Try --help.")?;
+    let spec = args
+        .rest
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with("--"))
+        .ok_or(format!(
+            "org {what}: needs the organization, such as github.com/acme/org#<commit>"
+        ))?;
+    let (url, sha, git_ref) = match remote::parse_source(spec)? {
+        remote::Source::Remote { url, sha, git_ref } => (url, sha, git_ref),
+        remote::Source::Local(_) => {
+            return Err(format!(
+                "org {what}: a directory needs no trust; this is for git repositories"
+            ));
+        }
+    };
+    match what {
+        "trust" => {
+            let sha = sha.ok_or(format!(
+                "org trust: pin the commit: {spec}#<commit>. `ensemble connect` pins and trusts in one step."
+            ))?;
+            approve(&url, &sha, args)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "update" => {
+            let old = sha;
+            let git_ref = git_ref.or_else(|| opt(args, "--ref").map(str::to_string));
+            let new = remote::resolve(&url, git_ref.as_deref())?;
+            if old.as_deref() == Some(new.as_str()) {
+                println!("Already at {new}.");
+                return Ok(ExitCode::SUCCESS);
+            }
+            let dir = remote::fetch(&url, &new)?;
+            match &old {
+                Some(old) => match remote::diff(&dir, old, &new) {
+                    Ok(diff) if diff.trim().is_empty() => {
+                        println!("config.yaml did not change between {old} and {new}.")
+                    }
+                    Ok(diff) => println!("{diff}"),
+                    Err(e) => println!("cannot show what changed since {old}: {e}"),
+                },
+                None => println!("Nothing to compare with: no commit was given to update from."),
+            }
+            println!(
+                "\nThe new pin is {}.\nRead the changes above, then: ensemble org trust {}\nand register it again with ensemble connect --org {}",
+                remote::pinned(&url, &new),
+                remote::pinned(&url, &new),
+                remote::pinned(&url, &new)
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        other => Err(format!("org: unknown '{other}'. Use trust or update.")),
+    }
 }

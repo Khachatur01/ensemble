@@ -564,6 +564,40 @@ the same files to an agent with `max_concurrent: 1`, or `isolation: worktree`. A
 the MCP timeout in the manager's config is the other fix for a client that
 times out.
 
+### Remote organizations
+
+An organization can live in a git repository you do not have checked out, and be
+shared by a department or a company:
+
+```console
+$ ensemble connect --manager claude-code --org github.com/acme/org@v1.2
+```
+
+`connect` resolves `@v1.2` (a tag or a branch) to the commit it is now, clones it
+into your cache (`$XDG_CACHE_HOME/ensemble`), prints every agent command, gate
+command, tool list and permission mode the config would run on your machine,
+with a warning for each risk, and asks you to trust that commit. Only then does
+it register `github.com/acme/org#<commit>`. Git does the talking, with your own
+SSH agent or credential helper; Ensemble stores no credentials.
+
+A remote organization is code that runs with your permissions, so:
+
+- **It is pinned.** `ensemble mcp` and every other command accept only
+  `<url>#<commit>`; a branch or tag is never followed at run time, so a moved
+  tag cannot swap what you approved.
+- **It is trusted per commit.** `ensemble org trust <url>#<commit>` shows what
+  it would run and records your approval for that exact commit. An untrusted
+  commit is refused with that command to run; the MCP server cannot ask,
+  because stdio is the protocol. There is no trusting a whole publisher.
+- **The cache is checked.** A cached copy that is not at the commit, or has been
+  changed by hand, is refused.
+- **Updating is explicit.** `ensemble org update <url>#<commit> --ref main` shows
+  what changed in `config.yaml` and prints the new pin; nothing is trusted or
+  registered until you do both.
+
+A remote organization is read-only: clone it to change it. Its keys are not in
+it; they come from your environment or `--env-file`, as always.
+
 ### Secrets
 
 API keys are named by the **variable** that holds them (`api_key_env`), never
@@ -715,6 +749,7 @@ state directory), `--context <text>` (for `run`).
 | --- | --- |
 | `src/config/` | the organization's `config.yaml`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`mod.rs`), version 1 to 2 (`migrate.rs`) |
 | `src/state.rs` | the per-user state and cache directories |
+| `src/remote.rs` | remote organizations: parsing, pinning, the cache, trust, and describing what a config would run |
 | `src/setup.rs` | `setup`, `connect` and `doctor`: detecting CLIs and servers, starters, registrations, findings |
 | `src/config/edit.rs` | adding and removing an agent in `config.yaml` as text, comments kept |
 | `src/router.rs` | agents to adapters; the ensemble itself, and `health` |
