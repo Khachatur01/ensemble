@@ -234,6 +234,9 @@ mod tests {
         let repo = tmp.0.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         run(&repo, &["init", "--quiet", "-b", "main"]);
+        // `merge` commits as whoever the repository says; a sandbox has no one.
+        run(&repo, &["config", "user.name", "T"]);
+        run(&repo, &["config", "user.email", "t@t"]);
         std::fs::write(repo.join("a.txt"), "one\n").unwrap();
         run(&repo, &["add", "."]);
         run(&repo, &["commit", "--quiet", "-m", "start"]);

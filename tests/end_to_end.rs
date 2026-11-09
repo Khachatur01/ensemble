@@ -2104,6 +2104,9 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
     );
     s.write("a.txt", "foo\n");
     git_in(s.path(), &["init", "--quiet", "-b", "main"]);
+    // The worktree commit and the merge are made as whoever the repository says.
+    git_in(s.path(), &["config", "user.name", "T"]);
+    git_in(s.path(), &["config", "user.email", "t@t"]);
     git_in(s.path(), &["add", "a.txt"]);
     git_in(s.path(), &["commit", "--quiet", "-m", "start"]);
 
