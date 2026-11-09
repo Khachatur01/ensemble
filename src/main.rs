@@ -112,6 +112,12 @@ ENVIRONMENT:
 ";
 
 fn main() -> ExitCode {
+    if cfg!(windows) {
+        eprintln!(
+            "ensemble: Windows is not supported: it starts agent CLIs as process groups and runs gates with `sh -c`. Use WSL."
+        );
+        return ExitCode::FAILURE;
+    }
     match run() {
         Ok(code) => code,
         Err(message) => {

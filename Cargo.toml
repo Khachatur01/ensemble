@@ -2,8 +2,13 @@
 name = "ensemble"
 version = "0.1.0"
 edition = "2024"
-description = "A team of coding agents (Claude Code, OpenCode) behind one MCP server."
+description = "An organization of coding agents (Claude Code, OpenCode, Codex) behind one MCP server."
 license = "MIT"
+repository = "https://github.com/Khachatur01/ensemble"
+readme = "README.md"
+keywords = ["mcp", "agents", "claude-code", "opencode", "codex"]
+categories = ["command-line-utilities", "development-tools"]
+rust-version = "1.85"
 
 [[bin]]
 name = "ensemble"

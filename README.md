@@ -818,8 +818,21 @@ error too: ``teams.software.agents.coder: `max_seconds` is required at line 12 c
 
 ## Installation
 
-Linux is the supported platform. The rest of Unix should work; it is not
-tested.
+Linux and macOS (Unix) are supported; CI builds and tests on both. Windows is not:
+Ensemble stops agent CLIs as process groups and runs gates with `sh -c`, and
+`ensemble` says so and exits there. Use WSL.
+
+### Release binaries
+
+Each version tag (`v0.1.0`) has a GitHub release with `ensemble-<tag>-<target>.tar.gz`
+and its `.sha256` for `x86_64` and `aarch64` Linux and macOS. Unpack, check the
+sum, and put `ensemble` on `PATH`:
+
+```console
+$ tar xzf ensemble-v0.1.0-aarch64-apple-darwin.tar.gz
+$ shasum -a 256 -c ensemble-v0.1.0-aarch64-apple-darwin.tar.gz.sha256
+$ install ensemble-v0.1.0-aarch64-apple-darwin/ensemble ~/.local/bin/
+```
 
 ### NixOS
 
@@ -862,7 +875,7 @@ An agent spawns `ensemble mcp` by name, so it has to find `ensemble` on the
 `PATH` it was started with: install it, or start the agent from inside
 `nix shell`.
 
-### Other Linux: cargo
+### Other Unix: cargo
 
 Needs Rust 1.85 or newer (edition 2024) and a C linker.
 
@@ -871,10 +884,10 @@ $ cargo install --git https://github.com/Khachatur01/ensemble
 ```
 
 This puts `ensemble` in `~/.cargo/bin`, which must be on `PATH`. Run the same
-command again to update.
+command again to update. Ensemble is not published on crates.io.
 
 Besides Ensemble, you need the CLIs of the adapter types your team uses:
-`claude` for `claude-code`, `opencode` for `opencode`. There is no runtime
+`claude` for `claude-code`, `opencode` for `opencode`, `codex` for `codex`. There is no runtime
 service, no daemon and no port.
 
 ## Usage
