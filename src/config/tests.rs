@@ -1308,10 +1308,9 @@ fn a_codex_agent_is_what_its_adapter_says_and_its_sandbox_is_one_codex_has() {
 
 #[test]
 fn an_anthropic_backend_loads_and_only_an_llm_agent_may_run_on_it() {
-    let doc = REFERENCE.replace("gates: {}\n", "gates: {}\n");
     let doc = format!(
         "{}\n",
-        doc.replacen(
+        REFERENCE.replacen(
             "llm_backends:\n",
             "llm_backends:\n  claude-api:\n    type: anthropic-api\n    base_url: \"https://api.anthropic.com/\"\n    api_key_env: ANTHROPIC_API_KEY\n    timeout_seconds: 90\n",
             1
