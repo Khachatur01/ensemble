@@ -691,7 +691,7 @@ current directory), `--context <text>` (for `run`).
 
 | | |
 | --- | --- |
-| `src/config.rs` | `.ensemble/config.yaml` and `.env`: load, resolve the environment, validate |
+| `src/config/` | `.ensemble/config.yaml` and `.env`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`mod.rs`) |
 | `src/router.rs` | agents to adapters; the ensemble itself, and `health` |
 | `src/external/` | the `claude-code` and `opencode` adapters (each CLI as a subprocess, its JSON events read as it goes), the `llm` adapter (one chat request), and gates |
 | `src/workspace.rs` | the project directory, and what a run changed in it |
@@ -701,7 +701,7 @@ current directory), `--context <text>` (for `run`).
 | `src/worktree.rs` | a git worktree and branch per task, and committing its work there |
 | `src/harness/delegation.rs` | the tools your agent calls: delegate, submit, status, wait, cancel, agents, health |
 | `src/harness/queue.rs` | the worker that runs tasks, background delegations, agent slots (`max_concurrent`), wait and cancel |
-| `src/harness/mcp.rs` | the MCP server, over stdio |
+| `src/harness/mcp/` | the MCP server, over stdio: the loop (`mod.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`) |
 | `ensemble.schema.json` | the JSON Schema for `config.yaml` |
 
 The MCP server knows the router; it does not know which CLIs exist. The router
@@ -731,11 +731,11 @@ scripts stand in for the CLIs.
 
 | suite | what it covers |
 | --- | --- |
-| `src/config.rs` | every validation rule, environment precedence, secrets, typos, the schema kept in step with the code |
+| `src/config/tests.rs` | every validation rule, environment precedence, secrets, typos, the schema kept in step with the code |
 | `src/external/` | each CLI's command line, generated config and event stream, denials, limits, failures, the time limit killing the process tree |
 | `src/router.rs`, `src/llm_backend.rs` | routing, `health` and its model check |
 | `src/tasks.rs` | ticket files: reading, ids, results written once, run logs |
-| `src/harness/mcp.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session |
+| `src/harness/mcp/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session |
 | `tests/end_to_end.rs` | the real binary: CLI, `show`, `health` against a stub server, MCP over real pipes, an agent changing a file |
 | `tests/fixtures/` | saved event streams per CLI version, replayed through each adapter's parser (see its README) |
 | `tests/real_cli.rs` | the real `claude` and `opencode` CLIs: `health` and one trivial run. Ignored; run with `ENSEMBLE_REAL_CLI=1 cargo test --test real_cli -- --ignored`. CI runs it weekly when the secrets exist |
