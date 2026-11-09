@@ -430,6 +430,25 @@ kills the CLI and its whole process tree.
 The agents' tools are the CLIs' own and run with your permissions; `tools` and
 `permission_mode` are what limit them. Ensemble adds no sandbox.
 
+### What the team costs
+
+Every run, whether a delegation, a task, a gate retry or a background run, leaves
+one line in `records.jsonl` beside the usage counters (shared by every project
+that uses the organization): the agent, the model that answered, when it started
+and how long it took, the tokens, the steps and tool calls, and whether it
+worked. `ensemble stats` sums them per agent:
+
+```console
+$ ensemble stats --org ~/my-org --since 7d
+agent              runs  failures    total s    mean s   tokens in  tokens out
+software/coder       12         1     1843.2     153.6      418220       30114
+software/reviewer     9         0      402.7      44.7           -           -
+```
+
+A `-` means no run of that agent reported tokens: an agent's CLI or server that
+says nothing is not the same as one that spent none. `--since` takes `30m`,
+`12h`, `7d` or `2w`; `--json` prints the same as data.
+
 ### Progress
 
 An agent can run for minutes. While it does, `ensemble mcp` sends two
@@ -775,6 +794,7 @@ $ ensemble tasks [--status S]      # the tasks of this working folder and where 
 $ ensemble task <id>               # one task: ticket, state, question or result
 $ ensemble submit <agent> <title> --text T   # write a task (also --goal --context --repo --gate --after ...)
 $ ensemble answer <id> <text>      # answer the question a task stopped to ask
+$ ensemble stats --org <dir> [--since 7d] [--json]   # what each agent has done: runs, failures, time, tokens
 $ ensemble serve --org <dir>       # run this folder's tasks with no session, until stopped
 $ ensemble init --org <dir>        # write a sample organization: <dir>/config.yaml
 $ ensemble init --stdout           # print it instead (init refuses to overwrite without --force)
@@ -807,6 +827,7 @@ state directory), `--context <text>` (for `run`).
 | `src/workspace.rs` | the working folder, a `repo` inside it, and what a run changed |
 | `src/llm_backend.rs` | asking a model server which models it serves, for `health` |
 | `src/port.rs` | the shared error type |
+| `src/records.rs` | the record of every run, and the sums `ensemble stats` prints |
 | `src/tracker.rs` | the `Tracker` trait the queue works through, and `LocalMarkdown`, its one implementation |
 | `src/tasks.rs` | tasks as files: `task.md`, `result.md`, and the git-ignored `runs/` |
 | `src/worktree.rs` | a git worktree and branch per task, and committing its work there |

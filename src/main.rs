@@ -62,6 +62,9 @@ COMMANDS:
     serve                   Work through this folder's tasks with no agent session
                             around them, until stopped (Ctrl-C or SIGTERM). Only
                             one worker runs a folder's tasks at a time.
+    stats [--since 7d] [--json]
+                            What each agent has done: runs, failures, time and
+                            tokens, from the record every run leaves.
     show <AGENT>            Print how an agent is started: its command line and
                             the config handed to its CLI, API keys hidden.
     check                   Load and validate the config, then report the team.
@@ -151,7 +154,8 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             "--context" => context = Some(value("--context")?),
             "--manager" | "--adapter" | "--model" | "--backend" | "--starter" | "--only"
             | "--prompt" | "--team-prompt" | "--status" | "--text" | "--goal" | "--repo"
-            | "--gate" | "--after" | "--files" | "--constraints" | "--done-when" | "--ref" => {
+            | "--gate" | "--since" | "--after" | "--files" | "--constraints" | "--done-when"
+            | "--ref" => {
                 opts.insert(arg.clone(), value(&arg)?);
             }
             other if other.starts_with('-') && command.is_none() => {
@@ -241,6 +245,7 @@ fn run() -> Result<ExitCode, String> {
         "doctor" => cmd_doctor(config, &dir, &args),
         "submit" => cmd_submit(&config, &dir, &args),
         "serve" => cmd_serve(config, dir, &args),
+        "stats" => cmd_stats(config, dir, &args),
         "run" => cmd_run(config, dir, &args),
         other => Err(format!("unknown command '{other}'. Try --help.")),
     }
@@ -1210,5 +1215,30 @@ fn cmd_serve(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, Stri
     }
     let ensemble = ensemble_for(config, dir, args);
     ensemble::harness::serve::run(&ensemble, &STOP, &|line| eprintln!("ensemble: {line}"))?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_stats(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String> {
+    let ensemble = ensemble_for(config, dir, args);
+    let records_dir = ensemble
+        .records_dir()
+        .ok_or("stats: cannot tell where runs are recorded")?;
+    let since = match opt(args, "--since") {
+        Some(text) => {
+            let ago =
+                ensemble::records::parse_duration(text).map_err(|e| format!("--since: {e}"))?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            Some(now.saturating_sub(ago))
+        }
+        None => None,
+    };
+    let summaries = ensemble::records::summarize(&ensemble::records::read(&records_dir), since);
+    if has(args, "--json") {
+        println!("{}", ensemble::records::json(&summaries));
+    } else {
+        print!("{}", ensemble::records::table(&summaries));
+    }
     Ok(ExitCode::SUCCESS)
 }

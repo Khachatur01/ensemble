@@ -114,6 +114,8 @@ impl Drop for Scratch {
         let _ = std::fs::remove_dir_all(self.0.with_extension("bin"));
         let _ = std::fs::remove_dir_all(self.org());
         let _ = std::fs::remove_dir_all(self.state());
+        let _ = std::fs::remove_dir_all(self.0.with_extension("xdg-state"));
+        let _ = std::fs::remove_dir_all(self.0.with_extension("xdg-cache"));
     }
 }
 
@@ -179,6 +181,8 @@ fn config_yaml(command: &str, backend_url: &str) -> String {
 fn command(scratch: &Scratch) -> Command {
     let mut c = Command::new(BIN);
     c.current_dir(scratch.path())
+        .env("XDG_STATE_HOME", scratch.0.with_extension("xdg-state"))
+        .env("XDG_CACHE_HOME", scratch.0.with_extension("xdg-cache"))
         .arg("--org")
         .arg(scratch.org())
         .arg("--state")
@@ -1831,4 +1835,51 @@ fn a_task_stopped_in_the_middle_is_run_again_by_the_next_serve() {
     );
     sigterm(&second);
     second.wait().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// stats
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_run_leaves_a_record_that_stats_sums_up() {
+    let s = Scratch::new("stats");
+    let cli = s.opencode("fine", "");
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    let none = ensemble(&s, &["stats"]);
+    assert!(
+        stdout_of(&none).contains("No runs recorded"),
+        "{}",
+        stdout_of(&none)
+    );
+
+    for _ in 0..2 {
+        let out = ensemble(&s, &["run", "reviewer", "look"]);
+        assert!(out.status.success(), "{}", stderr_of(&out));
+    }
+    // A run that cannot start is a failure on the record.
+    s.write(
+        ".ensemble/config.yaml",
+        &config_yaml("/nonexistent/opencode", NOWHERE),
+    );
+    let out = ensemble(&s, &["run", "reviewer", "look"]);
+    assert!(!out.status.success());
+
+    let table = ensemble(&s, &["stats"]);
+    let text = stdout_of(&table);
+    let row = text
+        .lines()
+        .find(|l| l.starts_with("default/reviewer"))
+        .unwrap_or_else(|| panic!("{text}"));
+    let cells: Vec<&str> = row.split_whitespace().collect();
+    assert_eq!((cells[1], cells[2]), ("3", "1"), "3 runs, 1 failure: {row}");
+
+    let json = ensemble(&s, &["stats", "--json", "--since", "1h"]);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout_of(&json)).unwrap();
+    assert_eq!(parsed[0]["agent"], "default/reviewer");
+    assert_eq!(parsed[0]["runs"], 3);
+
+    let bad = ensemble(&s, &["stats", "--since", "soon"]);
+    assert!(!bad.status.success());
+    assert!(stderr_of(&bad).contains("duration"), "{}", stderr_of(&bad));
 }

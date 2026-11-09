@@ -274,6 +274,8 @@ impl Ensemble {
         // Only runs in the project itself can see each other's changes; one in
         // a worktree of its own neither counts nor is counted.
         let in_project = self.workdir().is_ok_and(|dir| dir == workdir);
+        let started = std::time::SystemTime::now();
+        let clock = std::time::Instant::now();
         let run = if in_project {
             let me = self.started.fetch_add(1, Ordering::SeqCst) + 1;
             let others_running = self.active.fetch_add(1, Ordering::SeqCst) > 0;
@@ -284,7 +286,42 @@ impl Ensemble {
         } else {
             run(workdir).map(|r| (r, false))
         };
-        let (run, overlapped) = run.map_err(RouteError::Agent)?;
+        let seconds = clock.elapsed().as_secs_f64();
+        let started = started
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let (run, overlapped) = match run {
+            Ok(done) => done,
+            Err(e) => {
+                self.record(crate::records::Record {
+                    agent: agent.name.clone(),
+                    model: Some(agent.model().to_string()),
+                    started,
+                    seconds,
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    steps: 0,
+                    tool_calls: 0,
+                    ok: false,
+                    error: Some(e.to_string().chars().take(200).collect()),
+                });
+                return Err(RouteError::Agent(e));
+            }
+        };
+        // No tokens reported is not the same as none spent.
+        let reported = run.usage.prompt_tokens > 0 || run.usage.completion_tokens > 0;
+        self.record(crate::records::Record {
+            agent: agent.name.clone(),
+            model: Some(run.model.clone()).filter(|m| !m.is_empty()),
+            started,
+            seconds,
+            prompt_tokens: reported.then_some(u64::from(run.usage.prompt_tokens)),
+            completion_tokens: reported.then_some(u64::from(run.usage.completion_tokens)),
+            steps: run.steps,
+            tool_calls: run.tool_calls,
+            ok: true,
+            error: None,
+        });
         Ok(Outcome {
             agent: agent.name.clone(),
             runs_on: agent.runs_on(),
@@ -301,6 +338,18 @@ impl Ensemble {
                 overlapped: overlapped && agent.can_change_files(),
             },
         })
+    }
+
+    /// Where records of runs are kept: with the usage counters, shared by every
+    /// project that uses the organization, else in the state directory.
+    pub fn records_dir(&self) -> Option<PathBuf> {
+        self.usage_dir().or_else(|| self.state_dir().ok())
+    }
+
+    fn record(&self, record: crate::records::Record) {
+        if let Some(dir) = self.records_dir() {
+            crate::records::append(&dir, &record);
+        }
     }
 
     /// Check everything the agents run on: each CLI, and each LLM backend in

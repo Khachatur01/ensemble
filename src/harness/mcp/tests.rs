@@ -1323,3 +1323,20 @@ fn a_session_holds_the_lock_while_it_runs_and_frees_it_after() {
     });
     assert_eq!(crate::harness::lock::holder(&state), None);
 }
+
+#[test]
+fn a_delegation_leaves_a_record_of_the_run() {
+    let (e, tmp) = scouting();
+    let r = call(&e, "delegate", json!({"agent": "scout", "task": "look"}));
+    assert_eq!(r["result"]["isError"], false, "{}", text_of(&r));
+    let records = crate::records::read(&project(&tmp).join(".ensemble"));
+    assert_eq!(records.len(), 1, "{records:?}");
+    let run = &records[0];
+    assert_eq!(run.agent, "default/scout");
+    assert!(run.ok && run.error.is_none());
+    assert_eq!(
+        (run.prompt_tokens, run.completion_tokens),
+        (Some(5), Some(2))
+    );
+    assert_eq!(run.steps, 1);
+}
