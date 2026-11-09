@@ -112,7 +112,11 @@ pub struct GateRef {
 pub struct Ticket {
     pub id: String,
     pub title: String,
+    /// `team/agent`: a ticket written as `agent` is taken as the agent of the
+    /// team whose folder it is in.
     pub agent: String,
+    /// The team whose folder the task is in; its tracker.
+    pub team: String,
     /// Background for the agent, passed as the delegation's context.
     pub context: Option<String>,
     /// The outcome wanted, in a sentence.
@@ -306,7 +310,22 @@ impl Store {
     /// Write `ticket` as a new task and return its id: the next number, then
     /// a slug of the title. The ticket's own `id` is not used.
     pub fn create(&self, ticket: &Ticket) -> io::Result<String> {
-        fs::create_dir_all(&self.tasks)?;
+        let team = ticket
+            .agent
+            .split_once('/')
+            .map(|(team, _)| team)
+            .filter(|team| valid_id(team))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "agent '{}' is not team/agent, so there is no team to keep the task in",
+                        ticket.agent
+                    ),
+                )
+            })?;
+        let folder = self.tasks.join(team);
+        fs::create_dir_all(&folder)?;
         let mut front = format!(
             "title: {}\nagent: {}\n",
             yaml_str(&ticket.title),
@@ -347,9 +366,9 @@ impl Store {
             };
             // `create_dir` fails on an existing directory, so two writers
             // never share an id.
-            match fs::create_dir(self.tasks.join(&id)) {
+            match fs::create_dir(folder.join(&id)) {
                 Ok(()) => {
-                    write_atomically(&self.tasks.join(&id).join(TASK_FILE), &body)?;
+                    write_atomically(&folder.join(&id).join(TASK_FILE), &body)?;
                     return Ok(id);
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => number += 1,
@@ -358,10 +377,38 @@ impl Store {
         }
     }
 
+    /// The folder of team `team`'s tasks, and every team's.
+    fn team_dirs(&self) -> Vec<(String, PathBuf)> {
+        let mut teams = dir_names(&self.tasks);
+        teams.sort();
+        teams
+            .into_iter()
+            .map(|team| {
+                let dir = self.tasks.join(&team);
+                (team, dir)
+            })
+            .collect()
+    }
+
+    /// The directory of task `id`, in whichever team has it. Ids are numbered
+    /// across the folder, so an id names one task.
+    fn dir(&self, id: &str) -> PathBuf {
+        if valid_id(id) {
+            for (_, dir) in self.team_dirs() {
+                if dir.join(id).join(TASK_FILE).is_file() {
+                    return dir.join(id);
+                }
+            }
+        }
+        // Not a task: a path that is not there.
+        self.tasks.join("-").join("-")
+    }
+
     /// One past the highest number any task id starts with.
     fn next_number(&self) -> u32 {
-        dir_names(&self.tasks)
+        self.team_dirs()
             .iter()
+            .flat_map(|(_, dir)| dir_names(dir))
             .filter_map(|name| {
                 let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
                 digits.parse::<u32>().ok()
@@ -372,10 +419,14 @@ impl Store {
 
     /// Every task, by id. A directory without a `task.md` is not a task yet.
     pub fn scan(&self) -> Vec<Entry> {
-        let mut ids = dir_names(&self.tasks);
+        let mut ids: Vec<String> = self
+            .team_dirs()
+            .iter()
+            .flat_map(|(_, dir)| dir_names(dir))
+            .filter(|id| self.dir(id).join(TASK_FILE).is_file())
+            .collect();
         ids.sort();
         ids.into_iter()
-            .filter(|id| self.tasks.join(id).join(TASK_FILE).is_file())
             .map(|id| match self.read(&id) {
                 Ok(ticket) => {
                     let status = self.outcome(&id).map(|o| o.status);
@@ -387,7 +438,7 @@ impl Store {
     }
 
     pub fn exists(&self, id: &str) -> bool {
-        valid_id(id) && self.tasks.join(id).join(TASK_FILE).is_file()
+        valid_id(id) && self.dir(id).join(TASK_FILE).is_file()
     }
 
     /// Read a ticket. The error names the file and what is wrong with it.
@@ -395,9 +446,28 @@ impl Store {
         if !valid_id(id) {
             return Err(format!("'{id}' is not a task id"));
         }
-        let path = self.tasks.join(id).join(TASK_FILE);
+        let dir = self.dir(id);
+        let path = dir.join(TASK_FILE);
         let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        parse_ticket(id, &text).map_err(|e| format!("{}: {e}", path.display()))
+        let mut ticket = parse_ticket(id, &text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let team = dir
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match ticket.agent.split_once('/') {
+            Some((of, _)) if of != team => {
+                return Err(format!(
+                    "{}: agent '{}' is in team '{of}', but the task is in team '{team}': a team's tasks go to its own agents",
+                    path.display(),
+                    ticket.agent
+                ));
+            }
+            Some(_) => {}
+            None => ticket.agent = format!("{team}/{}", ticket.agent),
+        }
+        ticket.team = team;
+        Ok(ticket)
     }
 
     /// A task's `result.md`, once it has one.
@@ -405,7 +475,7 @@ impl Store {
         if !valid_id(id) {
             return None;
         }
-        let text = fs::read_to_string(self.tasks.join(id).join(RESULT_FILE)).ok()?;
+        let text = fs::read_to_string(self.dir(id).join(RESULT_FILE)).ok()?;
         let status = front_matter(&text)
             .and_then(|(front, _)| {
                 front
@@ -430,7 +500,7 @@ impl Store {
         extra: &[(&str, String)],
         reply: &str,
     ) -> io::Result<()> {
-        let path = self.tasks.join(id).join(RESULT_FILE);
+        let path = self.dir(id).join(RESULT_FILE);
         if path.exists() {
             return Ok(());
         }
@@ -496,7 +566,7 @@ impl Store {
     /// Add a question to the task's `questions.md`, and keep the reply that
     /// asked it for the run after the answer.
     pub fn ask(&self, id: &str, question: &str, reply: &str) -> io::Result<()> {
-        let path = self.tasks.join(id).join(QUESTIONS_FILE);
+        let path = self.dir(id).join(QUESTIONS_FILE);
         let text = fs::read_to_string(&path).unwrap_or_default();
         let n = text.matches("## Question ").count() + 1;
         let mut f = fs::OpenOptions::new()
@@ -517,7 +587,7 @@ impl Store {
         if !valid_id(id) {
             return None;
         }
-        let text = fs::read_to_string(self.tasks.join(id).join(QUESTIONS_FILE)).ok()?;
+        let text = fs::read_to_string(self.dir(id).join(QUESTIONS_FILE)).ok()?;
         let (_, last) = text.rsplit_once("## Question ")?;
         if last.contains(ANSWER_HEADING) {
             return None;
@@ -531,7 +601,7 @@ impl Store {
         if self.open_question(id).is_none() {
             return Err(format!("{id} has no question waiting for an answer."));
         }
-        let path = self.tasks.join(id).join(QUESTIONS_FILE);
+        let path = self.dir(id).join(QUESTIONS_FILE);
         let mut f = fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -543,7 +613,7 @@ impl Store {
     /// The questions and answers so far, and the reply that last asked, for
     /// the run after an answer.
     pub fn conversation(&self, id: &str) -> Option<(String, String)> {
-        let questions = fs::read_to_string(self.tasks.join(id).join(QUESTIONS_FILE)).ok()?;
+        let questions = fs::read_to_string(self.dir(id).join(QUESTIONS_FILE)).ok()?;
         let reply = fs::read_to_string(self.runs.join(id).join(REPLY_FILE)).unwrap_or_default();
         Some((questions, reply))
     }
@@ -712,6 +782,7 @@ fn parse_ticket(id: &str, text: &str) -> Result<Ticket, String> {
         id: id.to_string(),
         title: front.title.trim().to_string(),
         agent: front.agent.trim().to_string(),
+        team: String::new(),
         context: some(front.context),
         goal: some(front.goal),
         constraints: front.constraints.unwrap_or_default(),
@@ -784,7 +855,11 @@ mod tests {
     pub(crate) fn draft(title: &str, agent: &str, text: &str) -> Ticket {
         Ticket {
             title: title.into(),
-            agent: agent.into(),
+            agent: if agent.contains('/') {
+                agent.into()
+            } else {
+                format!("default/{agent}")
+            },
             text: text.into(),
             ..Ticket::default()
         }
@@ -818,6 +893,7 @@ mod tests {
             t,
             Ticket {
                 id: id.clone(),
+                team: "default".into(),
                 ..written
             }
         );
@@ -897,12 +973,87 @@ mod tests {
     }
 
     #[test]
+    fn tasks_live_in_their_teams_folder_and_ids_count_across_teams() {
+        let tmp = TempDir::new();
+        let store = Store::new(&tmp.0);
+        let a = store
+            .create(&draft("Wire it", "hardware/layout", "t"))
+            .unwrap();
+        let b = store
+            .create(&draft("Code it", "software/coder", "t"))
+            .unwrap();
+        assert_eq!((a.as_str(), b.as_str()), ("0001-wire-it", "0002-code-it"));
+        assert!(tmp.0.join("tasks/hardware/0001-wire-it/task.md").is_file());
+        assert!(tmp.0.join("tasks/software/0002-code-it/task.md").is_file());
+        let teams: Vec<String> = store
+            .scan()
+            .iter()
+            .map(|e| match e {
+                Entry::Task(t, _) => format!("{}:{}", t.team, t.agent),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            teams,
+            ["hardware:hardware/layout", "software:software/coder"]
+        );
+        assert!(store.exists(&b));
+        store.ask(&b, "which?", "reply").unwrap();
+        assert_eq!(store.open_question(&b).as_deref(), Some("which?"));
+        assert_eq!(store.open_question(&a), None);
+    }
+
+    #[test]
+    fn a_task_names_its_teams_agents_only_and_a_short_name_means_one_of_them() {
+        let tmp = TempDir::new();
+        let store = Store::new(&tmp.0);
+        let write = |team: &str, id: &str, agent: &str| {
+            let dir = tmp.0.join("tasks").join(team).join(id);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join(TASK_FILE),
+                format!("---\ntitle: t\nagent: {agent}\n---\nDo it.\n"),
+            )
+            .unwrap();
+        };
+        write("software", "0001-short", "coder");
+        write("software", "0002-full", "software/coder");
+        write("software", "0003-foreign", "hardware/layout");
+        let agent = |id: &str| store.read(id).map(|t| t.agent);
+        assert_eq!(agent("0001-short").unwrap(), "software/coder");
+        assert_eq!(agent("0002-full").unwrap(), "software/coder");
+        let err = agent("0003-foreign").unwrap_err();
+        assert!(
+            err.contains("its own agents") && err.contains("hardware"),
+            "{err}"
+        );
+        // A task that cannot be read does not stop the others.
+        assert_eq!(store.scan().len(), 3);
+    }
+
+    #[test]
+    fn a_ticket_needs_a_team_to_be_kept_in() {
+        let tmp = TempDir::new();
+        let store = Store::new(&tmp.0);
+        let err = store
+            .create(&Ticket {
+                title: "t".into(),
+                agent: "coder".into(),
+                text: "t".into(),
+                ..Ticket::default()
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("team"), "{err}");
+        assert!(!tmp.0.join("tasks").exists());
+    }
+
+    #[test]
     fn ids_count_up_past_the_highest_and_skip_a_taken_one() {
         let tmp = TempDir::new();
         let store = Store::new(&tmp.0);
-        fs::create_dir_all(tmp.0.join("tasks/0007-by-hand")).unwrap();
+        fs::create_dir_all(tmp.0.join("tasks/default/0007-by-hand")).unwrap();
         assert_eq!(store.create(&draft("Next", "a", "t")).unwrap(), "0008-next");
-        fs::create_dir_all(tmp.0.join("tasks/0009-same")).unwrap();
+        fs::create_dir_all(tmp.0.join("tasks/default/0009-same")).unwrap();
         assert_eq!(store.create(&draft("Same", "a", "t")).unwrap(), "0010-same");
         assert_eq!(store.create(&draft("", "a", "t")).unwrap(), "0011");
     }
@@ -912,8 +1063,8 @@ mod tests {
         let tmp = TempDir::new();
         let store = Store::new(&tmp.0);
         let write = |id: &str, text: &str| {
-            fs::create_dir_all(tmp.0.join("tasks").join(id)).unwrap();
-            fs::write(tmp.0.join("tasks").join(id).join(TASK_FILE), text).unwrap();
+            fs::create_dir_all(tmp.0.join("tasks/default").join(id)).unwrap();
+            fs::write(tmp.0.join("tasks/default").join(id).join(TASK_FILE), text).unwrap();
         };
         write(
             "a-good",
@@ -922,7 +1073,7 @@ mod tests {
         write("b-no-front", "Find the parser.\n");
         write("c-typo", "---\ntitle: x\nagnet: scout\n---\nt\n");
         write("d-empty", "---\ntitle: x\nagent: scout\n---\n\n");
-        fs::create_dir_all(tmp.0.join("tasks/e-not-yet")).unwrap();
+        fs::create_dir_all(tmp.0.join("tasks/default/e-not-yet")).unwrap();
         let entries = store.scan();
         assert_eq!(entries.len(), 4, "{entries:?}");
         assert!(matches!(&entries[0], Entry::Task(t, None) if t.text == "Find the parser."));
@@ -968,7 +1119,13 @@ mod tests {
             &store.scan()[0],
             Entry::Task(_, Some(Status::Failed))
         ));
-        assert!(!tmp.0.join("tasks").join(&id).join("result.tmp").exists());
+        assert!(
+            !tmp.0
+                .join("tasks/default")
+                .join(&id)
+                .join("result.tmp")
+                .exists()
+        );
     }
 
     #[test]

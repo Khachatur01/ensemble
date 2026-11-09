@@ -52,6 +52,10 @@ impl Scratch {
     fn place(&self, name: &str) -> PathBuf {
         match name.strip_prefix(".ensemble/") {
             Some(rest) if rest == "config.yaml" || rest == ".env" => self.org().join(rest),
+            Some(rest) if rest.starts_with("tasks/") && !rest.starts_with("tasks/default/") => self
+                .state()
+                .join("tasks/default")
+                .join(&rest["tasks/".len()..]),
             Some(rest) => self.state().join(rest),
             None => self.0.join(name),
         }
@@ -1014,7 +1018,7 @@ fn check_reports_a_task_that_could_not_run() {
         "{text}"
     );
     assert!(
-        text.contains("0003-who: agent 'architect' is not configured"),
+        text.contains("0003-who: agent 'default/architect' is not configured"),
         "{text}"
     );
 }

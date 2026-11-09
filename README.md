@@ -124,7 +124,7 @@ user, outside every project:
 
 | where | |
 | --- | --- |
-| `$XDG_STATE_HOME/ensemble/workdirs/<folder>-<hash>/tasks/` | tasks for agents to work through, one directory each |
+| `$XDG_STATE_HOME/ensemble/workdirs/<folder>-<hash>/tasks/<team>/` | a team's tasks for its agents to work through, one directory each |
 | `.../runs/` | what tasks and background delegations did as they ran |
 | `.../worktrees/` | a git worktree per task of an agent with `isolation: worktree` |
 | `$XDG_STATE_HOME/ensemble/orgs/<org>-<hash>/usage.json` | how many runs each agent started, shared by every project that uses the organization |
@@ -450,7 +450,7 @@ tool call after about a minute, whatever progress notifications arrive). On a
 slow machine every delegation to a local model can hit that. Two ways around
 it both answer at once:
 
-- **`submit`** writes a **task**: a ticket in the state directory's `tasks/<id>/task.md`. While `ensemble mcp` runs, agents work through the
+- **`submit`** writes a **task**: a ticket in the team's folder of the state directory, `tasks/<team>/<id>/task.md`. The team is the agent's. Ids are numbered across the folder, so an id names one task, and a task's `agent` may be written without its team: it is then an agent of the team whose folder the ticket is in. A ticket that names an agent of another team is refused. While `ensemble mcp` runs, agents work through the
   tasks without a result, oldest id first, each agent at most
   `max_concurrent` at a time, and write `result.md` beside the ticket when one
   ends. You can write a `task.md` by hand too; it is picked up within a few
@@ -807,6 +807,7 @@ state directory), `--context <text>` (for `run`).
 | `src/workspace.rs` | the working folder, a `repo` inside it, and what a run changed |
 | `src/llm_backend.rs` | asking a model server which models it serves, for `health` |
 | `src/port.rs` | the shared error type |
+| `src/tracker.rs` | the `Tracker` trait the queue works through, and `LocalMarkdown`, its one implementation |
 | `src/tasks.rs` | tasks as files: `task.md`, `result.md`, and the git-ignored `runs/` |
 | `src/worktree.rs` | a git worktree and branch per task, and committing its work there |
 | `src/harness/delegation.rs` | the tools your agent calls: delegate, submit, status, wait, cancel, agents, health |

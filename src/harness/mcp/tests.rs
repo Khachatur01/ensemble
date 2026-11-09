@@ -789,7 +789,7 @@ fn project(tmp: &TempDir) -> std::path::PathBuf {
 }
 
 fn tasks(tmp: &TempDir) -> std::path::PathBuf {
-    project(tmp).join(".ensemble/tasks")
+    project(tmp).join(".ensemble/tasks/default")
 }
 
 fn write_task(tmp: &TempDir, id: &str, agent: &str, text: &str) {
@@ -828,16 +828,16 @@ fn a_task_written_by_hand_is_run_and_its_result_written_once() {
     session(&e, |ask| {
         let result = ask("wait", json!({"task": "0001-look", "timeout_seconds": 20}));
         assert!(
-            result.starts_with("---\nstatus: done\nagent: \"scout\"\n"),
+            result.starts_with("---\nstatus: done\nagent: \"default/scout\"\n"),
             "{result}"
         );
         assert!(
-            result.contains("found it") && result.contains("[scout: 1 step(s)"),
+            result.contains("found it") && result.contains("[default/scout: 1 step(s)"),
             "{result}"
         );
         let status = ask("status", json!({}));
         assert!(
-            status.contains("0001-look · scout · done · Task 0001-look"),
+            status.contains("0001-look · default/scout · done · Task 0001-look"),
             "{status}"
         );
         assert!(status.contains("0002-bad · unreadable"), "{status}");
@@ -930,8 +930,11 @@ fn the_end_of_a_session_interrupts_running_tasks_and_leaves_queued_ones() {
     write_task(&tmp, "0002-b", "scout", "b");
     let started = std::time::Instant::now();
     session(&e, |ask| {
-        let status = until(ask, json!({}), "0001-a · scout · running");
-        assert!(status.contains("0002-b · scout · queued"), "{status}");
+        let status = until(ask, json!({}), "0001-a · default/scout · running");
+        assert!(
+            status.contains("0002-b · default/scout · queued"),
+            "{status}"
+        );
     });
     assert!(started.elapsed() < std::time::Duration::from_secs(15));
     let s = store(&tmp);
@@ -1211,7 +1214,7 @@ fn an_agent_over_its_budget_is_refused_and_its_tasks_wait() {
     write_task(&tmp, "0001-a", "scout", "a");
     session(&e, |ask| {
         let s = until(ask, json!({"task": "0001-a"}), "over its agent's budget");
-        assert!(s.contains("0001-a · scout · queued"), "{s}");
+        assert!(s.contains("0001-a · default/scout · queued"), "{s}");
     });
     assert!(store(&tmp).outcome("0001-a").is_none());
     let usage = store(&tmp).usage();

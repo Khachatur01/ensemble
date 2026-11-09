@@ -30,5 +30,6 @@ pub mod router;
 pub mod setup;
 pub mod state;
 pub mod tasks;
+pub mod tracker;
 pub mod workspace;
 pub mod worktree;

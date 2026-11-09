@@ -27,6 +27,7 @@ use crate::config::{Budget, Isolation};
 use crate::external::gate;
 use crate::router::Ensemble;
 use crate::tasks::{ASK_MARKER, Entry, Status, Store, Ticket, minutes, question_in, waiting_for};
+use crate::tracker::Tracker;
 use crate::worktree;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
@@ -390,8 +391,16 @@ impl<'e> Queue<'e> {
                     ticket.id.clone(),
                     Self::live(&ticket.agent, &ticket.title, cancel.clone(), false),
                 );
+                // The team's tracker keeps its tasks.
+                let tracker = self
+                    .ensemble
+                    .config()
+                    .teams
+                    .get(&ticket.team)
+                    .map_or(crate::config::Tracker::LocalMarkdown, |t| t.tracker);
+                let tracker = crate::tracker::for_team(tracker, store);
                 spawn(Box::new(move || {
-                    self.run_ticket(store, *ticket, slot, &cancel)
+                    self.run_ticket(tracker, *ticket, slot, &cancel)
                 }));
             }
             drop(
@@ -402,7 +411,7 @@ impl<'e> Queue<'e> {
         }
     }
 
-    fn run_ticket(&self, store: &Store, ticket: Ticket, slot: Slot<'_>, cancel: &AtomicBool) {
+    fn run_ticket(&self, store: &dyn Tracker, ticket: Ticket, slot: Slot<'_>, cancel: &AtomicBool) {
         let since = SystemTime::now();
         store.set_state(&ticket.id, "running", since);
         let place = self
@@ -507,7 +516,7 @@ impl<'e> Queue<'e> {
     /// gate's output. Returns the outcome and front matter for `result.md`.
     fn work_on(
         &self,
-        store: &Store,
+        store: &dyn Tracker,
         ticket: &Ticket,
         dir: &Path,
         cancel: &AtomicBool,

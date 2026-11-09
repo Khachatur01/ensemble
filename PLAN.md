@@ -297,6 +297,14 @@ A tagged variant. `local_markdown` has no settings of its own, so it carries
 none; the variant exists so other types can carry theirs. A team without a
 `tracker` key is refused by name (no defaults).
 
+### Done in this phase
+
+Tasks live in `<state>/tasks/<team>/<id>/`. Ids are numbered across the folder
+(not per team), so an id still names one task for `status`, `wait`, `after` and
+the worktree branch. The queue reaches tickets through the `Tracker` trait
+(`src/tracker.rs`); `LocalMarkdown` is the one implementation, and each ticket
+carries the team of its folder.
+
 ### Starting point after phase 3
 
 Phase 3 left one task store per working folder, `<state>/tasks/<id>-<slug>/`, whose
