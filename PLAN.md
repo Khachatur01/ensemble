@@ -110,7 +110,11 @@ Start with a single `config.yaml`. If it grows too large, allow the fixed layout
   tracker's label mapping lives in the tracker block, not on each agent; no
   wildcard trust for a publisher.
 
-## Phase 1. CI and real-CLI checks
+## Phase 1. Real-CLI checks
+
+The owner dropped CI: there are no GitHub workflows, and background work runs on the
+local computer, not on a remote server. Items 1, 3 and the release workflow of
+phase 14 are therefore not built, and the `.github/` directory was removed.
 
 Goal: a safety net before the large changes.
 
