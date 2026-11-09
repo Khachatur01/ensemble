@@ -6,5 +6,7 @@
 //! failed delegation says; `mcp` is the JSON-RPC transport around it.
 
 pub mod delegation;
+pub mod lock;
 pub mod mcp;
 pub mod queue;
+pub mod serve;

@@ -59,6 +59,9 @@ COMMANDS:
            [--after ID,ID] [--files F,F] [--constraints C,C] [--done-when D,D]
                             Write a task. A running `ensemble mcp` picks it up.
     answer ID TEXT          Answer the question a task stopped to ask.
+    serve                   Work through this folder's tasks with no agent session
+                            around them, until stopped (Ctrl-C or SIGTERM). Only
+                            one worker runs a folder's tasks at a time.
     show <AGENT>            Print how an agent is started: its command line and
                             the config handed to its CLI, API keys hidden.
     check                   Load and validate the config, then report the team.
@@ -237,6 +240,7 @@ fn run() -> Result<ExitCode, String> {
         "health" => cmd_health(config, dir, &args),
         "doctor" => cmd_doctor(config, &dir, &args),
         "submit" => cmd_submit(&config, &dir, &args),
+        "serve" => cmd_serve(config, dir, &args),
         "run" => cmd_run(config, dir, &args),
         other => Err(format!("unknown command '{other}'. Try --help.")),
     }
@@ -1035,9 +1039,10 @@ fn cmd_tasks(args: &Args, dir: &Path) -> Result<ExitCode, String> {
     let store = store_for(dir, args)?;
     let entries = store.scan();
     let wanted = opt(args, "--status");
+    let worker = ensemble::harness::lock::holder(store.root()).is_some();
     let mut shown = 0;
     for entry in &entries {
-        let line = tasks::entry_line(Some(&store), entry, &entries, None);
+        let line = tasks::entry_line(Some(&store), entry, &entries, None, worker);
         let status = line.split(" · ").nth(2).unwrap_or("");
         if wanted.is_none_or(|w| status.starts_with(w)) {
             println!("{line}");
@@ -1068,7 +1073,11 @@ fn cmd_task(args: &Args, dir: &Path) -> Result<ExitCode, String> {
             "task: no task '{id}'. `ensemble tasks` lists them."
         ));
     };
-    println!("{}", tasks::entry_line(Some(&store), entry, &entries, None));
+    let worker = ensemble::harness::lock::holder(store.root()).is_some();
+    println!(
+        "{}",
+        tasks::entry_line(Some(&store), entry, &entries, None, worker)
+    );
     if let tasks::Entry::Task(t, _) = entry {
         println!("\n{}", t.prompt());
         if let Some(repo) = &t.repo {
@@ -1182,5 +1191,24 @@ fn cmd_submit(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, Stri
         "task {id} written in {}. A running `ensemble mcp` for this folder picks it up.",
         store.tasks_dir().join(&id).display()
     );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Set by SIGINT and SIGTERM, so that `serve` can stop its tasks cleanly.
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn on_signal(_: libc::c_int) {
+    STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn cmd_serve(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String> {
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+    }
+    let ensemble = ensemble_for(config, dir, args);
+    ensemble::harness::serve::run(&ensemble, &STOP, &|line| eprintln!("ensemble: {line}"))?;
     Ok(ExitCode::SUCCESS)
 }

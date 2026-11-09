@@ -676,7 +676,12 @@ impl<'e> Queue<'e> {
             Entry::Task(t, None) => self.over_budget(inner, &t.agent),
             _ => None,
         };
-        crate::tasks::entry_line(self.store.as_ref(), entry, entries, wait)
+        let elsewhere = self
+            .store
+            .as_ref()
+            .and_then(|s| super::lock::holder(s.root()))
+            .is_some_and(|pid| pid != std::process::id());
+        crate::tasks::entry_line(self.store.as_ref(), entry, entries, wait, elsewhere)
     }
 
     /// The result of a task or background delegation, waiting up to

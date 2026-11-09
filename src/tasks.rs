@@ -164,26 +164,34 @@ pub fn minutes(seconds: u64) -> String {
 
 /// One line about a task found on disk: its id, agent, where it stands and its
 /// title. `budget_wait` is the seconds until its agent may start another run,
-/// when it may not now. The tool `status` and the commands `ensemble tasks` and
+/// when it may not now. `worker_elsewhere` says another process is working
+/// through the tasks, so a task recorded as running is running, not
+/// interrupted. The tool `status` and the commands `ensemble tasks` and
 /// `ensemble task` all show a task this way.
 pub fn entry_line(
     store: Option<&Store>,
     entry: &Entry,
     entries: &[Entry],
     budget_wait: Option<u64>,
+    worker_elsewhere: bool,
 ) -> String {
     match entry {
         Entry::Task(t, Some(status)) => {
             format!("{} · {} · {} · {}", t.id, t.agent, status.as_str(), t.title)
         }
         Entry::Task(t, None) => {
-            let interrupted = store
-                .and_then(|s| s.state(&t.id))
-                .is_some_and(|s| s == "interrupted" || s == "running");
+            let recorded = store.and_then(|s| s.state(&t.id));
+            let running = worker_elsewhere && recorded.as_deref() == Some("running");
+            let interrupted = !running
+                && recorded
+                    .as_deref()
+                    .is_some_and(|s| s == "interrupted" || s == "running");
             let blockers = waiting_for(t, entries);
             let question = store.and_then(|s| s.open_question(&t.id));
             let state = if let Some(q) = question {
                 format!("needs input: {q}")
+            } else if running {
+                "running".into()
             } else if let Some(wait) = budget_wait {
                 format!("queued, over its agent's budget for {}", minutes(wait))
             } else if !blockers.is_empty() {

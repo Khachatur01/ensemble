@@ -1287,3 +1287,36 @@ fn initialize_tells_the_manager_the_teams_and_how_to_hand_work_over() {
         "{text}"
     );
 }
+
+#[test]
+fn a_session_runs_no_tasks_while_another_worker_holds_the_folder() {
+    let (e, tmp) = team(&[("scout", "read", &emit(&step(vec![text("found it")])))]);
+    // This very process stands in for the other worker.
+    let state = project(&tmp).join(".ensemble");
+    let _other = crate::harness::lock::acquire(&state).unwrap();
+    session(&e, |ask| {
+        let r = ask(
+            "submit",
+            json!({"agent": "scout", "title": "Look", "task": "look"}),
+        );
+        assert!(r.contains("0001-look"), "{r}");
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let status = ask("status", json!({"task": "0001-look"}));
+        assert!(status.contains("queued"), "no worker ran it: {status}");
+    });
+    assert!(store(&tmp).outcome("0001-look").is_none());
+}
+
+#[test]
+fn a_session_holds_the_lock_while_it_runs_and_frees_it_after() {
+    let (e, tmp) = team(&[("scout", "read", "true")]);
+    let state = project(&tmp).join(".ensemble");
+    session(&e, |ask| {
+        let _ = ask("status", json!({}));
+        assert_eq!(
+            crate::harness::lock::holder(&state),
+            Some(std::process::id())
+        );
+    });
+    assert_eq!(crate::harness::lock::holder(&state), None);
+}

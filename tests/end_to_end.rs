@@ -1672,3 +1672,159 @@ fn answer_gives_a_waiting_task_its_answer() {
         stdout_of(&listed)
     );
 }
+
+// ---------------------------------------------------------------------------
+// serve
+// ---------------------------------------------------------------------------
+
+/// Wait up to `seconds` for `done` to be true.
+fn wait_for(seconds: u64, mut done: impl FnMut() -> bool) -> bool {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    while std::time::Instant::now() < end {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    done()
+}
+
+fn sigterm(child: &Child) {
+    let status = Command::new("kill")
+        .arg("-TERM")
+        .arg(child.id().to_string())
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn serve_runs_the_tasks_without_a_session_and_stops_on_sigterm() {
+    let s = Scratch::new("serve");
+    let cli = s.opencode("renamed it", "echo bar > a.txt");
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("a.txt", "foo\n");
+    let out = ensemble(
+        &s,
+        &[
+            "submit",
+            "coder",
+            "Rename foo",
+            "--text",
+            "rename foo to bar",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    let mut serve = command(&s)
+        .arg("serve")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert!(
+        wait_for(30, || s
+            .place(".ensemble/tasks/0001-rename-foo/result.md")
+            .is_file()),
+        "serve did not run the task"
+    );
+    assert_eq!(
+        std::fs::read_to_string(s.path().join("a.txt")).unwrap(),
+        "bar\n"
+    );
+    let listed = ensemble(&s, &["tasks"]);
+    assert!(
+        stdout_of(&listed).contains("done"),
+        "{}",
+        stdout_of(&listed)
+    );
+
+    // One worker per folder: a second serve refuses, and a session does not
+    // start another worker.
+    let second = command(&s)
+        .arg("serve")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!second.status.success());
+    assert!(
+        stderr_of(&second).contains("already running"),
+        "{}",
+        stderr_of(&second)
+    );
+
+    sigterm(&serve);
+    let status = serve.wait().unwrap();
+    assert!(status.success(), "serve ends cleanly on SIGTERM");
+    assert!(
+        !s.place(".ensemble/worker.lock").exists(),
+        "the lock is released"
+    );
+}
+
+#[test]
+fn a_task_stopped_in_the_middle_is_run_again_by_the_next_serve() {
+    let s = Scratch::new("serve-resume");
+    // The first run is slow and is stopped; the marker says it had started, so
+    // the run after it answers at once.
+    let marker = s.0.with_extension("bin").join("started");
+    let body = format!(
+        "if [ -e '{0}' ]; then :; else touch '{0}'; sleep 60; fi",
+        marker.display()
+    );
+    let cli = s.opencode("done", &body);
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    let out = ensemble(&s, &["submit", "coder", "Slow", "--text", "take your time"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    let mut first = command(&s)
+        .arg("serve")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(wait_for(30, || s
+        .0
+        .parent()
+        .unwrap()
+        .join("started")
+        .exists()
+        || {
+            let t = ensemble(&s, &["tasks"]);
+            stdout_of(&t).contains("running")
+        }));
+    let listed = ensemble(&s, &["tasks"]);
+    assert!(
+        stdout_of(&listed).contains("running"),
+        "{}",
+        stdout_of(&listed)
+    );
+    sigterm(&first);
+    first.wait().unwrap();
+    assert!(
+        !s.place(".ensemble/tasks/0001-slow/result.md").exists(),
+        "a stopped task has no result"
+    );
+    let listed = ensemble(&s, &["tasks"]);
+    assert!(
+        stdout_of(&listed).contains("interrupted"),
+        "{}",
+        stdout_of(&listed)
+    );
+
+    let mut second = command(&s)
+        .arg("serve")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(
+        wait_for(30, || s
+            .place(".ensemble/tasks/0001-slow/result.md")
+            .is_file()),
+        "the next serve did not run it again"
+    );
+    sigterm(&second);
+    second.wait().unwrap();
+}

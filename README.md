@@ -562,7 +562,45 @@ branch and merge it yourself, or have the manager do it, then
 session's end interrupted, carries on in the worktree it had. The working folder, or
 the task's `repo`, must be a git repository with at least one commit.
 
-When the caller closes the pipe, running tasks and background delegations are
+### Running tasks without a session
+
+`ensemble serve --org <dir>`, run in the working folder, is the same worker with
+no agent around it: it works through the folder's tasks until it gets Ctrl-C or
+SIGTERM, then stops the running ones (they run again next time) and leaves the
+rest queued. Only one worker runs a folder's tasks, so a second `serve`
+refuses, and an `ensemble mcp` that finds one running reads and writes tasks
+but starts none of its own; `ensemble tasks` shows a task as `running` while
+the other worker has it. The worker's lock is a file in the state directory; one
+left by a process that died is taken over.
+
+To keep it running, as a systemd user unit (`~/.config/systemd/user/ensemble.service`):
+
+```ini
+[Service]
+WorkingDirectory=%h/work/myproject
+ExecStart=ensemble serve --org %h/my-org --env-file %h/.config/ensemble.env
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+and `systemctl --user enable --now ensemble`. On macOS, a launchd agent
+(`~/Library/LaunchAgents/dev.ensemble.plist`):
+
+```xml
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.ensemble</string>
+  <key>WorkingDirectory</key><string>/Users/me/work/myproject</string>
+  <key>ProgramArguments</key><array>
+    <string>ensemble</string><string>serve</string>
+    <string>--org</string><string>/Users/me/my-org</string>
+  </array>
+  <key>KeepAlive</key><true/>
+</dict></plist>
+```
+
+When the caller closes the pipe of an `ensemble mcp`, running tasks and background delegations are
 stopped. A task stopped that way gets no result, so it runs again in the next
 session; tasks that had not started stay queued. Tasks of a `shared` agent share the
 project like any other parallel delegations, so give two of them that change
@@ -737,6 +775,7 @@ $ ensemble tasks [--status S]      # the tasks of this working folder and where 
 $ ensemble task <id>               # one task: ticket, state, question or result
 $ ensemble submit <agent> <title> --text T   # write a task (also --goal --context --repo --gate --after ...)
 $ ensemble answer <id> <text>      # answer the question a task stopped to ask
+$ ensemble serve --org <dir>       # run this folder's tasks with no session, until stopped
 $ ensemble init --org <dir>        # write a sample organization: <dir>/config.yaml
 $ ensemble init --stdout           # print it instead (init refuses to overwrite without --force)
 $ ensemble migrate <file> --org <dir>  # a version 1 config becomes an organization
@@ -771,6 +810,7 @@ state directory), `--context <text>` (for `run`).
 | `src/tasks.rs` | tasks as files: `task.md`, `result.md`, and the git-ignored `runs/` |
 | `src/worktree.rs` | a git worktree and branch per task, and committing its work there |
 | `src/harness/delegation.rs` | the tools your agent calls: delegate, submit, status, wait, cancel, agents, health |
+| `src/harness/serve.rs`, `src/harness/lock.rs` | `ensemble serve`, and the one-worker-per-folder lock |
 | `src/harness/queue.rs` | the worker that runs tasks, background delegations, agent slots (`max_concurrent`), wait and cancel |
 | `src/harness/mcp/` | the MCP server, over stdio: the loop (`mod.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`) |
 | `ensemble.schema.json` | the JSON Schema for `config.yaml` |
@@ -824,8 +864,10 @@ scripts stand in for the CLIs.
 - **Limits are per agent, not per model server or subscription.** Two agents
   on one server each get their own `max_concurrent`; a budget is shared by
   every project that uses the organization, but counts runs, not tokens.
-- **Tasks run only while a session runs.** There is no daemon: the worker lives
-  in `ensemble mcp`.
+- **Tasks run only while a worker runs.** The worker lives in `ensemble mcp`, so
+  tasks stop with the manager's session; `ensemble serve` is a worker with no
+  session, for queues that should go on. One worker runs a folder's tasks at a
+  time.
 - **The working folder is fixed when the server starts.** The working
   directory of the process (or `--dir`). A call can work in a folder inside it
   with `repo`, but not outside.

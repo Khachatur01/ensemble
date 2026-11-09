@@ -187,7 +187,17 @@ pub fn serve<W: Write + Send>(
             let _ = send(&n);
         }
     };
-    let mut store = Store::new(&ensemble.state_dir()?);
+    let state = ensemble.state_dir()?;
+    // One worker per folder: when another process (`ensemble serve`, or another
+    // session) has it, this one reads and writes the tasks and runs none.
+    let lock = super::lock::acquire(&state);
+    if let Err(pid) = &lock {
+        eprintln!(
+            "ensemble: process {pid} is running this folder's tasks; this session only reads and writes them"
+        );
+    }
+    let worker = lock.is_ok();
+    let mut store = Store::new(&state);
     if let Some(usage) = ensemble.usage_dir() {
         store = store.with_usage_dir(usage);
     }
@@ -195,7 +205,9 @@ pub fn serve<W: Write + Send>(
     let (send, notify, running, queue) = (&send, &notify, &running, &queue);
 
     std::thread::scope(|scope| {
-        scope.spawn(move || queue.work(&spawner(scope)));
+        if worker {
+            scope.spawn(move || queue.work(&spawner(scope)));
+        }
         let result = (|| -> std::io::Result<()> {
             for line in input.lines() {
                 let line = line?;
