@@ -19,6 +19,7 @@ pub const STATUS: &str = "status";
 pub const WAIT: &str = "wait";
 pub const CANCEL: &str = "cancel";
 pub const ANSWER: &str = "answer";
+pub const ASSIGN: &str = "assign";
 
 /// Seconds `wait` waits when the caller names no time, and the most it may.
 const DEFAULT_WAIT_SECONDS: u64 = 30;
@@ -109,7 +110,11 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                     "agent": {
                         "type": "string",
                         "enum": agents,
-                        "description": "Which agent of the ensemble does the work."
+                        "description": "Who does the work. Leave it out, and give `team`, to put the task in that team's backlog for someone to assign."
+                    },
+                    "team": {
+                        "type": "string",
+                        "description": "With no `agent`: the team whose backlog the task goes to."
                     },
                     "title": {
                         "type": "string",
@@ -161,7 +166,7 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                         "additionalProperties": false
                     }
                 },
-                "required": ["agent", "title", "task"],
+                "required": ["title", "task"],
                 "additionalProperties": false
             }),
         });
@@ -212,6 +217,24 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                     "task": { "type": "string", "description": "The id `submit` or `delegate` returned." }
                 },
                 "required": ["task"],
+                "additionalProperties": false
+            }),
+        });
+
+        out.push(Tool {
+            name: ASSIGN,
+            description:
+                "Assign a task to an agent: a task in the backlog (no assignee yet), or one \
+                          that should go to someone else. An agent with no task assigned stays \
+                          idle. Not for a task that is running or has ended."
+                    .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "The task id." },
+                    "agent": { "type": "string", "description": "Who gets it, as team/agent." }
+                },
+                "required": ["task", "agent"],
                 "additionalProperties": false
             }),
         });
@@ -445,11 +468,9 @@ pub fn call<'s>(
 
         SUBMIT => {
             let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::trim);
-            let (Some(role), Some(title), Some(task)) =
-                (text("agent"), text("title"), text("task"))
-            else {
+            let (Some(title), Some(task)) = (text("title"), text("task")) else {
                 return ToolResult::err(format!(
-                    "{SUBMIT}: `agent`, `title` and `task` are required and must be strings"
+                    "{SUBMIT}: `title` and `task` are required and must be strings"
                 ));
             };
             if title.is_empty() || task.is_empty() {
@@ -458,11 +479,34 @@ pub fn call<'s>(
             if title.contains('\n') {
                 return ToolResult::err(format!("{SUBMIT}: `title` is one line"));
             }
-            let role = &match ensemble.config().qualify(role) {
-                Ok(qualified) => qualified,
-                Err(e) => return ToolResult::err(format!("{SUBMIT}: {e}")),
+            // With an agent the task is assigned; with only a team it goes to
+            // that team's backlog, for the manager to assign.
+            let (role, team) = match (text("agent").filter(|a| !a.is_empty()), text("team")) {
+                (Some(agent), _) => match ensemble.config().qualify(agent) {
+                    Ok(qualified) => {
+                        let team = ensemble.config().agents[&qualified].team.clone();
+                        (qualified, team)
+                    }
+                    Err(e) => return ToolResult::err(format!("{SUBMIT}: {e}")),
+                },
+                (None, Some(team)) if ensemble.config().teams.contains_key(team) => {
+                    (String::new(), team.to_string())
+                }
+                (None, Some(team)) => {
+                    let known: Vec<&str> =
+                        ensemble.config().teams.keys().map(String::as_str).collect();
+                    return ToolResult::err(format!(
+                        "{SUBMIT}: no team '{team}'. Teams: {}.",
+                        known.join(", ")
+                    ));
+                }
+                (None, None) => {
+                    return ToolResult::err(format!(
+                        "{SUBMIT}: name an `agent` to assign it to, or a `team` to put it in the backlog of"
+                    ));
+                }
             };
-            let team = ensemble.config().agents[role].team.clone();
+            let role = &role;
             let mut lists = Vec::new();
             for key in ["constraints", "files", "done_when", "after"] {
                 match args.get(key) {
@@ -525,6 +569,7 @@ pub fn call<'s>(
             queue.submit(&crate::tasks::Ticket {
                 title: title.to_string(),
                 agent: role.to_string(),
+                team: team.clone(),
                 context: optional("context"),
                 goal: optional("goal"),
                 repo: optional("repo"),
@@ -566,6 +611,14 @@ pub fn call<'s>(
                 "{CANCEL}: `task` is required and must be a task id"
             )),
         },
+
+        ASSIGN => {
+            let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::trim);
+            match (text("task"), text("agent")) {
+                (Some(id), Some(agent)) if !agent.is_empty() => queue.assign(id, agent),
+                _ => ToolResult::err(format!("{ASSIGN}: `task` and `agent` are required")),
+            }
+        }
 
         ANSWER => {
             let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::trim);
@@ -655,7 +708,7 @@ pub fn call<'s>(
 
         other => ToolResult::err(format!(
             "no such tool: '{other}'. This server provides: \
-             {DELEGATE}, {SUBMIT}, {STATUS}, {WAIT}, {CANCEL}, {ANSWER}, {AGENTS}, {HEALTH}."
+             {DELEGATE}, {SUBMIT}, {STATUS}, {WAIT}, {CANCEL}, {ANSWER}, {ASSIGN}, {AGENTS}, {HEALTH}."
         )),
     }
 }
@@ -829,7 +882,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                DELEGATE, SUBMIT, STATUS, WAIT, CANCEL, ANSWER, AGENTS, HEALTH
+                DELEGATE, SUBMIT, STATUS, WAIT, CANCEL, ASSIGN, ANSWER, AGENTS, HEALTH
             ]
         );
     }

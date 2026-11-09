@@ -39,6 +39,10 @@ const LOG_FILE: &str = "log.txt";
 const REPLY_FILE: &str = "reply.md";
 /// When each agent with a budget started its recent runs, across sessions.
 const USAGE_FILE: &str = "usage.json";
+/// Who a task is assigned to now, beside its immutable `task.md`.
+const ASSIGNEE_FILE: &str = "assignee.txt";
+/// What agents handed on, in order.
+const HANDOFFS_FILE: &str = "handoffs.md";
 
 /// How an agent asks: a line of its reply starting with this.
 pub const ASK_MARKER: &str = "NEEDS INPUT:";
@@ -85,7 +89,8 @@ Live state and activity logs are in ../runs/, which git ignores.
 #[serde(deny_unknown_fields)]
 struct FrontMatter {
     title: String,
-    agent: String,
+    /// Its assignee. Without one the task is in the backlog.
+    agent: Option<String>,
     context: Option<String>,
     goal: Option<String>,
     constraints: Option<Vec<String>>,
@@ -95,6 +100,10 @@ struct FrontMatter {
     repo: Option<String>,
     gate: Option<GateRef>,
 }
+
+/// How an agent hands a task on: a line of its reply starting with this, then
+/// the agent and what remains.
+pub const HANDOFF_MARKER: &str = "HAND OFF:";
 
 /// A task's gate: which of the config's `gates` its work must pass, and how
 /// many runs of the agent it gets to pass it.
@@ -112,8 +121,9 @@ pub struct GateRef {
 pub struct Ticket {
     pub id: String,
     pub title: String,
-    /// `team/agent`: a ticket written as `agent` is taken as the agent of the
-    /// team whose folder it is in.
+    /// Its assignee, `team/agent`: a ticket written as `agent` is taken as the
+    /// agent of the team whose folder it is in. Empty for a task in the backlog,
+    /// which no agent works on until it is assigned.
     pub agent: String,
     /// The team whose folder the task is in; its tracker.
     pub team: String,
@@ -182,6 +192,9 @@ pub fn entry_line(
     match entry {
         Entry::Task(t, Some(status)) => {
             format!("{} · {} · {} · {}", t.id, t.agent, status.as_str(), t.title)
+        }
+        Entry::Task(t, None) if t.agent.is_empty() => {
+            format!("{} · - · backlog · {}", t.id, t.title)
         }
         Entry::Task(t, None) => {
             let recorded = store.and_then(|s| s.state(&t.id));
@@ -310,27 +323,28 @@ impl Store {
     /// Write `ticket` as a new task and return its id: the next number, then
     /// a slug of the title. The ticket's own `id` is not used.
     pub fn create(&self, ticket: &Ticket) -> io::Result<String> {
-        let team = ticket
-            .agent
-            .split_once('/')
-            .map(|(team, _)| team)
-            .filter(|team| valid_id(team))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "agent '{}' is not team/agent, so there is no team to keep the task in",
-                        ticket.agent
-                    ),
-                )
-            })?;
+        // The team is the assignee's, or the one named for a backlog task.
+        let team = if ticket.agent.is_empty() {
+            Some(ticket.team.as_str())
+        } else {
+            ticket.agent.split_once('/').map(|(team, _)| team)
+        }
+        .filter(|team| valid_id(team))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "agent '{}' is not team/agent, so there is no team to keep the task in",
+                    ticket.agent
+                ),
+            )
+        })?;
         let folder = self.tasks.join(team);
         fs::create_dir_all(&folder)?;
-        let mut front = format!(
-            "title: {}\nagent: {}\n",
-            yaml_str(&ticket.title),
-            yaml_str(&ticket.agent)
-        );
+        let mut front = format!("title: {}\n", yaml_str(&ticket.title));
+        if !ticket.agent.is_empty() {
+            front.push_str(&format!("agent: {}\n", yaml_str(&ticket.agent)));
+        }
         for (key, value) in [
             ("context", &ticket.context),
             ("goal", &ticket.goal),
@@ -456,6 +470,7 @@ impl Store {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         match ticket.agent.split_once('/') {
+            _ if ticket.agent.is_empty() => {}
             Some((of, _)) if of != team => {
                 return Err(format!(
                     "{}: agent '{}' is in team '{of}', but the task is in team '{team}': a team's tasks go to its own agents",
@@ -465,6 +480,12 @@ impl Store {
             }
             Some(_) => {}
             None => ticket.agent = format!("{team}/{}", ticket.agent),
+        }
+        // Who it is assigned to now, if it was assigned or handed on since.
+        if let Ok(now) = fs::read_to_string(dir.join(ASSIGNEE_FILE))
+            && !now.trim().is_empty()
+        {
+            ticket.agent = now.trim().to_string();
         }
         ticket.team = team;
         Ok(ticket)
@@ -626,6 +647,50 @@ impl Store {
     }
 
     /// When each agent started its recent runs, in seconds since the epoch.
+    /// Assign task `id` to `agent` (`team/agent`), whoever has it now. The
+    /// ticket itself is not rewritten: the assignee is kept beside it.
+    pub fn assign(&self, id: &str, agent: &str) -> io::Result<()> {
+        if !self.exists(id) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no task '{id}'"),
+            ));
+        }
+        write_atomically(&self.dir(id).join(ASSIGNEE_FILE), agent.trim())
+    }
+
+    /// Note that `from` handed task `id` on to `to`, saying what remains, with
+    /// what it had said.
+    pub fn append_handoff(
+        &self,
+        id: &str,
+        from: &str,
+        to: &str,
+        note: &str,
+        reply: &str,
+    ) -> io::Result<()> {
+        let path = self.dir(id).join(HANDOFFS_FILE);
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        write!(
+            f,
+            "## {from} handed this to {to}\n{}\n\nWhat {from} had said:\n{}\n\n",
+            if note.trim().is_empty() {
+                "(no note)"
+            } else {
+                note.trim()
+            },
+            reply.trim()
+        )
+    }
+
+    /// What earlier agents handed on, for the next one.
+    pub fn handoffs(&self, id: &str) -> Option<String> {
+        fs::read_to_string(self.dir(id).join(HANDOFFS_FILE)).ok()
+    }
+
     pub fn usage(&self) -> BTreeMap<String, Vec<u64>> {
         fs::read_to_string(self.usage_path())
             .ok()
@@ -669,6 +734,75 @@ pub fn question_in(reply: &str) -> Option<String> {
         .find_map(|l| l.trim().strip_prefix(ASK_MARKER))
         .map(|q| q.trim().to_string())
         .filter(|q| !q.is_empty())
+}
+
+/// Where an agent's reply hands the task: the last line that starts with
+/// [`HANDOFF_MARKER`], as the agent named and the note after it.
+pub fn handoff_in(reply: &str) -> Option<(String, String)> {
+    let rest = reply
+        .lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix(HANDOFF_MARKER))?
+        .trim();
+    let (agent, note) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    let note = note.trim().trim_start_matches(['—', '-', ':']).trim();
+    (!agent.is_empty()).then(|| (agent.to_string(), note.to_string()))
+}
+
+/// How many tasks are active: assigned, not ended, and not waiting on an answer
+/// or on a task that ended without being done.
+pub fn active_tasks(entries: &[Entry], store: Option<&Store>) -> usize {
+    entries
+        .iter()
+        .filter(|e| match e {
+            Entry::Task(t, None) => {
+                !t.agent.is_empty()
+                    && store.is_none_or(|s| s.open_question(&t.id).is_none())
+                    && !waiting_for(t, entries).iter().any(|w| {
+                        w.ends_with("(failed)")
+                            || w.ends_with("(cancelled)")
+                            || w.ends_with("(no such task)")
+                            || w.ends_with("(unreadable)")
+                    })
+            }
+            _ => false,
+        })
+        .count()
+}
+
+/// A line saying the organization has nothing active, and what is waiting for
+/// the owner; `None` while something is.
+pub fn idle_line(entries: &[Entry], store: Option<&Store>) -> Option<String> {
+    if active_tasks(entries, store) > 0 {
+        return None;
+    }
+    let unfinished: Vec<&Ticket> = entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Task(t, None) => Some(&**t),
+            _ => None,
+        })
+        .collect();
+    let backlog = unfinished.iter().filter(|t| t.agent.is_empty()).count();
+    let asking = unfinished
+        .iter()
+        .filter(|t| store.is_some_and(|s| s.open_question(&t.id).is_some()))
+        .count();
+    let mut waiting = Vec::new();
+    if backlog > 0 {
+        waiting.push(format!("{backlog} in the backlog, to be assigned"));
+    }
+    if asking > 0 {
+        waiting.push(format!("{asking} waiting for an answer"));
+    }
+    Some(format!(
+        "Idle: no active tasks{}. The organization waits for planning: tell your manager what to do next.",
+        if waiting.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", waiting.join(", "))
+        }
+    ))
 }
 
 /// What `ticket` still waits for: each task in its `after` that is not done,
@@ -755,9 +889,6 @@ fn parse_ticket(id: &str, text: &str) -> Result<Ticket, String> {
     if front.title.trim().is_empty() {
         return Err("`title` is empty".into());
     }
-    if front.agent.trim().is_empty() {
-        return Err("`agent` is empty".into());
-    }
     let text = body.trim();
     if text.is_empty() {
         return Err("there is no task below the front matter".into());
@@ -781,7 +912,7 @@ fn parse_ticket(id: &str, text: &str) -> Result<Ticket, String> {
     Ok(Ticket {
         id: id.to_string(),
         title: front.title.trim().to_string(),
-        agent: front.agent.trim().to_string(),
+        agent: front.agent.unwrap_or_default().trim().to_string(),
         team: String::new(),
         context: some(front.context),
         goal: some(front.goal),

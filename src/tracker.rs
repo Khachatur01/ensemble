@@ -43,6 +43,21 @@ pub trait Tracker: Sync {
     fn open_question(&self, id: &str) -> Option<String>;
     fn answer(&self, id: &str, answer: &str) -> Result<(), String>;
     fn conversation(&self, id: &str) -> Option<(String, String)>;
+    /// Give a task to `agent` (`team/agent`), from the backlog or from whoever
+    /// has it.
+    fn assign(&self, id: &str, agent: &str) -> io::Result<()>;
+    /// Note that `from` handed a task to `to`, with what remains and what it had
+    /// said.
+    fn append_handoff(
+        &self,
+        id: &str,
+        from: &str,
+        to: &str,
+        note: &str,
+        reply: &str,
+    ) -> io::Result<()>;
+    /// What earlier agents handed on, for the next one.
+    fn handoffs(&self, id: &str) -> Option<String>;
 }
 
 /// Tasks as markdown files: `tasks/<team>/<id>-<slug>/task.md`, with
@@ -99,6 +114,22 @@ impl Tracker for crate::tasks::Store {
     }
     fn conversation(&self, id: &str) -> Option<(String, String)> {
         crate::tasks::Store::conversation(self, id)
+    }
+    fn assign(&self, id: &str, agent: &str) -> io::Result<()> {
+        crate::tasks::Store::assign(self, id, agent)
+    }
+    fn append_handoff(
+        &self,
+        id: &str,
+        from: &str,
+        to: &str,
+        note: &str,
+        reply: &str,
+    ) -> io::Result<()> {
+        crate::tasks::Store::append_handoff(self, id, from, to, note, reply)
+    }
+    fn handoffs(&self, id: &str) -> Option<String> {
+        crate::tasks::Store::handoffs(self, id)
     }
 }
 

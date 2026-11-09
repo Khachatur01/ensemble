@@ -55,13 +55,18 @@ COMMANDS:
                             stands. Reads files; starts nothing.
     task ID                 Show one task: its ticket, where it stands, its
                             question or its result.
-    submit AGENT TITLE --text T [--goal G] [--context C] [--repo R] [--gate N:K]
+    submit AGENT TITLE --text T   (or TITLE --team T: put it in a team's backlog)
+           [--goal G] [--context C] [--repo R] [--gate N:K]
            [--after ID,ID] [--files F,F] [--constraints C,C] [--done-when D,D]
                             Write a task. A running `ensemble mcp` picks it up.
     answer ID TEXT          Answer the question a task stopped to ask.
-    serve                   Work through this folder's tasks with no agent session
-                            around them, until stopped (Ctrl-C or SIGTERM). Only
-                            one worker runs a folder's tasks at a time.
+    serve [--exit-when-idle]
+                            Work through this folder's tasks with no agent session
+                            around them, until stopped (Ctrl-C or SIGTERM), saying
+                            when nothing is left to do; --exit-when-idle stops
+                            there instead. Only one worker runs a folder's tasks.
+    assign ID AGENT         Give a task to an agent: from the backlog, or to
+                            someone else.
     stats [--since 7d] [--json]
                             What each agent has done: runs, failures, time and
                             tokens, from the record every run leaves.
@@ -154,8 +159,8 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             "--context" => context = Some(value("--context")?),
             "--manager" | "--adapter" | "--model" | "--backend" | "--starter" | "--only"
             | "--prompt" | "--team-prompt" | "--status" | "--text" | "--goal" | "--repo"
-            | "--gate" | "--since" | "--after" | "--files" | "--constraints" | "--done-when"
-            | "--ref" => {
+            | "--gate" | "--team" | "--since" | "--after" | "--files" | "--constraints"
+            | "--done-when" | "--ref" => {
                 opts.insert(arg.clone(), value(&arg)?);
             }
             other if other.starts_with('-') && command.is_none() => {
@@ -246,6 +251,7 @@ fn run() -> Result<ExitCode, String> {
         "submit" => cmd_submit(&config, &dir, &args),
         "serve" => cmd_serve(config, dir, &args),
         "stats" => cmd_stats(config, dir, &args),
+        "assign" => cmd_assign(&config, &dir, &args),
         "run" => cmd_run(config, dir, &args),
         other => Err(format!("unknown command '{other}'. Try --help.")),
     }
@@ -1063,6 +1069,12 @@ fn cmd_tasks(args: &Args, dir: &Path) -> Result<ExitCode, String> {
             }
         );
     }
+    if wanted.is_none()
+        && !worker
+        && let Some(idle) = tasks::idle_line(&entries, Some(&store))
+    {
+        println!("{idle}");
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1130,9 +1142,14 @@ fn list_opt(args: &Args, name: &str) -> Vec<String> {
 }
 
 fn cmd_submit(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, String> {
-    let (agent, title) = match args.rest.as_slice() {
-        [agent, title, ..] if !agent.starts_with("--") && !title.starts_with("--") => (agent, title),
-        _ => return Err("submit: needs an agent and a title: `ensemble submit software/coder \"Add retry\" --text ...`".into()),
+    // An agent and a title, or a title and `--team`, which is the backlog.
+    let positional: Vec<&String> = args.rest.iter().filter(|a| !a.starts_with("--")).collect();
+    let (agent, title): (String, &String) = match (opt(args, "--team"), positional.as_slice()) {
+        (None, [agent, title, ..]) => ((*agent).clone(), *title),
+        (Some(_), [title, ..]) => (String::new(), *title),
+        _ => {
+            return Err("submit: needs an agent and a title: `ensemble submit software/coder \"Add retry\" --text ...`, or a title and --team for the backlog".into());
+        }
     };
     let mut text = opt(args, "--text").map(str::to_string);
     if text.is_none() && !std::io::stdin().is_terminal() {
@@ -1150,8 +1167,21 @@ fn cmd_submit(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, Stri
     if title.trim().is_empty() || title.contains('\n') {
         return Err("submit: the title is one non-empty line".into());
     }
-    let qualified = config.qualify(agent).map_err(|e| format!("submit: {e}"))?;
-    let team = config.agents[&qualified].team.clone();
+    let (qualified, team) = if agent.is_empty() {
+        let team = opt(args, "--team").unwrap_or_default();
+        if !config.teams.contains_key(team) {
+            let known: Vec<&str> = config.teams.keys().map(String::as_str).collect();
+            return Err(format!(
+                "submit: no team '{team}'. Teams: {}.",
+                known.join(", ")
+            ));
+        }
+        (String::new(), team.to_string())
+    } else {
+        let qualified = config.qualify(&agent).map_err(|e| format!("submit: {e}"))?;
+        let team = config.agents[&qualified].team.clone();
+        (qualified, team)
+    };
     let gate = match opt(args, "--gate") {
         None => None,
         Some(spec) => {
@@ -1177,6 +1207,7 @@ fn cmd_submit(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, Stri
     let ticket = tasks::Ticket {
         title: title.trim().to_string(),
         agent: qualified,
+        team: team.clone(),
         context: args.context.clone(),
         goal: opt(args, "--goal").map(str::to_string),
         constraints: list_opt(args, "--constraints"),
@@ -1214,7 +1245,12 @@ fn cmd_serve(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, Stri
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
     }
     let ensemble = ensemble_for(config, dir, args);
-    ensemble::harness::serve::run(&ensemble, &STOP, &|line| eprintln!("ensemble: {line}"))?;
+    ensemble::harness::serve::run(
+        &ensemble,
+        &STOP,
+        &|line| eprintln!("ensemble: {line}"),
+        has(args, "--exit-when-idle"),
+    )?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1240,5 +1276,31 @@ fn cmd_stats(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, Stri
     } else {
         print!("{}", ensemble::records::table(&summaries));
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_assign(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, String> {
+    let (id, agent) =
+        match args.rest.as_slice() {
+            [id, agent, ..] => (id, agent),
+            _ => return Err(
+                "assign: needs a task id and an agent: `ensemble assign 0003-fix software/coder`"
+                    .into(),
+            ),
+        };
+    let store = store_for(dir, args)?;
+    if !store.exists(id) {
+        return Err(format!(
+            "assign: no task '{id}'. `ensemble tasks` lists them."
+        ));
+    }
+    let to = config.qualify(agent).map_err(|e| format!("assign: {e}"))?;
+    if store.outcome(id).is_some() {
+        return Err(format!("assign: {id} has ended; submit it again."));
+    }
+    store
+        .assign(id, &to)
+        .map_err(|e| format!("assign: cannot write: {e}"))?;
+    println!("{id} is assigned to {to}.");
     Ok(ExitCode::SUCCESS)
 }

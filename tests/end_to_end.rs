@@ -657,7 +657,8 @@ fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
     assert_eq!(
         names,
         vec![
-            "delegate", "submit", "status", "wait", "cancel", "answer", "agents", "health"
+            "delegate", "submit", "status", "wait", "cancel", "assign", "answer", "agents",
+            "health"
         ]
     );
 }
@@ -1882,4 +1883,106 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
     let bad = ensemble(&s, &["stats", "--since", "soon"]);
     assert!(!bad.status.success());
     assert!(stderr_of(&bad).contains("duration"), "{}", stderr_of(&bad));
+}
+
+// ---------------------------------------------------------------------------
+// An organization that works on its own
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_backlog_task_is_assigned_then_served_and_the_organization_says_when_it_is_idle() {
+    let s = Scratch::new("backlog");
+    let cli = s.opencode("renamed it", "echo bar > a.txt");
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("a.txt", "foo\n");
+
+    let out = ensemble(
+        &s,
+        &[
+            "submit",
+            "Rename foo",
+            "--team",
+            "default",
+            "--text",
+            "rename foo to bar",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let listed = stdout_of(&ensemble(&s, &["tasks"]));
+    assert!(listed.contains("0001-rename-foo · - · backlog"), "{listed}");
+    assert!(
+        listed.contains("Idle: no active tasks (1 in the backlog, to be assigned)"),
+        "{listed}"
+    );
+    assert!(
+        s.place(".ensemble/tasks/default/0001-rename-foo/task.md")
+            .is_file()
+    );
+
+    // Nothing runs it while it has no assignee.
+    let idle = command(&s)
+        .args(["serve", "--exit-when-idle"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(idle.status.success(), "{}", stderr_of(&idle));
+    assert!(
+        stderr_of(&idle).contains("Idle: no active tasks"),
+        "{}",
+        stderr_of(&idle)
+    );
+    assert!(
+        !s.place(".ensemble/tasks/default/0001-rename-foo/result.md")
+            .exists()
+    );
+
+    let bad = ensemble(&s, &["assign", "0001-rename-foo", "nobody"]);
+    assert!(!bad.status.success());
+    let ok = ensemble(&s, &["assign", "0001-rename-foo", "coder"]);
+    assert!(ok.status.success(), "{}", stderr_of(&ok));
+    assert!(
+        stdout_of(&ok).contains("assigned to default/coder"),
+        "{}",
+        stdout_of(&ok)
+    );
+    let listed = stdout_of(&ensemble(&s, &["tasks"]));
+    assert!(listed.contains("default/coder · queued"), "{listed}");
+    assert!(!listed.contains("Idle"), "{listed}");
+
+    // Served, then it stops by itself because nothing is left.
+    let served = command(&s)
+        .args(["serve", "--exit-when-idle"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(served.status.success(), "{}", stderr_of(&served));
+    assert!(
+        stderr_of(&served).contains("Idle: no active tasks"),
+        "{}",
+        stderr_of(&served)
+    );
+    assert_eq!(
+        std::fs::read_to_string(s.path().join("a.txt")).unwrap(),
+        "bar\n"
+    );
+    assert!(stdout_of(&ensemble(&s, &["tasks"])).contains("Idle: no active tasks"));
+    let shown = stdout_of(&ensemble(&s, &["task", "0001-rename-foo"]));
+    assert!(shown.contains("status: done"), "{shown}");
+}
+
+#[test]
+fn an_empty_organization_is_idle_and_serve_can_end_there() {
+    let s = Scratch::new("idle-empty");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    let out = command(&s)
+        .args(["serve", "--exit-when-idle"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("Idle: no active tasks. The organization waits for planning"),
+        "{}",
+        stderr_of(&out)
+    );
 }

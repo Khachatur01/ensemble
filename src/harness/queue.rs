@@ -26,7 +26,10 @@ use super::delegation::{ToolResult, run_delegation};
 use crate::config::{Budget, Isolation};
 use crate::external::gate;
 use crate::router::Ensemble;
-use crate::tasks::{ASK_MARKER, Entry, Status, Store, Ticket, minutes, question_in, waiting_for};
+use crate::tasks::{
+    ASK_MARKER, Entry, HANDOFF_MARKER, Status, Store, Ticket, handoff_in, idle_line, minutes,
+    question_in, waiting_for,
+};
 use crate::tracker::Tracker;
 use crate::worktree;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -419,6 +422,7 @@ impl<'e> Queue<'e> {
                 // Ended since the scan: a result is written before its run
                 // leaves `live`, under this lock.
                 if inner.live.contains_key(&ticket.id)
+                    || ticket.agent.is_empty()
                     || store.outcome(&ticket.id).is_some()
                     || !waiting_for(ticket, &entries).is_empty()
                     || store.open_question(&ticket.id).is_some()
@@ -497,6 +501,25 @@ impl<'e> Queue<'e> {
         let question = (!result.is_error && !cancel.load(Ordering::Relaxed))
             .then(|| question_in(&result.text))
             .flatten();
+        // Handing the task on is not finishing it: it goes to another agent with
+        // a note, and its worktree stays as it is for that agent.
+        let mut handoff = None;
+        if question.is_none()
+            && !result.is_error
+            && !cancel.load(Ordering::Relaxed)
+            && let Some((target, note)) = handoff_in(&result.text)
+        {
+            match self.ensemble.config().qualify(&target) {
+                Ok(to) if to != ticket.agent => handoff = Some((to, note)),
+                Ok(_) => {}
+                Err(e) => {
+                    result = ToolResult::err(format!(
+                        "{}\n\n[it tried to hand the task to '{target}', which is not an agent: {e}]",
+                        result.text
+                    ));
+                }
+            }
+        }
         if let Some(question) = &question {
             self.note(
                 &ticket.id,
@@ -509,6 +532,7 @@ impl<'e> Queue<'e> {
         if let Ok((_, Some(wt))) = &place
             && !interrupted_now
             && question.is_none()
+            && handoff.is_none()
         {
             extra.push(("branch", wt.branch.clone()));
             let note = match worktree::commit(wt, &format!("{}: {}", ticket.id, ticket.title)) {
@@ -534,6 +558,36 @@ impl<'e> Queue<'e> {
             store.set_state(&ticket.id, "interrupted", since);
         } else if question.is_some() {
             store.set_state(&ticket.id, "needs-input", since);
+        } else if let Some((to, note)) = &handoff {
+            match store
+                .append_handoff(&ticket.id, &ticket.agent, to, note, &result.text)
+                .and_then(|()| store.assign(&ticket.id, to))
+            {
+                Ok(()) => {
+                    // The lock is held here, so the log is written directly.
+                    store.log(
+                        &ticket.id,
+                        &format!("{} handed the task to {to}", ticket.agent),
+                    );
+                    store.set_state(&ticket.id, "queued", since);
+                }
+                Err(e) => {
+                    eprintln!("ensemble: cannot hand {} to {to}: {e}", ticket.id);
+                    store.set_state(&ticket.id, "failed", since);
+                    let text = format!(
+                        "{}\n\n[the hand-off to {to} could not be written: {e}]",
+                        result.text
+                    );
+                    let _ = store.write_result(
+                        &ticket.id,
+                        &ticket.agent,
+                        Status::Failed,
+                        since,
+                        &extra,
+                        &text,
+                    );
+                }
+            }
         } else {
             let status = if asked {
                 Status::Cancelled
@@ -578,8 +632,14 @@ impl<'e> Queue<'e> {
                 reply.trim()
             ));
         }
+        if let Some(earlier) = store.handoffs(&ticket.id) {
+            base.push_str(&format!(
+                "\n\nThis task was handed to you. What earlier agents did and left for you:\n\n{}",
+                earlier.trim()
+            ));
+        }
         base.push_str(&format!(
-            "\n\nIf you cannot finish without a decision that only the person who asked can make, stop and end your reply with one line: {ASK_MARKER} <your question>"
+            "\n\nIf you cannot finish without a decision that only the person who asked can make, stop and end your reply with one line: {ASK_MARKER} <your question>\nIf the next part belongs to another agent, end your reply with one line: {HANDOFF_MARKER} <team/agent> <what remains>"
         ));
         let delegate = |prompt: &str| {
             run_delegation(
@@ -721,6 +781,10 @@ impl<'e> Queue<'e> {
         }
         lines.extend(over.into_iter().skip(hidden));
         lines.extend(inner.ended.iter().map(|(id, e)| describe_ended(id, e)));
+        drop(inner);
+        if let Some(idle) = self.idle() {
+            lines.push(idle);
+        }
         if lines.is_empty() {
             ToolResult::ok("No tasks.")
         } else {
@@ -836,6 +900,47 @@ impl<'e> Queue<'e> {
             Ok(()) => ToolResult::ok(format!("{id} is cancelled; it had not started.")),
             Err(e) => ToolResult::err(format!("cannot cancel {id}: {e}")),
         }
+    }
+
+    /// Assign task `id` to `agent`: from the backlog, or to someone else. A
+    /// task that is running or has ended is left alone.
+    pub fn assign(&self, id: &str, agent: &str) -> ToolResult {
+        let Some(store) = &self.store else {
+            return ToolResult::err("there is no task store in this session.");
+        };
+        if !store.exists(id) {
+            let entries = store.scan();
+            return ToolResult::err(unknown(&self.lock(), &entries, id));
+        }
+        let to = match self.ensemble.config().qualify(agent) {
+            Ok(to) => to,
+            Err(e) => return ToolResult::err(format!("cannot assign {id}: {e}")),
+        };
+        if store.outcome(id).is_some() {
+            return ToolResult::err(format!(
+                "{id} has ended; it cannot be assigned. Submit it again."
+            ));
+        }
+        if self.lock().live.contains_key(id) {
+            return ToolResult::err(format!("{id} is running; assign it when it stops."));
+        }
+        match store.assign(id, &to) {
+            Ok(()) => {
+                self.changed.notify_all();
+                ToolResult::ok(format!("{id} is assigned to {to}."))
+            }
+            Err(e) => ToolResult::err(format!("cannot assign {id}: {e}")),
+        }
+    }
+
+    /// A line saying nothing is active, and what waits for the owner, when
+    /// that is so: no run is going and no task is assigned and ready.
+    pub fn idle(&self) -> Option<String> {
+        let store = self.store.as_ref()?;
+        if !self.lock().live.is_empty() {
+            return None;
+        }
+        idle_line(&store.scan(), Some(store))
     }
 
     /// Answer the question a task is waiting on, so it goes on.

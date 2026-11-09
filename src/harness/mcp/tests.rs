@@ -307,7 +307,8 @@ fn tools_list_advertises_the_tools_with_the_real_agent_names() {
     assert_eq!(
         names,
         vec![
-            "delegate", "submit", "status", "wait", "cancel", "answer", "agents", "health"
+            "delegate", "submit", "status", "wait", "cancel", "assign", "answer", "agents",
+            "health"
         ]
     );
 
@@ -1403,4 +1404,100 @@ fn a_plain_answer_is_not_mistaken_for_a_question() {
     let r = call(&e, "delegate", json!({"agent": "scout", "task": "x"}));
     assert!(text_of(&r).starts_with("all done"), "{}", text_of(&r));
     assert!(!text_of(&r).contains("needs_input"));
+}
+
+#[test]
+fn a_backlog_task_waits_for_an_assignee_and_then_runs_for_that_agent() {
+    let (e, tmp) = team(&[("scout", "read", &emit(&step(vec![text("found it")])))]);
+    session(&e, |ask| {
+        let r = ask(
+            "submit",
+            json!({"team": "default", "title": "Look around", "task": "look"}),
+        );
+        assert!(r.contains("0001-look-around"), "{r}");
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let status = ask("status", json!({}));
+        assert!(
+            status.contains("0001-look-around · - · backlog"),
+            "{status}"
+        );
+        assert!(
+            status.contains("Idle: no active tasks (1 in the backlog, to be assigned)"),
+            "{status}"
+        );
+
+        let r = ask(
+            "assign",
+            json!({"task": "0001-look-around", "agent": "scout"}),
+        );
+        assert!(r.contains("assigned to default/scout"), "{r}");
+        let r = ask(
+            "wait",
+            json!({"task": "0001-look-around", "timeout_seconds": 20}),
+        );
+        assert!(r.contains("status: done") && r.contains("found it"), "{r}");
+        let status = ask("status", json!({}));
+        assert!(status.contains("Idle: no active tasks"), "{status}");
+        let again = ask(
+            "assign",
+            json!({"task": "0001-look-around", "agent": "scout"}),
+        );
+        assert!(again.contains("has ended"), "{again}");
+        let none = ask(
+            "assign",
+            json!({"task": "0001-look-around", "agent": "nobody"}),
+        );
+        assert!(none.contains("no agent"), "{none}");
+    });
+    let ticket = std::fs::read_to_string(tasks(&tmp).join("0001-look-around/task.md")).unwrap();
+    assert!(
+        !ticket.contains("agent:"),
+        "task.md is never rewritten: {ticket}"
+    );
+}
+
+#[test]
+fn an_agent_hands_a_task_on_and_the_next_agent_is_told_what_was_done() {
+    let first = r#"t="wrote the plan\nHAND OFF: scout — now check it against the code"
+printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
+"#;
+    let second = r#"if printf '%s' "$*" | grep -q 'now check it against the code'; then t="checked the plan"; else t="no note"; fi
+printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
+"#;
+    let (e, tmp) = team(&[("coder", "read", first), ("scout", "read", second)]);
+    write_task(&tmp, "0001-plan", "coder", "Plan and check.");
+    session(&e, |ask| {
+        let r = ask("wait", json!({"task": "0001-plan", "timeout_seconds": 20}));
+        assert!(
+            r.contains("status: done") && r.contains("checked the plan"),
+            "{r}"
+        );
+        assert!(
+            r.contains("default/scout"),
+            "the result names who finished it: {r}"
+        );
+    });
+    let notes = std::fs::read_to_string(tasks(&tmp).join("0001-plan/handoffs.md")).unwrap();
+    assert!(
+        notes.contains("default/coder handed this to default/scout")
+            && notes.contains("now check it against the code")
+            && notes.contains("wrote the plan"),
+        "{notes}"
+    );
+}
+
+#[test]
+fn a_hand_off_to_nobody_fails_the_task_and_says_so() {
+    let body = r#"t="done mostly\nHAND OFF: ghost the rest"
+printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
+"#;
+    let (e, tmp) = team(&[("coder", "read", body)]);
+    write_task(&tmp, "0001-x", "coder", "Do it.");
+    session(&e, |ask| {
+        let r = ask("wait", json!({"task": "0001-x", "timeout_seconds": 20}));
+        assert!(
+            r.contains("status: failed") && r.contains("which is not an agent"),
+            "{r}"
+        );
+    });
 }

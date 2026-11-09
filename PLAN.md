@@ -386,6 +386,35 @@ and Anning needs its API documentation first.
    not offer them. Say so in the README.
 4. Update the `delegate` schema and the MCP tests that check tool schemas.
 
+## Phase 10b. An organization that works on its own (added by the owner)
+
+The user is the organization's owner or stakeholder. They talk to their own agent
+(the manager) and need not know who works on what, though they can look. The
+organization works through its tasks without a session, and waits for planning
+when it has none.
+
+Decided with the owner:
+
+- `local_markdown` is a tracker like GitLab or Jira, on markdown files. A task in
+  it has an **assignee**: an agent. A task with none is in the **backlog**.
+- An agent with no task assigned to it stays idle until one appears for it. Nothing
+  pulls from the backlog by itself: the manager (or the owner) **assigns** backlog
+  tasks.
+- The agent working on a task may **finish** it, or **hand it off**: end its
+  reply with `HAND OFF: <team/agent> <what remains>`. The task goes to that agent
+  with the note and what was done; it is not finished.
+- When no task is active (assigned, unfinished, not waiting for an answer), the
+  organization says so, and says what waits: the backlog, and questions for the
+  owner. It does this without ending the run (`status`, `tasks`, and a line from
+  `serve`); `serve --exit-when-idle` ends it instead.
+- The manager is the agent the user talks to. A team may also have a manager-like
+  agent of its own; nothing here forbids it.
+
+Built: tickets with no agent (backlog) and the `assign` tool and command; the
+assignee kept in `assignee.txt` beside the immutable `task.md`; `HAND OFF:` with a
+`handoffs.md` history the next agent is shown; the idle summary in `status`,
+`tasks` and `serve`; `serve --exit-when-idle`.
+
 ## Phase 11. Limits and safety
 
 1. **Shared limits.** `limits:` at the organization level, each entry named, with

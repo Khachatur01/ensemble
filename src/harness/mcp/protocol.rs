@@ -46,7 +46,13 @@ pub(super) fn instructions(config: &crate::config::Config) -> String {
          it needs: it cannot see this conversation. For work that may take more than a minute, \
          use `delegate` with `background`, or `submit` a task, then follow it with `status` and \
          `wait`. When the folder you work in holds several repositories, pass `repo` to work \
-         in one of them.",
+         in one of them.\n\n\
+         The person you talk to owns the organization and need not know who does what. \
+         Agents work only on tasks assigned to them and stay idle otherwise. Plan work with the \
+         owner into tasks: `submit` with an `agent` assigns one, `submit` with a `team` and no \
+         agent puts it in that team's backlog, and `assign` gives a backlog task to an agent. An \
+         agent may hand a task on to another. `status` says when nothing is active; then the \
+         organization waits for the next planning with the owner.",
     );
     out
 }

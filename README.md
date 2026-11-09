@@ -581,6 +581,34 @@ branch and merge it yourself, or have the manager do it, then
 session's end interrupted, carries on in the worktree it had. The working folder, or
 the task's `repo`, must be a git repository with at least one commit.
 
+### An organization that works on its own
+
+You are the organization's owner, not its operator: you talk to your own agent,
+the manager, about what you want, and it plans the work into tasks. You can see
+who does what, but you do not have to.
+
+- **Tasks have an assignee**, an agent. A task with none is in its team's
+  **backlog**: `submit` with a `team` and no `agent` (or `ensemble submit TITLE
+  --team T`) puts it there, and `assign` (the tool, or `ensemble assign ID
+  AGENT`) gives it to an agent. The assignee is kept in `assignee.txt` beside the
+  ticket, which is never rewritten.
+- **An agent works only on tasks assigned to it** and stays idle until one
+  appears for it. Nothing pulls from the backlog on its own: the manager, with you,
+  decides who gets what.
+- **An agent may finish a task or hand it on**: it ends its reply with `HAND OFF:
+  <team/agent> <what remains>`. The task goes to that agent, who is shown the note
+  and what was done (`handoffs.md`); a worktree stays as it is. A hand-off to a
+  name that is no agent fails the task and says so.
+- **When nothing is active** (no task is assigned, unfinished and not waiting for
+  your answer) the organization says so, and what waits: `Idle: no active tasks (2
+  in the backlog, to be assigned, 1 waiting for an answer). The organization waits
+  for planning: tell your manager what to do next.` `status` and `ensemble tasks`
+  show it, and `ensemble serve` prints it once without stopping;
+  `ensemble serve --exit-when-idle` stops there instead.
+
+Tasks that ask you something (`NEEDS INPUT:`) wait for your answer, through the
+manager or `ensemble answer`.
+
 ### Running tasks without a session
 
 `ensemble serve --org <dir>`, run in the working folder, is the same worker with
