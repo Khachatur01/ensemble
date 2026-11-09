@@ -82,6 +82,39 @@ struct Inner {
     busy: HashMap<String, u32>,
     /// When each agent with a budget started its runs in the last hour.
     usage: BTreeMap<String, Vec<u64>>,
+    /// Questions that delegations stopped to ask, by session, waiting for the
+    /// caller's answer.
+    asks: HashMap<String, Ask>,
+    asked: u64,
+}
+
+/// A delegation that stopped to ask, kept so that an answer can resume it. It
+/// lives as long as the MCP session.
+#[derive(Debug, Clone)]
+pub struct Ask {
+    pub agent: String,
+    /// The task as it was given.
+    pub task: String,
+    pub context: Option<String>,
+    pub repo: Option<std::path::PathBuf>,
+    pub question: String,
+    /// What the agent said when it stopped.
+    pub reply: String,
+}
+
+impl Ask {
+    /// What the agent is told when it goes on: the task, its question, the
+    /// answer and what it had said.
+    pub fn resume_prompt(&self, answer: &str) -> String {
+        format!(
+            "{}\n\n{}\n\nYou stopped earlier to ask: {}\nThe answer: {}\n\nYour reply when you last stopped:\n{}\n\nGo on from there.",
+            self.task,
+            crate::harness::delegation::ASK_INSTRUCTION,
+            self.question,
+            answer.trim(),
+            self.reply.trim()
+        )
+    }
 }
 
 /// The tasks and background delegations of one session.
@@ -132,6 +165,21 @@ impl<'e> Queue<'e> {
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Keep a question that a delegation stopped to ask, and return the session
+    /// the answer is sent to.
+    pub fn remember(&self, ask: Ask) -> String {
+        let mut inner = self.lock();
+        inner.asked += 1;
+        let session = format!("ask-{}", inner.asked);
+        inner.asks.insert(session.clone(), ask);
+        session
+    }
+
+    /// The question under `session`, once: answering it ends the session.
+    pub fn take_ask(&self, session: &str) -> Option<Ask> {
+        self.lock().asks.remove(session)
     }
 
     /// `agent` as `team/agent`, so that `coder` and `default/coder` share one

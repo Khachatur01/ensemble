@@ -878,9 +878,12 @@ scripts stand in for the CLIs.
 - **Three adapters so far.** `claude-code`, `opencode` and `llm`. Codex is planned, not
   built.
 - **Only OpenCode runs on an LLM backend.** Claude Code needs the Anthropic API.
-- **Only a task can ask.** A delegation is single-shot: the caller must pass
-  everything in `task` and `context`. A task's agent can stop with a question
-  (`NEEDS INPUT:`), but only at the end of a run, not halfway through one.
+- **Only the end of a run can ask.** An agent stops with a question
+  (`NEEDS INPUT:`) at the end of a run, never halfway through one: the CLIs'
+  headless modes do not wait for an answer. For a delegation, the reply says
+  `needs_input: true` with a session; answer it with `delegate` and `continue`,
+  and the agent goes on from what it had. A session lasts as long as the MCP
+  session.
 - **No sandbox of Ensemble's own.** The agents' tools are the CLIs' own; their
   permission settings are what limit them.
 - **Limits are per agent, not per model server or subscription.** Two agents

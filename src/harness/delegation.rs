@@ -6,8 +6,9 @@
 //! decides what runs it — that is the whole point of the indirection, and a
 //! `model` parameter would quietly undo it at the first opportunity.
 
-use super::queue::{Queue, Task};
+use super::queue::{Ask, Queue, Task};
 use crate::router::{Ensemble, RouteError};
+use crate::tasks::question_in;
 use serde_json::{Value, json};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -63,11 +64,11 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                     "agent": {
                         "type": "string",
                         "enum": agents,
-                        "description": "Which agent of the ensemble does the work."
+                        "description": "Which agent does the work, as team/agent. Required unless you `continue` a question."
                     },
                     "task": {
                         "type": "string",
-                        "description": "The task, stated so it can be acted on without further questions."
+                        "description": "The task, stated so it can be acted on without further questions. With `continue`, your answer to the agent's question."
                     },
                     "context": {
                         "type": "string",
@@ -77,6 +78,10 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                         "type": "string",
                         "description": REPO_DESCRIPTION
                     },
+                    "continue": {
+                        "type": "string",
+                        "description": "The session of a question an agent stopped to ask (a reply that starts with needs_input: true). Put your answer in `task`; `agent` is then not needed, and the same agent goes on with what it had."
+                    },
                     "background": {
                         "type": "boolean",
                         "description": "Return at once with an id instead of waiting for the agent. \
@@ -84,7 +89,7 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                                         Nothing is written to the project's tasks."
                     }
                 },
-                "required": ["agent", "task"],
+                "required": ["task"],
                 "additionalProperties": false
             }),
         });
@@ -305,30 +310,77 @@ pub fn call<'s>(
 ) -> ToolResult {
     match name {
         DELEGATE => {
-            let Some(role) = args.get("agent").and_then(Value::as_str) else {
-                return ToolResult::err(format!(
-                    "{DELEGATE}: `agent` is required and must be a string"
-                ));
+            let resumed = match args.get("continue") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(token)) => match queue.take_ask(token.trim()) {
+                    Some(ask) => Some(ask),
+                    None => {
+                        return ToolResult::err(format!(
+                            "{DELEGATE}: no question is waiting under '{token}'. A session is for one answer, and ends with the MCP session; \
+                             delegate again with everything the agent needs."
+                        ));
+                    }
+                },
+                Some(_) => {
+                    return ToolResult::err(format!(
+                        "{DELEGATE}: `continue` must be the session of a question"
+                    ));
+                }
             };
-            let Some(task) = args.get("task").and_then(Value::as_str) else {
+            let Some(given) = args.get("task").and_then(Value::as_str) else {
                 return ToolResult::err(format!(
                     "{DELEGATE}: `task` is required and must be a string"
                 ));
             };
-            if task.trim().is_empty() {
+            if given.trim().is_empty() {
                 return ToolResult::err(format!(
-                    "{DELEGATE}: `task` is empty — there is nothing to do"
+                    "{DELEGATE}: `task` is empty — {}",
+                    if resumed.is_some() {
+                        "with `continue` it is your answer"
+                    } else {
+                        "there is nothing to do"
+                    }
                 ));
             }
-            let context = args.get("context").and_then(Value::as_str);
-            let background = args
-                .get("background")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let repo = match repo_of(ensemble, args) {
-                Ok(repo) => repo,
-                Err(e) => return ToolResult::err(format!("{DELEGATE}: {e}")),
+            let background = resumed.is_none()
+                && args
+                    .get("background")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+
+            // What is delegated: the agent, the task as asked, its context and
+            // the repository to work in. An answer resumes what stopped.
+            let (role, asked, context, repo, prompt) = match resumed {
+                Some(ask) => {
+                    let prompt = ask.resume_prompt(given);
+                    (ask.agent, ask.task, ask.context, ask.repo, prompt)
+                }
+                None => {
+                    let Some(role) = args.get("agent").and_then(Value::as_str) else {
+                        return ToolResult::err(format!(
+                            "{DELEGATE}: `agent` is required and must be a string (unless you `continue` a question)"
+                        ));
+                    };
+                    let repo = match repo_of(ensemble, args) {
+                        Ok(repo) => repo,
+                        Err(e) => return ToolResult::err(format!("{DELEGATE}: {e}")),
+                    };
+                    let context = args.get("context").and_then(Value::as_str);
+                    let prompt = if background {
+                        given.to_string()
+                    } else {
+                        format!("{given}\n\n{ASK_INSTRUCTION}")
+                    };
+                    (
+                        role.to_string(),
+                        given.to_string(),
+                        context.map(str::to_string),
+                        repo,
+                        prompt,
+                    )
+                }
             };
+            let (role, context) = (role.as_str(), context.as_deref());
 
             // An unknown agent fails at once, so it takes the blocking path
             // and says so now rather than inside a background run.
@@ -336,7 +388,7 @@ pub fn call<'s>(
                 return run_delegation(
                     ensemble,
                     role,
-                    task,
+                    &prompt,
                     context,
                     repo.as_deref(),
                     progress,
@@ -347,7 +399,7 @@ pub fn call<'s>(
                 return ToolResult::err(format!("delegation refused: {refused}"));
             }
             if background {
-                let id = queue.start_adhoc(role, task, context, repo, spawn);
+                let id = queue.start_adhoc(role, &prompt, context, repo, spawn);
                 return ToolResult::ok(format!(
                     "{id} started. `status` shows what it is doing; `wait` with task {id} \
                      returns its reply."
@@ -359,15 +411,36 @@ pub fn call<'s>(
                     "delegation cancelled while it waited for a free slot of '{role}'."
                 ));
             };
-            run_delegation(
+            let result = run_delegation(
                 ensemble,
                 role,
-                task,
+                &prompt,
                 context,
                 repo.as_deref(),
                 progress,
                 cancel,
-            )
+            );
+            // An agent that stopped to ask is a question for the caller, with
+            // somewhere to send the answer, not an answer that fell short.
+            match (result.is_error, question_in(&result.text)) {
+                (false, Some(question)) => {
+                    let session = queue.remember(Ask {
+                        agent: role.to_string(),
+                        task: asked,
+                        context: context.map(str::to_string),
+                        repo,
+                        question: question.clone(),
+                        reply: result.text.clone(),
+                    });
+                    ToolResult::ok(format!(
+                        "needs_input: true\nsession: {session}\nquestion: {question}\n\n\
+                         The agent stopped to ask. Answer it with `{DELEGATE}`, `continue` set to \
+                         {session} and your answer as `task`.\n\n{}",
+                        result.text
+                    ))
+                }
+                _ => result,
+            }
         }
 
         SUBMIT => {
@@ -592,6 +665,9 @@ pub fn call<'s>(
 /// work. The agent works in `workdir`, or in the project without one.
 /// Up to this many agents, `agents` lists them all.
 const WHOLE_LISTING: usize = 12;
+
+/// Told to an agent a blocking delegation goes to, so that it can stop and ask.
+pub(crate) const ASK_INSTRUCTION: &str = "If you cannot finish without a decision only the person who asked can make, stop and end your reply with one line: NEEDS INPUT: <your question>";
 
 const REPO_DESCRIPTION: &str = "Optional: a folder of the working directory to work in, such as one repository of several. A path relative to the working directory; one that leaves it is refused.";
 

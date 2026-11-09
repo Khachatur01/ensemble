@@ -365,7 +365,14 @@ fn delegate_passes_the_task_and_its_context_to_the_agent() {
         json!({"agent": "coder", "task": "fix it", "context": "the test fails on line 9"}),
     );
     let prompt = std::fs::read_to_string(tmp.0.join("project/prompt.txt")).unwrap();
-    assert_eq!(prompt, "Context:\nthe test fails on line 9\n\nfix it");
+    assert!(
+        prompt.starts_with("Context:\nthe test fails on line 9\n\nfix it\n\n"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("NEEDS INPUT: <your question>"),
+        "a delegation may ask: {prompt}"
+    );
 }
 
 #[test]
@@ -1339,4 +1346,61 @@ fn a_delegation_leaves_a_record_of_the_run() {
         (Some(5), Some(2))
     );
     assert_eq!(run.steps, 1);
+}
+
+const ASKER: &str = r#"if printf '%s' "$*" | grep -q 'The answer: use bar'; then t="renamed with bar"; else t="NEEDS INPUT: Which name?"; fi
+printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
+"#;
+
+#[test]
+fn a_delegation_that_asks_returns_a_session_and_an_answer_resumes_it() {
+    let (e, _tmp) = team(&[("scout", "read", ASKER)]);
+    session(&e, |ask| {
+        let said = ask("delegate", json!({"agent": "scout", "task": "rename it"}));
+        assert!(
+            said.starts_with("needs_input: true\nsession: ask-1\nquestion: Which name?\n"),
+            "{said}"
+        );
+        assert!(said.contains("`continue`"), "{said}");
+
+        // The answer needs no agent: the same one goes on, with what it had.
+        let second = ask("delegate", json!({"continue": "ask-1", "task": "use bar"}));
+        assert!(second.starts_with("renamed with bar"), "{second}");
+
+        // A session is for one answer.
+        let again = ask("delegate", json!({"continue": "ask-1", "task": "use bar"}));
+        assert!(again.contains("no question is waiting"), "{again}");
+    });
+}
+
+#[test]
+fn an_answer_that_does_not_satisfy_asks_again_under_a_new_session() {
+    let (e, _tmp) = team(&[("scout", "read", ASKER)]);
+    session(&e, |ask| {
+        let first = ask("delegate", json!({"agent": "scout", "task": "rename it"}));
+        assert!(first.contains("session: ask-1"), "{first}");
+        let second = ask("delegate", json!({"continue": "ask-1", "task": "dunno"}));
+        assert!(second.contains("session: ask-2"), "{second}");
+    });
+}
+
+#[test]
+fn continue_needs_an_answer_and_a_plain_delegation_needs_an_agent() {
+    let (e, _tmp) = team(&[("scout", "read", ASKER)]);
+    session(&e, |ask| {
+        let no_agent = ask("delegate", json!({"task": "x"}));
+        assert!(no_agent.contains("`agent` is required"), "{no_agent}");
+        let first = ask("delegate", json!({"agent": "scout", "task": "rename it"}));
+        assert!(first.contains("ask-1"), "{first}");
+        let blank = ask("delegate", json!({"continue": "ask-1", "task": "  "}));
+        assert!(blank.contains("your answer"), "{blank}");
+    });
+}
+
+#[test]
+fn a_plain_answer_is_not_mistaken_for_a_question() {
+    let (e, _tmp) = team(&[("scout", "read", &emit(&step(vec![text("all done")])))]);
+    let r = call(&e, "delegate", json!({"agent": "scout", "task": "x"}));
+    assert!(text_of(&r).starts_with("all done"), "{}", text_of(&r));
+    assert!(!text_of(&r).contains("needs_input"));
 }
