@@ -1085,3 +1085,238 @@ fn a_light_agent_is_one_request_to_its_backend() {
         "{check}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Getting started
+// ---------------------------------------------------------------------------
+
+/// A directory of stand-ins for the manager and agent CLIs. Each answers
+/// `--version`, and otherwise saves its arguments, one per line, to
+/// `<name>.args` beside itself.
+fn stub_clis(scratch: &Scratch, names: &[&str]) -> PathBuf {
+    let bin = scratch.0.with_extension("clis");
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in names {
+        let path = bin.join(name);
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] && exit 0\nprintf '%s\\n' \"$@\" > '{}/{name}.args'\n",
+                bin.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+/// The binary, with only `bin` on its PATH, so no real CLI is ever started.
+fn with_path(scratch: &Scratch, bin: &Path) -> Command {
+    let mut c = Command::new(BIN);
+    c.current_dir(scratch.path())
+        .env("PATH", bin)
+        .env("XDG_STATE_HOME", scratch.state())
+        .env("HOME", scratch.0.with_extension("home"));
+    c
+}
+
+#[test]
+fn connect_registers_the_org_with_the_manager_and_says_what_it_ran() {
+    for (manager, program, scope) in [
+        ("claude-code", "claude", "--scope\nuser\n"),
+        ("opencode", "opencode", "--global\n"),
+    ] {
+        let s = Scratch::new(&format!("connect-{program}"));
+        s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+        let bin = stub_clis(&s, &[program]);
+        let out = with_path(&s, &bin)
+            .args([
+                "connect",
+                "--manager",
+                manager,
+                "--global",
+                "--only",
+                "default",
+            ])
+            .arg("--org")
+            .arg(s.org())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        let said = stdout_of(&out);
+        assert!(said.contains(&format!("$ {program} mcp add")), "{said}");
+        let args = std::fs::read_to_string(bin.join(format!("{program}.args"))).unwrap();
+        assert!(args.starts_with("mcp\nadd\n"), "{args}");
+        assert!(args.contains(scope), "{args}");
+        assert!(args.contains("\nmcp\n--org\n"), "{args}");
+        assert!(args.contains(&s.org().display().to_string()), "{args}");
+        assert!(args.ends_with("--only\ndefault\n"), "{args}");
+    }
+}
+
+#[test]
+fn connect_without_the_manager_cli_prints_the_command_and_fails() {
+    let s = Scratch::new("connect-missing");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    let bin = stub_clis(&s, &[]);
+    let out = with_path(&s, &bin)
+        .args(["connect", "--manager", "claude-code"])
+        .arg("--org")
+        .arg(s.org())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        stdout_of(&out).contains("$ claude mcp add"),
+        "{}",
+        stdout_of(&out)
+    );
+    assert!(
+        stderr_of(&out).contains("not on PATH"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+#[test]
+fn setup_writes_a_starter_registers_it_and_checks_it() {
+    let s = Scratch::new("setup");
+    let bin = stub_clis(&s, &["claude", "opencode"]);
+    let out = with_path(&s, &bin)
+        .args([
+            "setup",
+            "--yes",
+            "--manager",
+            "claude-code",
+            "--starter",
+            "hardware",
+        ])
+        .arg("--org")
+        .arg(s.org())
+        .output()
+        .unwrap();
+    let said = stdout_of(&out);
+    assert!(out.status.success(), "{said}\n{}", stderr_of(&out));
+    assert!(said.contains("Done."), "{said}");
+    let written = std::fs::read_to_string(s.org().join("config.yaml")).unwrap();
+    assert!(
+        written.contains("designer:") && written.contains("checker:"),
+        "{written}"
+    );
+    let args = std::fs::read_to_string(bin.join("claude.args")).unwrap();
+    assert!(args.contains("--org\n"), "{args}");
+
+    // A second run keeps what is there.
+    let again = with_path(&s, &bin)
+        .args(["setup", "--yes", "--manager", "claude-code"])
+        .arg("--org")
+        .arg(s.org())
+        .output()
+        .unwrap();
+    assert!(
+        stdout_of(&again).contains("keeping it"),
+        "{}",
+        stdout_of(&again)
+    );
+    assert_eq!(
+        std::fs::read_to_string(s.org().join("config.yaml")).unwrap(),
+        written
+    );
+}
+
+#[test]
+fn setup_without_any_agent_cli_says_what_to_install() {
+    let s = Scratch::new("setup-nothing");
+    let bin = stub_clis(&s, &[]);
+    let out = with_path(&s, &bin)
+        .args(["setup", "--yes"])
+        .arg("--org")
+        .arg(s.org())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr_of(&out).contains("Install"), "{}", stderr_of(&out));
+    assert!(!s.org().join("config.yaml").exists());
+}
+
+#[test]
+fn doctor_says_what_is_wrong_and_how_to_fix_it() {
+    let s = Scratch::new("doctor");
+    s.write(
+        ".ensemble/config.yaml",
+        &config_yaml("/nonexistent/opencode", NOWHERE),
+    );
+    let out = ensemble(&s, &["doctor"]);
+    assert!(!out.status.success());
+    let text = stdout_of(&out);
+    assert!(
+        text.contains("problem: opencode (/nonexistent/opencode)"),
+        "{text}"
+    );
+    assert!(text.contains("fix: install `opencode`"), "{text}");
+    assert!(
+        text.contains("ensemble remove-agent default/coder"),
+        "{text}"
+    );
+    assert!(text.contains("problem: openai-local"), "{text}");
+    assert!(text.contains("fix: start the model server"), "{text}");
+
+    let s = Scratch::new("doctor-ok");
+    s.write(".ensemble/config.yaml", &config_yaml("true", NOWHERE));
+    let url = models_stub(r#"{"data":[{"id":"qwen3-coder"}]}"#);
+    s.write(".ensemble/config.yaml", &config_yaml("true", &url));
+    std::fs::create_dir_all(s.path().join(".git")).unwrap();
+    let out = ensemble(&s, &["doctor"]);
+    let text = stdout_of(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(!text.contains("problem"), "{text}");
+}
+
+#[test]
+fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
+    let s = Scratch::new("add-agent");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    let out = ensemble(
+        &s,
+        &[
+            "add-agent",
+            "default/tester",
+            "--adapter",
+            "claude-code",
+            "--prompt",
+            "Tests it.",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let agents = ensemble(&s, &["agents"]);
+    assert!(
+        stdout_of(&agents).contains("default/tester\tclaude-code\tsonnet"),
+        "{}",
+        stdout_of(&agents)
+    );
+
+    let dup = ensemble(
+        &s,
+        &["add-agent", "default/tester", "--adapter", "claude-code"],
+    );
+    assert!(!dup.status.success());
+    assert!(
+        stderr_of(&dup).contains("already has"),
+        "{}",
+        stderr_of(&dup)
+    );
+
+    let bad = ensemble(&s, &["add-agent", "default/x", "--adapter", "llm"]);
+    assert!(
+        !bad.status.success(),
+        "an llm agent needs a backend and a model"
+    );
+
+    let gone = ensemble(&s, &["remove-agent", "default/tester"]);
+    assert!(gone.status.success(), "{}", stderr_of(&gone));
+    assert!(!stdout_of(&ensemble(&s, &["agents"])).contains("tester"));
+    let missing = ensemble(&s, &["remove-agent", "default/tester"]);
+    assert!(!missing.status.success());
+}

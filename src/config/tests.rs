@@ -1170,3 +1170,16 @@ fn a_team_must_name_its_tracker() {
         "{detail}"
     );
 }
+
+#[test]
+fn a_user_can_keep_only_some_teams_and_an_unknown_one_is_named() {
+    let mut c = parse(&two_teams(), &p(), &env(&[])).unwrap();
+    let err = c.retain_teams(&["nope".into()]).unwrap_err();
+    assert!(err.contains("Teams: hardware, software"), "{err}");
+    c.retain_teams(&["software".into()]).unwrap();
+    assert_eq!(c.agent_names(), vec!["software/coder", "software/planner"]);
+    assert!(c.gate("software", "test").is_some() && c.gate("hardware", "test").is_none());
+    assert_eq!(c.teams.len(), 1);
+    // With the other team gone, the short name is no longer ambiguous.
+    assert_eq!(c.qualify("coder").unwrap(), "software/coder");
+}

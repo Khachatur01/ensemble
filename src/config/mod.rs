@@ -33,6 +33,9 @@ pub const SCHEMA: &str = include_str!("../../ensemble.schema.json");
 /// The config `ensemble init` writes: every setting at least once, with what
 /// it does. The tests keep it loading and complete.
 pub const SAMPLE: &str = include_str!("../sample.yaml");
+
+/// The first line of a config, which points an editor at the JSON Schema.
+pub const SCHEMA_URL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json";
 pub const SUPPORTED_VERSION: u32 = 2;
 
 /// The LLM backend types that ship. Adding one is adding an adapter and a
@@ -419,6 +422,23 @@ impl Config {
         self.agents.keys().map(String::as_str).collect()
     }
 
+    /// Keep only the teams in `only`, with their agents and gates: a user's
+    /// choice of which teams to see, not a change to the organization. A name
+    /// that is no team is an error that lists the teams.
+    pub fn retain_teams(&mut self, only: &[String]) -> Result<(), String> {
+        if let Some(unknown) = only.iter().find(|t| !self.teams.contains_key(t.as_str())) {
+            let known: Vec<&str> = self.teams.keys().map(String::as_str).collect();
+            return Err(format!("no team '{unknown}'. Teams: {}.", known.join(", ")));
+        }
+        self.teams.retain(|name, _| only.contains(name));
+        self.agents.retain(|_, a| only.contains(&a.team));
+        self.gates.retain(|key, _| {
+            key.split_once('/')
+                .is_some_and(|(team, _)| only.contains(&team.to_string()))
+        });
+        Ok(())
+    }
+
     /// The gate `name` of `team`.
     pub fn gate(&self, team: &str, name: &str) -> Option<&Gate> {
         self.gates.get(&format!("{team}/{name}"))
@@ -478,6 +498,7 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+pub mod edit;
 mod env;
 pub mod migrate;
 mod raw;

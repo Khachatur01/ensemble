@@ -295,7 +295,6 @@ impl<'e> Queue<'e> {
                 .insert(id.clone(), Self::live(agent, task, cancel.clone(), true));
             (id, cancel)
         };
-        let repo = repo;
         let (run, agent, task, context) = (
             id.clone(),
             agent.to_string(),

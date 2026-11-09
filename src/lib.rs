@@ -26,6 +26,7 @@ pub mod harness;
 pub mod llm_backend;
 pub mod port;
 pub mod router;
+pub mod setup;
 pub mod state;
 pub mod tasks;
 pub mod workspace;

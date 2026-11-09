@@ -1272,3 +1272,18 @@ fn agents_can_be_listed_for_one_team_and_an_unknown_team_is_named() {
         text_of(&bad)
     );
 }
+
+#[test]
+fn initialize_tells_the_manager_the_teams_and_how_to_hand_work_over() {
+    let (e, _tmp) = team(&[("coder", "read, edit", "true"), ("scout", "read", "true")]);
+    let r = handle(&e, &rpc("initialize", json!({}))).unwrap();
+    let text = r["result"]["instructions"].as_str().unwrap();
+    assert!(
+        text.contains("- default: The agents of this project. (2 agents)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("`agents`") && text.contains("`delegate`") && text.contains("`repo`"),
+        "{text}"
+    );
+}

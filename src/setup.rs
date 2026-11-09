@@ -1,0 +1,574 @@
+//! Getting started: finding what is installed, writing a starter organization,
+//! registering Ensemble with the manager, and saying what is wrong and how to
+//! fix it. The pieces that touch nothing outside take what they need as
+//! arguments, so tests can run them without a terminal or a network.
+
+use crate::config::edit::{NewAgent, add_agent, agent_block};
+use crate::config::{CLAUDE_CODE_AGENT, Config, OPENCODE_AGENT, SCHEMA_URL_LINE};
+use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// Local model servers worth looking for, with where each listens by default.
+pub const LOCAL_SERVERS: [(&str, u16, &str); 3] = [
+    ("ollama", 11434, "http://127.0.0.1:11434/v1"),
+    ("llama-server", 8080, "http://127.0.0.1:8080/v1"),
+    ("lm-studio", 1234, "http://127.0.0.1:1234/v1"),
+];
+
+/// What the machine has.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Detected {
+    pub claude: bool,
+    pub opencode: bool,
+    /// Local model servers that answered, as (name, base URL).
+    pub servers: Vec<(String, String)>,
+}
+
+/// Is `program` an executable file on `PATH`? Nothing is run.
+pub fn on_path(program: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let file = dir.join(program);
+        file.is_file() && is_executable(&file)
+    })
+}
+
+#[cfg(unix)]
+fn is_executable(file: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(file).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_: &Path) -> bool {
+    true
+}
+
+/// Look for the agent CLIs, and for local model servers when `probe` is set.
+pub fn detect(probe: bool) -> Detected {
+    let servers = if probe {
+        LOCAL_SERVERS
+            .iter()
+            .filter(|(_, port, _)| {
+                let addr = SocketAddr::from(([127, 0, 0, 1], *port));
+                TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+            })
+            .map(|(name, _, url)| (name.to_string(), url.to_string()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Detected {
+        claude: on_path("claude"),
+        opencode: on_path("opencode"),
+        servers,
+    }
+}
+
+/// A starter organization: one team and the agents it begins with.
+#[derive(Debug)]
+pub struct Starter {
+    pub name: &'static str,
+    pub team: &'static str,
+    pub prompt: &'static str,
+    /// (name, what it is for, whether it may change files)
+    pub agents: &'static [(&'static str, &'static str, bool)],
+}
+
+pub const STARTERS: [Starter; 3] = [
+    Starter {
+        name: "software",
+        team: "software",
+        prompt: "Builds and reviews the software of the project.",
+        agents: &[
+            (
+                "coder",
+                "You implement exactly what is asked, in the style of the code around it. Read the relevant files first, make the change, and report what you changed.",
+                true,
+            ),
+            (
+                "reviewer",
+                "You review code for correctness and report findings as file:line — problem — fix. You do not rewrite the code.",
+                false,
+            ),
+        ],
+    },
+    Starter {
+        name: "hardware",
+        team: "hardware",
+        prompt: "Designs and checks the hardware of the project: KiCad schematics and boards.",
+        agents: &[
+            (
+                "designer",
+                "You change KiCad schematics and board files as asked, and say what you changed and why.",
+                true,
+            ),
+            (
+                "checker",
+                "You check KiCad projects for electrical and layout problems and report each with where it is. You do not edit.",
+                false,
+            ),
+        ],
+    },
+    Starter {
+        name: "docs",
+        team: "docs",
+        prompt: "Writes and edits the documentation of the project.",
+        agents: &[
+            (
+                "writer",
+                "You write documentation as asked, in the voice of what is already there, and say what you wrote.",
+                true,
+            ),
+            (
+                "editor",
+                "You read documentation for mistakes, gaps and unclear passages and report each with where it is. You do not edit.",
+                false,
+            ),
+        ],
+    },
+];
+
+/// The starter called `name`.
+pub fn starter(name: &str) -> Result<&'static Starter, String> {
+    STARTERS.iter().find(|s| s.name == name).ok_or_else(|| {
+        format!(
+            "no starter '{name}'. Starters: {}.",
+            STARTERS
+                .iter()
+                .map(|s| s.name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })
+}
+
+/// The text of a starter organization built for what is `found`: agents that
+/// change files run on OpenCode when it is there, reviewers on Claude Code, and
+/// either stands in for the other. A local model server that answered becomes
+/// an LLM backend, ready for an agent to name.
+pub fn starter_org(starter: &Starter, found: &Detected) -> Result<String, String> {
+    if !found.claude && !found.opencode {
+        return Err("no agent CLI found on PATH. Install `claude` (Claude Code) or `opencode`, then run this again.".into());
+    }
+    let mut text = format!("{SCHEMA_URL_LINE}\n\nversion: 2\n\n");
+    if found.servers.is_empty() {
+        text.push_str("llm_backends: {}\n\n");
+    } else {
+        text.push_str("llm_backends:\n");
+        for (name, url) in &found.servers {
+            text.push_str(&format!(
+                "  {name}:\n    type: openai-compatible-api\n    base_url: \"{url}\"\n    timeout_seconds: 600\n"
+            ));
+        }
+        text.push('\n');
+    }
+    text.push_str("teams: {}\n");
+    // `teams: {}` is a flow mapping; give add_agent a block to extend.
+    text = text.replace("teams: {}\n", "teams:\n");
+    let mut team_added = false;
+    for (name, prompt, writes) in starter.agents {
+        let adapter = match (*writes, found.opencode, found.claude) {
+            (true, true, _) | (false, true, false) => OPENCODE_AGENT,
+            _ => CLAUDE_CODE_AGENT,
+        };
+        let block = agent_block(
+            name,
+            &NewAgent {
+                adapter,
+                prompt: Some(prompt),
+                model: None,
+                backend: None,
+                writes: *writes,
+            },
+        )?;
+        text = add_agent(&text, starter.team, name, &block, starter.prompt)?;
+        team_added = true;
+    }
+    debug_assert!(team_added);
+    Ok(text)
+}
+
+/// The manager CLIs `connect` knows how to register with.
+pub const MANAGERS: [&str; 2] = [CLAUDE_CODE_AGENT, OPENCODE_AGENT];
+
+/// What registers Ensemble with a manager: the program and its arguments.
+pub struct Registration {
+    pub program: &'static str,
+    pub args: Vec<String>,
+}
+
+impl Registration {
+    /// As one line a shell would read back the same way.
+    pub fn line(&self) -> String {
+        std::iter::once(self.program)
+            .chain(self.args.iter().map(String::as_str))
+            .map(shell_word)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+fn shell_word(s: &str) -> String {
+    let plain = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-./:=@,+".contains(c));
+    if plain {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+/// How to register `ensemble mcp` with `manager`, serving the organization at
+/// `org` (an absolute path).
+pub fn registration(
+    manager: &str,
+    ensemble: &str,
+    org: &Path,
+    env_file: Option<&Path>,
+    only: Option<&str>,
+    global: bool,
+) -> Result<Registration, String> {
+    let mut serve = vec![
+        ensemble.to_string(),
+        "mcp".into(),
+        "--org".into(),
+        org.display().to_string(),
+    ];
+    if let Some(env_file) = env_file {
+        serve.push("--env-file".into());
+        serve.push(env_file.display().to_string());
+    }
+    if let Some(only) = only {
+        serve.push("--only".into());
+        serve.push(only.to_string());
+    }
+    let (program, mut args): (&'static str, Vec<String>) = match manager {
+        CLAUDE_CODE_AGENT => (
+            "claude",
+            vec![
+                "mcp".into(),
+                "add".into(),
+                "--scope".into(),
+                if global { "user" } else { "local" }.into(),
+                "ensemble".into(),
+                "--".into(),
+            ],
+        ),
+        OPENCODE_AGENT => {
+            let mut args = vec!["mcp".to_string(), "add".into()];
+            if global {
+                args.push("--global".into());
+            }
+            args.push("ensemble".into());
+            args.push("--".into());
+            ("opencode", args)
+        }
+        other => {
+            return Err(format!(
+                "unknown manager '{other}'. Managers: {}.",
+                MANAGERS.join(", ")
+            ));
+        }
+    };
+    args.extend(serve);
+    Ok(Registration { program, args })
+}
+
+/// The `ensemble` to register: the one on `PATH` when there is one, else this
+/// very program.
+pub fn ensemble_command() -> String {
+    if on_path("ensemble") {
+        "ensemble".into()
+    } else {
+        std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "ensemble".into())
+    }
+}
+
+/// How much a finding matters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    Ok,
+    /// Worth knowing, and nothing to fix before using Ensemble.
+    Note,
+    Problem,
+}
+
+/// What `doctor` found, one line at a time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    pub level: Level,
+    pub what: String,
+    /// What to do about it, as a command or a sentence.
+    pub fix: Option<String>,
+}
+
+impl Finding {
+    fn ok(what: impl Into<String>) -> Self {
+        Finding {
+            level: Level::Ok,
+            what: what.into(),
+            fix: None,
+        }
+    }
+
+    fn note(what: impl Into<String>, fix: impl Into<String>) -> Self {
+        Finding {
+            level: Level::Note,
+            what: what.into(),
+            fix: Some(fix.into()),
+        }
+    }
+
+    fn bad(what: impl Into<String>, fix: impl Into<String>) -> Self {
+        Finding {
+            level: Level::Problem,
+            what: what.into(),
+            fix: Some(fix.into()),
+        }
+    }
+}
+
+/// Checks that need no running agent: the structure of the organization.
+pub fn structure(config: &Config, org: &Path, workdir: &Path) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for team in config.teams.values() {
+        if team.agents.is_empty() {
+            out.push(Finding::bad(
+                format!("team '{}' has no agents", team.name),
+                format!(
+                    "ensemble add-agent {}/<name> --adapter opencode --org {}",
+                    team.name,
+                    org.display()
+                ),
+            ));
+        }
+    }
+    let teams: Vec<_> = config.teams.values().collect();
+    for (i, a) in teams.iter().enumerate() {
+        for b in &teams[i + 1..] {
+            if a.summary().eq_ignore_ascii_case(b.summary()) {
+                out.push(Finding::bad(
+                    format!(
+                        "teams '{}' and '{}' have the same prompt, so the manager cannot tell them apart",
+                        a.name, b.name
+                    ),
+                    "give each team a `prompt` that says what it is for",
+                ));
+            }
+        }
+    }
+    let wants_git = config
+        .agents
+        .values()
+        .any(|a| a.isolation == crate::config::Isolation::Worktree);
+    if wants_git && !workdir.join(".git").exists() {
+        out.push(Finding::note(
+            format!(
+                "{} is not a git repository, and some agents run tasks in worktrees",
+                workdir.display()
+            ),
+            "open a repository, or give tasks a `repo` that is one",
+        ));
+    }
+    if out.iter().all(|f| f.level != Level::Problem) {
+        out.push(Finding::ok(format!(
+            "{} teams, {} agents",
+            config.teams.len(),
+            config.agents.len()
+        )));
+    }
+    out
+}
+
+/// A health result as a finding, with what to do about it.
+pub fn health_finding(
+    name: &str,
+    result: &Result<(), crate::port::Error>,
+    config: &Config,
+    org: &Path,
+) -> Finding {
+    match result {
+        Ok(()) => Finding::ok(format!("{name}: ok")),
+        Err(e) => {
+            let what = format!("{name}: {e}");
+            let kind = name.split(' ').next().unwrap_or(name);
+            let users: Vec<&str> = config
+                .agents
+                .values()
+                .filter(|a| a.kind() == kind || a.llm_backend() == Some(name))
+                .map(|a| a.name.as_str())
+                .collect();
+            let remove = users
+                .iter()
+                .map(|u| format!("ensemble remove-agent {u} --org {}", org.display()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let fix = if kind == CLAUDE_CODE_AGENT || kind == OPENCODE_AGENT {
+                format!(
+                    "install `{kind}` and put it on PATH, or change `command` in config.yaml, or drop the agents that use it: {remove}"
+                )
+            } else {
+                format!(
+                    "start the model server, or correct `base_url` and the model names in config.yaml, or drop the agents that use it: {remove}"
+                )
+            };
+            Finding::bad(what, fix)
+        }
+    }
+}
+
+/// The directory `~` stands for.
+pub fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::parse;
+    use std::collections::BTreeMap;
+
+    fn both() -> Detected {
+        Detected {
+            claude: true,
+            opencode: true,
+            servers: Vec::new(),
+        }
+    }
+
+    fn loads(text: &str) -> Config {
+        parse(text, Path::new("config.yaml"), &BTreeMap::new())
+            .unwrap_or_else(|e| panic!("{e}\n{text}"))
+    }
+
+    #[test]
+    fn every_starter_is_a_valid_organization_for_every_set_of_clis() {
+        for s in &STARTERS {
+            for (claude, opencode) in [(true, true), (true, false), (false, true)] {
+                let found = Detected {
+                    claude,
+                    opencode,
+                    servers: Vec::new(),
+                };
+                let c = loads(&starter_org(s, &found).unwrap());
+                assert_eq!(c.teams[s.team].agents.len(), s.agents.len());
+                for a in c.agents.values() {
+                    assert!(
+                        (a.kind() == CLAUDE_CODE_AGENT && claude)
+                            || (a.kind() == OPENCODE_AGENT && opencode),
+                        "{} runs on a CLI that is not there",
+                        a.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn writers_run_on_opencode_and_reviewers_on_claude_code_when_both_are_there() {
+        let c = loads(&starter_org(starter("software").unwrap(), &both()).unwrap());
+        assert_eq!(c.agents["software/coder"].kind(), OPENCODE_AGENT);
+        assert_eq!(c.agents["software/reviewer"].kind(), CLAUDE_CODE_AGENT);
+        assert!(c.agents["software/coder"].can_change_files());
+        assert!(!c.agents["software/reviewer"].can_change_files());
+    }
+
+    #[test]
+    fn nothing_is_written_without_an_agent_cli_and_a_server_becomes_a_backend() {
+        let none = Detected::default();
+        let err = starter_org(starter("docs").unwrap(), &none).unwrap_err();
+        assert!(err.contains("claude") && err.contains("opencode"), "{err}");
+        let with = Detected {
+            servers: vec![("ollama".into(), "http://127.0.0.1:11434/v1".into())],
+            ..both()
+        };
+        let c = loads(&starter_org(starter("docs").unwrap(), &with).unwrap());
+        assert!(c.llm_backends.contains_key("ollama"));
+        assert!(starter("nope").unwrap_err().contains("software"));
+    }
+
+    #[test]
+    fn registrations_name_the_org_and_the_scope() {
+        let org = Path::new("/home/me/org");
+        let r = registration("claude-code", "ensemble", org, None, None, false).unwrap();
+        assert_eq!(
+            r.line(),
+            "claude mcp add --scope local ensemble -- ensemble mcp --org /home/me/org"
+        );
+        let r = registration(
+            "claude-code",
+            "ensemble",
+            org,
+            Some(Path::new("/k.env")),
+            Some("a,b"),
+            true,
+        )
+        .unwrap();
+        assert!(
+            r.line()
+                .starts_with("claude mcp add --scope user ensemble -- ")
+        );
+        assert!(
+            r.line().ends_with("--env-file /k.env --only a,b"),
+            "{}",
+            r.line()
+        );
+        let r = registration("opencode", "ensemble", org, None, None, true).unwrap();
+        assert_eq!(
+            r.line(),
+            "opencode mcp add --global ensemble -- ensemble mcp --org /home/me/org"
+        );
+        let r = registration("opencode", "ensemble", Path::new("/a b"), None, None, false).unwrap();
+        assert!(r.line().ends_with("--org '/a b'"), "{}", r.line());
+        assert!(registration("emacs", "ensemble", org, None, None, false).is_err());
+    }
+
+    #[test]
+    fn the_structure_check_names_what_is_wrong() {
+        let c = loads(&starter_org(starter("software").unwrap(), &both()).unwrap());
+        let tmp = crate::workspace::testing::TempDir::new();
+        let findings = structure(&c, Path::new("/org"), &tmp.0);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.level == Level::Note && f.what.contains("not a git repository")),
+            "{findings:?}"
+        );
+        std::fs::create_dir(tmp.0.join(".git")).unwrap();
+        let findings = structure(&c, Path::new("/org"), &tmp.0);
+        assert!(
+            findings.iter().all(|f| f.level == Level::Ok),
+            "{findings:?}"
+        );
+
+        let bare = crate::config::edit::remove_agent(
+            &crate::config::edit::remove_agent(
+                &starter_org(starter("software").unwrap(), &both()).unwrap(),
+                "software",
+                "coder",
+            )
+            .unwrap(),
+            "software",
+            "reviewer",
+        )
+        .unwrap();
+        let findings = structure(&loads(&bare), Path::new("/org"), &tmp.0);
+        assert!(
+            findings.iter().any(|f| f.level == Level::Problem
+                && f.what.contains("no agents")
+                && f.fix
+                    .as_deref()
+                    .is_some_and(|x| x.contains("add-agent software/<name>"))),
+            "{findings:?}"
+        );
+    }
+}

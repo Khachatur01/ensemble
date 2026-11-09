@@ -9,6 +9,7 @@ use ensemble::config::{self, Adapter, Config, SystemEnv};
 use ensemble::external::{claude_code, opencode};
 use ensemble::harness::mcp;
 use ensemble::router::Ensemble;
+use ensemble::setup;
 use ensemble::state;
 use ensemble::tasks;
 use std::io::IsTerminal;
@@ -31,6 +32,18 @@ COMMANDS:
                             it unless --force; --stdout prints it instead.
     migrate <FILE>          Rewrite a version 1 config (one team per project) as
                             an organization in --org, as the team `default`.
+    setup [--org DIR] [--manager M] [--starter S] [--yes]
+                            Set everything up: find the agent CLIs, write a
+                            starter organization, register it with your agent
+                            (the manager) and check it. Asks what it needs.
+    connect --manager M --org DIR [--only T,T] [--env-file F] [--global]
+                            Register Ensemble with a manager: claude-code or
+                            opencode. Prints the command it runs.
+    doctor                  Say what is wrong with the organization and the
+                            agents it needs, and how to fix each thing.
+    add-agent TEAM/NAME --adapter A [--model M] [--backend B] [--prompt P] [--writes]
+                            Add an agent to a team, every setting written.
+    remove-agent TEAM/NAME  Remove an agent from its team.
     show <AGENT>            Print how an agent is started: its command line and
                             the config handed to its CLI, API keys hidden.
     check                   Load and validate the config, then report the team.
@@ -78,6 +91,10 @@ struct Args {
     state: Option<PathBuf>,
     dir: Option<PathBuf>,
     context: Option<String>,
+    /// The options that take a value and belong to one command: `--manager`,
+    /// `--adapter`, `--model`, `--backend`, `--starter`, `--only`, `--prompt`,
+    /// `--team-prompt`.
+    opts: std::collections::BTreeMap<String, String>,
 }
 
 fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
@@ -88,6 +105,7 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
     let mut state = None;
     let mut dir = None;
     let mut context = None;
+    let mut opts = std::collections::BTreeMap::new();
 
     let mut it = argv.into_iter();
     while let Some(arg) = it.next() {
@@ -108,6 +126,10 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             "--state" => state = Some(PathBuf::from(value("--state")?)),
             "-d" | "--dir" => dir = Some(PathBuf::from(value("--dir")?)),
             "--context" => context = Some(value("--context")?),
+            "--manager" | "--adapter" | "--model" | "--backend" | "--starter" | "--only"
+            | "--prompt" | "--team-prompt" => {
+                opts.insert(arg.clone(), value(&arg)?);
+            }
             other if other.starts_with('-') && command.is_none() => {
                 return Err(format!("unknown option '{other}'. Try --help."));
             }
@@ -129,6 +151,7 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             state,
             dir,
             context,
+            opts,
         })),
     }
 }
@@ -157,11 +180,24 @@ fn run() -> Result<ExitCode, String> {
     if args.command == "migrate" {
         return cmd_migrate(&args);
     }
+    match args.command.as_str() {
+        "setup" => return cmd_setup(&args, &dir),
+        "connect" => return cmd_connect(&args),
+        "add-agent" => return cmd_add_agent(&args),
+        "remove-agent" => return cmd_remove_agent(&args),
+        _ => {}
+    }
 
     let org = org_of(&args, &args.command)?;
     let config_path = config::config_path(&org);
-    let config = config::load(&config_path, args.env_file.as_deref(), &SystemEnv)
+    let mut config = config::load(&config_path, args.env_file.as_deref(), &SystemEnv)
         .map_err(|e| e.to_string())?;
+    if let Some(only) = opt(&args, "--only") {
+        let only: Vec<String> = only.split(',').map(|t| t.trim().to_string()).collect();
+        config
+            .retain_teams(&only)
+            .map_err(|e| format!("--only: {e}"))?;
+    }
 
     match args.command.as_str() {
         "mcp" => cmd_mcp(config, dir, &args),
@@ -169,6 +205,7 @@ fn run() -> Result<ExitCode, String> {
         "agents" => cmd_agents(config, dir, &args),
         "show" => cmd_show(&config, &args),
         "health" => cmd_health(config, dir, &args),
+        "doctor" => cmd_doctor(config, &dir, &args),
         "run" => cmd_run(config, dir, &args),
         other => Err(format!("unknown command '{other}'. Try --help.")),
     }
@@ -538,4 +575,287 @@ fn command_line(program: &str, args: &[String]) -> String {
         .map(quote)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The value of an option that takes one, such as `--manager`.
+fn opt<'a>(args: &'a Args, name: &str) -> Option<&'a str> {
+    args.opts.get(name).map(String::as_str)
+}
+
+/// Was the switch `name`, such as `--global`, given?
+fn has(args: &Args, name: &str) -> bool {
+    args.rest.iter().any(|a| a == name)
+}
+
+/// Ask a question on the terminal and read the answer; empty means `default`.
+fn ask(question: &str, default: Option<&str>) -> Result<String, String> {
+    use std::io::Write;
+    match default {
+        Some(d) => eprint!("{question} [{d}]: "),
+        None => eprint!("{question}: "),
+    }
+    std::io::stderr().flush().ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| format!("cannot read an answer: {e}"))?;
+    let line = line.trim();
+    match (line.is_empty(), default) {
+        (true, Some(d)) => Ok(d.to_string()),
+        (true, None) => Err(format!("{question}: an answer is needed")),
+        _ => Ok(line.to_string()),
+    }
+}
+
+/// `path` made absolute, with a leading `~` meaning the home directory.
+fn absolute(path: &Path) -> Result<PathBuf, String> {
+    let text = path.to_string_lossy();
+    let expanded = match text.strip_prefix("~/") {
+        Some(rest) => setup::home()
+            .ok_or("cannot expand ~: HOME is not set")?
+            .join(rest),
+        None => path.to_path_buf(),
+    };
+    if expanded.is_absolute() {
+        Ok(expanded)
+    } else {
+        Ok(std::env::current_dir()
+            .map_err(|e| format!("cannot read the current directory: {e}"))?
+            .join(expanded))
+    }
+}
+
+/// Run a registration, saying first what it is. The manager's own words come
+/// through, and so does its exit status.
+fn run_registration(reg: &setup::Registration) -> Result<(), String> {
+    println!("$ {}", reg.line());
+    match std::process::Command::new(reg.program)
+        .args(&reg.args)
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!(
+            "`{}` failed ({status}). Run the command above yourself to see why.",
+            reg.program
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
+            "`{}` is not on PATH. Install it, then run the command above.",
+            reg.program
+        )),
+        Err(e) => Err(format!("cannot run `{}`: {e}", reg.program)),
+    }
+}
+
+fn cmd_connect(args: &Args) -> Result<ExitCode, String> {
+    let manager = opt(args, "--manager").ok_or(format!(
+        "connect: needs --manager, the agent you talk to: {}",
+        setup::MANAGERS.join(" or ")
+    ))?;
+    let org = absolute(&org_of(args, "connect")?)?;
+    let env_file = args.env_file.as_deref().map(absolute).transpose()?;
+    let reg = setup::registration(
+        manager,
+        &setup::ensemble_command(),
+        &org,
+        env_file.as_deref(),
+        opt(args, "--only"),
+        has(args, "--global"),
+    )?;
+    run_registration(&reg)?;
+    println!("Registered. Restart {manager} so that it starts the server.");
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
+    let interactive = std::io::stdin().is_terminal() && !has(args, "--yes");
+    let found = setup::detect(true);
+    println!(
+        "Found: claude {}, opencode {}{}",
+        if found.claude { "yes" } else { "no" },
+        if found.opencode { "yes" } else { "no" },
+        if found.servers.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ", local model servers: {}",
+                found
+                    .servers
+                    .iter()
+                    .map(|(n, u)| format!("{n} ({u})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    );
+    let manager = match opt(args, "--manager") {
+        Some(m) => m.to_string(),
+        None => match (found.claude, found.opencode) {
+            (true, false) => "claude-code".into(),
+            (false, true) => "opencode".into(),
+            (false, false) => {
+                return Err("setup: no agent CLI found on PATH. Install `claude` (Claude Code) or `opencode`, then run `ensemble setup` again.".into());
+            }
+            (true, true) if interactive => ask(
+                "Which agent do you talk to? (claude-code or opencode)",
+                Some("claude-code"),
+            )?,
+            (true, true) => {
+                return Err("setup: both claude and opencode are installed; say which one you talk to with --manager claude-code or --manager opencode.".into());
+            }
+        },
+    };
+    let org = match &args.org {
+        Some(org) => org.clone(),
+        None if interactive => {
+            let home = setup::home().unwrap_or_else(|| dir.to_path_buf());
+            PathBuf::from(ask(
+                "Where should the organization live?",
+                Some(&home.join("ensemble-org").display().to_string()),
+            )?)
+        }
+        None => {
+            return Err("setup: say where the organization lives with --org <dir>.".into());
+        }
+    };
+    let org = absolute(&org)?;
+    let path = config::config_path(&org);
+    if path.exists() {
+        println!("{} exists; keeping it.", path.display());
+    } else {
+        let starter = setup::starter(opt(args, "--starter").unwrap_or("software"))?;
+        let text = setup::starter_org(starter, &found)?;
+        std::fs::create_dir_all(&org)
+            .map_err(|e| format!("cannot create {}: {e}", org.display()))?;
+        std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        println!(
+            "Wrote {}: the {} starter. Edit it, or change it with `ensemble add-agent` and `remove-agent`.",
+            path.display(),
+            starter.name
+        );
+    }
+    let env_file = args.env_file.as_deref().map(absolute).transpose()?;
+    let reg = setup::registration(
+        &manager,
+        &setup::ensemble_command(),
+        &org,
+        env_file.as_deref(),
+        None,
+        has(args, "--global"),
+    )?;
+    let registered = run_registration(&reg);
+    if let Err(e) = &registered {
+        println!("{e}");
+    }
+    println!();
+    let config =
+        config::load(&path, args.env_file.as_deref(), &SystemEnv).map_err(|e| e.to_string())?;
+    let healthy = report_doctor(&config, &org, dir, args)?;
+    println!();
+    if registered.is_ok() && healthy {
+        println!(
+            "Done. In {manager}, try: \"have the team implement X\" (restart {manager} first if it was running)."
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        println!(
+            "Setup is not finished: fix what is listed above, then run `ensemble doctor --org {}`.",
+            org.display()
+        );
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+fn cmd_doctor(config: Config, dir: &Path, args: &Args) -> Result<ExitCode, String> {
+    let org = absolute(&org_of(args, "doctor")?)?;
+    Ok(if report_doctor(&config, &org, dir, args)? {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// Print what is wrong, each with its fix, and say whether nothing was.
+fn report_doctor(config: &Config, org: &Path, dir: &Path, args: &Args) -> Result<bool, String> {
+    let mut findings = setup::structure(config, org, dir);
+    let ensemble = ensemble_for(config.clone(), dir.to_path_buf(), args);
+    for (name, result) in ensemble.health() {
+        findings.push(setup::health_finding(&name, &result, config, org));
+    }
+    let mut all_ok = true;
+    for f in &findings {
+        let label = match f.level {
+            setup::Level::Ok => "ok",
+            setup::Level::Note => "note",
+            setup::Level::Problem => {
+                all_ok = false;
+                "problem"
+            }
+        };
+        println!("{label}: {}", f.what);
+        if let (Some(fix), false) = (&f.fix, f.level == setup::Level::Ok) {
+            println!("  fix: {fix}");
+        }
+    }
+    Ok(all_ok)
+}
+
+fn cmd_add_agent(args: &Args) -> Result<ExitCode, String> {
+    let (team, name) = args
+        .rest
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .and_then(|a| a.split_once('/'))
+        .ok_or("add-agent: needs TEAM/NAME, such as software/coder")?;
+    let adapter =
+        opt(args, "--adapter").ok_or("add-agent: needs --adapter claude-code, opencode or llm")?;
+    let org = org_of(args, "add-agent")?;
+    let path = config::config_path(&org);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("add-agent: cannot read {}: {e}", path.display()))?;
+    let block = config::edit::agent_block(
+        name,
+        &config::edit::NewAgent {
+            adapter,
+            prompt: opt(args, "--prompt"),
+            model: opt(args, "--model"),
+            backend: opt(args, "--backend"),
+            writes: has(args, "--writes"),
+        },
+    )
+    .map_err(|e| format!("add-agent: {e}"))?;
+    let edited = config::edit::add_agent(
+        &text,
+        team,
+        name,
+        &block,
+        opt(args, "--team-prompt").unwrap_or("Describe what this team is for."),
+    )
+    .map_err(|e| format!("add-agent: {e}"))?;
+    config::parse(&edited, &path, &std::collections::BTreeMap::new()).map_err(|e| {
+        format!("add-agent: the result would not load, so nothing was written: {e}")
+    })?;
+    std::fs::write(&path, edited).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    println!("added {team}/{name} to {}", path.display());
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_remove_agent(args: &Args) -> Result<ExitCode, String> {
+    let (team, name) = args
+        .rest
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .and_then(|a| a.split_once('/'))
+        .ok_or("remove-agent: needs TEAM/NAME, such as software/coder")?;
+    let org = org_of(args, "remove-agent")?;
+    let path = config::config_path(&org);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("remove-agent: cannot read {}: {e}", path.display()))?;
+    let edited =
+        config::edit::remove_agent(&text, team, name).map_err(|e| format!("remove-agent: {e}"))?;
+    config::parse(&edited, &path, &std::collections::BTreeMap::new()).map_err(|e| {
+        format!("remove-agent: the result would not load, so nothing was written: {e}")
+    })?;
+    std::fs::write(&path, edited).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    println!("removed {team}/{name} from {}", path.display());
+    Ok(ExitCode::SUCCESS)
 }

@@ -88,7 +88,8 @@ pub fn handle_reporting<'s>(
             reply(json!({
                 "protocolVersion": version,
                 "capabilities": { "tools": { "listChanged": false }, "logging": {} },
-                "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") }
+                "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
+                "instructions": protocol::instructions(ensemble.config())
             }))
         }
 

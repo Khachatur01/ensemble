@@ -40,26 +40,28 @@ Codex is meant to become a further adapter type.
 
 ## Quick start
 
-1. [Install](#installation) Ensemble so that `ensemble` is on your `PATH`, and
-   the agent CLIs your team uses (`claude`, `opencode`).
-2. Make an organization, then check it:
+```console
+$ ensemble setup
+```
 
-   ```console
-   $ ensemble init   --org ~/my-org     # writes ~/my-org/config.yaml, a sample
-   $ ensemble check  --org ~/my-org
-   $ ensemble health --org ~/my-org     # every agent CLI starts, every model server answers
-   ```
+That is all most people need. `setup` finds the agent CLIs you have (`claude`,
+`opencode`) and any local model server, asks which agent you talk to (your
+manager) and where the organization should live, writes a starter organization
+there, registers Ensemble with your manager and checks that every agent starts.
+It ends with a sentence to try: restart your agent and ask it to have the team
+implement something. The manager learns the teams from Ensemble itself when it
+connects, so there is nothing to add to its `CLAUDE.md` or `AGENTS.md`.
 
-   Edit the teams first: the sample has one team with one agent of each kind,
-   with every setting and what it does. API keys go in the environment, or in a
-   file you pass with `--env-file`; never in the organization.
-3. [Connect your agent](#connect-your-agent), from any directory.
-4. Tell your agent when to use the teams, in `AGENTS.md` (OpenCode) or
-   `CLAUDE.md` (Claude Code):
+Without a terminal, or to script it: `ensemble setup --yes --manager claude-code
+--org ~/my-org --starter software`. Starters are `software`, `hardware` and
+`docs`. [Install](#installation) Ensemble first, so that `ensemble` is on your
+`PATH`.
 
-   > Delegate implementation to the `software/coder` agent and review to
-   > `software/reviewer` with the `delegate` tool. Check `agents` for what each
-   > can do.
+Afterwards, `ensemble doctor --org ~/my-org` says what is wrong and how to fix
+each thing, and `ensemble add-agent software/tester --adapter claude-code
+--org ~/my-org` and `ensemble remove-agent` change the team without editing the
+file (the file stays yours: comments and order are kept, and every setting is
+written out).
 
 The folder your agent opens is where the teams work, and it can be a parent of
 several repositories. Ensemble keeps nothing in it: tasks, run logs and
@@ -70,7 +72,10 @@ path that leaves the folder is refused.
 
 ## Connect your agent
 
-Ensemble is a standard MCP server on stdio. Any agent that can spawn one can
+Ensemble is a standard MCP server on stdio. `ensemble setup` and
+`ensemble connect --manager claude-code|opencode --org <dir>` register it for
+you and print what they run; this shows the same by hand. Any agent that can
+spawn one can
 use it; nothing in it is specific to one harness. Register it with the organization
 it serves: `--org` is the directory with `config.yaml`.
 
@@ -682,6 +687,11 @@ Day to day you do not run Ensemble; your agent does. These are for setting it
 up and for debugging it.
 
 ```console
+$ ensemble setup                      # find the CLIs, write a starter, register it, check it
+$ ensemble connect --manager M --org <dir> [--only T,T] [--global]  # register with claude-code or opencode
+$ ensemble doctor --org <dir>      # what is wrong, and how to fix each thing
+$ ensemble add-agent <team/name> --adapter A --org <dir>   # add an agent, every setting written
+$ ensemble remove-agent <team/name> --org <dir>
 $ ensemble init --org <dir>        # write a sample organization: <dir>/config.yaml
 $ ensemble init --stdout           # print it instead (init refuses to overwrite without --force)
 $ ensemble migrate <file> --org <dir>  # a version 1 config becomes an organization
@@ -705,6 +715,8 @@ state directory), `--context <text>` (for `run`).
 | --- | --- |
 | `src/config/` | the organization's `config.yaml`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`mod.rs`), version 1 to 2 (`migrate.rs`) |
 | `src/state.rs` | the per-user state and cache directories |
+| `src/setup.rs` | `setup`, `connect` and `doctor`: detecting CLIs and servers, starters, registrations, findings |
+| `src/config/edit.rs` | adding and removing an agent in `config.yaml` as text, comments kept |
 | `src/router.rs` | agents to adapters; the ensemble itself, and `health` |
 | `src/external/` | the `claude-code` and `opencode` adapters (each CLI as a subprocess, its JSON events read as it goes), the `llm` adapter (one chat request), and gates |
 | `src/workspace.rs` | the working folder, a `repo` inside it, and what a run changed |
