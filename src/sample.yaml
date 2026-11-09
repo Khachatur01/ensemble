@@ -41,6 +41,24 @@ llm_backends:
     timeout_seconds: 600
 
 # ---------------------------------------------------------------------------
+# Limits that agents share. Two agents on one model server, or on one
+# subscription, should not each assume they have it to themselves: an agent
+# names a limit with `limit`, in place of its own `max_concurrent` and `budget`,
+# and every agent that names it uses one count of slots and one budget. `{}` when
+# there are none.
+# ---------------------------------------------------------------------------
+limits:
+  local-server:
+    # Most runs at once across all of them.
+    max_concurrent: 1
+    # How much all of them together may run in an hour: `unlimited`, `per_hour`
+    # with `delegations`, or `per_hour_tokens` with `tokens`, counted from what
+    # each run reports (one that reports none counts none).
+    budget:
+      type: per_hour_tokens
+      tokens: 2000000
+
+# ---------------------------------------------------------------------------
 # Teams. The names are yours. Your agent reads each team's `prompt` to choose a
 # team, then delegates to one of its agents as `team/agent`, or as `agent` when
 # no other team has one of that name. A team has its own gates and its own
@@ -89,17 +107,13 @@ teams:
           you changed.
         # Wall-clock limit for one delegation.
         max_seconds: 1800
-        # Most delegations to it that run at once; more wait for a free slot.
-        # 1 suits a model server that serves one request at a time.
-        max_concurrent: 1
+        # Its slots and budget come from a shared limit above, in place of its own
+        # `max_concurrent` and `budget`.
+        limit: local-server
         # Where its tasks run: `shared` in the project, or `worktree`, each task in
         # its own git worktree on the branch ensemble/<id>, committed there and
         # never merged by Ensemble.
         isolation: worktree
-        # How many runs it may start in an hour: `unlimited`, or `per_hour` with
-        # `delegations` (tasks, gate retries and delegations all count).
-        budget:
-          type: unlimited
         adapter:
           type: opencode
           # Where the model comes from: `llm_backend` for one an entry of
@@ -126,8 +140,12 @@ teams:
           You find where things are in the codebase and report file:line with a
           one-line note each. You do not edit.
         max_seconds: 1800
+        # Most delegations to it that run at once; more wait for a free slot.
+        # 1 suits a model server that serves one request at a time.
         max_concurrent: 1
         isolation: shared
+        # How many runs it may start in an hour: `unlimited`, or `per_hour` with
+        # `delegations` (tasks, gate retries and delegations all count).
         budget:
           type: unlimited
         adapter:

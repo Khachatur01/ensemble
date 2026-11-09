@@ -7,6 +7,7 @@
   "required": [
     "version",
     "llm_backends",
+    "limits",
     "teams"
   ],
   "additionalProperties": false,
@@ -22,6 +23,13 @@
         "$ref": "#/definitions/llm_backend"
       }
     },
+    "limits": {
+      "description": "Named limits that agents share, such as one model server's concurrency or one subscription's budget. An agent names one with `limit`. `{}` when there are none.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/limit"
+      }
+    },
     "teams": {
       "description": "The organization's teams. The key is the team's name; its agents are delegated to as `team/agent`, or as `agent` when the name is unique. The names are yours.",
       "type": "object",
@@ -31,6 +39,42 @@
     }
   },
   "definitions": {
+    "limit": {
+      "type": "object",
+      "required": ["max_concurrent", "budget"],
+      "additionalProperties": false,
+      "properties": {
+        "max_concurrent": {
+          "description": "Most runs at once across every agent that shares this limit.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "budget": {
+          "description": "How much all of them together may run in an hour. `type` decides which other settings there are.",
+          "oneOf": [
+            { "$ref": "#/definitions/budget_unlimited" },
+            { "$ref": "#/definitions/budget_per_hour" },
+            { "$ref": "#/definitions/budget_per_hour_tokens" }
+          ]
+        }
+      }
+    },
+    "budget_per_hour_tokens": {
+      "type": "object",
+      "required": ["type", "tokens"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "per_hour_tokens: runs may use at most `tokens` tokens in any hour, counted from what each run reports. A run that reports none counts none. Over it, tasks wait and delegations are refused, saying when the next run is allowed.",
+          "const": "per_hour_tokens"
+        },
+        "tokens": {
+          "description": "Tokens, prompt and completion together, in any hour.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
     "team": {
       "type": "object",
       "required": ["prompt", "tracker", "gates", "agents"],
@@ -172,10 +216,18 @@
       "type": "object",
       "required": [
         "max_seconds",
-        "max_concurrent",
         "isolation",
-        "budget",
         "adapter"
+      ],
+      "oneOf": [
+        {
+          "required": ["limit"],
+          "not": { "anyOf": [{ "required": ["max_concurrent"] }, { "required": ["budget"] }] }
+        },
+        {
+          "required": ["max_concurrent", "budget"],
+          "not": { "required": ["limit"] }
+        }
       ],
       "additionalProperties": false,
       "properties": {
@@ -188,8 +240,12 @@
           "type": "integer",
           "minimum": 1
         },
+        "limit": {
+          "description": "The name of one of the organization's `limits`, in place of `max_concurrent` and `budget`: the slots and the budget are then shared with every agent that names it.",
+          "type": "string"
+        },
         "max_concurrent": {
-          "description": "Most delegations to this agent that run at once in a session, background tasks and blocking calls alike; more wait for a free slot. 1 suits a model server that serves one request at a time.",
+          "description": "Most delegations to this agent that run at once in a session, background tasks and blocking calls alike; more wait for a free slot. 1 suits a model server that serves one request at a time. Written with `budget`, or not at all when `limit` is.",
           "type": "integer",
           "minimum": 1
         },
@@ -208,6 +264,9 @@
             },
             {
               "$ref": "#/definitions/budget_per_hour"
+            },
+            {
+              "$ref": "#/definitions/budget_per_hour_tokens"
             }
           ]
         },

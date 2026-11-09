@@ -400,6 +400,12 @@ fn the_schema_names_exactly_the_keys_the_config_accepts() {
             "openai-compatible-api backend",
         ),
         ("team", accepted_keys::<RawTeam>(), "teams"),
+        ("limit", accepted_keys::<RawLimit>(), "limits"),
+        (
+            "budget_per_hour_tokens",
+            accepted_keys::<RawPerHourTokens>(),
+            "per_hour_tokens budget",
+        ),
         ("agent", accepted_keys::<RawAgent>(), "agents"),
         ("gate", accepted_keys::<RawGate>(), "gates"),
         (
@@ -453,7 +459,9 @@ fn the_schema_requires_every_key_but_the_optional_two() {
     };
     for (def, keys) in [
         ("openai_compatible_api_backend", vec!["api_key_env"]),
-        ("agent", vec!["prompt"]),
+        ("agent", vec!["prompt", "max_concurrent", "budget", "limit"]),
+        ("limit", vec![]),
+        ("budget_per_hour_tokens", vec![]),
         ("team", vec![]),
         ("tracker_local_markdown", vec![]),
         ("gate", vec![]),
@@ -1096,7 +1104,7 @@ fn two_teams() -> String {
         t
     };
     format!(
-        "version: 2\nllm_backends: {{}}\nteams:\n{}{}",
+        "version: 2\nllm_backends: {{}}\nlimits: {{}}\nteams:\n{}{}",
         team("hardware", &["coder"]),
         team("software", &["coder", "planner"])
     )
@@ -1182,4 +1190,70 @@ fn a_user_can_keep_only_some_teams_and_an_unknown_one_is_named() {
     assert_eq!(c.teams.len(), 1);
     // With the other team gone, the short name is no longer ambiguous.
     assert_eq!(c.qualify("coder").unwrap(), "software/coder");
+}
+
+/// A document with one shared limit and two agents, written out in full.
+fn with_limits(agent_a: &str, agent_b: &str) -> String {
+    let adapter = "        isolation: shared\n        adapter: { type: opencode, model: { type: provider, name: opencode/m }, tools: [read], system_prompt: append, max_steps: 3, command: opencode }\n";
+    format!(
+        "version: 2\nllm_backends: {{}}\nlimits:\n  server:\n    max_concurrent: 1\n    budget: {{ type: per_hour_tokens, tokens: 5000 }}\nteams:\n  t:\n    prompt: p\n    tracker: {{ type: local_markdown }}\n    gates: {{}}\n    agents:\n      a:\n        max_seconds: 60\n{agent_a}{adapter}      b:\n        max_seconds: 60\n{agent_b}{adapter}"
+    )
+}
+
+#[test]
+fn agents_can_share_a_named_limit_or_write_their_own_but_not_mix() {
+    let shared = "        limit: server\n";
+    let own = "        max_concurrent: 3\n        budget: { type: per_hour, delegations: 4 }\n";
+    let c = parse(&with_limits(shared, own), &p(), &env(&[])).unwrap();
+    let a = &c.agents["t/a"];
+    assert_eq!(a.limit.as_deref(), Some("server"));
+    assert_eq!(a.max_concurrent, 1);
+    assert_eq!(a.budget, Budget::PerHourTokens { tokens: 5000 });
+    let b = &c.agents["t/b"];
+    assert_eq!(b.limit, None);
+    assert_eq!(
+        (b.max_concurrent, b.budget),
+        (3, Budget::PerHour { delegations: 4 })
+    );
+    assert_eq!(c.limits["server"].max_concurrent, 1);
+
+    for (doc, needle) in [
+        (
+            with_limits("        limit: server\n        max_concurrent: 2\n", own),
+            "not a mix",
+        ),
+        (
+            with_limits(
+                "        limit: server\n        budget: { type: unlimited }\n",
+                own,
+            ),
+            "not a mix",
+        ),
+        (with_limits("        max_concurrent: 2\n", own), "not a mix"),
+        (with_limits("", own), "not neither"),
+        (
+            with_limits("        limit: nope\n", own),
+            "limit 'nope' is not defined. Defined limits: server",
+        ),
+    ] {
+        let joined = joined_problems(&doc);
+        assert!(joined.contains(needle), "{needle}: {joined}");
+    }
+}
+
+#[test]
+fn a_limit_needs_real_numbers() {
+    let doc = with_limits("        limit: server\n", "        limit: server\n").replace(
+        "max_concurrent: 1\n    budget: { type: per_hour_tokens, tokens: 5000 }",
+        "max_concurrent: 0\n    budget: { type: per_hour_tokens, tokens: 0 }",
+    );
+    let joined = joined_problems(&doc);
+    assert!(
+        joined.contains("limits.server: `max_concurrent` must be greater than 0"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("limits.server: `tokens` must be greater than 0"),
+        "{joined}"
+    );
 }

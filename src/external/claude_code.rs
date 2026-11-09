@@ -409,6 +409,7 @@ mod tests {
             max_concurrent: 1,
             isolation: crate::config::Isolation::Shared,
             budget: crate::config::Budget::Unlimited,
+            limit: None,
             adapter: Adapter::ClaudeCode(cc.clone()),
         };
         (a, cc)

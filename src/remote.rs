@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn describing_an_org_lists_what_runs_and_warns_about_the_risky() {
-        let doc = "version: 2\nllm_backends: {}\nteams:\n  t:\n    prompt: p\n    tracker: { type: local_markdown }\n    gates:\n      test: { command: \"rm -rf build && make\", timeout_seconds: 5 }\n    agents:\n      doer:\n        max_seconds: 60\n        max_concurrent: 1\n        isolation: shared\n        budget: { type: unlimited }\n        adapter: { type: claude-code, model: sonnet, tools: [Read, \"Bash(*)\"], permission_mode: bypassPermissions, max_turns: 3, command: claude }\n";
+        let doc = "version: 2\nllm_backends: {}\nlimits: {}\nteams:\n  t:\n    prompt: p\n    tracker: { type: local_markdown }\n    gates:\n      test: { command: \"rm -rf build && make\", timeout_seconds: 5 }\n    agents:\n      doer:\n        max_seconds: 60\n        max_concurrent: 1\n        isolation: shared\n        budget: { type: unlimited }\n        adapter: { type: claude-code, model: sonnet, tools: [Read, \"Bash(*)\"], permission_mode: bypassPermissions, max_turns: 3, command: claude }\n";
         let config =
             crate::config::parse(doc, Path::new("c.yaml"), &std::collections::BTreeMap::new())
                 .unwrap();

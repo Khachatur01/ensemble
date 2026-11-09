@@ -491,6 +491,7 @@ mod tests {
             max_concurrent: 1,
             isolation: crate::config::Isolation::Shared,
             budget: crate::config::Budget::Unlimited,
+            limit: None,
             adapter: Adapter::OpenCode(oc.clone()),
         };
         (a, oc)

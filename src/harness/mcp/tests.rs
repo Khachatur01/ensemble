@@ -1501,3 +1501,86 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
         );
     });
 }
+
+#[test]
+fn agents_on_one_shared_limit_do_not_overlap_whatever_each_would_allow() {
+    // Each agent alone would allow two at once; the limit they share allows one.
+    let (e, tmp) = team_limited(&[("coder", "read", BUSY), ("scout", "read", BUSY)], 2);
+    let mut config = e.config().clone();
+    config.limits.insert(
+        "server".into(),
+        config::Limit {
+            max_concurrent: 1,
+            budget: config::Budget::Unlimited,
+        },
+    );
+    for a in config.agents.values_mut() {
+        a.limit = Some("server".into());
+        a.max_concurrent = 1;
+    }
+    let e = Ensemble::new(config, Some(project(&tmp))).with_state(project(&tmp).join(".ensemble"));
+    write_task(&tmp, "0001-a", "coder", "a");
+    write_task(&tmp, "0002-b", "scout", "b");
+    let mut got = Vec::new();
+    session(&e, |ask| {
+        for id in ["0001-a", "0002-b"] {
+            let r = ask("wait", json!({"task": id, "timeout_seconds": 20}));
+            got.push(r.lines().nth(6).unwrap_or("").to_string());
+        }
+    });
+    got.sort();
+    assert_eq!(got, ["alone", "alone"], "one limit, one run at a time");
+}
+
+#[test]
+fn a_token_budget_counts_what_runs_reported_and_refuses_when_it_is_used() {
+    let (e, tmp) = team(&[("scout", "read", &emit(&step(vec![text("found it")])))]);
+    let mut config = e.config().clone();
+    config.agents.get_mut("default/scout").unwrap().budget =
+        config::Budget::PerHourTokens { tokens: 100 };
+    let e = Ensemble::new(config, Some(project(&tmp))).with_state(project(&tmp).join(".ensemble"));
+    let dir = project(&tmp).join(".ensemble");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let run = |started: u64, tokens: Option<(u64, u64)>| crate::records::Record {
+        agent: "default/scout".into(),
+        model: None,
+        started,
+        seconds: 1.0,
+        prompt_tokens: tokens.map(|t| t.0),
+        completion_tokens: tokens.map(|t| t.1),
+        steps: 1,
+        tool_calls: 0,
+        ok: true,
+        error: None,
+    };
+    // 60 tokens an hour ago-ish, and a run that reported none: under budget.
+    crate::records::append(&dir, &run(now - 600, Some((40, 20))));
+    crate::records::append(&dir, &run(now - 300, None));
+    let r = call(&e, "delegate", json!({"agent": "scout", "task": "look"}));
+    assert_eq!(r["result"]["isError"], false, "{}", text_of(&r));
+    // That run reported 5 + 2; now push it over.
+    crate::records::append(&dir, &run(now - 100, Some((30, 20))));
+    let r = call(&e, "delegate", json!({"agent": "scout", "task": "look"}));
+    assert_eq!(r["result"]["isError"], true);
+    assert!(
+        text_of(&r).contains("used its budget for this hour"),
+        "{}",
+        text_of(&r)
+    );
+    // Runs older than an hour are not counted.
+    let (e2, tmp2) = team(&[("scout", "read", &emit(&step(vec![text("ok")])))]);
+    let mut config = e2.config().clone();
+    config.agents.get_mut("default/scout").unwrap().budget =
+        config::Budget::PerHourTokens { tokens: 100 };
+    let e2 =
+        Ensemble::new(config, Some(project(&tmp2))).with_state(project(&tmp2).join(".ensemble"));
+    crate::records::append(
+        &project(&tmp2).join(".ensemble"),
+        &run(now - 7200, Some((900, 900))),
+    );
+    let r = call(&e2, "delegate", json!({"agent": "scout", "task": "look"}));
+    assert_eq!(r["result"]["isError"], false, "{}", text_of(&r));
+}

@@ -1986,3 +1986,19 @@ fn an_empty_organization_is_idle_and_serve_can_end_there() {
         stderr_of(&out)
     );
 }
+
+#[test]
+fn check_warns_about_what_agents_may_do_without_failing() {
+    let s = Scratch::new("check-warn");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    let out = ensemble(&s, &["check"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.contains("warnings:"), "{text}");
+    assert!(
+        text.contains("default/coder can change files directly in your working folder"),
+        "{text}"
+    );
+    assert!(text.contains("isolation: worktree"), "{text}");
+    assert!(!text.contains("default/reviewer can change"), "{text}");
+}

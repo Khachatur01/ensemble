@@ -47,6 +47,27 @@ pub fn parse(text: &str, path: &Path, env: &dyn Env) -> Result<Config, ConfigErr
 /// What serde said, which already says where in the document, with a missing
 /// key put as the instruction it is and the removed `ensemble` type pointed to
 /// its replacement.
+/// A budget as written, checked at `at`.
+pub(super) fn resolve_budget(at: &str, raw: &RawBudget, problems: &mut Vec<String>) -> Budget {
+    match raw {
+        RawBudget::Unlimited(_) => Budget::Unlimited,
+        RawBudget::PerHour(b) => {
+            if b.delegations == 0 {
+                problems.push(format!("{at}: `delegations` must be greater than 0"));
+            }
+            Budget::PerHour {
+                delegations: b.delegations,
+            }
+        }
+        RawBudget::PerHourTokens(b) => {
+            if b.tokens == 0 {
+                problems.push(format!("{at}: `tokens` must be greater than 0"));
+            }
+            Budget::PerHourTokens { tokens: b.tokens }
+        }
+    }
+}
+
 pub(super) fn explain(e: &serde_norway::Error) -> String {
     let mut detail = e.to_string();
     if let Some((before, rest)) = detail.split_once("missing field `")
@@ -81,6 +102,27 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
             }
             Err(mut errs) => problems.append(&mut errs),
         }
+    }
+
+    // --- shared limits ---
+    let mut limits: BTreeMap<String, Limit> = BTreeMap::new();
+    for (name, l) in &raw.limits {
+        let at = format!("limits.{name}");
+        if name.trim().is_empty() {
+            problems.push("limits: a limit name cannot be empty".into());
+            continue;
+        }
+        if l.max_concurrent == 0 {
+            problems.push(format!("{at}: `max_concurrent` must be greater than 0"));
+        }
+        let budget = resolve_budget(&at, &l.budget, &mut problems);
+        limits.insert(
+            name.clone(),
+            Limit {
+                max_concurrent: l.max_concurrent,
+                budget,
+            },
+        );
     }
 
     // --- teams: their gates and agents ---
@@ -140,20 +182,38 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
             if ra.max_seconds == 0 {
                 problems.push(format!("{path}: `max_seconds` must be greater than 0"));
             }
-            if ra.max_concurrent == 0 {
-                problems.push(format!("{path}: `max_concurrent` must be greater than 0"));
-            }
-            let budget = match &ra.budget {
-                RawBudget::Unlimited(_) => Budget::Unlimited,
-                RawBudget::PerHour(b) => {
-                    if b.delegations == 0 {
+            // Its own limits, written out, or a shared one by name; never a mix.
+            let (max_concurrent, budget, limit) = match (&ra.limit, ra.max_concurrent, &ra.budget) {
+                (Some(name), None, None) => match limits.get(name) {
+                    Some(l) => (l.max_concurrent, l.budget, Some(name.clone())),
+                    None => {
+                        let known: Vec<&str> = limits.keys().map(String::as_str).collect();
                         problems.push(format!(
-                            "{path}.budget: `delegations` must be greater than 0"
+                            "{path}: limit '{name}' is not defined. Defined limits: {}.",
+                            if known.is_empty() {
+                                "(none)".to_string()
+                            } else {
+                                known.join(", ")
+                            }
                         ));
+                        (1, Budget::Unlimited, None)
                     }
-                    Budget::PerHour {
-                        delegations: b.delegations,
+                },
+                (None, Some(max), Some(budget)) => {
+                    if max == 0 {
+                        problems.push(format!("{path}: `max_concurrent` must be greater than 0"));
                     }
+                    (
+                        max,
+                        resolve_budget(&format!("{path}.budget"), budget, &mut problems),
+                        None,
+                    )
+                }
+                _ => {
+                    problems.push(format!(
+                        "{path}: give either `limit`, the name of a shared one, or both `max_concurrent` and `budget`; not a mix and not neither"
+                    ));
+                    (1, Budget::Unlimited, None)
                 }
             };
             let at = format!("{path}.adapter");
@@ -181,9 +241,10 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
                     team: team_name.clone(),
                     prompt: ra.prompt.clone(),
                     max_seconds: ra.max_seconds,
-                    max_concurrent: ra.max_concurrent,
+                    max_concurrent,
                     isolation: ra.isolation,
                     budget,
+                    limit,
                     adapter,
                 },
             );
@@ -213,6 +274,7 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
         Ok(Config {
             version: raw.version,
             llm_backends: backends,
+            limits,
             teams,
             agents,
             gates,

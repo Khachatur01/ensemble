@@ -46,6 +46,9 @@ pub fn to_v2(text: &str) -> Result<String, String> {
             }
         }
     }
+    if !top.contains_key("limits") {
+        top.insert(key("limits"), Value::Mapping(Mapping::new()));
+    }
     let mut teams = Mapping::new();
     teams.insert(key(MIGRATED_TEAM), Value::Mapping(team));
     top.insert(key("teams"), Value::Mapping(teams));

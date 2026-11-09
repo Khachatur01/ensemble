@@ -222,7 +222,7 @@ fn join(lines: Vec<String>, original: &str) -> String {
 mod tests {
     use super::*;
 
-    const ORG: &str = "version: 2\nllm_backends: {}\n# the teams\nteams:\n  software:\n    prompt: Code.\n    tracker:\n      type: local_markdown\n    gates: {}\n    agents:\n      coder:\n        max_seconds: 60\n        max_concurrent: 1\n        isolation: shared\n        budget:\n          type: unlimited\n        adapter:\n          type: opencode\n          model:\n            type: provider\n            name: opencode/m\n          tools: [read]\n          system_prompt: append\n          max_steps: 3\n          command: opencode\n      # keep this comment with the next agent\n  hardware:\n    prompt: Boards.\n    tracker:\n      type: local_markdown\n    gates: {}\n    agents: {}\n";
+    const ORG: &str = "version: 2\nllm_backends: {}\nlimits: {}\n# the teams\nteams:\n  software:\n    prompt: Code.\n    tracker:\n      type: local_markdown\n    gates: {}\n    agents:\n      coder:\n        max_seconds: 60\n        max_concurrent: 1\n        isolation: shared\n        budget:\n          type: unlimited\n        adapter:\n          type: opencode\n          model:\n            type: provider\n            name: opencode/m\n          tools: [read]\n          system_prompt: append\n          max_steps: 3\n          command: opencode\n      # keep this comment with the next agent\n  hardware:\n    prompt: Boards.\n    tracker:\n      type: local_markdown\n    gates: {}\n    agents: {}\n";
 
     fn reviewer() -> String {
         agent_block(
@@ -320,7 +320,7 @@ mod tests {
             )
             .unwrap();
             let text = format!(
-                "version: 2\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nteams:\n  t:\n    prompt: p\n    tracker: {{ type: local_markdown }}\n    gates: {{}}\n    agents:\n{block}"
+                "version: 2\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nlimits: {{}}\nteams:\n  t:\n    prompt: p\n    tracker: {{ type: local_markdown }}\n    gates: {{}}\n    agents:\n{block}"
             );
             loads(&text);
         }

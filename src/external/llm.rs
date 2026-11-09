@@ -182,6 +182,7 @@ mod tests {
             max_concurrent: 1,
             isolation: Isolation::Shared,
             budget: Budget::Unlimited,
+            limit: None,
             adapter: Adapter::Llm(la.clone()),
         };
         (a, la)

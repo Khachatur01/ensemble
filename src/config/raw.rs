@@ -16,6 +16,9 @@ pub(crate) struct RawConfig {
     /// hands its harness the endpoint, so it is defined once, here, for the
     /// whole organization.
     pub(crate) llm_backends: BTreeMap<String, RawLlmBackend>,
+    /// Named limits that agents share, such as one model server's concurrency
+    /// or one subscription's budget. `{}` when there are none.
+    pub(crate) limits: BTreeMap<String, RawLimit>,
     /// The organization's teams.
     pub(crate) teams: BTreeMap<String, RawTeam>,
 }
@@ -91,12 +94,18 @@ pub(crate) struct RawAgent {
     /// Most delegations to this agent that run at once in a session; more
     /// wait for a free slot. 1 for a model server that can serve one request
     /// at a time.
-    pub(crate) max_concurrent: u32,
+    /// Written with `budget`, or not at all when `limit` names a shared one.
+    pub(crate) max_concurrent: Option<u32>,
     /// Where its tasks run: in the project itself, or each in a git worktree
     /// of its own.
     pub(crate) isolation: Isolation,
-    /// How many runs it may start in an hour.
-    pub(crate) budget: RawBudget,
+    /// How much it may run in an hour. Written with `max_concurrent`, or not
+    /// at all when `limit` names a shared one.
+    pub(crate) budget: Option<RawBudget>,
+    /// The name of one of the organization's `limits`, which it then shares
+    /// with the other agents that name it, in place of `max_concurrent` and
+    /// `budget`.
+    pub(crate) limit: Option<String>,
     /// What runs the agent, and how.
     pub(crate) adapter: RawAdapter,
 }
@@ -109,6 +118,26 @@ pub(crate) enum RawBudget {
     Unlimited(RawUnlimited),
     #[serde(rename = "per_hour")]
     PerHour(RawPerHour),
+    #[serde(rename = "per_hour_tokens")]
+    PerHourTokens(RawPerHourTokens),
+}
+
+/// A limit agents share.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawLimit {
+    /// Most runs at once across every agent that shares it.
+    pub(crate) max_concurrent: u32,
+    /// How much all of them together may run in an hour.
+    pub(crate) budget: RawBudget,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawPerHourTokens {
+    /// Tokens, prompt and completion together, that runs may use in any hour.
+    /// Counted from what each run reports; one that reports none counts none.
+    pub(crate) tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]

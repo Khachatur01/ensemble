@@ -454,6 +454,19 @@ fn cmd_check(config: Config, dir: &Path, args: &Args) -> Result<ExitCode, String
         println!("  (none — add agents under `agents:`)");
     }
 
+    // Not errors: what the agents are allowed to do, for a second look.
+    let risks = setup::risks(&config);
+    if !risks.is_empty() {
+        println!();
+        println!("warnings:");
+        for r in &risks {
+            println!("  {}", r.what);
+            if let Some(fix) = &r.fix {
+                println!("    {fix}");
+            }
+        }
+    }
+
     // A bad ticket fails only when the worker reaches it; say so now.
     let store = tasks::Store::new(&state_for(dir, args)?);
     let entries = store.scan();

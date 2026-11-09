@@ -194,6 +194,60 @@ impl<'e> Queue<'e> {
             .unwrap_or_else(|_| agent.to_string())
     }
 
+    /// What `agent`'s slots and budget are counted under: its own name, or the
+    /// shared limit it names, so that every agent on one limit uses one count.
+    fn key(&self, agent: &str) -> String {
+        let qualified = self.qualified(agent);
+        match self
+            .ensemble
+            .config()
+            .agent(&qualified)
+            .and_then(|a| a.limit.as_ref())
+        {
+            Some(limit) => format!("limit:{limit}"),
+            None => qualified,
+        }
+    }
+
+    /// Seconds until the runs of `agent`, and of every agent on its limit,
+    /// have used fewer than `tokens` in the last hour, or `None` if they have.
+    /// Counted from the record of runs, from what each reported.
+    fn over_tokens(&self, agent: &str, tokens: u64) -> Option<u64> {
+        let config = self.ensemble.config();
+        let members: Vec<&str> = match config.agent(agent).and_then(|a| a.limit.as_ref()) {
+            Some(limit) => config
+                .agents
+                .values()
+                .filter(|a| a.limit.as_ref() == Some(limit))
+                .map(|a| a.name.as_str())
+                .collect(),
+            None => vec![agent],
+        };
+        let now = unix_now();
+        let mut runs: Vec<(u64, u64)> = crate::records::read(&self.ensemble.records_dir()?)
+            .into_iter()
+            .filter(|r| members.contains(&r.agent.as_str()) && now < r.started + HOUR)
+            .map(|r| {
+                (
+                    r.started,
+                    r.prompt_tokens.unwrap_or(0) + r.completion_tokens.unwrap_or(0),
+                )
+            })
+            .collect();
+        let mut left: u64 = runs.iter().map(|r| r.1).sum();
+        if left < tokens {
+            return None;
+        }
+        runs.sort_unstable();
+        for (started, used) in runs {
+            left -= used;
+            if left < tokens {
+                return Some((started + HOUR).saturating_sub(now).max(1));
+            }
+        }
+        None
+    }
+
     /// How many delegations to `agent` may run at once. An unknown agent
     /// fails as soon as it starts, so it needs no limit.
     fn limit(&self, agent: &str) -> u32 {
@@ -206,15 +260,16 @@ impl<'e> Queue<'e> {
     /// Seconds until `agent` may start another run, or `None` if it may now.
     fn over_budget(&self, inner: &Inner, agent: &str) -> Option<u64> {
         let agent = &self.qualified(agent);
-        let Some(Budget::PerHour { delegations }) =
-            self.ensemble.config().agent(agent).map(|a| a.budget)
-        else {
-            return None;
+        let key = self.key(agent);
+        let delegations = match self.ensemble.config().agent(agent).map(|a| a.budget) {
+            Some(Budget::PerHour { delegations }) => delegations,
+            Some(Budget::PerHourTokens { tokens }) => return self.over_tokens(agent, tokens),
+            _ => return None,
         };
         let now = unix_now();
         let mut recent: Vec<u64> = inner
             .usage
-            .get(agent)
+            .get(&key)
             .map(|runs| runs.iter().copied().filter(|t| now < t + HOUR).collect())
             .unwrap_or_default();
         if recent.len() < delegations as usize {
@@ -240,7 +295,7 @@ impl<'e> Queue<'e> {
             return Ok(());
         }
         let now = unix_now();
-        let runs = inner.usage.entry(agent.to_string()).or_default();
+        let runs = inner.usage.entry(self.key(agent)).or_default();
         runs.retain(|t| now < t + HOUR);
         runs.push(now);
         if let Some(store) = &self.store {
@@ -258,7 +313,8 @@ impl<'e> Queue<'e> {
     /// Take a slot of `agent` if one is free.
     fn take(&self, inner: &mut Inner, agent: &str) -> Option<Slot<'_>> {
         let agent = &self.qualified(agent);
-        let used = inner.busy.entry(agent.to_string()).or_default();
+        let key = self.key(agent);
+        let used = inner.busy.entry(key.clone()).or_default();
         if *used >= self.limit(agent) {
             return None;
         }
@@ -266,7 +322,7 @@ impl<'e> Queue<'e> {
         Some(Slot {
             inner: &self.inner,
             changed: &self.changed,
-            agent: agent.to_string(),
+            agent: key,
         })
     }
 
@@ -984,7 +1040,7 @@ fn unix_now() -> u64 {
 
 fn over_budget_message(agent: &str, wait: u64) -> String {
     format!(
-        "agent '{agent}' has used its budget of runs for this hour; the next is allowed in {}. \
+        "agent '{agent}' has used its budget for this hour; the next run is allowed in {}. \
          Use another agent, or try again then.",
         minutes(wait)
     )

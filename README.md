@@ -143,6 +143,8 @@ llm_backends:
     api_key_env: OPENAI_LOCAL_API_KEY
     timeout_seconds: 600
 
+limits: {}
+
 teams:
   software:
     prompt: Writes and reviews the code of the project.
@@ -205,9 +207,10 @@ hardcoded as planner, coder or reviewer. It has:
 | --- | --- |
 | `prompt` | what it is for. The first line is what your agent sees in `agents`; the whole of it goes into the agent's system prompt, added to the CLI's own (OpenCode can also replace its own; see `system_prompt`). Optional: without it a CLI agent runs on its CLI's own system prompt alone, and an `llm` agent has none |
 | `max_seconds` | wall-clock limit for one delegation. At the limit the CLI and its whole process tree are killed and what it did is returned, marked unfinished |
+| `limit` | the name of one of the organization's [`limits`](#shared-limits), in place of `max_concurrent` and `budget` |
 | `max_concurrent` | most delegations to it that run at once in a session: tasks, background and blocking delegations alike. More wait for a free slot. `1` suits a model server that serves one request at a time |
 | `isolation` | where its tasks run: `shared`, in the project directory, or `worktree`, each task in a git worktree of its own (see [Tasks](#tasks-and-background-delegations)). Delegations always run in the project |
-| `budget` | how many runs it may start in an hour: `{ type: unlimited }`, or `{ type: per_hour, delegations: 20 }`. Tasks, each gate retry, and delegations, blocking or in the background, all count, across sessions and projects (`usage.json` in the organization's state directory). Over it, a delegation is refused saying when the next run is allowed, a task waits (`queued, over its agent's budget for 12 more minutes`), and a gate retry is not made |
+| `budget` | how much it may run in an hour: `{ type: unlimited }`, `{ type: per_hour, delegations: 20 }` (runs), or `{ type: per_hour_tokens, tokens: 2000000 }` (the tokens its runs reported). Tasks, each gate retry, and delegations, blocking or in the background, all count, across sessions and projects (`usage.json` in the organization's state directory). Over it, a delegation is refused saying when the next run is allowed, a task waits (`queued, over its agent's budget for 12 more minutes`), and a gate retry is not made |
 | `adapter` | what runs it. `type` decides which other fields the adapter takes |
 
 An **LLM backend** is a model server of yours, defined once. An OpenCode agent
@@ -656,6 +659,36 @@ the same files to an agent with `max_concurrent: 1`, or `isolation: worktree`. A
 the MCP timeout in the manager's config is the other fix for a client that
 times out.
 
+### Shared limits
+
+Two agents on one model server, or one subscription, should not each assume
+they have it to themselves. The organization's `limits` name a limit once, and
+an agent takes it in place of its own `max_concurrent` and `budget`:
+
+```yaml
+limits:
+  local-server:
+    max_concurrent: 1
+    budget: { type: per_hour_tokens, tokens: 2000000 }
+teams:
+  software:
+    # ...
+    agents:
+      coder:
+        limit: local-server    # no max_concurrent, no budget
+```
+
+Every agent that names `local-server` uses one count of slots and one budget, so
+their runs together stay within it. An agent writes either `limit`, or both
+`max_concurrent` and `budget`; a mix, or neither, is refused by name. A token
+budget is counted from the record of runs (`ensemble stats`), from what each run
+reported: an agent whose runs report none counts none, so its budget never fills.
+
+There is no sandbox: the agents' tools are their CLIs' own. `ensemble check` and
+`ensemble doctor` warn, without failing, about agents that can change files
+directly in your working folder (`isolation: shared`), about Claude Code
+permission modes that skip the checks, and about token budgets.
+
 ### Remote organizations
 
 An organization can live in a git repository you do not have checked out, and be
@@ -914,9 +947,9 @@ scripts stand in for the CLIs.
   session.
 - **No sandbox of Ensemble's own.** The agents' tools are the CLIs' own; their
   permission settings are what limit them.
-- **Limits are per agent, not per model server or subscription.** Two agents
-  on one server each get their own `max_concurrent`; a budget is shared by
-  every project that uses the organization, but counts runs, not tokens.
+- **Limits are per agent unless shared.** Agents on one server share a limit only
+  when they name the same one. Budgets are shared by every project that uses the
+  organization. A token budget counts what runs report, which not every CLI does.
 - **Tasks run only while a worker runs.** The worker lives in `ensemble mcp`, so
   tasks stop with the manager's session; `ensemble serve` is a worker with no
   session, for queues that should go on. One worker runs a folder's tasks at a

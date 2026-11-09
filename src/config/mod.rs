@@ -98,6 +98,9 @@ pub struct AgentConfig {
     pub max_concurrent: u32,
     pub isolation: Isolation,
     pub budget: Budget,
+    /// The shared limit it takes `max_concurrent` and `budget` from, when it
+    /// names one: its slots and its budget are then shared with the others.
+    pub limit: Option<String>,
     pub adapter: Adapter,
 }
 
@@ -121,6 +124,17 @@ pub enum Budget {
     PerHour {
         delegations: u32,
     },
+    /// At most this many tokens used by runs in any hour, as the runs report.
+    PerHourTokens {
+        tokens: u64,
+    },
+}
+
+/// A limit that several agents share: their runs together stay within it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limit {
+    pub max_concurrent: u32,
+    pub budget: Budget,
 }
 
 /// What runs an agent.
@@ -309,6 +323,8 @@ pub fn claude_tool_writes(tool: &str) -> bool {
 pub struct Config {
     pub version: u32,
     pub llm_backends: BTreeMap<String, LlmBackend>,
+    /// Shared limits, by name.
+    pub limits: BTreeMap<String, Limit>,
     /// The organization's teams, by name. There is no manager in the file: the
     /// agent that calls Ensemble is it.
     pub teams: BTreeMap<String, Team>,

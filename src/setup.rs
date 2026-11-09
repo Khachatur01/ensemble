@@ -4,7 +4,7 @@
 //! arguments, so tests can run them without a terminal or a network.
 
 use crate::config::edit::{NewAgent, add_agent, agent_block};
-use crate::config::{CLAUDE_CODE_AGENT, Config, OPENCODE_AGENT, SCHEMA_URL_LINE};
+use crate::config::{Adapter, Budget, CLAUDE_CODE_AGENT, Config, OPENCODE_AGENT, SCHEMA_URL_LINE};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -166,7 +166,7 @@ pub fn starter_org(starter: &Starter, found: &Detected) -> Result<String, String
         }
         text.push('\n');
     }
-    text.push_str("teams: {}\n");
+    text.push_str("limits: {}\n\nteams: {}\n");
     // `teams: {}` is a flow mapping; give add_agent a block to extend.
     text = text.replace("teams: {}\n", "teams:\n");
     let mut team_added = false;
@@ -335,6 +335,44 @@ impl Finding {
     }
 }
 
+/// What a config lets its agents do that deserves a second look. Ensemble adds
+/// no sandbox of its own, so these are the agents' CLIs' own permissions.
+pub fn risks(config: &Config) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for a in config.agents.values() {
+        if let Adapter::ClaudeCode(c) = &a.adapter
+            && matches!(c.permission_mode.as_str(), "bypassPermissions" | "auto")
+        {
+            out.push(Finding::note(
+                format!(
+                    "{} uses permission mode '{}', which lets it act without asking",
+                    a.name, c.permission_mode
+                ),
+                "use `dontAsk` with a list of `tools`, which is what limits it",
+            ));
+        }
+        if a.can_change_files() && a.isolation == crate::config::Isolation::Shared {
+            out.push(Finding::note(
+                format!(
+                    "{} can change files directly in your working folder (isolation: shared)",
+                    a.name
+                ),
+                "set `isolation: worktree` so its tasks work on a branch of their own",
+            ));
+        }
+        if let Budget::PerHourTokens { .. } = a.budget {
+            out.push(Finding::note(
+                format!(
+                    "{} has a token budget, which counts only the tokens its runs report",
+                    a.name
+                ),
+                "`ensemble stats` shows `-` for an agent whose runs report none; its budget never fills",
+            ));
+        }
+    }
+    out
+}
+
 /// Checks that need no running agent: the structure of the organization.
 pub fn structure(config: &Config, org: &Path, workdir: &Path) -> Vec<Finding> {
     let mut out = Vec::new();
@@ -377,6 +415,7 @@ pub fn structure(config: &Config, org: &Path, workdir: &Path) -> Vec<Finding> {
             "open a repository, or give tasks a `repo` that is one",
         ));
     }
+    out.extend(risks(config));
     if out.iter().all(|f| f.level != Level::Problem) {
         out.push(Finding::ok(format!(
             "{} teams, {} agents",
