@@ -51,6 +51,14 @@ COMMANDS:
     org update URL#COMMIT [--ref R]
                             Show what changed in a remote organization since
                             COMMIT and print its new pin. Trusts nothing.
+    tasks [--status S]      List the tasks of this working folder and where each
+                            stands. Reads files; starts nothing.
+    task ID                 Show one task: its ticket, where it stands, its
+                            question or its result.
+    submit AGENT TITLE --text T [--goal G] [--context C] [--repo R] [--gate N:K]
+           [--after ID,ID] [--files F,F] [--constraints C,C] [--done-when D,D]
+                            Write a task. A running `ensemble mcp` picks it up.
+    answer ID TEXT          Answer the question a task stopped to ask.
     show <AGENT>            Print how an agent is started: its command line and
                             the config handed to its CLI, API keys hidden.
     check                   Load and validate the config, then report the team.
@@ -139,7 +147,8 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             "-d" | "--dir" => dir = Some(PathBuf::from(value("--dir")?)),
             "--context" => context = Some(value("--context")?),
             "--manager" | "--adapter" | "--model" | "--backend" | "--starter" | "--only"
-            | "--prompt" | "--team-prompt" => {
+            | "--prompt" | "--team-prompt" | "--status" | "--text" | "--goal" | "--repo"
+            | "--gate" | "--after" | "--files" | "--constraints" | "--done-when" | "--ref" => {
                 opts.insert(arg.clone(), value(&arg)?);
             }
             other if other.starts_with('-') && command.is_none() => {
@@ -194,6 +203,9 @@ fn run() -> Result<ExitCode, String> {
         return cmd_migrate(&args);
     }
     match args.command.as_str() {
+        "tasks" => return cmd_tasks(&args, &dir),
+        "task" => return cmd_task(&args, &dir),
+        "answer" => return cmd_answer(&args, &dir),
         "setup" => return cmd_setup(&args, &dir),
         "connect" => return cmd_connect(&args),
         "add-agent" => return cmd_add_agent(&args),
@@ -224,6 +236,7 @@ fn run() -> Result<ExitCode, String> {
         "show" => cmd_show(&config, &args),
         "health" => cmd_health(config, dir, &args),
         "doctor" => cmd_doctor(config, &dir, &args),
+        "submit" => cmd_submit(&config, &dir, &args),
         "run" => cmd_run(config, dir, &args),
         other => Err(format!("unknown command '{other}'. Try --help.")),
     }
@@ -1011,4 +1024,163 @@ fn cmd_org(args: &Args) -> Result<ExitCode, String> {
         }
         other => Err(format!("org: unknown '{other}'. Use trust or update.")),
     }
+}
+
+/// The task store of the working folder, kept where `--state` says.
+fn store_for(dir: &Path, args: &Args) -> Result<tasks::Store, String> {
+    Ok(tasks::Store::new(&state_for(dir, args)?))
+}
+
+fn cmd_tasks(args: &Args, dir: &Path) -> Result<ExitCode, String> {
+    let store = store_for(dir, args)?;
+    let entries = store.scan();
+    let wanted = opt(args, "--status");
+    let mut shown = 0;
+    for entry in &entries {
+        let line = tasks::entry_line(Some(&store), entry, &entries, None);
+        let status = line.split(" · ").nth(2).unwrap_or("");
+        if wanted.is_none_or(|w| status.starts_with(w)) {
+            println!("{line}");
+            shown += 1;
+        }
+    }
+    if shown == 0 {
+        println!(
+            "{}",
+            match wanted {
+                Some(w) => format!("No tasks with status '{w}'."),
+                None => format!("No tasks in {}.", store.tasks_dir().display()),
+            }
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_task(args: &Args, dir: &Path) -> Result<ExitCode, String> {
+    let id = args
+        .rest
+        .first()
+        .ok_or("task: needs a task id. `ensemble tasks` lists them.")?;
+    let store = store_for(dir, args)?;
+    let entries = store.scan();
+    let Some(entry) = entries.iter().find(|e| e.id() == id) else {
+        return Err(format!(
+            "task: no task '{id}'. `ensemble tasks` lists them."
+        ));
+    };
+    println!("{}", tasks::entry_line(Some(&store), entry, &entries, None));
+    if let tasks::Entry::Task(t, _) = entry {
+        println!("\n{}", t.prompt());
+        if let Some(repo) = &t.repo {
+            println!("\nrepo: {repo}");
+        }
+        if let Some(gate) = &t.gate {
+            println!("gate: {} ({} attempts)", gate.name, gate.attempts);
+        }
+    }
+    if let Some(q) = store.open_question(id) {
+        println!("\nWaiting for an answer to: {q}\nAnswer it with: ensemble answer {id} <text>");
+    }
+    if let Some(outcome) = store.outcome(id) {
+        println!("\n{}", outcome.text);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_answer(args: &Args, dir: &Path) -> Result<ExitCode, String> {
+    let id = args
+        .rest
+        .first()
+        .ok_or("answer: needs a task id and the answer")?;
+    let answer = args.rest[1..].join(" ");
+    if answer.trim().is_empty() {
+        return Err(
+            "answer: needs the answer, e.g. `ensemble answer 0001-add-retry use ureq`".into(),
+        );
+    }
+    store_for(dir, args)?.answer(id, &answer)?;
+    println!("answered {id}; a running `ensemble mcp` carries the task on.");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A comma-separated option as a list.
+fn list_opt(args: &Args, name: &str) -> Vec<String> {
+    opt(args, name)
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn cmd_submit(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, String> {
+    let (agent, title) = match args.rest.as_slice() {
+        [agent, title, ..] if !agent.starts_with("--") && !title.starts_with("--") => (agent, title),
+        _ => return Err("submit: needs an agent and a title: `ensemble submit software/coder \"Add retry\" --text ...`".into()),
+    };
+    let mut text = opt(args, "--text").map(str::to_string);
+    if text.is_none() && !std::io::stdin().is_terminal() {
+        use std::io::Read;
+        let mut piped = String::new();
+        std::io::stdin()
+            .read_to_string(&mut piped)
+            .map_err(|e| format!("submit: cannot read the task from stdin: {e}"))?;
+        text = Some(piped);
+    }
+    let text = text
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .ok_or("submit: needs the task: --text <text>, or pipe it in")?;
+    if title.trim().is_empty() || title.contains('\n') {
+        return Err("submit: the title is one non-empty line".into());
+    }
+    let qualified = config.qualify(agent).map_err(|e| format!("submit: {e}"))?;
+    let team = config.agents[&qualified].team.clone();
+    let gate = match opt(args, "--gate") {
+        None => None,
+        Some(spec) => {
+            let (name, attempts) = spec.split_once(':').unwrap_or((spec, "1"));
+            let attempts: u32 = attempts
+                .parse()
+                .ok()
+                .filter(|n| *n >= 1)
+                .ok_or("submit: --gate is name:attempts, with attempts at least 1")?;
+            if config.gate(&team, name).is_none() {
+                return Err(format!("submit: no gate '{name}' for team '{team}'"));
+            }
+            Some(tasks::GateRef {
+                name: name.to_string(),
+                attempts,
+            })
+        }
+    };
+    let repo = opt(args, "--repo").map(str::to_string);
+    if let Some(repo) = &repo {
+        ensemble::workspace::resolve_repo(dir, repo).map_err(|e| format!("submit: {e}"))?;
+    }
+    let ticket = tasks::Ticket {
+        title: title.trim().to_string(),
+        agent: qualified,
+        context: args.context.clone(),
+        goal: opt(args, "--goal").map(str::to_string),
+        constraints: list_opt(args, "--constraints"),
+        files: list_opt(args, "--files"),
+        done_when: list_opt(args, "--done-when"),
+        after: list_opt(args, "--after"),
+        repo,
+        gate,
+        text,
+        ..Default::default()
+    };
+    let store = store_for(dir, args)?;
+    let id = store
+        .create(&ticket)
+        .map_err(|e| format!("submit: cannot write the task: {e}"))?;
+    println!(
+        "task {id} written in {}. A running `ensemble mcp` for this folder picks it up.",
+        store.tasks_dir().join(&id).display()
+    );
+    Ok(ExitCode::SUCCESS)
 }

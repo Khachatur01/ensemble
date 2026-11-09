@@ -26,7 +26,7 @@ use super::delegation::{ToolResult, run_delegation};
 use crate::config::{Budget, Isolation};
 use crate::external::gate;
 use crate::router::Ensemble;
-use crate::tasks::{ASK_MARKER, Entry, Status, Store, Ticket, question_in, waiting_for};
+use crate::tasks::{ASK_MARKER, Entry, Status, Store, Ticket, minutes, question_in, waiting_for};
 use crate::worktree;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
@@ -672,33 +672,11 @@ impl<'e> Queue<'e> {
     }
 
     fn describe_entry(&self, inner: &Inner, entry: &Entry, entries: &[Entry]) -> String {
-        match entry {
-            Entry::Task(t, Some(status)) => {
-                format!("{} · {} · {} · {}", t.id, t.agent, status.as_str(), t.title)
-            }
-            Entry::Task(t, None) => {
-                let interrupted = self
-                    .store
-                    .as_ref()
-                    .and_then(|s| s.state(&t.id))
-                    .is_some_and(|s| s == "interrupted" || s == "running");
-                let blockers = waiting_for(t, entries);
-                let question = self.store.as_ref().and_then(|s| s.open_question(&t.id));
-                let state = if let Some(q) = question {
-                    format!("needs input: {q}")
-                } else if let Some(wait) = self.over_budget(inner, &t.agent) {
-                    format!("queued, over its agent's budget for {}", minutes(wait))
-                } else if !blockers.is_empty() {
-                    format!("blocked by {}", blockers.join(", "))
-                } else if interrupted {
-                    "queued (interrupted last session)".into()
-                } else {
-                    "queued".into()
-                };
-                format!("{} · {} · {state} · {}", t.id, t.agent, t.title)
-            }
-            Entry::Unreadable { id, error } => format!("{id} · unreadable · {error}"),
-        }
+        let wait = match entry {
+            Entry::Task(t, None) => self.over_budget(inner, &t.agent),
+            _ => None,
+        };
+        crate::tasks::entry_line(self.store.as_ref(), entry, entries, wait)
     }
 
     /// The result of a task or background delegation, waiting up to
@@ -835,11 +813,6 @@ fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
-}
-
-fn minutes(seconds: u64) -> String {
-    let m = seconds.div_ceil(60);
-    format!("{m} more minute{}", if m == 1 { "" } else { "s" })
 }
 
 fn over_budget_message(agent: &str, wait: u64) -> String {

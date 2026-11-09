@@ -472,6 +472,13 @@ Then, for either:
 - `cancel` with `task` kills the agent's CLI and its process tree. A task that
   has not started gets a `cancelled` result and never runs.
 
+You can do the same from the terminal, with no agent in between: `ensemble
+tasks` and `ensemble task <id>` read the state directory and show what
+`status` and `wait` would, `ensemble submit` writes a ticket and `ensemble
+answer` answers a question. They start no worker: a running `ensemble mcp` for
+the same working folder runs the tasks, and the folder is the current directory
+or `--dir`.
+
 A task looks like this. Only `title` and `agent` are required; `submit` takes
 the same fields:
 
@@ -726,6 +733,10 @@ $ ensemble connect --manager M --org <dir> [--only T,T] [--global]  # register w
 $ ensemble doctor --org <dir>      # what is wrong, and how to fix each thing
 $ ensemble add-agent <team/name> --adapter A --org <dir>   # add an agent, every setting written
 $ ensemble remove-agent <team/name> --org <dir>
+$ ensemble tasks [--status S]      # the tasks of this working folder and where each stands
+$ ensemble task <id>               # one task: ticket, state, question or result
+$ ensemble submit <agent> <title> --text T   # write a task (also --goal --context --repo --gate --after ...)
+$ ensemble answer <id> <text>      # answer the question a task stopped to ask
 $ ensemble init --org <dir>        # write a sample organization: <dir>/config.yaml
 $ ensemble init --stdout           # print it instead (init refuses to overwrite without --force)
 $ ensemble migrate <file> --org <dir>  # a version 1 config becomes an organization

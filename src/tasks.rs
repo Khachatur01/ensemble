@@ -156,6 +156,49 @@ impl Ticket {
     }
 }
 
+/// "3 more minutes".
+pub fn minutes(seconds: u64) -> String {
+    let m = seconds.div_ceil(60);
+    format!("{m} more minute{}", if m == 1 { "" } else { "s" })
+}
+
+/// One line about a task found on disk: its id, agent, where it stands and its
+/// title. `budget_wait` is the seconds until its agent may start another run,
+/// when it may not now. The tool `status` and the commands `ensemble tasks` and
+/// `ensemble task` all show a task this way.
+pub fn entry_line(
+    store: Option<&Store>,
+    entry: &Entry,
+    entries: &[Entry],
+    budget_wait: Option<u64>,
+) -> String {
+    match entry {
+        Entry::Task(t, Some(status)) => {
+            format!("{} · {} · {} · {}", t.id, t.agent, status.as_str(), t.title)
+        }
+        Entry::Task(t, None) => {
+            let interrupted = store
+                .and_then(|s| s.state(&t.id))
+                .is_some_and(|s| s == "interrupted" || s == "running");
+            let blockers = waiting_for(t, entries);
+            let question = store.and_then(|s| s.open_question(&t.id));
+            let state = if let Some(q) = question {
+                format!("needs input: {q}")
+            } else if let Some(wait) = budget_wait {
+                format!("queued, over its agent's budget for {}", minutes(wait))
+            } else if !blockers.is_empty() {
+                format!("blocked by {}", blockers.join(", "))
+            } else if interrupted {
+                "queued (interrupted last session)".into()
+            } else {
+                "queued".into()
+            };
+            format!("{} · {} · {state} · {}", t.id, t.agent, t.title)
+        }
+        Entry::Unreadable { id, error } => format!("{id} · unreadable · {error}"),
+    }
+}
+
 /// How a task ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {

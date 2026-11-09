@@ -74,7 +74,7 @@ impl Scratch {
     }
 
     fn read(&self, name: &str) -> String {
-        std::fs::read_to_string(self.0.join(name)).unwrap_or_else(|e| panic!("read {name}: {e}"))
+        std::fs::read_to_string(self.place(name)).unwrap_or_else(|e| panic!("read {name}: {e}"))
     }
 
     /// What the stand-in CLI saved: `args` or `config`.
@@ -1513,4 +1513,162 @@ fn org_update_shows_what_changed_and_pins_nothing_by_itself() {
         .output()
         .unwrap();
     assert!(!used.status.success());
+}
+
+// ---------------------------------------------------------------------------
+// Tasks from the terminal
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_task_written_by_submit_is_listed_shown_and_run_by_a_session() {
+    let s = Scratch::new("cli-tasks");
+    let cli = s.opencode("renamed it", "echo bar > a.txt");
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("a.txt", "foo\n");
+
+    let none = ensemble(&s, &["tasks"]);
+    assert!(
+        stdout_of(&none).contains("No tasks"),
+        "{}",
+        stdout_of(&none)
+    );
+
+    let out = ensemble(
+        &s,
+        &[
+            "submit",
+            "coder",
+            "Rename foo",
+            "--text",
+            "rename foo to bar",
+            "--goal",
+            "no foo left",
+            "--done-when",
+            "a.txt says bar,tests pass",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("task 0001-rename-foo written"),
+        "{}",
+        stdout_of(&out)
+    );
+
+    let listed = ensemble(&s, &["tasks"]);
+    assert!(
+        stdout_of(&listed).contains("0001-rename-foo · default/coder · queued · Rename foo"),
+        "{}",
+        stdout_of(&listed)
+    );
+    let shown = ensemble(&s, &["task", "0001-rename-foo"]);
+    let text = stdout_of(&shown);
+    assert!(
+        text.contains("rename foo to bar") && text.contains("Goal: no foo left"),
+        "{text}"
+    );
+    assert!(text.contains("- tests pass"), "{text}");
+
+    // A running session picks it up, as it does a task the manager wrote.
+    let mut session = McpSession::start(&s);
+    session.request("initialize", serde_json::json!({}));
+    let reply = session.call(
+        "wait",
+        serde_json::json!({"task": "0001-rename-foo", "timeout_seconds": 30}),
+    );
+    assert!(
+        tool_text(&reply).contains("status: done"),
+        "{}",
+        tool_text(&reply)
+    );
+    drop(session);
+
+    let done = ensemble(&s, &["tasks", "--status", "done"]);
+    assert!(
+        stdout_of(&done).contains("0001-rename-foo"),
+        "{}",
+        stdout_of(&done)
+    );
+    let queued = ensemble(&s, &["tasks", "--status", "queued"]);
+    assert!(
+        stdout_of(&queued).contains("No tasks with status 'queued'"),
+        "{}",
+        stdout_of(&queued)
+    );
+    let shown = ensemble(&s, &["task", "0001-rename-foo"]);
+    assert!(
+        stdout_of(&shown).contains("status: done"),
+        "{}",
+        stdout_of(&shown)
+    );
+}
+
+#[test]
+fn submit_refuses_what_a_task_cannot_be() {
+    let s = Scratch::new("cli-submit-bad");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    let no_text = ensemble(&s, &["submit", "coder", "T"]);
+    assert!(!no_text.status.success());
+    for (args, needle) in [
+        (vec!["submit", "nobody", "T", "--text", "x"], "no agent"),
+        (
+            vec!["submit", "coder", "T", "--text", "x", "--gate", "nope:2"],
+            "no gate",
+        ),
+        (
+            vec!["submit", "coder", "T", "--text", "x", "--gate", "test:0"],
+            "attempts",
+        ),
+        (
+            vec!["submit", "coder", "T", "--text", "x", "--repo", "../out"],
+            "`repo`",
+        ),
+    ] {
+        let out = ensemble(&s, &args);
+        assert!(!out.status.success(), "{args:?}");
+        assert!(
+            stderr_of(&out).contains(needle),
+            "{args:?}: {}",
+            stderr_of(&out)
+        );
+    }
+    assert!(stdout_of(&ensemble(&s, &["tasks"])).contains("No tasks"));
+}
+
+#[test]
+fn answer_gives_a_waiting_task_its_answer() {
+    let s = Scratch::new("cli-answer");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write(
+        ".ensemble/tasks/0001-ask/task.md",
+        "---\ntitle: ask\nagent: coder\n---\nask\n",
+    );
+    s.write(
+        ".ensemble/tasks/0001-ask/questions.md",
+        "## Question 1\nWhich name?\n\n",
+    );
+    let listed = ensemble(&s, &["tasks"]);
+    assert!(
+        stdout_of(&listed).contains("needs input: Which name?"),
+        "{}",
+        stdout_of(&listed)
+    );
+    let none = ensemble(&s, &["answer", "0001-ask"]);
+    assert!(!none.status.success());
+    let out = ensemble(&s, &["answer", "0001-ask", "use", "bar"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        s.read(".ensemble/tasks/0001-ask/questions.md")
+            .contains("### Answer\nuse bar")
+    );
+    let again = ensemble(&s, &["answer", "0001-ask", "twice"]);
+    assert!(
+        !again.status.success(),
+        "a second answer has no question to answer"
+    );
+    let listed = ensemble(&s, &["tasks"]);
+    assert!(
+        stdout_of(&listed).contains("queued"),
+        "{}",
+        stdout_of(&listed)
+    );
 }
