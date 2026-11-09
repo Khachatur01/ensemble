@@ -24,11 +24,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// Everything Ensemble keeps in a project lives in this directory.
-pub const CONFIG_DIR: &str = ".ensemble";
 pub const CONFIG_FILENAME: &str = "config.yaml";
-/// Variables for the config's `api_key_env` settings, beside the config file.
-pub const ENV_FILENAME: &str = ".env";
 
 /// The JSON Schema for `config.yaml`, for editors. `ensemble schema`
 /// prints it; the tests keep it in step with the structs below.
@@ -37,7 +33,7 @@ pub const SCHEMA: &str = include_str!("../../ensemble.schema.json");
 /// The config `ensemble init` writes: every setting at least once, with what
 /// it does. The tests keep it loading and complete.
 pub const SAMPLE: &str = include_str!("../sample.yaml");
-pub const SUPPORTED_VERSION: u32 = 1;
+pub const SUPPORTED_VERSION: u32 = 2;
 
 /// The LLM backend types that ship. Adding one is adding an adapter and a
 /// variant.
@@ -88,7 +84,10 @@ impl LlmBackend {
 /// One member of the team, resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentConfig {
+    /// `team/agent`, the name the manager delegates by.
     pub name: String,
+    /// The team it belongs to.
+    pub team: String,
     pub prompt: Option<String>,
     /// See [`RawAgent::max_seconds`].
     pub max_seconds: u32,
@@ -217,6 +216,11 @@ impl OpenCodeAdapter {
 }
 
 impl AgentConfig {
+    /// The name without its team.
+    pub fn short_name(&self) -> &str {
+        self.name.split_once('/').map_or(&self.name, |(_, n)| n)
+    }
+
     pub fn kind(&self) -> &'static str {
         match self.adapter {
             Adapter::ClaudeCode(_) => CLAUDE_CODE_AGENT,
@@ -302,11 +306,74 @@ pub fn claude_tool_writes(tool: &str) -> bool {
 pub struct Config {
     pub version: u32,
     pub llm_backends: BTreeMap<String, LlmBackend>,
-    /// The team. There is no manager: the agent that calls Ensemble is it.
+    /// The organization's teams, by name. There is no manager in the file: the
+    /// agent that calls Ensemble is it.
+    pub teams: BTreeMap<String, Team>,
+    /// Every agent of every team, by its qualified name, `team/agent`.
     pub agents: BTreeMap<String, AgentConfig>,
+    /// Every team's gates, by qualified name, `team/gate`.
     pub gates: BTreeMap<String, Gate>,
     /// Where it was loaded from, for error messages.
     pub source: PathBuf,
+}
+
+/// A team of the organization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Team {
+    pub name: String,
+    /// What the team is for; the first line is what the manager sees.
+    pub prompt: String,
+    pub tracker: Tracker,
+    /// Its agents, by qualified name.
+    pub agents: Vec<String>,
+}
+
+impl Team {
+    /// The first line of its prompt.
+    pub fn summary(&self) -> &str {
+        self.prompt.lines().next().unwrap_or("").trim()
+    }
+}
+
+/// Where a team's tasks come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tracker {
+    /// Markdown files in Ensemble's state directory.
+    LocalMarkdown,
+}
+
+/// The name an agent is looked up by was not enough to tell which one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameError {
+    Unknown {
+        name: String,
+        known: Vec<String>,
+    },
+    Ambiguous {
+        name: String,
+        candidates: Vec<String>,
+    },
+}
+
+impl fmt::Display for NameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NameError::Unknown { name, known } => write!(
+                f,
+                "no agent '{name}'. Agents: {}.",
+                if known.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    known.join(", ")
+                }
+            ),
+            NameError::Ambiguous { name, candidates } => write!(
+                f,
+                "'{name}' is the name of more than one agent: {}. Use the full name, team/agent.",
+                candidates.join(", ")
+            ),
+        }
+    }
 }
 
 /// A command a task's work must pass.
@@ -317,12 +384,44 @@ pub struct Gate {
 }
 
 impl Config {
+    /// The agent called `name`: `team/agent`, or `agent` when only one team has
+    /// an agent of that name.
     pub fn agent(&self, name: &str) -> Option<&AgentConfig> {
-        self.agents.get(name)
+        self.qualify(name).ok().and_then(|q| self.agents.get(&q))
     }
 
+    /// `name` as `team/agent`, or why it names no single agent.
+    pub fn qualify(&self, name: &str) -> Result<String, NameError> {
+        if self.agents.contains_key(name) {
+            return Ok(name.to_string());
+        }
+        let candidates: Vec<String> = self
+            .agents
+            .values()
+            .filter(|a| a.short_name() == name)
+            .map(|a| a.name.clone())
+            .collect();
+        match candidates.len() {
+            1 => Ok(candidates.into_iter().next().expect("one candidate")),
+            0 => Err(NameError::Unknown {
+                name: name.to_string(),
+                known: self.agent_names().into_iter().map(String::from).collect(),
+            }),
+            _ => Err(NameError::Ambiguous {
+                name: name.to_string(),
+                candidates,
+            }),
+        }
+    }
+
+    /// The agents' qualified names.
     pub fn agent_names(&self) -> Vec<&str> {
         self.agents.keys().map(String::as_str).collect()
+    }
+
+    /// The gate `name` of `team`.
+    pub fn gate(&self, team: &str, name: &str) -> Option<&Gate> {
+        self.gates.get(&format!("{team}/{name}"))
     }
 }
 
@@ -357,7 +456,7 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::NotFound { path } => write!(
                 f,
-                "no {CONFIG_FILENAME} at {}. Create one, or pass --config <path>.",
+                "no {CONFIG_FILENAME} at {}. Check the --org directory, or make one with `ensemble init --org <dir>`.",
                 path.display()
             ),
             ConfigError::Unreadable { path, detail } => {
@@ -380,6 +479,7 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 mod env;
+pub mod migrate;
 mod raw;
 mod validate;
 

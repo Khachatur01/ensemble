@@ -3,7 +3,10 @@
 use super::raw::*;
 use super::*;
 
-pub fn load(path: &Path, env: &dyn Env) -> Result<Config, ConfigError> {
+/// Load the organization config at `path`. Variables the environment does not
+/// set may come from `env_file`, a file of `NAME=value` lines the caller names;
+/// nothing is read beside the config, because it can live in a shared repo.
+pub fn load(path: &Path, env_file: Option<&Path>, env: &dyn Env) -> Result<Config, ConfigError> {
     if !path.exists() {
         return Err(ConfigError::NotFound {
             path: path.to_path_buf(),
@@ -13,15 +16,15 @@ pub fn load(path: &Path, env: &dyn Env) -> Result<Config, ConfigError> {
         path: path.to_path_buf(),
         detail: e.to_string(),
     })?;
-    let dotenv = env_path(path);
-    let file_vars = if dotenv.is_file() {
-        let vars = std::fs::read_to_string(&dotenv).map_err(|e| ConfigError::Unreadable {
-            path: dotenv.clone(),
-            detail: e.to_string(),
-        })?;
-        parse_dotenv(&vars, &dotenv)?
-    } else {
-        BTreeMap::new()
+    let file_vars = match env_file {
+        Some(dotenv) => {
+            let vars = std::fs::read_to_string(dotenv).map_err(|e| ConfigError::Unreadable {
+                path: dotenv.to_path_buf(),
+                detail: e.to_string(),
+            })?;
+            parse_dotenv(&vars, dotenv)?
+        }
+        None => BTreeMap::new(),
     };
     parse(
         &text,
@@ -80,82 +83,118 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
         }
     }
 
-    // --- gates ---
+    // --- teams: their gates and agents ---
+    let mut teams: BTreeMap<String, Team> = BTreeMap::new();
     let mut gates = BTreeMap::new();
-    for (name, g) in &raw.gates {
-        if g.command.trim().is_empty() {
-            problems.push(format!("gates.{name}: `command` is empty"));
-        }
-        if g.timeout_seconds == 0 {
-            problems.push(format!(
-                "gates.{name}: `timeout_seconds` must be greater than 0"
-            ));
-        }
-        gates.insert(
-            name.clone(),
-            Gate {
-                command: g.command.clone(),
-                timeout_seconds: g.timeout_seconds,
-            },
-        );
-    }
-
-    // --- agents ---
     let mut agents: BTreeMap<String, AgentConfig> = BTreeMap::new();
-    for (name, ra) in &raw.agents {
-        if name.trim().is_empty() {
-            problems.push("agents: an agent name cannot be empty".into());
+    for (team_name, rt) in &raw.teams {
+        let here = format!("teams.{team_name}");
+        if team_name.trim().is_empty() || team_name.contains('/') {
+            problems.push(format!(
+                "teams: the team name '{team_name}' must not be empty or contain '/'"
+            ));
             continue;
         }
-        if ra.max_seconds == 0 {
+        if rt.prompt.trim().is_empty() {
             problems.push(format!(
-                "agents.{name}: `max_seconds` must be greater than 0"
+                "{here}: `prompt` is empty; the manager reads it to choose a team"
             ));
         }
-        if ra.max_concurrent == 0 {
-            problems.push(format!(
-                "agents.{name}: `max_concurrent` must be greater than 0"
-            ));
+        let tracker = match &rt.tracker {
+            RawTracker::LocalMarkdown(_) => Tracker::LocalMarkdown,
+        };
+
+        for (name, g) in &rt.gates {
+            if name.trim().is_empty() || name.contains('/') {
+                problems.push(format!(
+                    "{here}.gates: the gate name '{name}' must not be empty or contain '/'"
+                ));
+                continue;
+            }
+            if g.command.trim().is_empty() {
+                problems.push(format!("{here}.gates.{name}: `command` is empty"));
+            }
+            if g.timeout_seconds == 0 {
+                problems.push(format!(
+                    "{here}.gates.{name}: `timeout_seconds` must be greater than 0"
+                ));
+            }
+            gates.insert(
+                format!("{team_name}/{name}"),
+                Gate {
+                    command: g.command.clone(),
+                    timeout_seconds: g.timeout_seconds,
+                },
+            );
         }
-        let budget = match &ra.budget {
-            RawBudget::Unlimited(_) => Budget::Unlimited,
-            RawBudget::PerHour(b) => {
-                if b.delegations == 0 {
-                    problems.push(format!(
-                        "agents.{name}.budget: `delegations` must be greater than 0"
-                    ));
+
+        let mut members = Vec::new();
+        for (name, ra) in &rt.agents {
+            if name.trim().is_empty() || name.contains('/') {
+                problems.push(format!(
+                    "{here}.agents: the agent name '{name}' must not be empty or contain '/'"
+                ));
+                continue;
+            }
+            let path = format!("{here}.agents.{name}");
+            if ra.max_seconds == 0 {
+                problems.push(format!("{path}: `max_seconds` must be greater than 0"));
+            }
+            if ra.max_concurrent == 0 {
+                problems.push(format!("{path}: `max_concurrent` must be greater than 0"));
+            }
+            let budget = match &ra.budget {
+                RawBudget::Unlimited(_) => Budget::Unlimited,
+                RawBudget::PerHour(b) => {
+                    if b.delegations == 0 {
+                        problems.push(format!(
+                            "{path}.budget: `delegations` must be greater than 0"
+                        ));
+                    }
+                    Budget::PerHour {
+                        delegations: b.delegations,
+                    }
                 }
-                Budget::PerHour {
-                    delegations: b.delegations,
+            };
+            let at = format!("{path}.adapter");
+            let adapter = match &ra.adapter {
+                RawAdapter::ClaudeCode(c) => {
+                    Adapter::ClaudeCode(claude_code_adapter(&at, c, &mut problems))
                 }
-            }
-        };
-        let at = format!("agents.{name}.adapter");
-        let adapter = match &ra.adapter {
-            RawAdapter::ClaudeCode(c) => {
-                Adapter::ClaudeCode(claude_code_adapter(&at, c, &mut problems))
-            }
-            RawAdapter::OpenCode(o) => Adapter::OpenCode(opencode_adapter(
-                &at,
-                o,
-                ra.prompt.as_deref(),
-                &raw.llm_backends,
-                &mut problems,
-            )),
-            RawAdapter::Llm(l) => {
-                Adapter::Llm(llm_adapter(&at, l, &raw.llm_backends, &mut problems))
-            }
-        };
-        agents.insert(
-            name.clone(),
-            AgentConfig {
-                name: name.clone(),
-                prompt: ra.prompt.clone(),
-                max_seconds: ra.max_seconds,
-                max_concurrent: ra.max_concurrent,
-                isolation: ra.isolation,
-                budget,
-                adapter,
+                RawAdapter::OpenCode(o) => Adapter::OpenCode(opencode_adapter(
+                    &at,
+                    o,
+                    ra.prompt.as_deref(),
+                    &raw.llm_backends,
+                    &mut problems,
+                )),
+                RawAdapter::Llm(l) => {
+                    Adapter::Llm(llm_adapter(&at, l, &raw.llm_backends, &mut problems))
+                }
+            };
+            let qualified = format!("{team_name}/{name}");
+            members.push(qualified.clone());
+            agents.insert(
+                qualified.clone(),
+                AgentConfig {
+                    name: qualified,
+                    team: team_name.clone(),
+                    prompt: ra.prompt.clone(),
+                    max_seconds: ra.max_seconds,
+                    max_concurrent: ra.max_concurrent,
+                    isolation: ra.isolation,
+                    budget,
+                    adapter,
+                },
+            );
+        }
+        teams.insert(
+            team_name.clone(),
+            Team {
+                name: team_name.clone(),
+                prompt: rt.prompt.clone(),
+                tracker,
+                agents: members,
             },
         );
     }
@@ -174,6 +213,7 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
         Ok(Config {
             version: raw.version,
             llm_backends: backends,
+            teams,
             agents,
             gates,
             source: path.to_path_buf(),

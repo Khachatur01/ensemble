@@ -30,15 +30,21 @@ impl Project {
     fn new(config: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("ensemble-real-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join(".ensemble")).unwrap();
-        std::fs::write(dir.join(".ensemble/config.yaml"), config).unwrap();
+        std::fs::create_dir_all(dir.join("org")).unwrap();
+        std::fs::create_dir_all(dir.join("work")).unwrap();
+        let v2 = ensemble::config::migrate::to_v2(config).expect("a sample");
+        std::fs::write(dir.join("org/config.yaml"), v2).unwrap();
         Project(dir)
     }
 
     fn ensemble(&self, args: &[&str]) -> std::process::Output {
         Command::new(BIN)
             .args(args)
-            .current_dir(&self.0)
+            .arg("--org")
+            .arg(self.0.join("org"))
+            .arg("--state")
+            .arg(self.0.join("state"))
+            .current_dir(self.0.join("work"))
             .output()
             .expect("run ensemble")
     }

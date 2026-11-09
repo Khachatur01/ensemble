@@ -49,6 +49,11 @@ pub enum RouteError {
     /// The agent is not in the config. Carries the ones that are, because the
     /// caller is usually a model that guessed a plausible name.
     UnknownAgent { asked: String, known: Vec<String> },
+    /// The name fits agents of more than one team.
+    AmbiguousAgent {
+        asked: String,
+        candidates: Vec<String>,
+    },
     /// The agent is configured but did not do the work.
     Agent(Error),
 }
@@ -61,6 +66,11 @@ impl std::fmt::Display for RouteError {
                 "no agent '{asked}' is configured. Available agents: {}.",
                 known.join(", ")
             ),
+            RouteError::AmbiguousAgent { asked, candidates } => write!(
+                f,
+                "'{asked}' is the name of more than one agent: {}. Use the full name, team/agent.",
+                candidates.join(", ")
+            ),
             RouteError::Agent(e) => write!(f, "{e}"),
         }
     }
@@ -71,7 +81,7 @@ impl std::error::Error for RouteError {}
 impl RouteError {
     pub fn is_retryable(&self) -> bool {
         match self {
-            RouteError::UnknownAgent { .. } => false,
+            RouteError::UnknownAgent { .. } | RouteError::AmbiguousAgent { .. } => false,
             RouteError::Agent(e) => e.is_retryable(),
         }
     }
@@ -80,6 +90,10 @@ impl RouteError {
 pub struct Ensemble {
     config: Config,
     workdir: Option<PathBuf>,
+    /// Where tasks, run logs and worktrees go; the per-user state directory
+    /// of the working directory unless set.
+    state: Option<PathBuf>,
+    usage: Option<PathBuf>,
     /// Agent runs in progress, and how many have ever started: together they
     /// tell a run whether another one overlapped it.
     active: AtomicUsize,
@@ -91,8 +105,45 @@ impl Ensemble {
         Ensemble {
             config,
             workdir,
+            state: None,
+            usage: None,
             active: AtomicUsize::new(0),
             started: AtomicU64::new(0),
+        }
+    }
+
+    /// Keep state in `dir` instead of the per-user state directory.
+    pub fn with_state(mut self, dir: PathBuf) -> Self {
+        self.state = Some(dir);
+        self
+    }
+
+    /// Keep usage counters in `dir` instead of the organization's per-user
+    /// directory.
+    pub fn with_usage_dir(mut self, dir: PathBuf) -> Self {
+        self.usage = Some(dir);
+        self
+    }
+
+    /// Where usage counters are kept, when not beside the runs: shared by
+    /// every project that uses the organization.
+    pub fn usage_dir(&self) -> Option<PathBuf> {
+        match &self.usage {
+            Some(dir) => Some(dir.clone()),
+            None => self
+                .config
+                .source
+                .is_file()
+                .then(|| crate::state::org_dir(&self.config.source).ok())
+                .flatten(),
+        }
+    }
+
+    /// Where tasks, run logs and worktrees are kept.
+    pub fn state_dir(&self) -> std::io::Result<PathBuf> {
+        match &self.state {
+            Some(dir) => Ok(dir.clone()),
+            None => crate::state::dir_for(&self.workdir()?).map_err(std::io::Error::other),
         }
     }
 
@@ -113,12 +164,18 @@ impl Ensemble {
     }
 
     fn resolve(&self, name: &str) -> Result<&AgentConfig, RouteError> {
-        self.config
-            .agent(name)
-            .ok_or_else(|| RouteError::UnknownAgent {
-                asked: name.to_string(),
-                known: self.agents().into_iter().map(str::to_string).collect(),
-            })
+        let qualified = self.config.qualify(name).map_err(|e| match e {
+            crate::config::NameError::Unknown { name, known } => {
+                RouteError::UnknownAgent { asked: name, known }
+            }
+            crate::config::NameError::Ambiguous { name, candidates } => {
+                RouteError::AmbiguousAgent {
+                    asked: name,
+                    candidates,
+                }
+            }
+        })?;
+        Ok(&self.config.agents[&qualified])
     }
 
     /// Where an agent runs, and on which model. Used by `ensemble agents`;
@@ -385,6 +442,7 @@ agents:
       command: "{program}"
 "#
         );
+        let yaml = config::migrate::to_v2(&yaml).unwrap();
         let cfg =
             config::parse(&yaml, std::path::Path::new("config.yaml"), &BTreeMap::new()).unwrap();
         Ensemble::new(cfg, workdir)
@@ -413,7 +471,10 @@ agents:
         let err = e.delegate("nobody", "x", None).unwrap_err();
         assert!(!err.is_retryable());
         let msg = err.to_string();
-        assert!(msg.contains("doer, looker, reviewer"), "{msg}");
+        assert!(
+            msg.contains("default/doer, default/looker, default/reviewer"),
+            "{msg}"
+        );
     }
 
     #[test]

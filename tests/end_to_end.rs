@@ -36,8 +36,36 @@ impl Scratch {
         &self.0
     }
 
+    /// The organization directory, kept beside the project so it is not one of
+    /// the files a run changes.
+    fn org(&self) -> PathBuf {
+        self.0.with_extension("org")
+    }
+
+    /// Where tasks and runs go (`--state`), beside the project too.
+    fn state(&self) -> PathBuf {
+        self.0.with_extension("state")
+    }
+
+    /// A path in the project, or one of the old `.ensemble/` names, which are
+    /// the organization (`config.yaml`, `.env`) and the state (the rest).
+    fn place(&self, name: &str) -> PathBuf {
+        match name.strip_prefix(".ensemble/") {
+            Some(rest) if rest == "config.yaml" || rest == ".env" => self.org().join(rest),
+            Some(rest) => self.state().join(rest),
+            None => self.0.join(name),
+        }
+    }
+
     fn write(&self, name: &str, contents: &str) -> PathBuf {
-        let p = self.0.join(name);
+        let p = self.place(name);
+        let converted;
+        let contents = if name == ".ensemble/config.yaml" {
+            converted = ensemble::config::migrate::to_v2(contents).unwrap_or(contents.to_string());
+            converted.as_str()
+        } else {
+            contents
+        };
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
@@ -80,12 +108,14 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
         let _ = std::fs::remove_dir_all(self.0.with_extension("bin"));
+        let _ = std::fs::remove_dir_all(self.org());
+        let _ = std::fs::remove_dir_all(self.state());
     }
 }
 
 /// Two OpenCode agents run by `command`: `reviewer` on a provider OpenCode
 /// knows, and `coder` on the `openai-local` LLM backend at `backend_url`.
-fn config_yaml(command: &str, backend_url: &str) -> String {
+fn config_v1(command: &str, backend_url: &str) -> String {
     format!(
         r#"
 version: 1
@@ -135,13 +165,26 @@ agents:
     )
 }
 
+/// The same, as the version 2 organization it is loaded as.
+fn config_yaml(command: &str, backend_url: &str) -> String {
+    ensemble::config::migrate::to_v2(&config_v1(command, backend_url)).expect("a version 1 sample")
+}
+
 /// The binary, run in `scratch` with none of the test variables inherited:
 /// a stale one would silently change what is being tested.
 fn command(scratch: &Scratch) -> Command {
     let mut c = Command::new(BIN);
     c.current_dir(scratch.path())
+        .arg("--org")
+        .arg(scratch.org())
+        .arg("--state")
+        .arg(scratch.state())
         .env_remove("ENSEMBLE_TEST_LOCAL_URL")
         .env_remove("ENSEMBLE_TEST_LOCAL_KEY");
+    let env_file = scratch.org().join(".env");
+    if env_file.exists() {
+        c.arg("--env-file").arg(env_file);
+    }
     c
 }
 
@@ -206,10 +249,10 @@ fn check_accepts_a_valid_config_and_reports_the_team() {
     let out = ensemble(&s, &["check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
-    assert!(text.contains("ok (version 1)"), "{text}");
+    assert!(text.contains("ok (version 2)"), "{text}");
     assert!(text.contains("mcp: ready"), "{text}");
     assert!(
-        text.contains("coder  ->  opencode on openai-local / qwen3-coder"),
+        text.contains("default/coder  ->  opencode on openai-local / qwen3-coder"),
         "{text}"
     );
     assert!(text.contains("openai-compatible-api"), "{text}");
@@ -286,26 +329,20 @@ llm_backends:
 }
 
 #[test]
-fn a_config_in_a_parent_directory_is_not_used() {
-    let s = Scratch::new("discover");
+fn nothing_is_found_without_an_org() {
+    let s = Scratch::new("no-org");
     s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
-    let deep = s.path().join("a/b/c");
-    std::fs::create_dir_all(&deep).unwrap();
+    // The project folder holds a config of the old kind; it is not looked at.
+    s.write("config.yaml", "version: 2\n");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
 
-    let out = command(&s)
+    let out = Command::new(BIN)
         .arg("check")
-        .current_dir(&deep)
+        .current_dir(s.path())
         .output()
         .unwrap();
-    assert!(
-        !out.status.success(),
-        "a parent's config must not configure a subfolder"
-    );
-    assert!(
-        stderr_of(&out).contains("parent directories are not searched"),
-        "{}",
-        stderr_of(&out)
-    );
+    assert!(!out.status.success(), "no --org means no organization");
+    assert!(stderr_of(&out).contains("--org"), "{}", stderr_of(&out));
 }
 
 #[test]
@@ -314,7 +351,7 @@ fn a_missing_config_says_so_rather_than_guessing() {
     let out = ensemble(&s, &["check"]);
     assert!(!out.status.success());
     assert!(
-        stderr_of(&out).contains(".ensemble/config.yaml"),
+        stderr_of(&out).contains("config.yaml"),
         "{}",
         stderr_of(&out)
     );
@@ -329,11 +366,11 @@ fn agents_prints_the_routing_table() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(
-        text.contains("coder\topencode on openai-local\tqwen3-coder"),
+        text.contains("default/coder\topencode on openai-local\tqwen3-coder"),
         "{text}"
     );
     assert!(
-        text.contains("reviewer\topencode\topencode/reviewer-model"),
+        text.contains("default/reviewer\topencode\topencode/reviewer-model"),
         "{text}"
     );
 }
@@ -372,7 +409,7 @@ fn run_starts_the_agents_cli_with_the_task_and_prints_its_answer() {
     );
     // Provenance goes to stderr so stdout stays pipeable.
     assert!(
-        stderr_of(&out).contains("reviewer via opencode / opencode/reviewer-model"),
+        stderr_of(&out).contains("default/reviewer via opencode / opencode/reviewer-model"),
         "{}",
         stderr_of(&out)
     );
@@ -383,7 +420,7 @@ fn run_starts_the_agents_cli_with_the_task_and_prints_its_answer() {
     );
     let config: serde_json::Value = serde_json::from_str(&s.seen("config")).unwrap();
     assert_eq!(
-        config["agent"]["ensemble-reviewer"]["prompt"],
+        config["agent"]["ensemble-default-reviewer"]["prompt"],
         "Reviews code and reports findings."
     );
     assert!(config.get("provider").is_none(), "{config}");
@@ -430,7 +467,7 @@ fn show_prints_how_an_agent_starts_with_the_key_hidden() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(
-        text.starts_with("opencode run --standalone --format json --agent ensemble-coder -m ensemble-openai-local/qwen3-coder -- '<task>'"),
+        text.starts_with("opencode run --standalone --format json --agent ensemble-default-coder -m ensemble-openai-local/qwen3-coder -- '<task>'"),
         "{text}"
     );
     assert!(
@@ -443,7 +480,7 @@ fn show_prints_how_an_agent_starts_with_the_key_hidden() {
     let out = ensemble(&s, &["show", "nobody"]);
     assert!(!out.status.success());
     assert!(
-        stderr_of(&out).contains("coder, reviewer"),
+        stderr_of(&out).contains("default/coder, default/reviewer"),
         "{}",
         stderr_of(&out)
     );
@@ -675,7 +712,7 @@ fn a_harness_can_submit_a_task_and_collect_its_result_from_the_ticket() {
     assert!(text.contains("status: done"), "{text}");
     assert!(text.contains("[files changed: a.txt (modified)]"), "{text}");
 
-    let ticket = s.path().join(".ensemble/tasks/0001-rename-foo");
+    let ticket = s.place(".ensemble/tasks/0001-rename-foo");
     assert!(ticket.join("task.md").is_file() && ticket.join("result.md").is_file());
 }
 
@@ -689,7 +726,10 @@ fn a_harness_can_delegate_through_mcp_and_get_the_work_back() {
     session.request("initialize", serde_json::json!({}));
 
     let agents = tool_text(&session.call("agents", serde_json::json!({})));
-    assert!(agents.contains("coder [can change files]"), "{agents}");
+    assert!(
+        agents.contains("default/coder [can change files]"),
+        "{agents}"
+    );
 
     let reply = session.call(
         "delegate",
@@ -842,37 +882,26 @@ fn an_invalid_config_stops_the_mcp_server_before_it_serves_anything() {
 }
 
 #[test]
-fn init_writes_a_sample_that_checks_and_never_overwrites_by_accident() {
+fn init_writes_a_sample_organization_that_checks_and_never_overwrites_by_accident() {
     let s = Scratch::new("init");
     let out = ensemble(&s, &["init"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let written = std::fs::read_to_string(s.path().join(".ensemble/config.yaml")).unwrap();
+    let written = std::fs::read_to_string(s.org().join("config.yaml")).unwrap();
     assert!(written.contains("type: opencode"), "{written}");
-    assert_eq!(
-        std::fs::read_to_string(s.path().join(".ensemble/.gitignore")).unwrap(),
-        ".env\n"
-    );
-    let env = s.path().join(".ensemble/.env");
+    assert!(written.contains("teams:"), "{written}");
     assert!(
-        std::fs::read_to_string(&env)
-            .unwrap()
-            .contains("OPENAI_LOCAL_API_KEY")
+        !s.org().join(".env").exists() && !s.org().join(".gitignore").exists(),
+        "an organization holds no secrets, so it needs no .env"
     );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&env).unwrap().permissions().mode();
-        assert_eq!(mode & 0o077, 0, "only its owner may read the secrets file");
-    }
-
     assert!(
-        std::fs::read_to_string(s.path().join(".ensemble/tasks/README.md"))
-            .unwrap()
-            .contains("agent: coder")
+        !s.path().join(".ensemble").exists(),
+        "nothing is written in the project"
     );
 
     let check = ensemble(&s, &["check"]);
     assert!(check.status.success(), "{}", stderr_of(&check));
+    let text = stdout_of(&check);
+    assert!(text.contains("software"), "{text}");
 
     s.write(".ensemble/config.yaml", "mine");
     let again = ensemble(&s, &["init"]);
@@ -883,23 +912,56 @@ fn init_writes_a_sample_that_checks_and_never_overwrites_by_accident() {
         stderr_of(&again)
     );
     assert_eq!(
-        std::fs::read_to_string(s.path().join(".ensemble/config.yaml")).unwrap(),
+        std::fs::read_to_string(s.org().join("config.yaml")).unwrap(),
         "mine"
     );
 
     let printed = ensemble(&s, &["init", "--stdout"]);
     assert_eq!(stdout_of(&printed), written);
-    std::fs::write(&env, "MINE=1\n").unwrap();
     assert!(ensemble(&s, &["init", "--force"]).status.success());
     assert_eq!(
-        std::fs::read_to_string(&env).unwrap(),
-        "MINE=1\n",
-        "--force never overwrites the secrets"
-    );
-    assert_eq!(
-        std::fs::read_to_string(s.path().join(".ensemble/config.yaml")).unwrap(),
+        std::fs::read_to_string(s.org().join("config.yaml")).unwrap(),
         written
     );
+}
+
+#[test]
+fn migrate_turns_a_version_1_config_into_an_organization() {
+    let s = Scratch::new("migrate");
+    let old = s.write("old.yaml", &{
+        let v1 = r#"
+version: 1
+llm_backends: {}
+gates: {}
+agents:
+  solo:
+    prompt: "Does it."
+    max_seconds: 60
+    max_concurrent: 1
+    isolation: shared
+    budget:
+      type: unlimited
+    adapter:
+      type: opencode
+      model: { type: provider, name: opencode/m }
+      tools: [read]
+      system_prompt: append
+      max_steps: 3
+      command: opencode
+"#;
+        v1.to_string()
+    });
+    let out = ensemble(&s, &["migrate", old.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let check = ensemble(&s, &["check"]);
+    assert!(check.status.success(), "{}", stderr_of(&check));
+    assert!(
+        stdout_of(&check).contains("default/solo"),
+        "{}",
+        stdout_of(&check)
+    );
+    let again = ensemble(&s, &["migrate", old.to_str().unwrap()]);
+    assert!(!again.status.success(), "migrate does not overwrite");
 }
 
 #[test]
@@ -911,7 +973,6 @@ fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(text.contains("authenticated"), "{text}");
-    assert!(text.contains(".env: read for variables"), "{text}");
     assert!(!text.contains("sk-from-dotenv"), "{text}");
 
     s.write(".ensemble/.env", "not a line\n");
@@ -995,7 +1056,7 @@ fn a_light_agent_is_one_request_to_its_backend() {
     );
     let config = format!(
         "{}  summariser:\n    prompt: You summarise.\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: llm\n      backend: openai-local\n      model: small\n      max_tokens: 300\n",
-        config_yaml("opencode", &url)
+        config_v1("opencode", &url)
     );
     s.write(".ensemble/config.yaml", &config);
 

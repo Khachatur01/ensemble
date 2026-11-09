@@ -176,6 +176,7 @@ mod tests {
         };
         let a = AgentConfig {
             name: "summariser".into(),
+            team: "default".into(),
             prompt: prompt.map(String::from),
             max_seconds,
             max_concurrent: 1,

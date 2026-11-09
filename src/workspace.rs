@@ -139,6 +139,37 @@ fn walk(dir: &Path, visit: &mut dyn FnMut(&Path)) {
     }
 }
 
+/// The directory `repo` names inside `workdir`, for a run that works in one
+/// repository of a folder that holds several. `repo` is relative to `workdir`;
+/// anything that resolves outside it, by `..` or by a symlink, is refused.
+pub fn resolve_repo(workdir: &Path, repo: &str) -> Result<PathBuf, String> {
+    let root = workdir
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", workdir.display()))?;
+    let path = Path::new(repo);
+    if path.is_absolute() {
+        return Err(format!(
+            "`repo` '{repo}' must be a path inside the working directory, not an absolute one"
+        ));
+    }
+    let found = root.join(path).canonicalize().map_err(|e| {
+        format!(
+            "`repo` '{repo}' is not a directory in {}: {e}",
+            root.display()
+        )
+    })?;
+    if !found.starts_with(&root) {
+        return Err(format!(
+            "`repo` '{repo}' is outside the working directory {}",
+            root.display()
+        ));
+    }
+    if !found.is_dir() {
+        return Err(format!("`repo` '{repo}' is not a directory"));
+    }
+    Ok(found)
+}
+
 #[cfg(test)]
 pub mod testing {
     use std::path::PathBuf;
@@ -247,5 +278,54 @@ mod tests {
         record(&mut c, "b".into(), Change::Deleted);
         record(&mut c, "b".into(), Change::Added);
         assert_eq!(c["b"], Change::Modified);
+    }
+}
+
+#[cfg(test)]
+mod repo_tests {
+    use super::resolve_repo;
+    use super::testing::TempDir;
+
+    #[test]
+    fn a_folder_inside_the_workdir_resolves() {
+        let tmp = TempDir::new();
+        std::fs::create_dir_all(tmp.0.join("a/b")).unwrap();
+        let found = resolve_repo(&tmp.0, "a/b").unwrap();
+        assert_eq!(found, tmp.0.canonicalize().unwrap().join("a/b"));
+    }
+
+    #[test]
+    fn a_path_that_leaves_the_workdir_is_refused() {
+        let tmp = TempDir::new();
+        let work = tmp.0.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(tmp.0.join("other")).unwrap();
+        assert!(
+            resolve_repo(&work, "../other")
+                .unwrap_err()
+                .contains("outside")
+        );
+        assert!(
+            resolve_repo(&work, "/tmp")
+                .unwrap_err()
+                .contains("absolute")
+        );
+        assert!(resolve_repo(&work, "missing").is_err());
+    }
+
+    #[test]
+    fn a_symlink_out_of_the_workdir_is_refused_and_a_file_is_not_a_repo() {
+        let tmp = TempDir::new();
+        let work = tmp.0.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(tmp.0.join("other")).unwrap();
+        std::os::unix::fs::symlink(tmp.0.join("other"), work.join("link")).unwrap();
+        assert!(resolve_repo(&work, "link").unwrap_err().contains("outside"));
+        std::fs::write(work.join("file"), "x").unwrap();
+        assert!(
+            resolve_repo(&work, "file")
+                .unwrap_err()
+                .contains("not a directory")
+        );
     }
 }

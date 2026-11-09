@@ -1,4 +1,4 @@
-//! Work the caller does not wait for: tasks from `.ensemble/tasks/`, and
+//! Work the caller does not wait for: tasks from the state directory's `tasks/`, and
 //! background delegations.
 //!
 //! A blocking `delegate` holds the caller's tool call open for as long as the
@@ -133,6 +133,15 @@ impl<'e> Queue<'e> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// `agent` as `team/agent`, so that `coder` and `default/coder` share one
+    /// slot count and one budget. A name that is not an agent stays as it is.
+    fn qualified(&self, agent: &str) -> String {
+        self.ensemble
+            .config()
+            .qualify(agent)
+            .unwrap_or_else(|_| agent.to_string())
+    }
+
     /// How many delegations to `agent` may run at once. An unknown agent
     /// fails as soon as it starts, so it needs no limit.
     fn limit(&self, agent: &str) -> u32 {
@@ -144,6 +153,7 @@ impl<'e> Queue<'e> {
 
     /// Seconds until `agent` may start another run, or `None` if it may now.
     fn over_budget(&self, inner: &Inner, agent: &str) -> Option<u64> {
+        let agent = &self.qualified(agent);
         let Some(Budget::PerHour { delegations }) =
             self.ensemble.config().agent(agent).map(|a| a.budget)
         else {
@@ -167,6 +177,7 @@ impl<'e> Queue<'e> {
     /// Count a run of `agent` against its budget, or say how long until it
     /// may start one.
     fn spend_locked(&self, inner: &mut Inner, agent: &str) -> Result<(), u64> {
+        let agent = &self.qualified(agent);
         if let Some(wait) = self.over_budget(inner, agent) {
             return Err(wait);
         }
@@ -194,6 +205,7 @@ impl<'e> Queue<'e> {
 
     /// Take a slot of `agent` if one is free.
     fn take(&self, inner: &mut Inner, agent: &str) -> Option<Slot<'_>> {
+        let agent = &self.qualified(agent);
         let used = inner.busy.entry(agent.to_string()).or_default();
         if *used >= self.limit(agent) {
             return None;
@@ -266,6 +278,7 @@ impl<'e> Queue<'e> {
         agent: &str,
         task: &str,
         context: Option<&str>,
+        repo: Option<std::path::PathBuf>,
         spawn: &dyn Fn(Task<'s>),
     ) -> String
     where
@@ -282,6 +295,7 @@ impl<'e> Queue<'e> {
                 .insert(id.clone(), Self::live(agent, task, cancel.clone(), true));
             (id, cancel)
         };
+        let repo = repo;
         let (run, agent, task, context) = (
             id.clone(),
             agent.to_string(),
@@ -301,7 +315,7 @@ impl<'e> Queue<'e> {
                         &agent,
                         &task,
                         context.as_deref(),
-                        None,
+                        repo.as_deref(),
                         &|line| self.note(&run, line),
                         &cancel,
                     )
@@ -396,6 +410,10 @@ impl<'e> Queue<'e> {
             .ensemble
             .workdir()
             .map_err(|e| format!("no project directory to work in: {e}"))
+            .and_then(|workdir| match ticket.repo.as_deref() {
+                Some(repo) => crate::workspace::resolve_repo(&workdir, repo),
+                None => Ok(workdir),
+            })
             .and_then(
                 |project| match self.ensemble.config().agent(&ticket.agent) {
                     Some(a) if a.isolation == Isolation::Worktree => {
@@ -521,10 +539,12 @@ impl<'e> Queue<'e> {
         let Some(gate) = &ticket.gate else {
             return (delegate(&base), Vec::new());
         };
-        let Some(check) = self.ensemble.config().gates.get(&gate.name) else {
+        let config = self.ensemble.config();
+        let team = config.agent(&ticket.agent).map_or("", |a| a.team.as_str());
+        let Some(check) = config.gate(team, &gate.name) else {
             return (
                 ToolResult::err(format!(
-                    "gate '{}' is not defined under `gates` in config.yaml, so the task did not run.",
+                    "gate '{}' is not defined under the team's `gates` in config.yaml, so the task did not run.",
                     gate.name
                 )),
                 Vec::new(),

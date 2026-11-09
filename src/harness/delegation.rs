@@ -73,6 +73,10 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                         "type": "string",
                         "description": "Optional background: prior findings, file contents, constraints."
                     },
+                    "repo": {
+                        "type": "string",
+                        "description": REPO_DESCRIPTION
+                    },
                     "background": {
                         "type": "boolean",
                         "description": "Return at once with an id instead of waiting for the agent. \
@@ -88,7 +92,7 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
         out.push(Tool {
             name: SUBMIT,
             description: format!(
-                "Write a task for an agent to the project's task list (.ensemble/tasks/, \
+                "Write a task for an agent to the project's task list (the state directory's tasks/, \
                  committed like a ticket) and return its id at once. Agents work through \
                  tasks while this session runs, as many at a time as each agent allows; a \
                  task this session does not finish runs in the next one. Available agents: \
@@ -113,6 +117,10 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                     "context": {
                         "type": "string",
                         "description": "Optional background: prior findings, file contents."
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": REPO_DESCRIPTION
                     },
                     "goal": {
                         "type": "string",
@@ -223,10 +231,21 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
 
     out.push(Tool {
         name: AGENTS,
-        description: "List the agents this ensemble can delegate to, and what each is for. \
-                      Call this first if you are unsure who should do a piece of work."
+        description: "List the teams of this ensemble, and the agents of each with what each is \
+                      for. Call this first if you are unsure who should do a piece of work. \
+                      In a large organization it lists the teams only; pass `team` to list one \
+                      team's agents."
             .into(),
-        parameters: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "team": {
+                    "type": "string",
+                    "description": "Optional: list only this team's agents."
+                }
+            },
+            "additionalProperties": false
+        }),
     });
 
     out.push(Tool {
@@ -306,17 +325,29 @@ pub fn call<'s>(
                 .get("background")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            let repo = match repo_of(ensemble, args) {
+                Ok(repo) => repo,
+                Err(e) => return ToolResult::err(format!("{DELEGATE}: {e}")),
+            };
 
             // An unknown agent fails at once, so it takes the blocking path
             // and says so now rather than inside a background run.
-            if !ensemble.agents().contains(&role) {
-                return run_delegation(ensemble, role, task, context, None, progress, cancel);
+            if ensemble.config().agent(role).is_none() {
+                return run_delegation(
+                    ensemble,
+                    role,
+                    task,
+                    context,
+                    repo.as_deref(),
+                    progress,
+                    cancel,
+                );
             }
             if let Err(refused) = queue.spend(role) {
                 return ToolResult::err(format!("delegation refused: {refused}"));
             }
             if background {
-                let id = queue.start_adhoc(role, task, context, spawn);
+                let id = queue.start_adhoc(role, task, context, repo, spawn);
                 return ToolResult::ok(format!(
                     "{id} started. `status` shows what it is doing; `wait` with task {id} \
                      returns its reply."
@@ -328,7 +359,15 @@ pub fn call<'s>(
                     "delegation cancelled while it waited for a free slot of '{role}'."
                 ));
             };
-            run_delegation(ensemble, role, task, context, None, progress, cancel)
+            run_delegation(
+                ensemble,
+                role,
+                task,
+                context,
+                repo.as_deref(),
+                progress,
+                cancel,
+            )
         }
 
         SUBMIT => {
@@ -346,12 +385,11 @@ pub fn call<'s>(
             if title.contains('\n') {
                 return ToolResult::err(format!("{SUBMIT}: `title` is one line"));
             }
-            if !ensemble.agents().contains(&role) {
-                return ToolResult::err(format!(
-                    "{SUBMIT}: no agent '{role}' is configured. Available agents: {}.",
-                    ensemble.agents().join(", ")
-                ));
-            }
+            let role = &match ensemble.config().qualify(role) {
+                Ok(qualified) => qualified,
+                Err(e) => return ToolResult::err(format!("{SUBMIT}: {e}")),
+            };
+            let team = ensemble.config().agents[role].team.clone();
             let mut lists = Vec::new();
             for key in ["constraints", "files", "done_when", "after"] {
                 match args.get(key) {
@@ -381,11 +419,16 @@ pub fn call<'s>(
                             "{SUBMIT}: `gate.attempts` must be at least 1"
                         ));
                     }
-                    Ok(g) if !ensemble.config().gates.contains_key(&g.name) => {
-                        let known: Vec<&str> =
-                            ensemble.config().gates.keys().map(String::as_str).collect();
+                    Ok(g) if ensemble.config().gate(&team, &g.name).is_none() => {
+                        let prefix = format!("{team}/");
+                        let known: Vec<&str> = ensemble
+                            .config()
+                            .gates
+                            .keys()
+                            .filter_map(|k| k.strip_prefix(prefix.as_str()))
+                            .collect();
                         return ToolResult::err(format!(
-                            "{SUBMIT}: no gate '{}' is configured. Gates: {}.",
+                            "{SUBMIT}: no gate '{}' is configured for team '{team}'. Gates: {}.",
                             g.name,
                             if known.is_empty() {
                                 "(none)".to_string()
@@ -403,11 +446,15 @@ pub fn call<'s>(
                 },
             };
             let optional = |key: &str| text(key).filter(|s| !s.is_empty()).map(str::to_string);
+            if let Err(e) = repo_of(ensemble, args) {
+                return ToolResult::err(format!("{SUBMIT}: {e}"));
+            }
             queue.submit(&crate::tasks::Ticket {
                 title: title.to_string(),
                 agent: role.to_string(),
                 context: optional("context"),
                 goal: optional("goal"),
+                repo: optional("repo"),
                 constraints,
                 files,
                 done_when,
@@ -458,22 +505,57 @@ pub fn call<'s>(
         }
 
         AGENTS => {
-            let mut lines = Vec::new();
-            for role in ensemble.agents() {
+            let config = ensemble.config();
+            let line = |role: &str| {
                 // Where it runs and the model are deliberately absent: the caller must
                 // not start choosing them.
-                let purpose = ensemble
-                    .config()
+                let purpose = config
                     .agent(role)
                     .and_then(|a| a.prompt.as_deref())
                     .map(first_line)
                     .unwrap_or_else(|| "(no description configured)".to_string());
-                let kind = match ensemble.config().agent(role) {
+                let kind = match config.agent(role) {
                     Some(a) if a.can_change_files() => " [can change files]",
                     Some(a) if a.has_tools() => " [read-only]",
                     _ => "",
                 };
-                lines.push(format!("{role}{kind}: {purpose}"));
+                format!("{role}{kind}: {purpose}")
+            };
+            let wanted = match args.get("team") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(team)) => Some(team.as_str()),
+                Some(_) => return ToolResult::err(format!("{AGENTS}: `team` must be a string")),
+            };
+            if let Some(team) = wanted
+                && !config.teams.contains_key(team)
+            {
+                let known: Vec<&str> = config.teams.keys().map(String::as_str).collect();
+                return ToolResult::err(format!(
+                    "{AGENTS}: no team '{team}'. Teams: {}.",
+                    known.join(", ")
+                ));
+            }
+            // A small organization is listed whole; a large one by team, so
+            // that the caller's context is not spent on every agent.
+            let whole = wanted.is_some() || config.agents.len() <= WHOLE_LISTING;
+            let mut lines = Vec::new();
+            for team in config
+                .teams
+                .values()
+                .filter(|t| wanted.is_none_or(|w| w == t.name))
+            {
+                if whole {
+                    lines.push(format!("# team {}: {}", team.name, team.summary()));
+                    lines.extend(team.agents.iter().map(|a| line(a)));
+                } else {
+                    lines.push(format!(
+                        "# team {}: {} ({} agents; `{AGENTS}` with team={} lists them)",
+                        team.name,
+                        team.summary(),
+                        team.agents.len(),
+                        team.name
+                    ));
+                }
             }
             ToolResult::ok(lines.join("\n"))
         }
@@ -508,6 +590,26 @@ pub fn call<'s>(
 /// Delegate and turn the outcome into a tool result: the agent's work and a
 /// footer of what it did, or why it failed and whether another attempt could
 /// work. The agent works in `workdir`, or in the project without one.
+/// Up to this many agents, `agents` lists them all.
+const WHOLE_LISTING: usize = 12;
+
+const REPO_DESCRIPTION: &str = "Optional: a folder of the working directory to work in, such as one repository of several. A path relative to the working directory; one that leaves it is refused.";
+
+/// The `repo` argument as a directory inside the working directory, or why it
+/// is not one. `None` when there is none.
+fn repo_of(ensemble: &Ensemble, args: &Value) -> Result<Option<std::path::PathBuf>, String> {
+    let repo = match args.get("repo") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(repo)) if repo.trim().is_empty() => return Ok(None),
+        Some(Value::String(repo)) => repo.trim(),
+        Some(_) => return Err("`repo` must be a string".into()),
+    };
+    let workdir = ensemble
+        .workdir()
+        .map_err(|e| format!("no working directory: {e}"))?;
+    crate::workspace::resolve_repo(&workdir, repo).map(Some)
+}
+
 pub(super) fn run_delegation(
     ensemble: &Ensemble,
     role: &str,
@@ -539,7 +641,9 @@ pub(super) fn run_delegation(
                 " Retrying this unchanged will fail the same way."
             };
             let detail = match &e {
-                RouteError::UnknownAgent { .. } => String::new(),
+                RouteError::UnknownAgent { .. } | RouteError::AmbiguousAgent { .. } => {
+                    String::new()
+                }
                 RouteError::Agent(_) => format!(" (agent '{role}')"),
             };
             ToolResult::err(format!("delegation failed{detail}: {e}{hint}"))

@@ -13,14 +13,39 @@ use std::collections::BTreeMap;
 pub(crate) struct RawConfig {
     pub(crate) version: u32,
     /// Model endpoints. An agent names one with `llm_backend`, and Ensemble
-    /// hands its harness the endpoint, so it is defined once, here.
+    /// hands its harness the endpoint, so it is defined once, here, for the
+    /// whole organization.
     pub(crate) llm_backends: BTreeMap<String, RawLlmBackend>,
-    /// The team.
-    pub(crate) agents: BTreeMap<String, RawAgent>,
+    /// The organization's teams.
+    pub(crate) teams: BTreeMap<String, RawTeam>,
+}
+
+/// One team of the organization.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawTeam {
+    /// What the team is for. The manager reads it to choose a team.
+    pub(crate) prompt: String,
+    /// Where the team's tasks come from.
+    pub(crate) tracker: RawTracker,
     /// Commands a task's work must pass. Defined here, by a person, so a task
     /// names a gate and cannot bring a command of its own.
     pub(crate) gates: BTreeMap<String, RawGate>,
+    /// The team's agents.
+    pub(crate) agents: BTreeMap<String, RawAgent>,
 }
+
+/// Where a team's tasks come from. `type` decides which settings it has.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum RawTracker {
+    #[serde(rename = "local_markdown")]
+    LocalMarkdown(RawLocalMarkdown),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawLocalMarkdown {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

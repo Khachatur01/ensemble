@@ -9,6 +9,7 @@ use ensemble::config::{self, Adapter, Config, SystemEnv};
 use ensemble::external::{claude_code, opencode};
 use ensemble::harness::mcp;
 use ensemble::router::Ensemble;
+use ensemble::state;
 use ensemble::tasks;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -25,10 +26,11 @@ COMMANDS:
                             agent (Claude Code, OpenCode, ...) spawns, with the
                             project as its working directory; it is not meant
                             to be run by hand.
-    init [--force|--stdout] Write .ensemble/ with a sample config.yaml that has
-                            every setting, a .env for API keys and a .gitignore
-                            that keeps .env out of git. Refuses to overwrite
-                            config.yaml unless --force; --stdout prints it.
+    init [--force|--stdout] Write a sample organization: config.yaml in the --org
+                            directory, with every setting. Refuses to overwrite
+                            it unless --force; --stdout prints it instead.
+    migrate <FILE>          Rewrite a version 1 config (one team per project) as
+                            an organization in --org, as the team `default`.
     show <AGENT>            Print how an agent is started: its command line and
                             the config handed to its CLI, API keys hidden.
     check                   Load and validate the config, then report the team.
@@ -40,10 +42,12 @@ COMMANDS:
     run <AGENT> <TASK>      Send one task to one agent and print the answer.
 
 OPTIONS:
-    -c, --config <PATH>     Path to the config file. A .env beside it is read.
-                            Default: .ensemble/config.yaml in the project
-                            directory.
-                            Parent directories are not searched.
+    -o, --org <DIR>         The organization: the directory with config.yaml, its
+                            llm_backends and teams. Nothing is searched for.
+        --env-file <PATH>   A file of NAME=value lines read for variables the
+                            environment does not set.
+        --state <DIR>       Keep tasks, runs and worktrees here instead of in
+                            the per-user state directory.
     -d, --dir <PATH>        The project directory agents work in.
                             Default: the current directory.
         --context <TEXT>    Extra context for `run`.
@@ -53,7 +57,7 @@ OPTIONS:
 ENVIRONMENT:
     LLM backends name the variables they read; `ensemble check` lists them. API keys
     are never read from the config file. Variables missing from the environment
-    are read from .ensemble/.env, beside the config.
+    are read from the --env-file, when one is given.
 ";
 
 fn main() -> ExitCode {
@@ -69,7 +73,9 @@ fn main() -> ExitCode {
 struct Args {
     command: String,
     rest: Vec<String>,
-    config: Option<PathBuf>,
+    org: Option<PathBuf>,
+    env_file: Option<PathBuf>,
+    state: Option<PathBuf>,
     dir: Option<PathBuf>,
     context: Option<String>,
 }
@@ -77,7 +83,9 @@ struct Args {
 fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
     let mut command: Option<String> = None;
     let mut rest = Vec::new();
-    let mut config = None;
+    let mut org = None;
+    let mut env_file = None;
+    let mut state = None;
     let mut dir = None;
     let mut context = None;
 
@@ -95,7 +103,9 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
                 println!("ensemble {}", env!("CARGO_PKG_VERSION"));
                 return Ok(None);
             }
-            "-c" | "--config" => config = Some(PathBuf::from(value("--config")?)),
+            "-o" | "--org" => org = Some(PathBuf::from(value("--org")?)),
+            "--env-file" => env_file = Some(PathBuf::from(value("--env-file")?)),
+            "--state" => state = Some(PathBuf::from(value("--state")?)),
             "-d" | "--dir" => dir = Some(PathBuf::from(value("--dir")?)),
             "--context" => context = Some(value("--context")?),
             other if other.starts_with('-') && command.is_none() => {
@@ -114,7 +124,9 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
         Some(command) => Ok(Some(Args {
             command,
             rest,
-            config,
+            org,
+            env_file,
+            state,
             dir,
             context,
         })),
@@ -140,35 +152,58 @@ fn run() -> Result<ExitCode, String> {
     };
 
     if args.command == "init" {
-        return cmd_init(&args, &dir);
+        return cmd_init(&args);
+    }
+    if args.command == "migrate" {
+        return cmd_migrate(&args);
     }
 
-    let config_path = match &args.config {
-        Some(p) => p.clone(),
-        None => config::discover(&dir).ok_or_else(|| {
-            format!(
-                "no {} in the project directory {}. Run `ensemble init` there (parent directories are not searched), or pass --config <path>.",
-                Path::new(config::CONFIG_DIR).join(config::CONFIG_FILENAME).display(),
-                dir.display()
-            )
-        })?,
-    };
-
-    let config = config::load(&config_path, &SystemEnv).map_err(|e| e.to_string())?;
+    let org = org_of(&args, &args.command)?;
+    let config_path = config::config_path(&org);
+    let config = config::load(&config_path, args.env_file.as_deref(), &SystemEnv)
+        .map_err(|e| e.to_string())?;
 
     match args.command.as_str() {
-        "mcp" => cmd_mcp(config, dir),
-        "check" => cmd_check(config, &dir),
-        "agents" => cmd_agents(config, dir),
+        "mcp" => cmd_mcp(config, dir, &args),
+        "check" => cmd_check(config, &dir, &args),
+        "agents" => cmd_agents(config, dir, &args),
         "show" => cmd_show(&config, &args),
-        "health" => cmd_health(config, dir),
+        "health" => cmd_health(config, dir, &args),
         "run" => cmd_run(config, dir, &args),
         other => Err(format!("unknown command '{other}'. Try --help.")),
     }
 }
 
-/// Write the sample config, or print it.
-fn cmd_init(args: &Args, dir: &std::path::Path) -> Result<ExitCode, String> {
+/// The organization directory, which every command but `init`, `migrate` and
+/// `schema` needs. It is named, never found.
+fn org_of(args: &Args, command: &str) -> Result<PathBuf, String> {
+    match &args.org {
+        Some(org) => Ok(org.clone()),
+        None => Err(format!(
+            "{command}: no organization given. Pass --org <dir>, the directory with config.yaml. `ensemble init --org <dir>` makes one."
+        )),
+    }
+}
+
+/// An `Ensemble` for `config`, keeping its state where `--state` says.
+fn ensemble_for(config: Config, dir: PathBuf, args: &Args) -> Ensemble {
+    let ensemble = Ensemble::new(config, Some(dir));
+    match &args.state {
+        Some(state) => ensemble.with_state(state.clone()),
+        None => ensemble,
+    }
+}
+
+/// Where tasks and runs are kept for the work done in `dir`.
+fn state_for(dir: &Path, args: &Args) -> Result<PathBuf, String> {
+    match &args.state {
+        Some(state) => Ok(state.clone()),
+        None => state::dir_for(dir),
+    }
+}
+
+/// Write the sample organization, or print it.
+fn cmd_init(args: &Args) -> Result<ExitCode, String> {
     let has = |flag: &str| args.rest.iter().any(|a| a == flag);
     if let Some(other) = args
         .rest
@@ -181,66 +216,59 @@ fn cmd_init(args: &Args, dir: &std::path::Path) -> Result<ExitCode, String> {
         print!("{}", config::SAMPLE);
         return Ok(ExitCode::SUCCESS);
     }
-    let path = args
-        .config
-        .clone()
-        .unwrap_or_else(|| config::config_path(dir));
+    let org = org_of(args, "init")?;
+    let path = config::config_path(&org);
     if path.exists() && !has("--force") {
         return Err(format!(
             "{} already exists. Pass --force to overwrite it, or --stdout to print the sample.",
             path.display()
         ));
     }
-    let folder = path.parent().unwrap_or(dir);
-    std::fs::create_dir_all(folder)
-        .map_err(|e| format!("cannot create {}: {e}", folder.display()))?;
-    let write = |file: &Path, text: &str| {
-        std::fs::write(file, text).map_err(|e| format!("cannot write {}: {e}", file.display()))
-    };
-    write(&path, config::SAMPLE)?;
-    println!("wrote {}: a sample team with every setting", path.display());
-    // The secrets file is the user's once it exists: never overwritten.
-    let env = config::env_path(&path);
-    if !env.exists() {
-        write(&env, SAMPLE_ENV)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&env, std::fs::Permissions::from_mode(0o600));
-        }
-        println!("wrote {}: put API keys here", env.display());
-    }
-    let ignore = folder.join(".gitignore");
-    if !ignore.exists() {
-        write(&ignore, ".env\n")?;
-        println!("wrote {}: keeps .env out of git", ignore.display());
-    }
-    // Tasks belong to the project, wherever its config is.
-    let tasks = dir.join(config::CONFIG_DIR).join(tasks::TASKS_DIR);
-    let readme = tasks.join("README.md");
-    if !readme.exists() {
-        std::fs::create_dir_all(&tasks)
-            .map_err(|e| format!("cannot create {}: {e}", tasks.display()))?;
-        write(&readme, tasks::TASKS_README)?;
-        println!(
-            "wrote {}: how to write a task; runs/ beside it ignores itself",
-            readme.display()
-        );
-    }
-    println!("Edit the agents, then run `ensemble check`.");
+    std::fs::create_dir_all(&org).map_err(|e| format!("cannot create {}: {e}", org.display()))?;
+    std::fs::write(&path, config::SAMPLE)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    println!(
+        "wrote {}: a sample organization with every setting",
+        path.display()
+    );
+    println!(
+        "Edit the teams, then run `ensemble check --org {}`. API keys go in the\n\
+         environment, or in a file you pass with --env-file; never in this directory.",
+        org.display()
+    );
     Ok(ExitCode::SUCCESS)
 }
 
-/// The `.env` `ensemble init` writes beside the sample config.
-const SAMPLE_ENV: &str = "\
-# Variables for config.yaml's api_key_env settings, read when they are not set
-# in the environment. A variable that is set wins over this file. Keep it out
-# of git; the .gitignore beside it does.
-#
-# OPENAI_LOCAL_API_KEY=
-";
+/// Rewrite a version 1 config as an organization in `--org`.
+fn cmd_migrate(args: &Args) -> Result<ExitCode, String> {
+    let source = args
+        .rest
+        .first()
+        .ok_or("migrate: needs the version 1 config file, e.g. `ensemble migrate .ensemble/config.yaml --org ~/my-org`")?;
+    let org = org_of(args, "migrate")?;
+    let text = std::fs::read_to_string(source).map_err(|e| format!("migrate: {source}: {e}"))?;
+    let v2 = config::migrate::to_v2(&text).map_err(|e| format!("migrate: {source}: {e}"))?;
+    let path = config::config_path(&org);
+    if path.exists() && !args.rest.iter().any(|a| a == "--force") {
+        return Err(format!(
+            "{} already exists. Pass --force to overwrite it.",
+            path.display()
+        ));
+    }
+    // Loading it now says what, if anything, the old file got wrong.
+    config::parse(&v2, &path, &SystemEnv)
+        .map_err(|e| format!("migrate: the result is not valid: {e}"))?;
+    std::fs::create_dir_all(&org).map_err(|e| format!("cannot create {}: {e}", org.display()))?;
+    std::fs::write(&path, v2).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    println!(
+        "wrote {}: every agent is now `{}/<name>`. Comments were not kept. Give the team a real `prompt`.",
+        path.display(),
+        config::migrate::MIGRATED_TEAM
+    );
+    Ok(ExitCode::SUCCESS)
+}
 
-fn cmd_mcp(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
+fn cmd_mcp(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String> {
     // A friendly nudge, on stderr so it cannot corrupt the protocol stream.
     if std::io::stdin().is_terminal() {
         eprintln!(
@@ -248,14 +276,14 @@ fn cmd_mcp(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
              ensemble: a harness spawns this; for a one-off try `ensemble run <agent> <task>`."
         );
     }
-    let ensemble = Ensemble::new(config, Some(dir));
+    let ensemble = ensemble_for(config, dir, args);
     let stdin = std::io::stdin();
     // Not locked: delegations reply from their own threads.
     mcp::serve(&ensemble, stdin.lock(), std::io::stdout()).map_err(|e| format!("mcp: {e}"))?;
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_check(config: Config, dir: &Path) -> Result<ExitCode, String> {
+fn cmd_check(config: Config, dir: &Path, args: &Args) -> Result<ExitCode, String> {
     // Reaching here means the config already loaded and validated; `load`
     // returns an error otherwise.
     println!(
@@ -263,13 +291,6 @@ fn cmd_check(config: Config, dir: &Path) -> Result<ExitCode, String> {
         config.source.display(),
         config.version
     );
-    let env = config::env_path(&config.source);
-    if env.is_file() {
-        println!(
-            "{}: read for variables the environment does not set",
-            env.display()
-        );
-    }
     println!();
     println!("llm_backends:");
     for (name, b) in &config.llm_backends {
@@ -292,6 +313,16 @@ fn cmd_check(config: Config, dir: &Path) -> Result<ExitCode, String> {
         );
     }
     println!();
+    println!("teams:");
+    for team in config.teams.values() {
+        println!(
+            "  {}  -  {}  ({} agents)",
+            team.name,
+            team.summary(),
+            team.agents.len()
+        );
+    }
+    println!();
     println!("agents:");
     for role in config.agent_names() {
         let a = config
@@ -309,7 +340,7 @@ fn cmd_check(config: Config, dir: &Path) -> Result<ExitCode, String> {
     }
 
     // A bad ticket fails only when the worker reaches it; say so now.
-    let store = tasks::Store::new(&dir.join(config::CONFIG_DIR));
+    let store = tasks::Store::new(&state_for(dir, args)?);
     let entries = store.scan();
     let mut bad = Vec::new();
     for entry in &entries {
@@ -320,12 +351,14 @@ fn cmd_check(config: Config, dir: &Path) -> Result<ExitCode, String> {
                 t.id, t.agent
             )),
             tasks::Entry::Task(t, None)
-                if t.gate
-                    .as_ref()
-                    .is_some_and(|g| !config.gates.contains_key(&g.name)) =>
+                if t.gate.as_ref().is_some_and(|g| {
+                    config
+                        .agent(&t.agent)
+                        .is_some_and(|a| config.gate(&a.team, &g.name).is_none())
+                }) =>
             {
                 bad.push(format!(
-                    "{}: gate '{}' is not configured under `gates`; it would fail at once",
+                    "{}: gate '{}' is not configured under the team's `gates`; it would fail at once",
                     t.id,
                     t.gate.as_ref().map_or("", |g| g.name.as_str())
                 ))
@@ -372,8 +405,8 @@ fn cmd_check(config: Config, dir: &Path) -> Result<ExitCode, String> {
     })
 }
 
-fn cmd_agents(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
-    let ensemble = Ensemble::new(config, Some(dir));
+fn cmd_agents(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String> {
+    let ensemble = ensemble_for(config, dir, args);
     for role in ensemble.agents() {
         let (runs_on, model) = ensemble.route_of(role).map_err(|e| e.to_string())?;
         println!("{role}\t{runs_on}\t{model}");
@@ -381,8 +414,8 @@ fn cmd_agents(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_health(config: Config, dir: PathBuf) -> Result<ExitCode, String> {
-    let ensemble = Ensemble::new(config, Some(dir));
+fn cmd_health(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String> {
+    let ensemble = ensemble_for(config, dir, args);
     let mut all_ok = true;
     for (backend, result) in ensemble.health() {
         match result {
@@ -414,7 +447,7 @@ fn cmd_run(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
         );
     }
 
-    let ensemble = Ensemble::new(config, Some(dir));
+    let ensemble = ensemble_for(config, dir, args);
     let outcome = ensemble
         .delegate(role, &task, args.context.as_deref())
         .map_err(|e| e.to_string())?;

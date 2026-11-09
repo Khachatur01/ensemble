@@ -1,4 +1,4 @@
-//! Reading the environment, `.env` files and where a project's config lives.
+//! Reading the environment, `--env-file` files and where an organization's config lives.
 
 use super::*;
 
@@ -22,25 +22,11 @@ impl Env for BTreeMap<String, String> {
     }
 }
 
-/// Where a project's config lives: `.ensemble/config.yaml`.
-pub fn config_path(project: &Path) -> PathBuf {
-    project.join(CONFIG_DIR).join(CONFIG_FILENAME)
-}
-
-/// The project's own `.ensemble/config.yaml`, and nothing else.
-///
-/// Parent directories are deliberately not searched: a team is a property of
-/// one project, and a file in `~/projects/` silently configuring every
-/// checkout below it is exactly the shared, out-of-sight config this rules
-/// out. There is no user-level fallback either.
-pub fn discover(project: &Path) -> Option<PathBuf> {
-    let candidate = config_path(project);
-    candidate.is_file().then_some(candidate)
-}
-
-/// The `.env` beside a config file.
-pub fn env_path(config: &Path) -> PathBuf {
-    config.with_file_name(ENV_FILENAME)
+/// The config file of the organization in directory `org`: `config.yaml`.
+/// Parent directories are deliberately not searched, and there is no
+/// user-level fallback: the organization is named, never found.
+pub fn config_path(org: &Path) -> PathBuf {
+    org.join(CONFIG_FILENAME)
 }
 
 /// The real environment, then the `.env` file: a variable that is set wins,

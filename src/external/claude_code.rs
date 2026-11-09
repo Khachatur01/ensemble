@@ -403,6 +403,7 @@ mod tests {
         };
         let a = AgentConfig {
             name: "reviewer".into(),
+            team: "default".into(),
             prompt: Some("You review code.".into()),
             max_seconds,
             max_concurrent: 1,

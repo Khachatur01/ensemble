@@ -1,22 +1,25 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json
 
-# .ensemble/config.yaml — the agent team for this project, written by
-# `ensemble init`. API keys go in .env beside it, which git ignores.
+# config.yaml — an organization of agent teams, written by `ensemble init`. It
+# is meant to live in a directory (usually its own git repo) of its own, apart
+# from any project; the folder your agent opens is where the teams work. API
+# keys never go here: they come from the environment, or from a file passed
+# with --env-file.
 #
 # Nothing has a default value: every setting is written here, and one that is
 # missing is refused by name. Only two may be left out, because leaving them
 # out means "not used": an agent's `prompt` and a backend's `api_key_env`.
-# This file is a map of what can be set rather than a team to keep as it is:
-# delete the agents you do not want and change the rest. Check it with
-# `ensemble check`, see how an agent is started with `ensemble show <agent>`,
-# and check that everything it needs is there with `ensemble health`.
+# This file is a map of what can be set rather than an organization to keep as
+# it is: delete the teams and agents you do not want and change the rest. Check
+# it with `ensemble check --org <dir>`, see how an agent is started with
+# `ensemble show <agent> --org <dir>`, and check that everything it needs is
+# there with `ensemble health --org <dir>`.
 #
-# Register Ensemble with your agent from this directory, which makes your
-# agent the manager of the team:
-#   claude mcp add --scope local ensemble -- ensemble mcp
-#   opencode mcp add ensemble -- ensemble mcp
+# Register Ensemble with your agent, which makes it the manager of the teams:
+#   claude mcp add --scope local ensemble -- ensemble mcp --org <dir>
+#   opencode mcp add ensemble -- ensemble mcp --org <dir>
 
-version: 1
+version: 2
 
 # ---------------------------------------------------------------------------
 # LLM backends: model endpoints, such as a local model server. An agent names
@@ -38,131 +41,146 @@ llm_backends:
     timeout_seconds: 600
 
 # ---------------------------------------------------------------------------
-# Gates: checks a task's work must pass. None here; `{}` says there are none.
-# To add one, give it a name and a command:
-#
-#   gates:
-#     test:
-#       # Run with sh -c in the task's working directory; exit status 0 passes.
-#       command: make test
-#       # Seconds it may run before it is stopped and counts as failed.
-#       timeout_seconds: 900
-#
-# A task then names it with `gate: { name: test, attempts: 3 }`; when the
-# command fails, the same agent tries again with its output, up to `attempts`
-# runs in all. Commands live here, not in tasks, so a task cannot bring a
-# command of its own.
+# Teams. The names are yours. Your agent reads each team's `prompt` to choose a
+# team, then delegates to one of its agents as `team/agent`, or as `agent` when
+# no other team has one of that name. A team has its own gates and its own
+# agents.
 # ---------------------------------------------------------------------------
-gates: {}
+teams:
+  software:
+    # What the team is for. The first line is what your agent sees for the team.
+    prompt: Writes and reviews the code of the project.
+    # Where the team's tasks come from. `local_markdown`: markdown files in
+    # Ensemble's per-user state directory, one folder each.
+    tracker:
+      type: local_markdown
 
-# ---------------------------------------------------------------------------
-# Agents: the team. The names are yours; your agent delegates by name. Each
-# runs an agent CLI you have installed, headless in this project.
-# ---------------------------------------------------------------------------
-agents:
-  # The OpenCode CLI on a model from llm_backends.
-  coder:
-    # What it is for. The first line is what your agent sees in `agents`; the
-    # whole of it is the agent's system prompt. Leave it out for no system
-    # prompt.
-    prompt: |
-      You implement exactly what is asked, in the style of the surrounding
-      code. Read the relevant files first, make the change, and report what
-      you changed.
-    # Wall-clock limit for one delegation.
-    max_seconds: 1800
-    # Most delegations to it that run at once; more wait for a free slot.
-    # 1 suits a model server that serves one request at a time.
-    max_concurrent: 1
-    # Where its tasks run: `shared` in the project, or `worktree`, each task in
-    # its own git worktree on the branch ensemble/<id>, committed there and
-    # never merged by Ensemble.
-    isolation: worktree
-    # How many runs it may start in an hour: `unlimited`, or `per_hour` with
-    # `delegations` (tasks, gate retries and delegations all count).
-    budget:
-      type: unlimited
-    adapter:
-      type: opencode
-      # Where the model comes from: `llm_backend` for one an entry of
-      # llm_backends serves, `provider` for one OpenCode is already set up for.
-      model:
-        type: llm_backend
-        backend: local
-        # The id the endpoint serves the model under, as its /models lists it.
-        name: qwen3.5:9b
-        # Tokens of context the server really runs the model with, so OpenCode
-        # knows when to compact (Ollama: OLLAMA_CONTEXT_LENGTH).
-        context_window: 32768
-      # OpenCode permissions, such as read, edit, bash or bash(git *);
-      # everything else is denied.
-      tools: [read, glob, grep, list, edit, bash]
-      system_prompt: append
-      max_steps: 30
-      # The CLI: `opencode` if it is on PATH.
-      command: opencode
+    # ---------------------------------------------------------------------------
+    # Gates: checks a task's work must pass. None here; `{}` says there are none.
+    # To add one, give it a name and a command:
+    #
+    #   gates:
+    #     test:
+    #       # Run with sh -c in the task's working directory; exit status 0 passes.
+    #       command: make test
+    #       # Seconds it may run before it is stopped and counts as failed.
+    #       timeout_seconds: 900
+    #
+    # A task then names it with `gate: { name: test, attempts: 3 }`; when the
+    # command fails, the same agent tries again with its output, up to `attempts`
+    # runs in all. Commands live here, not in tasks, so a task cannot bring a
+    # command of its own.
+    # ---------------------------------------------------------------------------
+    gates: {}
 
-  # The OpenCode CLI on a provider OpenCode is already set up for.
-  explorer:
-    prompt: |
-      You find where things are in the codebase and report file:line with a
-      one-line note each. You do not edit.
-    max_seconds: 1800
-    max_concurrent: 1
-    isolation: shared
-    budget:
-      type: unlimited
-    adapter:
-      type: opencode
-      model:
-        type: provider
-        # provider/model, as `opencode models` lists it.
-        name: opencode/big-pickle
-      # Read-only.
-      tools: [read, glob, grep, list]
-      system_prompt: append
-      max_steps: 30
-      command: opencode
+    # ---------------------------------------------------------------------------
+    # Agents: the team. The names are yours; your agent delegates by name. Each
+    # runs an agent CLI you have installed, headless in this project.
+    # ---------------------------------------------------------------------------
+    agents:
+      # The OpenCode CLI on a model from llm_backends.
+      coder:
+        # What it is for. The first line is what your agent sees in `agents`; the
+        # whole of it is the agent's system prompt. Leave it out for no system
+        # prompt.
+        prompt: |
+          You implement exactly what is asked, in the style of the surrounding
+          code. Read the relevant files first, make the change, and report what
+          you changed.
+        # Wall-clock limit for one delegation.
+        max_seconds: 1800
+        # Most delegations to it that run at once; more wait for a free slot.
+        # 1 suits a model server that serves one request at a time.
+        max_concurrent: 1
+        # Where its tasks run: `shared` in the project, or `worktree`, each task in
+        # its own git worktree on the branch ensemble/<id>, committed there and
+        # never merged by Ensemble.
+        isolation: worktree
+        # How many runs it may start in an hour: `unlimited`, or `per_hour` with
+        # `delegations` (tasks, gate retries and delegations all count).
+        budget:
+          type: unlimited
+        adapter:
+          type: opencode
+          # Where the model comes from: `llm_backend` for one an entry of
+          # llm_backends serves, `provider` for one OpenCode is already set up for.
+          model:
+            type: llm_backend
+            backend: local
+            # The id the endpoint serves the model under, as its /models lists it.
+            name: qwen3.5:9b
+            # Tokens of context the server really runs the model with, so OpenCode
+            # knows when to compact (Ollama: OLLAMA_CONTEXT_LENGTH).
+            context_window: 32768
+          # OpenCode permissions, such as read, edit, bash or bash(git *);
+          # everything else is denied.
+          tools: [read, glob, grep, list, edit, bash]
+          system_prompt: append
+          max_steps: 30
+          # The CLI: `opencode` if it is on PATH.
+          command: opencode
 
-  # A light agent: one request to a model from llm_backends. No CLI and no
-  # tools, so it reads and changes nothing and answers from what it is given:
-  # cheap work such as summarising, classifying or drafting.
-  summariser:
-    prompt: |
-      You summarise what you are given in five bullet points or fewer.
-    max_seconds: 600
-    max_concurrent: 1
-    isolation: shared
-    budget:
-      type: unlimited
-    adapter:
-      type: llm
-      backend: local
-      # The id the endpoint serves the model under, as its /models lists it.
-      model: qwen3.5:9b
-      # Most tokens of answer; an answer cut off there is marked unfinished.
-      max_tokens: 1000
+      # The OpenCode CLI on a provider OpenCode is already set up for.
+      explorer:
+        prompt: |
+          You find where things are in the codebase and report file:line with a
+          one-line note each. You do not edit.
+        max_seconds: 1800
+        max_concurrent: 1
+        isolation: shared
+        budget:
+          type: unlimited
+        adapter:
+          type: opencode
+          model:
+            type: provider
+            # provider/model, as `opencode models` lists it.
+            name: opencode/big-pickle
+          # Read-only.
+          tools: [read, glob, grep, list]
+          system_prompt: append
+          max_steps: 30
+          command: opencode
 
-  # The Claude Code CLI, on your own subscription.
-  reviewer:
-    prompt: |
-      You review code for correctness and report findings as
-      file:line — problem — fix. You do not rewrite the code.
-    max_seconds: 1800
-    max_concurrent: 1
-    isolation: shared
-    budget:
-      type: per_hour
-      delegations: 20
-    adapter:
-      type: claude-code
-      # An alias (sonnet, opus, haiku) or a full model id.
-      model: sonnet
-      # Claude Code's own tools, one per entry, such as Read, Edit, Bash or
-      # Bash(git diff:*). This is read-only.
-      tools: [Read, Grep, Glob]
-      # dontAsk denies anything not in tools instead of waiting for a person.
-      permission_mode: dontAsk
-      max_turns: 30
-      # The CLI: `claude` if it is on PATH.
-      command: claude
+      # A light agent: one request to a model from llm_backends. No CLI and no
+      # tools, so it reads and changes nothing and answers from what it is given:
+      # cheap work such as summarising, classifying or drafting.
+      summariser:
+        prompt: |
+          You summarise what you are given in five bullet points or fewer.
+        max_seconds: 600
+        max_concurrent: 1
+        isolation: shared
+        budget:
+          type: unlimited
+        adapter:
+          type: llm
+          backend: local
+          # The id the endpoint serves the model under, as its /models lists it.
+          model: qwen3.5:9b
+          # Most tokens of answer; an answer cut off there is marked unfinished.
+          max_tokens: 1000
+
+      # The Claude Code CLI, on your own subscription.
+      reviewer:
+        prompt: |
+          You review code for correctness and report findings as
+          file:line — problem — fix. You do not rewrite the code.
+        max_seconds: 1800
+        max_concurrent: 1
+        isolation: shared
+        budget:
+          type: per_hour
+          delegations: 20
+        adapter:
+          type: claude-code
+          # An alias (sonnet, opus, haiku) or a full model id.
+          model: sonnet
+          # Claude Code's own tools, one per entry, such as Read, Edit, Bash or
+          # Bash(git diff:*). This is read-only.
+          tools: [Read, Grep, Glob]
+          # dontAsk denies anything not in tools instead of waiting for a person.
+          permission_mode: dontAsk
+          max_turns: 30
+          # The CLI: `claude` if it is on PATH.
+          command: claude

@@ -297,6 +297,13 @@ A tagged variant. `local_markdown` has no settings of its own, so it carries
 none; the variant exists so other types can carry theirs. A team without a
 `tracker` key is refused by name (no defaults).
 
+### Starting point after phase 3
+
+Phase 3 left one task store per working folder, `<state>/tasks/<id>-<slug>/`, whose
+tickets name their agent as `team/agent` (or an unambiguous short name). This
+phase splits it into one tracker per team as designed below, and moves each
+ticket under its team.
+
 ### Where files live
 
 Nothing in the project. Tasks go in the state directory, per team:

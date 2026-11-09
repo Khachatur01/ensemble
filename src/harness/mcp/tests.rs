@@ -71,8 +71,10 @@ fn team_with(
                 "  {name}:\n    prompt: \"The {name}. Second line.\"\n    max_seconds: 1800\n    max_concurrent: {max_concurrent}\n    isolation: {isolation}\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {{ type: provider, name: opencode/m-{name} }}\n      tools: [{tools}]\n      system_prompt: append\n      max_steps: 30\n      command: \"{command}\"\n"
             ));
     }
+    let yaml = config::migrate::to_v2(&yaml).unwrap();
     let cfg = config::parse(&yaml, std::path::Path::new("config.yaml"), &BTreeMap::new()).unwrap();
-    (Ensemble::new(cfg, Some(project)), tmp)
+    let state = project.join(".ensemble");
+    (Ensemble::new(cfg, Some(project)).with_state(state), tmp)
 }
 
 fn working() -> (Ensemble, TempDir) {
@@ -114,10 +116,10 @@ fn agents_are_labelled_and_a_delegation_reports_what_it_did() {
     let listing = call(&e, "agents", json!({}));
     let listing = text_of(&listing);
     assert!(
-        listing.starts_with("coder [can change files]: The coder. Second line."),
+        listing.contains("default/coder [can change files]: The coder. Second line."),
         "{listing}"
     );
-    assert!(listing.contains("scout [read-only]"), "{listing}");
+    assert!(listing.contains("default/scout [read-only]"), "{listing}");
 
     let (e, _tmp) = scouting();
     let r = call(&e, "delegate", json!({"agent": "scout", "task": "look"}));
@@ -178,7 +180,7 @@ fn a_delegation_streams_progress_and_log_messages_before_its_reply() {
     assert_eq!(counters, [1, 2, 3], "the counter rises");
     assert_eq!(
         progress[1]["params"]["message"],
-        "scout · step 1 · read(a.txt)"
+        "default/scout · step 1 · read(a.txt)"
     );
 
     let logs: Vec<&Value> = before
@@ -186,7 +188,7 @@ fn a_delegation_streams_progress_and_log_messages_before_its_reply() {
         .filter(|m| m["method"] == "notifications/message")
         .collect();
     assert_eq!(logs.len(), 3);
-    assert_eq!(logs[2]["params"]["data"], "scout · done");
+    assert_eq!(logs[2]["params"]["data"], "default/scout · done");
     assert_eq!(logs[2]["params"]["level"], "info");
 }
 
@@ -316,7 +318,7 @@ fn tools_list_advertises_the_tools_with_the_real_agent_names() {
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert_eq!(agents, vec!["coder", "reviewer"]);
+    assert_eq!(agents, vec!["default/coder", "default/reviewer"]);
 }
 
 #[test]
@@ -430,7 +432,7 @@ fn health_reports_each_cli_and_flags_a_broken_one() {
     assert!(text_of(&good).contains(": ok"), "{}", text_of(&good));
 
     let cfg = config::parse(
-            "version: 1\nllm_backends: {}\ngates: {}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 4\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter: { type: opencode, model: { type: provider, name: a/b }, tools: [read], system_prompt: append, max_steps: 3, command: /nonexistent/opencode }\n",
+            &config::migrate::to_v2("version: 1\nllm_backends: {}\ngates: {}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 4\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter: { type: opencode, model: { type: provider, name: a/b }, tools: [read], system_prompt: append, max_steps: 3, command: /nonexistent/opencode }\n").unwrap(),
             std::path::Path::new("config.yaml"),
             &BTreeMap::new(),
         )
@@ -883,7 +885,7 @@ fn a_submitted_task_is_a_ticket_on_disk_whose_result_wait_returns() {
     let ticket = std::fs::read_to_string(tasks(&tmp).join("0001-find-the-parser/task.md")).unwrap();
     assert_eq!(
         ticket,
-        "---\ntitle: \"Find the parser\"\nagent: \"scout\"\ncontext: \"src/\"\n---\nLook.\n"
+        "---\ntitle: \"Find the parser\"\nagent: \"default/scout\"\ncontext: \"src/\"\n---\nLook.\n"
     );
 }
 
@@ -1191,8 +1193,9 @@ fn an_agent_over_its_budget_is_refused_and_its_tasks_wait() {
     let (e, tmp) = team(&[("scout", "read", &emit(&step(vec![text("found it")])))]);
     // One run an hour; the record is kept across sessions.
     let mut config = e.config().clone();
-    config.agents.get_mut("scout").unwrap().budget = config::Budget::PerHour { delegations: 1 };
-    let e = Ensemble::new(config, Some(project(&tmp)));
+    config.agents.get_mut("default/scout").unwrap().budget =
+        config::Budget::PerHour { delegations: 1 };
+    let e = Ensemble::new(config, Some(project(&tmp))).with_state(project(&tmp).join(".ensemble"));
     session(&e, |ask| {
         let r = ask("delegate", json!({"agent": "scout", "task": "a"}));
         assert!(r.starts_with("found it"), "{r}");
@@ -1212,5 +1215,60 @@ fn an_agent_over_its_budget_is_refused_and_its_tasks_wait() {
     });
     assert!(store(&tmp).outcome("0001-a").is_none());
     let usage = store(&tmp).usage();
-    assert_eq!(usage["scout"].len(), 1, "{usage:?}");
+    assert_eq!(usage["default/scout"].len(), 1, "{usage:?}");
+}
+
+#[test]
+fn a_delegation_with_repo_works_in_that_folder_of_the_project() {
+    let body = format!("echo here > marker\n{}", emit(&step(vec![text("ok")])));
+    let (e, tmp) = team(&[("fixer", "read, edit", &body)]);
+    std::fs::create_dir_all(project(&tmp).join("backend")).unwrap();
+    let r = call(
+        &e,
+        "delegate",
+        json!({"agent": "fixer", "task": "mark", "repo": "backend"}),
+    );
+    assert_eq!(r["result"]["isError"], false, "{}", text_of(&r));
+    assert!(project(&tmp).join("backend/marker").is_file());
+    assert!(!project(&tmp).join("marker").exists());
+}
+
+#[test]
+fn a_repo_outside_the_project_is_refused_by_delegate_and_submit() {
+    let (e, tmp) = team(&[("fixer", "read, edit", "true")]);
+    std::fs::create_dir_all(tmp.0.join("elsewhere")).unwrap();
+    for repo in ["../elsewhere", "/tmp", "nope"] {
+        let r = call(
+            &e,
+            "delegate",
+            json!({"agent": "fixer", "task": "x", "repo": repo}),
+        );
+        assert_eq!(r["result"]["isError"], true, "{repo}: {}", text_of(&r));
+        assert!(text_of(&r).contains("`repo`"), "{}", text_of(&r));
+        let r = call(
+            &e,
+            "submit",
+            json!({"agent": "fixer", "title": "t", "task": "x", "repo": repo}),
+        );
+        assert_eq!(r["result"]["isError"], true, "{repo}: {}", text_of(&r));
+    }
+    assert!(!tasks(&tmp).exists(), "a refused task writes no ticket");
+}
+
+#[test]
+fn agents_can_be_listed_for_one_team_and_an_unknown_team_is_named() {
+    let (e, _tmp) = team(&[("coder", "read, edit", "true"), ("scout", "read", "true")]);
+    let one = call(&e, "agents", json!({"team": "default"}));
+    assert!(
+        text_of(&one).contains("default/scout [read-only]"),
+        "{}",
+        text_of(&one)
+    );
+    let bad = call(&e, "agents", json!({"team": "nope"}));
+    assert_eq!(bad["result"]["isError"], true);
+    assert!(
+        text_of(&bad).contains("Teams: default"),
+        "{}",
+        text_of(&bad)
+    );
 }

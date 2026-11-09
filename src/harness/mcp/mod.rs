@@ -157,7 +157,7 @@ pub fn handle_reporting<'s>(
 /// they work. `notifications/cancelled` stops the named call at its next step,
 /// and it gets no reply: the client has stopped waiting for one.
 ///
-/// Alongside, a worker runs the tasks in the project's `.ensemble/tasks/`.
+/// Alongside, a worker runs the tasks in the state directory's `tasks/`.
 /// When stdin closes, running tasks and background delegations are stopped
 /// (tasks that had not started stay queued for the next session), and blocking
 /// calls still running are finished before this returns.
@@ -186,11 +186,11 @@ pub fn serve<W: Write + Send>(
             let _ = send(&n);
         }
     };
-    let project = ensemble.workdir()?;
-    let queue = Queue::new(
-        ensemble,
-        Some(Store::new(&project.join(crate::config::CONFIG_DIR))),
-    );
+    let mut store = Store::new(&ensemble.state_dir()?);
+    if let Some(usage) = ensemble.usage_dir() {
+        store = store.with_usage_dir(usage);
+    }
+    let queue = Queue::new(ensemble, Some(store));
     let (send, notify, running, queue) = (&send, &notify, &running, &queue);
 
     std::thread::scope(|scope| {

@@ -1,20 +1,19 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json",
-  "title": ".ensemble/config.yaml",
-  "description": "The agent team for one project: the agents a calling agent can delegate to, and the LLM backends they can run on. Nothing has a default value: every setting is written, except the two that may be left out because leaving them out means 'not used' (an agent's `prompt` and a backend's `api_key_env`).",
+  "title": "Ensemble organization: config.yaml",
+  "description": "An organization of teams: the agents a calling agent can delegate to, grouped in teams, and the LLM backends they can run on. Nothing has a default value: every setting is written, except the two that may be left out because leaving them out means 'not used' (an agent's `prompt` and a backend's `api_key_env`).",
   "type": "object",
   "required": [
     "version",
     "llm_backends",
-    "agents",
-    "gates"
+    "teams"
   ],
   "additionalProperties": false,
   "properties": {
     "version": {
-      "description": "Config format version. Always 1.",
-      "const": 1
+      "description": "Config format version. Always 2.",
+      "const": 2
     },
     "llm_backends": {
       "description": "Model endpoints. The key is the backend's name, which an `opencode` agent's model of type `llm_backend` refers to. Ensemble hands the endpoint and key to the agent's CLI for each run, so they are defined only here. `{}` when there are none.",
@@ -23,22 +22,54 @@
         "$ref": "#/definitions/llm_backend"
       }
     },
-    "agents": {
-      "description": "The team. The key is the agent's name, which the calling agent delegates to. The names are yours.",
+    "teams": {
+      "description": "The organization's teams. The key is the team's name; its agents are delegated to as `team/agent`, or as `agent` when the name is unique. The names are yours.",
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/definitions/agent"
-      }
-    },
-    "gates": {
-      "description": "Commands a task's work must pass. The key is the gate's name, which a task's `gate` refers to. Defined here so a task names a gate and cannot bring a command of its own. `{}` when there are none.",
-      "type": "object",
-      "additionalProperties": {
-        "$ref": "#/definitions/gate"
+        "$ref": "#/definitions/team"
       }
     }
   },
   "definitions": {
+    "team": {
+      "type": "object",
+      "required": ["prompt", "tracker", "gates", "agents"],
+      "additionalProperties": false,
+      "properties": {
+        "prompt": {
+          "description": "What the team is for. The manager reads its first line to choose a team.",
+          "type": "string",
+          "minLength": 1
+        },
+        "tracker": {
+          "description": "Where the team's tasks come from.",
+          "oneOf": [
+            { "$ref": "#/definitions/tracker_local_markdown" }
+          ]
+        },
+        "gates": {
+          "description": "Commands a task's work must pass. The key is the gate's name, which a task's `gate` refers to. Defined here so a task names a gate and cannot bring a command of its own. `{}` when there are none.",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/gate" }
+        },
+        "agents": {
+          "description": "The team's agents. The key is the agent's name. The names are yours.",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/agent" }
+        }
+      }
+    },
+    "tracker_local_markdown": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "local_markdown: tasks are markdown files in Ensemble's state directory.",
+          "const": "local_markdown"
+        }
+      }
+    },
     "budget_unlimited": {
       "type": "object",
       "required": [

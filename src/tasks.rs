@@ -65,7 +65,8 @@ agent's `max_concurrent`.
     files: [src/fetch.rs]
     done_when: [cargo test passes]
     after: [0001-add-ureq]     # tasks that must be done first
-    gate: { name: test, attempts: 3 }   # a check from config.yaml's gates
+    repo: backend           # a folder of the working directory, when it holds several repos
+    gate: { name: test, attempts: 3 }   # a check from the team's gates in config.yaml
     ---
     Retry a failed request three times, waiting 1s, 2s, 4s.
 
@@ -91,6 +92,7 @@ struct FrontMatter {
     files: Option<Vec<String>>,
     done_when: Option<Vec<String>>,
     after: Option<Vec<String>>,
+    repo: Option<String>,
     gate: Option<GateRef>,
 }
 
@@ -123,6 +125,9 @@ pub struct Ticket {
     pub done_when: Vec<String>,
     /// Tasks that must be done before this one starts.
     pub after: Vec<String>,
+    /// A path inside the working directory where the task works, when that
+    /// holds several repositories.
+    pub repo: Option<String>,
     pub gate: Option<GateRef>,
     pub text: String,
 }
@@ -204,26 +209,41 @@ impl Entry {
     }
 }
 
-/// The tasks and runs of one project: `.ensemble/tasks/` and `.ensemble/runs/`.
+/// The tasks and runs of the work done in one directory: `tasks/` and `runs/`
+/// under its state directory.
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
     tasks: PathBuf,
     runs: PathBuf,
+    /// Where usage counters are kept when not in `runs/`: the directory of
+    /// the organization, shared by every project that uses it.
+    usage: Option<PathBuf>,
 }
 
 impl Store {
-    /// The store in `dir`, the project's `.ensemble/`. Nothing is created
+    /// The store in `dir`, a state directory. Nothing is created
     /// until something is written.
     pub fn new(dir: &Path) -> Self {
         Store {
             root: dir.to_path_buf(),
             tasks: dir.join(TASKS_DIR),
             runs: dir.join(RUNS_DIR),
+            usage: None,
         }
     }
 
-    /// The project's `.ensemble/`.
+    /// Keep usage counters in `dir` instead of beside the runs.
+    pub fn with_usage_dir(mut self, dir: PathBuf) -> Self {
+        self.usage = Some(dir);
+        self
+    }
+
+    fn usage_path(&self) -> PathBuf {
+        self.usage.as_ref().unwrap_or(&self.runs).join(USAGE_FILE)
+    }
+
+    /// The state directory.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -241,7 +261,11 @@ impl Store {
             yaml_str(&ticket.title),
             yaml_str(&ticket.agent)
         );
-        for (key, value) in [("context", &ticket.context), ("goal", &ticket.goal)] {
+        for (key, value) in [
+            ("context", &ticket.context),
+            ("goal", &ticket.goal),
+            ("repo", &ticket.repo),
+        ] {
             if let Some(value) = value {
                 front.push_str(&format!("{key}: {}\n", yaml_str(value)));
             }
@@ -482,7 +506,7 @@ impl Store {
 
     /// When each agent started its recent runs, in seconds since the epoch.
     pub fn usage(&self) -> BTreeMap<String, Vec<u64>> {
-        fs::read_to_string(self.runs.join(USAGE_FILE))
+        fs::read_to_string(self.usage_path())
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default()
@@ -491,7 +515,13 @@ impl Store {
     pub fn save_usage(&self, usage: &BTreeMap<String, Vec<u64>>) {
         let write = || -> io::Result<()> {
             let text = serde_json::to_string(usage).expect("usage serializes");
-            write_atomically(&self.runs_dir()?.join(USAGE_FILE), &text)
+            match &self.usage {
+                Some(dir) => fs::create_dir_all(dir)?,
+                None => {
+                    self.runs_dir()?;
+                }
+            }
+            write_atomically(&self.usage_path(), &text)
         };
         if let Err(e) = write() {
             eprintln!("ensemble: cannot record usage: {e}");
@@ -636,6 +666,7 @@ fn parse_ticket(id: &str, text: &str) -> Result<Ticket, String> {
         constraints: front.constraints.unwrap_or_default(),
         files: front.files.unwrap_or_default(),
         done_when: front.done_when.unwrap_or_default(),
+        repo: front.repo,
         after,
         gate: front.gate,
         text: text.to_string(),
