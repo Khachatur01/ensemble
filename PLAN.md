@@ -428,7 +428,8 @@ assignee kept in `assignee.txt` beside the immutable `task.md`; `HAND OFF:` with
 
 ## Phase 12. More adapters and backend types
 
-Built: the Codex adapter, written from Codex's documented `exec --json` output and
+Built: the `anthropic-api` backend type (for `llm` agents; OpenCode on it is refused
+at load, by name), and the Codex adapter, written from Codex's documented `exec --json` output and
 not yet run against a real Codex (see its README section).
 
 1. **Codex adapter.** `Adapter::Codex` with every setting explicit (read

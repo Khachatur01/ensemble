@@ -65,6 +65,19 @@ pub(crate) struct RawGate {
 pub(crate) enum RawLlmBackend {
     #[serde(rename = "openai-compatible-api")]
     OpenAiCompatibleApi(RawOpenAiBackend),
+    #[serde(rename = "anthropic-api")]
+    AnthropicApi(RawAnthropicBackend),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawAnthropicBackend {
+    /// Where the API is, without `/v1`: `https://api.anthropic.com`.
+    pub(crate) base_url: String,
+    /// The name of the variable holding the API key.
+    pub(crate) api_key_env: Option<String>,
+    /// Seconds one request may take.
+    pub(crate) timeout_seconds: u64,
 }
 
 #[derive(Debug, Deserialize)]

@@ -406,6 +406,11 @@ fn the_schema_names_exactly_the_keys_the_config_accepts() {
             accepted_keys::<RawPerHourTokens>(),
             "per_hour_tokens budget",
         ),
+        (
+            "anthropic_api_backend",
+            accepted_keys::<RawAnthropicBackend>(),
+            "anthropic-api backend",
+        ),
         ("agent", accepted_keys::<RawAgent>(), "agents"),
         ("gate", accepted_keys::<RawGate>(), "gates"),
         (
@@ -464,6 +469,7 @@ fn the_schema_requires_every_key_but_the_optional_two() {
     };
     for (def, keys) in [
         ("openai_compatible_api_backend", vec!["api_key_env"]),
+        ("anthropic_api_backend", vec!["api_key_env"]),
         ("agent", vec!["prompt", "max_concurrent", "budget", "limit"]),
         ("limit", vec![]),
         ("budget_per_hour_tokens", vec![]),
@@ -491,6 +497,7 @@ fn the_schemas_choices_are_the_codes() {
     let defs = &schema["definitions"];
     let tag = |def: &str| defs[def]["properties"]["type"]["const"].clone();
     assert_eq!(tag("openai_compatible_api_backend"), OPENAI_COMPATIBLE_API);
+    assert_eq!(tag("anthropic_api_backend"), ANTHROPIC_API);
     assert_eq!(tag("claude_code_adapter"), CLAUDE_CODE_AGENT);
     assert_eq!(tag("codex_adapter"), CODEX_AGENT);
     assert_eq!(tag("tracker_local_markdown"), "local_markdown");
@@ -547,9 +554,7 @@ fn an_env_file_fills_in_what_the_environment_lacks() {
     )
     .unwrap();
     let path = config_path(&org);
-    let key = |c: &Config, name: &str| match &c.llm_backends[name].settings {
-        BackendSettings::OpenAiCompatible { api_key, .. } => api_key.clone(),
-    };
+    let key = |c: &Config, name: &str| c.llm_backends[name].settings.api_key().map(String::from);
 
     let c = load(&path, Some(&vars), &env(&[])).unwrap();
     assert_eq!(key(&c, "openai-local").as_deref(), Some("from-file"));
@@ -575,9 +580,7 @@ fn a_dotenv_beside_the_config_is_not_read() {
     .unwrap();
     std::fs::write(tmp.0.join(".env"), "OPENAI_LOCAL_API_KEY=from-file\n").unwrap();
     let c = load(&config_path(&tmp.0), None, &env(&[])).unwrap();
-    match &c.llm_backends["openai-local"].settings {
-        BackendSettings::OpenAiCompatible { api_key, .. } => assert_eq!(*api_key, None),
-    }
+    assert_eq!(c.llm_backends["openai-local"].settings.api_key(), None);
 }
 
 #[test]
@@ -626,6 +629,9 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
     };
     let backends: Vec<&serde_json::Value> =
         doc["llm_backends"].as_object().unwrap().values().collect();
+    fn of_type<'a>(all: &[&'a serde_json::Value], kind: &str) -> Vec<&'a serde_json::Value> {
+        all.iter().copied().filter(|b| b["type"] == kind).collect()
+    }
     let teams: Vec<&serde_json::Value> = doc["teams"].as_object().unwrap().values().collect();
     let trackers: Vec<&serde_json::Value> = teams.iter().map(|t| &t["tracker"]).collect();
     let agents: Vec<&serde_json::Value> = teams
@@ -654,7 +660,11 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
             .collect()
     };
     for (def, objects) in [
-        ("openai_compatible_api_backend", backends),
+        (
+            "openai_compatible_api_backend",
+            of_type(&backends, OPENAI_COMPATIBLE_API),
+        ),
+        ("anthropic_api_backend", of_type(&backends, ANTHROPIC_API)),
         ("team", teams.clone()),
         ("tracker_local_markdown", trackers),
         ("agent", agents.clone()),
@@ -895,11 +905,10 @@ fn the_base_url_is_the_one_written_in_the_config() {
         &env(&[("OPENAI_LOCAL_BASE_URL", "http://192.168.1.9:9000/v1")]),
     )
     .unwrap();
-    match &c.llm_backends["openai-local"].settings {
-        BackendSettings::OpenAiCompatible { base_url, .. } => {
-            assert_eq!(base_url, "http://127.0.0.1:8000/v1");
-        }
-    }
+    assert_eq!(
+        c.llm_backends["openai-local"].settings.base_url(),
+        "http://127.0.0.1:8000/v1"
+    );
 }
 
 #[test]
@@ -910,15 +919,12 @@ fn api_keys_are_read_from_the_environment_never_the_file() {
         &env(&[("OPENAI_LOCAL_API_KEY", "sk-secret")]),
     )
     .unwrap();
-    match &c.llm_backends["openai-local"].settings {
-        BackendSettings::OpenAiCompatible { api_key, .. } => {
-            assert_eq!(api_key.as_deref(), Some("sk-secret"))
-        }
-    }
+    assert_eq!(
+        c.llm_backends["openai-local"].settings.api_key(),
+        Some("sk-secret")
+    );
     // And an unset one is simply absent, not an empty bearer token.
-    match &c.llm_backends["openai-remote"].settings {
-        BackendSettings::OpenAiCompatible { api_key, .. } => assert_eq!(*api_key, None),
-    }
+    assert_eq!(c.llm_backends["openai-remote"].settings.api_key(), None);
 }
 
 #[test]
@@ -931,9 +937,7 @@ gates: {}
 agents: {}
 "#;
     let c = parse(yaml, &p(), &env(&[])).unwrap();
-    match &c.llm_backends["x"].settings {
-        BackendSettings::OpenAiCompatible { api_key, .. } => assert_eq!(*api_key, None),
-    }
+    assert_eq!(c.llm_backends["x"].settings.api_key(), None);
 }
 
 #[test]
@@ -1017,11 +1021,10 @@ gates: {}
 agents: {}
 "#;
     let c = parse(yaml, &p(), &env(&[])).unwrap();
-    match &c.llm_backends["x"].settings {
-        BackendSettings::OpenAiCompatible { base_url, .. } => {
-            assert_eq!(base_url, "http://127.0.0.1:8000/v1")
-        }
-    }
+    assert_eq!(
+        c.llm_backends["x"].settings.base_url(),
+        "http://127.0.0.1:8000/v1"
+    );
 }
 
 #[test]
@@ -1301,4 +1304,42 @@ fn a_codex_agent_is_what_its_adapter_says_and_its_sandbox_is_one_codex_has() {
         "sandbox: workspace-write\n      max_turns: 3",
     ));
     assert!(stray.contains("max_turns"), "{stray}");
+}
+
+#[test]
+fn an_anthropic_backend_loads_and_only_an_llm_agent_may_run_on_it() {
+    let doc = REFERENCE.replace("gates: {}\n", "gates: {}\n");
+    let doc = format!(
+        "{}\n",
+        doc.replacen(
+            "llm_backends:\n",
+            "llm_backends:\n  claude-api:\n    type: anthropic-api\n    base_url: \"https://api.anthropic.com/\"\n    api_key_env: ANTHROPIC_API_KEY\n    timeout_seconds: 90\n",
+            1
+        )
+    );
+    let c = parse(&doc, &p(), &env(&[("ANTHROPIC_API_KEY", "sk-ant")])).unwrap();
+    let b = &c.llm_backends["claude-api"];
+    assert_eq!(b.type_id(), ANTHROPIC_API);
+    assert_eq!(b.settings.base_url(), "https://api.anthropic.com");
+    assert_eq!(b.settings.api_key(), Some("sk-ant"));
+    assert_eq!(b.timeout_seconds, 90);
+
+    // An llm agent may name it.
+    let llm = doc.replace(
+        "      type: opencode\n      model:\n        type: llm_backend\n        backend: openai-remote\n        name: qwen3-coder\n        context_window: 32768\n      tools: [read, edit, bash]\n      system_prompt: append\n      max_steps: 30\n      command: opencode",
+        "      type: llm\n      backend: claude-api\n      model: claude-haiku-4-5\n      max_tokens: 500",
+    );
+    let c = parse(&llm, &p(), &env(&[])).unwrap();
+    assert_eq!(c.agents["default/coder"].llm_backend(), Some("claude-api"));
+
+    // An OpenCode agent may not: it needs an openai-compatible one.
+    let oc = doc.replace(
+        "        backend: openai-remote\n        name: qwen3-coder",
+        "        backend: claude-api\n        name: claude-haiku-4-5",
+    );
+    let joined = joined_problems(&oc);
+    assert!(
+        joined.contains("'claude-api' is of type 'anthropic-api', which OpenCode cannot use"),
+        "{joined}"
+    );
 }

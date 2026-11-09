@@ -376,6 +376,12 @@ pub(super) fn opencode_adapter(
             if !declared.contains_key(&b.backend) {
                 problems.push(undefined_backend(at, &b.backend, declared));
             }
+            if let Some(RawLlmBackend::AnthropicApi(_)) = declared.get(&b.backend) {
+                problems.push(format!(
+                    "{at}: LLM backend '{}' is of type '{ANTHROPIC_API}', which OpenCode cannot use: it needs an '{OPENAI_COMPATIBLE_API}' one. Use a model of type '{PROVIDER_MODEL}', or a `claude-code` agent",
+                    b.backend
+                ));
+            }
             // On a backend the model is the id the endpoint serves; Ensemble
             // names the provider.
             if b.name.trim().is_empty() {
@@ -472,6 +478,20 @@ pub(super) fn resolve_backend(
 ) -> Result<LlmBackend, Vec<String>> {
     match rb {
         RawLlmBackend::OpenAiCompatibleApi(b) => resolve_openai(name, b, env),
+        RawLlmBackend::AnthropicApi(b) => {
+            // The same checks: a URL, a timeout and an optional key.
+            let as_openai = RawOpenAiBackend {
+                base_url: b.base_url.clone(),
+                api_key_env: b.api_key_env.clone(),
+                timeout_seconds: b.timeout_seconds,
+            };
+            resolve_openai(name, &as_openai, env).map(|mut done| {
+                if let BackendSettings::OpenAiCompatible { base_url, api_key } = done.settings {
+                    done.settings = BackendSettings::Anthropic { base_url, api_key };
+                }
+                done
+            })
+        }
     }
 }
 

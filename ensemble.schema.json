@@ -175,8 +175,38 @@
       "oneOf": [
         {
           "$ref": "#/definitions/openai_compatible_api_backend"
+        },
+        {
+          "$ref": "#/definitions/anthropic_api_backend"
         }
       ]
+    },
+    "anthropic_api_backend": {
+      "type": "object",
+      "required": ["type", "base_url", "timeout_seconds"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "anthropic-api: Anthropic's own Messages API. Only an `llm` agent can run on it: OpenCode needs an openai-compatible-api backend, and Claude Code uses your own login.",
+          "const": "anthropic-api"
+        },
+        "base_url": {
+          "description": "Where the API is, without /v1.",
+          "type": "string",
+          "pattern": "^https?://",
+          "examples": ["https://api.anthropic.com"]
+        },
+        "api_key_env": {
+          "description": "The NAME of the environment variable holding the API key, sent as x-api-key. Keys are never written in this file.",
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "timeout_seconds": {
+          "description": "Seconds one request to this backend may take.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
     },
     "openai_compatible_api_backend": {
       "type": "object",

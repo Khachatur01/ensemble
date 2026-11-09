@@ -2034,3 +2034,43 @@ fn show_prints_how_a_codex_agent_starts() {
         "{agents}"
     );
 }
+
+#[test]
+fn a_light_agent_on_an_anthropic_backend_shows_a_messages_request() {
+    let s = Scratch::new("show-anthropic");
+    let v1 = format!(
+        "{}\n",
+        config_v1("opencode", NOWHERE).replacen(
+            "llm_backends:\n",
+            "llm_backends:\n  claude-api:\n    type: anthropic-api\n    base_url: \"https://api.anthropic.com\"\n    api_key_env: ENSEMBLE_TEST_ANTHROPIC_KEY\n    timeout_seconds: 30\n",
+            1,
+        )
+    );
+    s.write(".ensemble/config.yaml", &v1);
+    let out = ensemble(
+        &s,
+        &[
+            "add-agent",
+            "default/helper",
+            "--adapter",
+            "llm",
+            "--backend",
+            "claude-api",
+            "--model",
+            "claude-haiku-4-5",
+            "--prompt",
+            "You help.",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let shown = ensemble(&s, &["show", "helper"]);
+    assert!(shown.status.success(), "{}", stderr_of(&shown));
+    let text = stdout_of(&shown);
+    assert!(
+        text.starts_with("POST https://api.anthropic.com/v1/messages"),
+        "{text}"
+    );
+    assert!(text.contains("\"system\": \"You help.\""), "{text}");
+    let check = stdout_of(&ensemble(&s, &["check"]));
+    assert!(check.contains("claude-api  [anthropic-api]"), "{check}");
+}

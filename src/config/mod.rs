@@ -41,6 +41,8 @@ pub const SUPPORTED_VERSION: u32 = 2;
 /// The LLM backend types that ship. Adding one is adding an adapter and a
 /// variant.
 pub const OPENAI_COMPATIBLE_API: &str = "openai-compatible-api";
+/// Anthropic's own Messages API.
+pub const ANTHROPIC_API: &str = "anthropic-api";
 
 /// The adapter types that ship: the Claude Code and OpenCode CLIs, whole
 /// agents of their own that Ensemble starts in the project.
@@ -71,6 +73,27 @@ pub enum BackendSettings {
         base_url: String,
         api_key: Option<String>,
     },
+    /// `POST {base_url}/v1/messages`, the key in `x-api-key`.
+    Anthropic {
+        base_url: String,
+        api_key: Option<String>,
+    },
+}
+
+impl BackendSettings {
+    pub fn base_url(&self) -> &str {
+        match self {
+            BackendSettings::OpenAiCompatible { base_url, .. }
+            | BackendSettings::Anthropic { base_url, .. } => base_url,
+        }
+    }
+
+    pub fn api_key(&self) -> Option<&str> {
+        match self {
+            BackendSettings::OpenAiCompatible { api_key, .. }
+            | BackendSettings::Anthropic { api_key, .. } => api_key.as_deref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +107,7 @@ impl LlmBackend {
     pub fn type_id(&self) -> &'static str {
         match self.settings {
             BackendSettings::OpenAiCompatible { .. } => OPENAI_COMPATIBLE_API,
+            BackendSettings::Anthropic { .. } => ANTHROPIC_API,
         }
     }
 }

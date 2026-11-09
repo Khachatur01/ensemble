@@ -426,8 +426,7 @@ pub fn describe(config: &Config) -> String {
     }
     out.push_str("\nModel servers it sends your prompts to:\n");
     for (name, b) in &config.llm_backends {
-        let crate::config::BackendSettings::OpenAiCompatible { base_url, .. } = &b.settings;
-        out.push_str(&format!("  {name}: {base_url}\n"));
+        out.push_str(&format!("  {name}: {}\n", b.settings.base_url()));
     }
     if config.llm_backends.is_empty() {
         out.push_str("  (none)\n");

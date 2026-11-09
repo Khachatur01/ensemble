@@ -216,12 +216,19 @@ hardcoded as planner, coder or reviewer. It has:
 An **LLM backend** is a model server of yours, defined once. An OpenCode agent
 names it in its model (`type: llm_backend`), and Ensemble hands the agent's CLI the endpoint and key for
 each run, so you never configure the same server again in the CLI's own
-settings. Its one type today, `openai-compatible-api`, is any
-`/chat/completions` endpoint: llama-server, vLLM, Ollama, Unsloth, a hosted
-API. It requires `base_url` (the URL itself; no variable overrides it) and
+settings. It has a `type`:
+
+- `openai-compatible-api`: any `/chat/completions` endpoint: llama-server, vLLM,
+  Ollama, Unsloth, a hosted API. `opencode` and `llm` agents can run on it.
+- `anthropic-api`: Anthropic's own Messages API (`base_url:
+  https://api.anthropic.com`, the key sent as `x-api-key`). Only an `llm` agent can
+  run on it; OpenCode needs an openai-compatible one, and a config that says
+  otherwise is refused by name. Claude Code uses your own login, not a backend.
+
+Either requires `base_url` (the URL itself; no variable overrides it) and
 `timeout_seconds` (per request), and takes `api_key_env`, the name of the
-variable holding the key, when the server wants one. Only the `opencode` adapter
-can run on one today; Claude Code speaks the Anthropic API, not this one.
+variable holding the key, when the server wants one. `health` asks each for the
+models it serves.
 
 A **gate** is a check a task's work must pass, so an agent that says "done"
 too early gets sent back instead of being believed. You define each gate once,
@@ -964,7 +971,8 @@ scripts stand in for the CLIs.
 
 - **Three adapters so far.** `claude-code`, `opencode` and `llm`. Codex is planned, not
   built.
-- **Only OpenCode runs on an LLM backend.** Claude Code needs the Anthropic API.
+- **Only `opencode` and `llm` agents run on an LLM backend**, and an Anthropic
+  one only an `llm` agent. Claude Code and Codex use your own login.
 - **Only the end of a run can ask.** An agent stops with a question
   (`NEEDS INPUT:`) at the end of a run, never halfway through one: the CLIs'
   headless modes do not wait for an answer. For a delegation, the reply says

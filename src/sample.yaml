@@ -39,6 +39,13 @@ llm_backends:
     api_key_env: OPENAI_LOCAL_API_KEY
     # Seconds one request may take.
     timeout_seconds: 600
+  # Anthropic's own API. Only an `llm` agent can run on it.
+  claude-api:
+    type: anthropic-api
+    # Where the API is, without /v1.
+    base_url: "https://api.anthropic.com"
+    api_key_env: ANTHROPIC_API_KEY
+    timeout_seconds: 120
 
 # ---------------------------------------------------------------------------
 # Limits that agents share. Two agents on one model server, or on one

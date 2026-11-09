@@ -14,9 +14,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The ids of the models `backend` serves.
 pub fn models(backend: &LlmBackend) -> Result<Vec<String>, Error> {
-    let BackendSettings::OpenAiCompatible {
-        base_url, api_key, ..
-    } = &backend.settings;
+    let (base_url, api_key) = (backend.settings.base_url(), backend.settings.api_key());
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(PROBE_TIMEOUT))
         // Hand back a non-2xx as a response: its body says why ("model is
@@ -24,10 +22,24 @@ pub fn models(backend: &LlmBackend) -> Result<Vec<String>, Error> {
         .http_status_as_error(false)
         .build()
         .into();
-    let mut req = agent.get(format!("{base_url}/models"));
-    if let Some(key) = api_key {
-        req = req.header("authorization", &format!("Bearer {key}"));
-    }
+    let req = match &backend.settings {
+        BackendSettings::OpenAiCompatible { .. } => {
+            let req = agent.get(format!("{base_url}/models"));
+            match api_key {
+                Some(key) => req.header("authorization", &format!("Bearer {key}")),
+                None => req,
+            }
+        }
+        BackendSettings::Anthropic { .. } => {
+            let req = agent
+                .get(format!("{base_url}/v1/models"))
+                .header("anthropic-version", crate::external::llm::ANTHROPIC_VERSION);
+            match api_key {
+                Some(key) => req.header("x-api-key", key),
+                None => req,
+            }
+        }
+    };
     let mut resp = req
         .call()
         .map_err(|e| transport(&backend.name, e.to_string()))?;
@@ -121,5 +133,72 @@ mod tests {
             transport("b", "timed out reading response".into()),
             Error::Timeout { .. }
         ));
+    }
+
+    /// A server that answers one request with `body`, and hands back what it got.
+    fn answering(body: &str) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let body = body.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut reader = BufReader::new(&stream);
+            let mut request = String::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
+                    break;
+                }
+                request.push_str(&line);
+            }
+            let _ = tx.send(request);
+            let mut out = &stream;
+            let _ = write!(
+                out,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        });
+        (url, rx)
+    }
+
+    #[test]
+    fn each_kind_of_backend_is_asked_for_its_models_its_own_way() {
+        let backend = |settings| LlmBackend {
+            name: "b".into(),
+            timeout_seconds: 5,
+            settings,
+        };
+        let (url, request) = answering(r#"{"data":[{"id":"claude-haiku-4-5"}]}"#);
+        let ids = models(&backend(BackendSettings::Anthropic {
+            base_url: url,
+            api_key: Some("sk-ant".into()),
+        }))
+        .unwrap();
+        assert_eq!(ids, ["claude-haiku-4-5"]);
+        let sent = request.recv().unwrap().to_ascii_lowercase();
+        assert!(sent.starts_with("get /v1/models "), "{sent}");
+        assert!(
+            sent.contains("x-api-key: sk-ant") && sent.contains("anthropic-version: 2023-06-01"),
+            "{sent}"
+        );
+
+        let (url, request) = answering(r#"{"data":[{"id":"qwen"}]}"#);
+        let ids = models(&backend(BackendSettings::OpenAiCompatible {
+            base_url: format!("{url}/v1"),
+            api_key: Some("k".into()),
+        }))
+        .unwrap();
+        assert_eq!(ids, ["qwen"]);
+        let sent = request.recv().unwrap().to_ascii_lowercase();
+        assert!(sent.starts_with("get /v1/models "), "{sent}");
+        assert!(
+            sent.contains("authorization: bearer k") && !sent.contains("x-api-key"),
+            "{sent}"
+        );
     }
 }

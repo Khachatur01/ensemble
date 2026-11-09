@@ -22,8 +22,7 @@
 use super::AgentRun;
 use super::process;
 use crate::config::{
-    AgentConfig, BackendSettings, LlmBackend, OPENCODE_AGENT, OpenCodeAdapter, SystemPrompt,
-    opencode_tool_writes,
+    AgentConfig, LlmBackend, OPENCODE_AGENT, OpenCodeAdapter, SystemPrompt, opencode_tool_writes,
 };
 use crate::port::{Error, Usage};
 use crate::workspace::{self, Changes, Workspace};
@@ -195,9 +194,9 @@ impl Drop for PromptFile {
 
 /// An LLM backend as an OpenCode provider serving the agent's one model.
 fn provider(backend: &LlmBackend, oc: &OpenCodeAdapter) -> Value {
-    let BackendSettings::OpenAiCompatible {
-        base_url, api_key, ..
-    } = &backend.settings;
+    // Config loading refuses an Anthropic backend here; the URL and key are the
+    // same either way if one gets this far.
+    let (base_url, api_key) = (backend.settings.base_url(), backend.settings.api_key());
     let mut options = json!({
         "baseURL": base_url,
         "timeout": backend.timeout_seconds.saturating_mul(1000),
@@ -470,6 +469,7 @@ pub fn health(command: &str) -> Result<(), Error> {
 mod tests {
     use super::process::testing::{emitting, fake};
     use super::*;
+    use crate::config::BackendSettings;
     use crate::config::{Adapter, OpenCodeModel};
     use crate::workspace::testing::TempDir;
 

@@ -409,18 +409,15 @@ fn cmd_check(config: Config, dir: &Path, args: &Args) -> Result<ExitCode, String
     println!();
     println!("llm_backends:");
     for (name, b) in &config.llm_backends {
-        let detail = match &b.settings {
-            config::BackendSettings::OpenAiCompatible { base_url, api_key } => {
-                format!(
-                    "{base_url}{}",
-                    if api_key.is_some() {
-                        ", authenticated"
-                    } else {
-                        ""
-                    }
-                )
+        let detail = format!(
+            "{}{}",
+            b.settings.base_url(),
+            if b.settings.api_key().is_some() {
+                ", authenticated"
+            } else {
+                ""
             }
-        };
+        );
         println!(
             "  {name}  [{}]  {detail}  timeout {}s",
             b.type_id(),
@@ -618,14 +615,18 @@ fn cmd_show(config: &Config, args: &Args) -> Result<ExitCode, String> {
             println!("{}", command_line(&cx.command, &argv));
         }
         Adapter::Llm(la) => {
-            let url = match config.llm_backends.get(&la.backend).map(|b| &b.settings) {
-                Some(config::BackendSettings::OpenAiCompatible { base_url, .. }) => {
-                    base_url.clone()
+            let (path, body) = match config.llm_backends.get(&la.backend) {
+                Some(backend) => {
+                    let (path, body) =
+                        ensemble::external::llm::request_for(backend, agent, la, TASK, None);
+                    (format!("{}{path}", backend.settings.base_url()), body)
                 }
-                None => format!("<undefined backend {}>", la.backend),
+                None => (
+                    format!("<undefined backend {}>", la.backend),
+                    ensemble::external::llm::request(agent, la, TASK, None),
+                ),
             };
-            println!("POST {url}/chat/completions");
-            let body = ensemble::external::llm::request(agent, la, TASK, None);
+            println!("POST {path}");
             println!(
                 "{}",
                 serde_json::to_string_pretty(&body).map_err(|e| e.to_string())?
