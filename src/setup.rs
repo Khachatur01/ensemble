@@ -4,7 +4,9 @@
 //! arguments, so tests can run them without a terminal or a network.
 
 use crate::config::edit::{NewAgent, add_agent, agent_block};
-use crate::config::{Adapter, Budget, CLAUDE_CODE_AGENT, Config, OPENCODE_AGENT, SCHEMA_URL_LINE};
+use crate::config::{
+    Adapter, Budget, CLAUDE_CODE_AGENT, CODEX_AGENT, Config, OPENCODE_AGENT, SCHEMA_URL_LINE,
+};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -21,6 +23,7 @@ pub const LOCAL_SERVERS: [(&str, u16, &str); 3] = [
 pub struct Detected {
     pub claude: bool,
     pub opencode: bool,
+    pub codex: bool,
     /// Local model servers that answered, as (name, base URL).
     pub servers: Vec<(String, String)>,
 }
@@ -64,6 +67,7 @@ pub fn detect(probe: bool) -> Detected {
     Detected {
         claude: on_path("claude"),
         opencode: on_path("opencode"),
+        codex: on_path("codex"),
         servers,
     }
 }
@@ -151,8 +155,8 @@ pub fn starter(name: &str) -> Result<&'static Starter, String> {
 /// either stands in for the other. A local model server that answered becomes
 /// an LLM backend, ready for an agent to name.
 pub fn starter_org(starter: &Starter, found: &Detected) -> Result<String, String> {
-    if !found.claude && !found.opencode {
-        return Err("no agent CLI found on PATH. Install `claude` (Claude Code) or `opencode`, then run this again.".into());
+    if !found.claude && !found.opencode && !found.codex {
+        return Err("no agent CLI found on PATH. Install `claude` (Claude Code), `opencode` or `codex`, then run this again.".into());
     }
     let mut text = format!("{SCHEMA_URL_LINE}\n\nversion: 2\n\n");
     if found.servers.is_empty() {
@@ -171,10 +175,25 @@ pub fn starter_org(starter: &Starter, found: &Detected) -> Result<String, String
     text = text.replace("teams: {}\n", "teams:\n");
     let mut team_added = false;
     for (name, prompt, writes) in starter.agents {
-        let adapter = match (*writes, found.opencode, found.claude) {
-            (true, true, _) | (false, true, false) => OPENCODE_AGENT,
-            _ => CLAUDE_CODE_AGENT,
+        // Writers go to OpenCode, then Codex, then Claude Code; readers to Claude
+        // Code, then Codex, then OpenCode: whichever of them is there.
+        let order: [(&str, bool); 3] = if *writes {
+            [
+                (OPENCODE_AGENT, found.opencode),
+                (CODEX_AGENT, found.codex),
+                (CLAUDE_CODE_AGENT, found.claude),
+            ]
+        } else {
+            [
+                (CLAUDE_CODE_AGENT, found.claude),
+                (CODEX_AGENT, found.codex),
+                (OPENCODE_AGENT, found.opencode),
+            ]
         };
+        let adapter = order
+            .iter()
+            .find(|(_, there)| *there)
+            .map_or(CLAUDE_CODE_AGENT, |(kind, _)| kind);
         let block = agent_block(
             name,
             &NewAgent {
@@ -193,7 +212,7 @@ pub fn starter_org(starter: &Starter, found: &Detected) -> Result<String, String
 }
 
 /// The manager CLIs `connect` knows how to register with.
-pub const MANAGERS: [&str; 2] = [CLAUDE_CODE_AGENT, OPENCODE_AGENT];
+pub const MANAGERS: [&str; 3] = [CLAUDE_CODE_AGENT, OPENCODE_AGENT, CODEX_AGENT];
 
 /// What registers Ensemble with a manager: the program and its arguments.
 pub struct Registration {
@@ -268,6 +287,14 @@ pub fn registration(
             args.push("--".into());
             ("opencode", args)
         }
+        CODEX_AGENT => {
+            // Codex keeps its servers in one config of its own, so there is
+            // no scope to choose.
+            (
+                "codex",
+                vec!["mcp".into(), "add".into(), "ensemble".into(), "--".into()],
+            )
+        }
         other => {
             return Err(format!(
                 "unknown manager '{other}'. Managers: {}.",
@@ -340,6 +367,17 @@ impl Finding {
 pub fn risks(config: &Config) -> Vec<Finding> {
     let mut out = Vec::new();
     for a in config.agents.values() {
+        if let Adapter::Codex(c) = &a.adapter
+            && c.sandbox == "danger-full-access"
+        {
+            out.push(Finding::note(
+                format!(
+                    "{} runs with sandbox 'danger-full-access', which limits nothing",
+                    a.name
+                ),
+                "use `workspace-write`, or `read-only` for an agent that only reads",
+            ));
+        }
         if let Adapter::ClaudeCode(c) = &a.adapter
             && matches!(c.permission_mode.as_str(), "bypassPermissions" | "auto")
         {
@@ -480,6 +518,7 @@ mod tests {
         Detected {
             claude: true,
             opencode: true,
+            codex: false,
             servers: Vec::new(),
         }
     }
@@ -492,10 +531,17 @@ mod tests {
     #[test]
     fn every_starter_is_a_valid_organization_for_every_set_of_clis() {
         for s in &STARTERS {
-            for (claude, opencode) in [(true, true), (true, false), (false, true)] {
+            for (claude, opencode, codex) in [
+                (true, true, false),
+                (true, false, false),
+                (false, true, false),
+                (false, false, true),
+                (true, false, true),
+            ] {
                 let found = Detected {
                     claude,
                     opencode,
+                    codex,
                     servers: Vec::new(),
                 };
                 let c = loads(&starter_org(s, &found).unwrap());
@@ -503,7 +549,8 @@ mod tests {
                 for a in c.agents.values() {
                     assert!(
                         (a.kind() == CLAUDE_CODE_AGENT && claude)
-                            || (a.kind() == OPENCODE_AGENT && opencode),
+                            || (a.kind() == OPENCODE_AGENT && opencode)
+                            || (a.kind() == CODEX_AGENT && codex),
                         "{} runs on a CLI that is not there",
                         a.name
                     );
@@ -568,6 +615,11 @@ mod tests {
         );
         let r = registration("opencode", "ensemble", Path::new("/a b"), None, None, false).unwrap();
         assert!(r.line().ends_with("--org '/a b'"), "{}", r.line());
+        let r = registration("codex", "ensemble", org, None, None, true).unwrap();
+        assert_eq!(
+            r.line(),
+            "codex mcp add ensemble -- ensemble mcp --org /home/me/org"
+        );
         assert!(registration("emacs", "ensemble", org, None, None, false).is_err());
     }
 

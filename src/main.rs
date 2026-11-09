@@ -613,6 +613,10 @@ fn cmd_show(config: &Config, args: &Args) -> Result<ExitCode, String> {
             let argv = claude_code::arguments(agent, cc, TASK);
             println!("{}", command_line(&cc.command, &argv));
         }
+        Adapter::Codex(cx) => {
+            let argv = ensemble::external::codex::arguments(agent, cx, TASK);
+            println!("{}", command_line(&cx.command, &argv));
+        }
         Adapter::Llm(la) => {
             let url = match config.llm_backends.get(&la.backend).map(|b| &b.settings) {
                 Some(config::BackendSettings::OpenAiCompatible { base_url, .. }) => {
@@ -774,9 +778,10 @@ fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
     let interactive = std::io::stdin().is_terminal() && !has(args, "--yes");
     let found = setup::detect(true);
     println!(
-        "Found: claude {}, opencode {}{}",
+        "Found: claude {}, opencode {}, codex {}{}",
         if found.claude { "yes" } else { "no" },
         if found.opencode { "yes" } else { "no" },
+        if found.codex { "yes" } else { "no" },
         if found.servers.is_empty() {
             String::new()
         } else {
@@ -793,20 +798,33 @@ fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
     );
     let manager = match opt(args, "--manager") {
         Some(m) => m.to_string(),
-        None => match (found.claude, found.opencode) {
-            (true, false) => "claude-code".into(),
-            (false, true) => "opencode".into(),
-            (false, false) => {
-                return Err("setup: no agent CLI found on PATH. Install `claude` (Claude Code) or `opencode`, then run `ensemble setup` again.".into());
+        None => {
+            let there: Vec<&str> = [
+                (found.claude, "claude-code"),
+                (found.opencode, "opencode"),
+                (found.codex, "codex"),
+            ]
+            .iter()
+            .filter(|(yes, _)| *yes)
+            .map(|(_, name)| *name)
+            .collect();
+            match there.as_slice() {
+                [] => {
+                    return Err("setup: no agent CLI found on PATH. Install `claude` (Claude Code), `opencode` or `codex`, then run `ensemble setup` again.".into());
+                }
+                [only] => only.to_string(),
+                several if interactive => ask(
+                    &format!("Which agent do you talk to? ({})", several.join(", ")),
+                    Some(several[0]),
+                )?,
+                several => {
+                    return Err(format!(
+                        "setup: {} are installed; say which one you talk to with --manager.",
+                        several.join(", ")
+                    ));
+                }
             }
-            (true, true) if interactive => ask(
-                "Which agent do you talk to? (claude-code or opencode)",
-                Some("claude-code"),
-            )?,
-            (true, true) => {
-                return Err("setup: both claude and opencode are installed; say which one you talk to with --manager claude-code or --manager opencode.".into());
-            }
-        },
+        }
     };
     let org = match &args.org {
         Some(org) => PathBuf::from(org),
@@ -910,8 +928,8 @@ fn cmd_add_agent(args: &Args) -> Result<ExitCode, String> {
         .find(|a| !a.starts_with("--"))
         .and_then(|a| a.split_once('/'))
         .ok_or("add-agent: needs TEAM/NAME, such as software/coder")?;
-    let adapter =
-        opt(args, "--adapter").ok_or("add-agent: needs --adapter claude-code, opencode or llm")?;
+    let adapter = opt(args, "--adapter")
+        .ok_or("add-agent: needs --adapter claude-code, opencode, codex or llm")?;
     let org = org_of(args, "add-agent")?;
     let path = config::config_path(&org);
     let text = std::fs::read_to_string(&path)

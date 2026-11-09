@@ -2,6 +2,7 @@
 //! started in the project with a task and read as they work.
 
 pub mod claude_code;
+pub mod codex;
 pub mod gate;
 pub mod llm;
 pub mod opencode;

@@ -231,6 +231,9 @@ impl Ensemble {
             Adapter::ClaudeCode(cc) => self.run_tracked(agent, workdir, |dir| {
                 crate::external::claude_code::run(agent, cc, task, context, dir, progress, cancel)
             }),
+            Adapter::Codex(cx) => self.run_tracked(agent, workdir, |dir| {
+                crate::external::codex::run(agent, cx, task, context, dir, progress, cancel)
+            }),
             Adapter::Llm(la) => {
                 let backend = self.config.llm_backends.get(&la.backend).ok_or_else(|| {
                     RouteError::Agent(Error::Unsupported {
@@ -365,6 +368,7 @@ impl Ensemble {
             match &a.adapter {
                 Adapter::ClaudeCode(cc) => commands.push((CLAUDE_CODE_AGENT, &cc.command)),
                 Adapter::OpenCode(oc) => commands.push((OPENCODE_AGENT, &oc.command)),
+                Adapter::Codex(cx) => commands.push((crate::config::CODEX_AGENT, &cx.command)),
                 // No program: its backend, checked below, is all it needs.
                 Adapter::Llm(_) => {}
             }
@@ -380,6 +384,8 @@ impl Ensemble {
             .map(|(kind, command)| {
                 let result = if kind == OPENCODE_AGENT {
                     crate::external::opencode::health(command)
+                } else if kind == crate::config::CODEX_AGENT {
+                    crate::external::codex::health(command)
                 } else {
                     crate::external::claude_code::health(command)
                 };

@@ -419,6 +419,11 @@ fn the_schema_names_exactly_the_keys_the_config_accepts() {
             "claude-code adapter",
         ),
         (
+            "codex_adapter",
+            accepted_keys::<RawCodexAdapter>(),
+            "codex adapter",
+        ),
+        (
             "opencode_adapter",
             accepted_keys::<RawOpenCodeAdapter>(),
             "opencode adapter",
@@ -468,6 +473,7 @@ fn the_schema_requires_every_key_but_the_optional_two() {
         ("budget_unlimited", vec![]),
         ("budget_per_hour", vec![]),
         ("claude_code_adapter", vec![]),
+        ("codex_adapter", vec![]),
         ("opencode_adapter", vec![]),
         ("opencode_provider_model", vec![]),
         ("llm_adapter", vec![]),
@@ -486,6 +492,7 @@ fn the_schemas_choices_are_the_codes() {
     let tag = |def: &str| defs[def]["properties"]["type"]["const"].clone();
     assert_eq!(tag("openai_compatible_api_backend"), OPENAI_COMPATIBLE_API);
     assert_eq!(tag("claude_code_adapter"), CLAUDE_CODE_AGENT);
+    assert_eq!(tag("codex_adapter"), CODEX_AGENT);
     assert_eq!(tag("tracker_local_markdown"), "local_markdown");
     assert_eq!(tag("opencode_adapter"), OPENCODE_AGENT);
     assert_eq!(tag("llm_adapter"), LLM_AGENT);
@@ -593,7 +600,7 @@ fn a_named_env_file_that_is_missing_is_an_error() {
 fn the_sample_loads_and_sets_every_setting_the_schema_has() {
     let c = parse(SAMPLE, &p(), &env(&[])).expect("the sample is a valid config");
     let kinds: Vec<&str> = c.agents.values().map(|a| a.kind()).collect();
-    for kind in [CLAUDE_CODE_AGENT, OPENCODE_AGENT, LLM_AGENT] {
+    for kind in [CLAUDE_CODE_AGENT, OPENCODE_AGENT, CODEX_AGENT, LLM_AGENT] {
         assert!(kinds.contains(&kind), "the sample has no {kind} agent");
     }
     assert!(
@@ -654,6 +661,7 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
         ("budget_unlimited", budgets("unlimited")),
         ("budget_per_hour", budgets("per_hour")),
         ("claude_code_adapter", adapters(CLAUDE_CODE_AGENT)),
+        ("codex_adapter", adapters(CODEX_AGENT)),
         ("opencode_adapter", adapters(OPENCODE_AGENT)),
         ("llm_adapter", adapters(LLM_AGENT)),
         ("opencode_provider_model", models(PROVIDER_MODEL)),
@@ -777,11 +785,11 @@ fn on_an_llm_backend_the_model_is_the_endpoints_own_id() {
 
 #[test]
 fn an_unknown_adapter_type_lists_the_known_ones() {
-    let doc = REFERENCE.replace("type: claude-code", "type: codex");
+    let doc = REFERENCE.replace("type: claude-code", "type: aider");
     let detail = refusal(&doc);
     assert!(
         detail.contains("teams.default.agents.reviewer.adapter")
-            && detail.contains("unknown variant `codex`")
+            && detail.contains("unknown variant `aider`")
             && detail.contains("claude-code")
             && detail.contains("opencode"),
         "{detail}"
@@ -1256,4 +1264,41 @@ fn a_limit_needs_real_numbers() {
         joined.contains("limits.server: `tokens` must be greater than 0"),
         "{joined}"
     );
+}
+
+#[test]
+fn a_codex_agent_is_what_its_adapter_says_and_its_sandbox_is_one_codex_has() {
+    let doc = REFERENCE.replace(
+        "      type: claude-code\n      model: sonnet\n      tools: [Read, Grep, Glob]\n      permission_mode: dontAsk\n      max_turns: 30\n      command: claude",
+        "      type: codex\n      model: gpt-5-codex\n      sandbox: workspace-write\n      command: /opt/codex",
+    );
+    let c = parse(&doc, &p(), &env(&[])).unwrap();
+    let r = &c.agents["default/reviewer"];
+    assert_eq!((r.kind(), r.model()), (CODEX_AGENT, "gpt-5-codex"));
+    assert!(r.can_change_files() && r.has_tools());
+    assert_eq!(r.runs_on(), CODEX_AGENT);
+    match &r.adapter {
+        Adapter::Codex(cx) => assert_eq!(
+            (cx.command.as_str(), cx.sandbox.as_str()),
+            ("/opt/codex", "workspace-write")
+        ),
+        other => panic!("{other:?}"),
+    }
+    let ro = parse(
+        &doc.replace("workspace-write", "read-only"),
+        &p(),
+        &env(&[]),
+    )
+    .unwrap();
+    assert!(!ro.agents["default/reviewer"].can_change_files());
+
+    let bad = joined_problems(&doc.replace("workspace-write", "anything"));
+    assert!(bad.contains("sandbox 'anything' is unknown. Sandboxes: read-only, workspace-write, danger-full-access"), "{bad}");
+    let empty = joined_problems(&doc.replace("model: gpt-5-codex", "model: \"\""));
+    assert!(empty.contains("`model` is empty"), "{empty}");
+    let stray = refusal(&doc.replace(
+        "sandbox: workspace-write",
+        "sandbox: workspace-write\n      max_turns: 3",
+    ));
+    assert!(stray.contains("max_turns"), "{stray}");
 }

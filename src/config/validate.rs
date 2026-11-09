@@ -228,6 +228,7 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
                     &raw.llm_backends,
                     &mut problems,
                 )),
+                RawAdapter::Codex(c) => Adapter::Codex(codex_adapter(&at, c, &mut problems)),
                 RawAdapter::Llm(l) => {
                     Adapter::Llm(llm_adapter(&at, l, &raw.llm_backends, &mut problems))
                 }
@@ -436,6 +437,31 @@ pub(super) fn claude_code_adapter(
         tools: ad.tools.clone(),
         permission_mode: ad.permission_mode.clone(),
         max_turns: ad.max_turns,
+    }
+}
+
+pub(super) fn codex_adapter(
+    at: &str,
+    ad: &RawCodexAdapter,
+    problems: &mut Vec<String>,
+) -> CodexAdapter {
+    if ad.model.trim().is_empty() {
+        problems.push(format!("{at}: `model` is empty"));
+    }
+    if ad.command.trim().is_empty() {
+        problems.push(format!("{at}: `command` is empty"));
+    }
+    if !CODEX_SANDBOXES.contains(&ad.sandbox.as_str()) {
+        problems.push(format!(
+            "{at}: sandbox '{}' is unknown. Sandboxes: {}.",
+            ad.sandbox,
+            CODEX_SANDBOXES.join(", ")
+        ));
+    }
+    CodexAdapter {
+        command: ad.command.clone(),
+        model: ad.model.clone(),
+        sandbox: ad.sandbox.clone(),
     }
 }
 

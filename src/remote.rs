@@ -385,6 +385,23 @@ pub fn describe(config: &Config) -> String {
                     ));
                 }
             }
+            Adapter::Codex(c) => {
+                out.push_str(&format!(
+                    "  {}: runs `{}` (Codex), sandbox {}\n",
+                    a.name, c.command, c.sandbox
+                ));
+                if c.sandbox == "danger-full-access" {
+                    risks.push(format!(
+                        "{} runs with sandbox 'danger-full-access': nothing limits what it does on your machine",
+                        a.name
+                    ));
+                } else if crate::config::codex_sandbox_writes(&c.sandbox) {
+                    risks.push(format!(
+                        "{} can change files in your working folder",
+                        a.name
+                    ));
+                }
+            }
             Adapter::Llm(l) => out.push_str(&format!(
                 "  {}: one chat request to backend '{}', no tools\n",
                 a.name, l.backend

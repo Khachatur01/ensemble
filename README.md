@@ -11,18 +11,18 @@ projects.
 
 Ensemble runs no agent loop of its own. It starts the agent's CLI headless in
 the project with the task, reads what it does as it works, and returns the
-answer with what it changed. Three adapters ship:
+answer with what it changed. Four adapters ship:
 
 - **`claude-code`**, the Claude Code CLI, on your own subscription, with the
   tools you allow it.
 - **`opencode`**, the OpenCode CLI, with the tools you allow it, on any
   provider OpenCode is set up for, or on a model server of yours that you
   define once in Ensemble's config.
+- **`codex`**, the Codex CLI, on your own login, limited by Codex's own sandbox.
 - **`llm`**, a light agent: one chat request to a model server of yours, with
   no CLI and no tools, for cheap work that needs no files.
 
 A team can mix them, and your agent delegates to any of them the same way.
-Codex is meant to become a further adapter type.
 
 ```
    Your agent (Claude Code, OpenCode, ...)      = the manager
@@ -369,6 +369,32 @@ agents:
 The request waits up to the backend's `timeout_seconds`, and the agent's
 `max_seconds` or a cancel ends the wait sooner. `ensemble show <agent>` prints
 the request; `health` checks the backend serves the model.
+
+### The `codex` adapter
+
+The Codex CLI as a member of the team, run with `codex exec --json`, on your own
+login:
+
+```yaml
+adapter:
+  type: codex
+  model: gpt-5-codex
+  sandbox: workspace-write   # read-only | workspace-write | danger-full-access
+  command: codex
+```
+
+Codex has no tool list and no turn limit to set. What limits it is its own
+sandbox: `read-only` can only read, `workspace-write` can change files in the
+project (Ensemble then lists what changed), `danger-full-access` limits nothing,
+which `check` and `doctor` warn about. It has no flag for a system prompt, so the
+agent's `prompt` goes in front of the task. Progress, the commands it ran, its
+tokens and its answer are read from its JSON events as it works.
+
+**Not yet checked against a real Codex release.** The event shapes follow Codex's
+documented `exec --json` output and are covered by stand-ins and a saved stream;
+the first run against the real CLI is `ENSEMBLE_REAL_CLI=1 cargo test --test
+real_cli -- --ignored`, and a mismatch there is a fixture to capture and a parser
+to fix, as for the other CLIs.
 
 ### The `claude-code` adapter
 
@@ -884,7 +910,7 @@ state directory), `--context <text>` (for `run`).
 | `src/setup.rs` | `setup`, `connect` and `doctor`: detecting CLIs and servers, starters, registrations, findings |
 | `src/config/edit.rs` | adding and removing an agent in `config.yaml` as text, comments kept |
 | `src/router.rs` | agents to adapters; the ensemble itself, and `health` |
-| `src/external/` | the `claude-code` and `opencode` adapters (each CLI as a subprocess, its JSON events read as it goes), the `llm` adapter (one chat request), and gates |
+| `src/external/` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `llm` adapter (one chat request), and gates |
 | `src/workspace.rs` | the working folder, a `repo` inside it, and what a run changed |
 | `src/llm_backend.rs` | asking a model server which models it serves, for `health` |
 | `src/port.rs` | the shared error type |

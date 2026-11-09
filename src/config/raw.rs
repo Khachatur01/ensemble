@@ -160,6 +160,8 @@ pub(crate) enum RawAdapter {
     ClaudeCode(RawClaudeCodeAdapter),
     #[serde(rename = "opencode")]
     OpenCode(RawOpenCodeAdapter),
+    #[serde(rename = "codex")]
+    Codex(RawCodexAdapter),
     #[serde(rename = "llm")]
     Llm(RawLlmAdapter),
 }
@@ -241,4 +243,15 @@ pub(crate) struct RawBackendModel {
     /// Tokens of context the server really runs the model with. OpenCode
     /// needs it to know when to compact the conversation.
     pub(crate) context_window: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawCodexAdapter {
+    /// The program to run: `codex`, or a path to it.
+    pub(crate) command: String,
+    /// The model Codex runs on, as `codex exec --model` takes it.
+    pub(crate) model: String,
+    /// `read-only`, `workspace-write` or `danger-full-access`.
+    pub(crate) sandbox: String,
 }

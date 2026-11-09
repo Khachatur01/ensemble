@@ -65,6 +65,17 @@ pub fn agent_block(name: &str, a: &NewAgent<'_>) -> Result<String, String> {
                 "          type: {OPENCODE_AGENT}\n{model}          tools: {tools}\n          system_prompt: append\n          max_steps: 30\n          command: opencode\n"
             ));
         }
+        CODEX_AGENT => {
+            let sandbox = if a.writes {
+                "workspace-write"
+            } else {
+                "read-only"
+            };
+            out.push_str(&format!(
+                "          type: {CODEX_AGENT}\n          model: {}\n          sandbox: {sandbox}\n          command: codex\n",
+                a.model.unwrap_or("gpt-5-codex")
+            ));
+        }
         LLM_AGENT => {
             let backend = a
                 .backend
@@ -78,7 +89,7 @@ pub fn agent_block(name: &str, a: &NewAgent<'_>) -> Result<String, String> {
         }
         other => {
             return Err(format!(
-                "unknown adapter '{other}'. Adapters: {CLAUDE_CODE_AGENT}, {OPENCODE_AGENT}, {LLM_AGENT}"
+                "unknown adapter '{other}'. Adapters: {CLAUDE_CODE_AGENT}, {OPENCODE_AGENT}, {CODEX_AGENT}, {LLM_AGENT}"
             ));
         }
     }
@@ -304,6 +315,7 @@ mod tests {
     fn every_adapter_writes_every_setting() {
         for (adapter, backend, model) in [
             (CLAUDE_CODE_AGENT, None, None),
+            (CODEX_AGENT, None, None),
             (OPENCODE_AGENT, None, None),
             (OPENCODE_AGENT, Some("local"), Some("qwen3")),
             (LLM_AGENT, Some("local"), Some("small")),

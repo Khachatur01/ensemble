@@ -179,6 +179,24 @@ teams:
           # Most tokens of answer; an answer cut off there is marked unfinished.
           max_tokens: 1000
 
+      # The Codex CLI, on your own login.
+      fixer:
+        prompt: |
+          You fix exactly what is asked and say what you changed.
+        max_seconds: 1800
+        max_concurrent: 1
+        isolation: worktree
+        budget:
+          type: unlimited
+        adapter:
+          type: codex
+          model: gpt-5-codex
+          # Codex's own sandbox, which is what limits it: read-only,
+          # workspace-write (it may change files here) or danger-full-access.
+          sandbox: workspace-write
+          # The CLI: `codex` if it is on PATH.
+          command: codex
+
       # The Claude Code CLI, on your own subscription.
       reviewer:
         prompt: |

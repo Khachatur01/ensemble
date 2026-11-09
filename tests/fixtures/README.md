@@ -14,5 +14,6 @@ Capture:
 
     claude -p "reply with the word ok" --output-format stream-json --verbose > tests/fixtures/claude-code/<version>.jsonl
     opencode run --format json "reply with the word ok" > tests/fixtures/opencode/<version>.jsonl
+    codex exec --json --skip-git-repo-check "reply with the word ok" > tests/fixtures/codex/<version>.jsonl
 
 Remove anything private (paths, keys) from a capture before committing it.

@@ -428,6 +428,9 @@ assignee kept in `assignee.txt` beside the immutable `task.md`; `HAND OFF:` with
 
 ## Phase 12. More adapters and backend types
 
+Built: the Codex adapter, written from Codex's documented `exec --json` output and
+not yet run against a real Codex (see its README section).
+
 1. **Codex adapter.** `Adapter::Codex` with every setting explicit (read
    `codex exec --help` and its `--json` output to choose them), a new
    `src/external/codex.rs` modeled on `opencode.rs`, router arm, `show`, schema,

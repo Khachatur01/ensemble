@@ -46,6 +46,10 @@ pub const OPENAI_COMPATIBLE_API: &str = "openai-compatible-api";
 /// agents of their own that Ensemble starts in the project.
 pub const CLAUDE_CODE_AGENT: &str = "claude-code";
 pub const OPENCODE_AGENT: &str = "opencode";
+/// The Codex CLI, run headless with `codex exec`.
+pub const CODEX_AGENT: &str = "codex";
+/// What Codex's sandbox lets a run do.
+pub const CODEX_SANDBOXES: [&str; 3] = ["read-only", "workspace-write", "danger-full-access"];
 /// The light adapter: one request to an LLM backend, no CLI and no tools.
 pub const LLM_AGENT: &str = "llm";
 
@@ -142,7 +146,23 @@ pub struct Limit {
 pub enum Adapter {
     ClaudeCode(ClaudeCodeAdapter),
     OpenCode(OpenCodeAdapter),
+    Codex(CodexAdapter),
     Llm(LlmAdapter),
+}
+
+/// The Codex CLI, run headless in the project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexAdapter {
+    pub command: String,
+    pub model: String,
+    /// `read-only`, `workspace-write` or `danger-full-access`: what Codex's own
+    /// sandbox lets it do. It is what limits the agent.
+    pub sandbox: String,
+}
+
+/// Can a Codex sandbox change files?
+pub fn codex_sandbox_writes(sandbox: &str) -> bool {
+    sandbox != "read-only"
 }
 
 /// The Claude Code CLI, run headless in the project.
@@ -242,6 +262,7 @@ impl AgentConfig {
         match self.adapter {
             Adapter::ClaudeCode(_) => CLAUDE_CODE_AGENT,
             Adapter::OpenCode(_) => OPENCODE_AGENT,
+            Adapter::Codex(_) => CODEX_AGENT,
             Adapter::Llm(_) => LLM_AGENT,
         }
     }
@@ -250,6 +271,7 @@ impl AgentConfig {
         match &self.adapter {
             Adapter::ClaudeCode(c) => &c.model,
             Adapter::OpenCode(o) => o.model_id(),
+            Adapter::Codex(c) => &c.model,
             Adapter::Llm(l) => &l.model,
         }
     }
@@ -257,7 +279,7 @@ impl AgentConfig {
     /// The LLM backend its model runs on, when it runs on one.
     pub fn llm_backend(&self) -> Option<&str> {
         match &self.adapter {
-            Adapter::ClaudeCode(_) => None,
+            Adapter::ClaudeCode(_) | Adapter::Codex(_) => None,
             Adapter::OpenCode(o) => o.llm_backend(),
             Adapter::Llm(l) => Some(&l.backend),
         }
@@ -267,7 +289,7 @@ impl AgentConfig {
     /// LLM backend.
     pub fn context_window(&self) -> Option<u32> {
         match &self.adapter {
-            Adapter::ClaudeCode(_) | Adapter::Llm(_) => None,
+            Adapter::ClaudeCode(_) | Adapter::Codex(_) | Adapter::Llm(_) => None,
             Adapter::OpenCode(o) => o.context_window(),
         }
     }
@@ -289,6 +311,7 @@ impl AgentConfig {
         match &self.adapter {
             Adapter::ClaudeCode(c) => c.tools.iter().any(|t| claude_tool_writes(t)),
             Adapter::OpenCode(o) => o.tools.iter().any(|t| opencode_tool_writes(t)),
+            Adapter::Codex(c) => codex_sandbox_writes(&c.sandbox),
             Adapter::Llm(_) => false,
         }
     }
@@ -298,6 +321,8 @@ impl AgentConfig {
         match &self.adapter {
             Adapter::ClaudeCode(c) => c.tools.iter().map(String::as_str).collect(),
             Adapter::OpenCode(o) => o.tools.iter().map(String::as_str).collect(),
+            // Its sandbox is what stands in for a list of tools.
+            Adapter::Codex(c) => vec![c.sandbox.as_str()],
             Adapter::Llm(_) => Vec::new(),
         }
     }

@@ -121,3 +121,19 @@ fn opencode_answers_a_trivial_task() {
         ),
     );
 }
+
+#[test]
+#[ignore = "needs ENSEMBLE_REAL_CLI=1 and the codex CLI, logged in"]
+fn codex_answers_a_trivial_task() {
+    if !enabled() || !on_path("codex") {
+        eprintln!("skipped: ENSEMBLE_REAL_CLI=1 and `codex` on PATH are needed");
+        return;
+    }
+    let model = std::env::var("ENSEMBLE_REAL_CODEX_MODEL").unwrap_or_else(|_| "gpt-5-codex".into());
+    check(
+        "probe",
+        &format!(
+            "      type: codex\n      model: {model}\n      sandbox: read-only\n      command: codex\n"
+        ),
+    );
+}

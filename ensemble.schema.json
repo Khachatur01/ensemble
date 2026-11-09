@@ -280,9 +280,37 @@
               "$ref": "#/definitions/opencode_adapter"
             },
             {
+              "$ref": "#/definitions/codex_adapter"
+            },
+            {
               "$ref": "#/definitions/llm_adapter"
             }
           ]
+        }
+      }
+    },
+    "codex_adapter": {
+      "type": "object",
+      "required": ["type", "model", "sandbox", "command"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "codex: the Codex CLI (`codex exec`), run headless in the project on your own login. It brings its own tools and manages its own context; its sandbox is what limits it.",
+          "const": "codex"
+        },
+        "model": {
+          "description": "Codex's --model.",
+          "type": "string",
+          "minLength": 1
+        },
+        "sandbox": {
+          "description": "Codex's own sandbox, passed to --sandbox. read-only: it can only read. workspace-write: it can change files in the project. danger-full-access: nothing limits it.",
+          "enum": ["read-only", "workspace-write", "danger-full-access"]
+        },
+        "command": {
+          "description": "The CLI to run: `codex` if it is on PATH, or a path.",
+          "type": "string",
+          "minLength": 1
         }
       }
     },

@@ -2002,3 +2002,35 @@ fn check_warns_about_what_agents_may_do_without_failing() {
     assert!(text.contains("isolation: worktree"), "{text}");
     assert!(!text.contains("default/reviewer can change"), "{text}");
 }
+
+#[test]
+fn show_prints_how_a_codex_agent_starts() {
+    let s = Scratch::new("show-codex");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    let out = ensemble(
+        &s,
+        &[
+            "add-agent",
+            "default/fixer",
+            "--adapter",
+            "codex",
+            "--prompt",
+            "Fixes it.",
+            "--writes",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let shown = ensemble(&s, &["show", "fixer"]);
+    assert!(shown.status.success(), "{}", stderr_of(&shown));
+    let text = stdout_of(&shown);
+    assert!(
+        text.starts_with("codex exec --json --skip-git-repo-check --sandbox workspace-write --model gpt-5-codex -- "),
+        "{text}"
+    );
+    assert!(text.contains("Fixes it."), "{text}");
+    let agents = stdout_of(&ensemble(&s, &["agents"]));
+    assert!(
+        agents.contains("default/fixer\tcodex\tgpt-5-codex"),
+        "{agents}"
+    );
+}
