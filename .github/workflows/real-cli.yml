@@ -1,0 +1,42 @@
+name: real-cli
+
+# Runs the ignored tests in tests/real_cli.rs against the real agent CLIs, to
+# catch an upgrade that changes their output. Needs repository secrets; without
+# them the job says so and passes.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  real-cli:
+    runs-on: ubuntu-latest
+    env:
+      ENSEMBLE_REAL_CLI: "1"
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ENSEMBLE_REAL_OPENCODE_MODEL: ${{ vars.ENSEMBLE_REAL_OPENCODE_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check for secrets
+        id: secrets
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "No ANTHROPIC_API_KEY secret: skipping the real-CLI checks."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install the CLIs
+        if: steps.secrets.outputs.run == 'true'
+        run: |
+          npm install -g @anthropic-ai/claude-code opencode-ai
+          claude --version
+          opencode --version
+      - name: Run the real-CLI tests
+        if: steps.secrets.outputs.run == 'true'
+        run: cargo test --test real_cli -- --ignored --nocapture

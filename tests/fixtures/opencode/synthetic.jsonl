@@ -1,0 +1,3 @@
+{"type":"step_start","part":{}}
+{"type":"text","part":{"text":"ok"}}
+{"type":"step_finish","part":{"tokens":{"input":5,"output":1}}}

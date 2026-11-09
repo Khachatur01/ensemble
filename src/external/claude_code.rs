@@ -478,6 +478,28 @@ mod tests {
         assert!(!args.contains(&"--bare".to_string()));
     }
 
+    /// Every saved event stream in `tests/fixtures/claude-code/` still parses.
+    #[test]
+    fn every_saved_event_stream_still_parses() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-code");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "jsonl") {
+                continue;
+            }
+            let tmp = TempDir::new();
+            let script = format!("cat '{}'\n", path.display());
+            let (a, cc) = agent(&["Read"], 60);
+            let (r, _) = go(&fake(&tmp.0, &script), &a, &cc, &tmp.0);
+            let r = r.unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            assert!(!r.text.is_empty(), "{}: no answer", path.display());
+            assert!(!r.model.is_empty(), "{}: no model", path.display());
+            checked += 1;
+        }
+        assert!(checked > 0, "no fixtures in {}", dir.display());
+    }
+
     #[test]
     fn a_run_reports_progress_commands_usage_and_the_answer() {
         let tmp = TempDir::new();
