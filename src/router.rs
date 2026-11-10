@@ -387,7 +387,7 @@ impl Ensemble {
             wanted.sort_unstable();
             wanted.dedup();
             let result = match self.config.llm_backends.get(name) {
-                Some(b) => crate::llm_backend::models(b)
+                Some(b) => crate::backends::models::models(b)
                     .and_then(|served| served_all(name, &wanted, &served)),
                 None => Err(Error::Unsupported {
                     backend: name.into(),

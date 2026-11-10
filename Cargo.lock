@@ -49,12 +49,23 @@ dependencies = [
 name = "ensemble"
 version = "0.1.0"
 dependencies = [
+ "ensemble-backends",
  "ensemble-config",
  "ensemble-core",
  "libc",
  "serde",
  "serde_json",
  "serde_norway",
+ "ureq",
+]
+
+[[package]]
+name = "ensemble-backends"
+version = "0.1.0"
+dependencies = [
+ "ensemble-config",
+ "ensemble-core",
+ "serde_json",
  "ureq",
 ]
 

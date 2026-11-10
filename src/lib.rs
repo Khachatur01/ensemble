@@ -22,7 +22,6 @@
 
 pub mod external;
 pub mod harness;
-pub mod llm_backend;
 pub mod remote;
 pub mod review;
 pub mod router;
@@ -31,5 +30,6 @@ pub mod tasks;
 pub mod tracker;
 pub mod worktree;
 
+pub use ensemble_backends as backends;
 pub use ensemble_config as config;
 pub use ensemble_core::{port, records, state, workspace};

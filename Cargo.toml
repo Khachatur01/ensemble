@@ -25,6 +25,7 @@ ureq = "3"
 libc = "0.2"
 ensemble-core = { path = "crates/ensemble-core" }
 ensemble-config = { path = "crates/ensemble-config" }
+ensemble-backends = { path = "crates/ensemble-backends" }
 
 [package]
 name = "ensemble"
@@ -43,6 +44,7 @@ name = "ensemble"
 path = "src/main.rs"
 
 [dependencies]
+ensemble-backends.workspace = true
 ensemble-config.workspace = true
 ensemble-core.workspace = true
 serde.workspace = true

@@ -1,13 +1,13 @@
 //! Asking an LLM backend which models it serves.
 //!
-//! An agent's harness calls its model; only a light `llm` agent is a request
-//! Ensemble makes itself, in `external::llm`. This is
-//! only the health check: `GET /models` is the cheapest request that proves
-//! the server is up and the key is accepted, it spends no tokens, and its
-//! answer says whether the model an agent names is really there.
+//! An agent's harness calls its model; only a light `direct` agent is a request
+//! Ensemble makes itself, through `chat`. This is only the health check:
+//! `GET /models` is the cheapest request that proves the server is up and the
+//! key is accepted, it spends no tokens, and its answer says whether the model
+//! an agent names is really there.
 
-use crate::config::{BackendSettings, LlmBackend};
-use crate::port::Error;
+use ensemble_config::{BackendSettings, LlmBackend};
+use ensemble_core::port::Error;
 use std::time::Duration;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -31,10 +31,9 @@ pub fn models(backend: &LlmBackend) -> Result<Vec<String>, Error> {
             }
         }
         BackendSettings::Anthropic { .. } => {
-            let req = agent.get(format!("{base_url}/v1/models")).header(
-                "anthropic-version",
-                crate::external::direct::ANTHROPIC_VERSION,
-            );
+            let req = agent
+                .get(format!("{base_url}/v1/models"))
+                .header("anthropic-version", crate::chat::ANTHROPIC_VERSION);
             match api_key {
                 Some(key) => req.header("x-api-key", key),
                 None => req,

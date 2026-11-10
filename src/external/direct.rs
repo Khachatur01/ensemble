@@ -1,19 +1,35 @@
 //! The `direct` adapter: a light agent that is one chat request to an LLM
-//! backend, with no CLI in between. No tools: the model answers from the task, its context
-//! and the agent's prompt, so it suits cheap work that needs no files, such
-//! as summarising, classifying or drafting from what it is given.
+//! backend, with no CLI in between. No tools: the model answers from the task,
+//! its context and the agent's prompt, so it suits cheap work that needs no
+//! files, such as summarising, classifying or drafting from what it is given.
+//! The request itself is `ensemble_backends::chat`; this is the agent around it.
 
 use super::AgentRun;
-use crate::config::{AgentConfig, BackendSettings, DIRECT_AGENT, DirectAdapter, LlmBackend};
-use crate::port::{Error, Usage};
+use crate::config::{AgentConfig, DIRECT_AGENT, DirectAdapter, LlmBackend};
+use crate::port::Error;
 use crate::workspace::Changes;
-use serde_json::{Value, json};
+use ensemble_backends::chat::{self, Ask};
+use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-/// The version of Anthropic's API that is asked for.
-pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// The one user message: the task, after its context when there is one.
+fn user_message(task: &str, context: Option<&str>) -> String {
+    match context.filter(|c| !c.trim().is_empty()) {
+        Some(ctx) => format!("Context:\n{ctx}\n\n{task}"),
+        None => task.to_string(),
+    }
+}
+
+fn ask<'a>(agent: &'a AgentConfig, la: &'a DirectAdapter, user: &'a str) -> Ask<'a> {
+    Ask {
+        model: &la.model,
+        system: agent.prompt.as_deref(),
+        user,
+        max_tokens: la.max_tokens,
+    }
+}
 
 /// The request for `backend`: the path after its `base_url`, and the body.
 pub fn request_for(
@@ -23,26 +39,8 @@ pub fn request_for(
     task: &str,
     context: Option<&str>,
 ) -> (&'static str, Value) {
-    match backend.settings {
-        BackendSettings::OpenAiCompatible { .. } => {
-            ("/chat/completions", request(agent, la, task, context))
-        }
-        BackendSettings::Anthropic { .. } => {
-            let user = match context.filter(|c| !c.trim().is_empty()) {
-                Some(ctx) => format!("Context:\n{ctx}\n\n{task}"),
-                None => task.to_string(),
-            };
-            let mut body = json!({
-                "model": la.model,
-                "max_tokens": la.max_tokens,
-                "messages": [{ "role": "user", "content": user }],
-            });
-            if let Some(prompt) = agent.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
-                body["system"] = json!(prompt);
-            }
-            ("/v1/messages", body)
-        }
-    }
+    let user = user_message(task, context);
+    chat::request(backend, &ask(agent, la, &user))
 }
 
 /// The request, as it is sent to `{base_url}/chat/completions`.
@@ -52,16 +50,8 @@ pub fn request(
     task: &str,
     context: Option<&str>,
 ) -> Value {
-    let mut messages = Vec::new();
-    if let Some(prompt) = agent.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
-        messages.push(json!({ "role": "system", "content": prompt }));
-    }
-    let user = match context.filter(|c| !c.trim().is_empty()) {
-        Some(ctx) => format!("Context:\n{ctx}\n\n{task}"),
-        None => task.to_string(),
-    };
-    messages.push(json!({ "role": "user", "content": user }));
-    json!({ "model": la.model, "messages": messages, "max_tokens": la.max_tokens })
+    let user = user_message(task, context);
+    chat::openai_body(&ask(agent, la, &user))
 }
 
 /// Send the task and return the answer. The request runs on a thread of its
@@ -84,7 +74,7 @@ pub fn run(
     ));
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(send(&backend, path, &body));
+        let _ = tx.send(chat::send(&backend, path, &body));
     });
     let deadline = Instant::now() + Duration::from_secs(u64::from(agent.max_seconds));
     let answer = loop {
@@ -113,14 +103,20 @@ pub fn run(
         }
     };
     progress(&format!("{} · answered", agent.name));
-    Ok(answer)
+    Ok(AgentRun {
+        text: answer.text,
+        model: answer.model,
+        usage: answer.usage,
+        steps: 1,
+        ..empty(&la.model)
+    })
 }
 
 fn empty(model: &str) -> AgentRun {
     AgentRun {
         text: String::new(),
         model: model.to_string(),
-        usage: Usage::default(),
+        usage: Default::default(),
         steps: 0,
         tool_calls: 0,
         changes: Changes::new(),
@@ -128,133 +124,11 @@ fn empty(model: &str) -> AgentRun {
     }
 }
 
-fn send(backend: &LlmBackend, path: &str, body: &Value) -> Result<AgentRun, Error> {
-    let (base_url, api_key) = (backend.settings.base_url(), backend.settings.api_key());
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(backend.timeout_seconds)))
-        .http_status_as_error(false)
-        .build()
-        .into();
-    let mut req = agent
-        .post(format!("{base_url}{path}"))
-        .header("content-type", "application/json");
-    req = match (&backend.settings, api_key) {
-        (BackendSettings::OpenAiCompatible { .. }, Some(key)) => {
-            req.header("authorization", &format!("Bearer {key}"))
-        }
-        (BackendSettings::Anthropic { .. }, key) => {
-            let req = req.header("anthropic-version", ANTHROPIC_VERSION);
-            match key {
-                Some(key) => req.header("x-api-key", key),
-                None => req,
-            }
-        }
-        (_, None) => req,
-    };
-    let mut resp = req.send(body.to_string()).map_err(|e| {
-        let detail = e.to_string();
-        if detail.to_ascii_lowercase().contains("timeout") || detail.contains("timed out") {
-            Error::Timeout {
-                backend: backend.name.clone(),
-                seconds: backend.timeout_seconds,
-            }
-        } else {
-            Error::Transport {
-                backend: backend.name.clone(),
-                detail,
-            }
-        }
-    })?;
-    let status = resp.status().as_u16();
-    let text = resp.body_mut().read_to_string().unwrap_or_default();
-    let model = body["model"].as_str().unwrap_or("");
-    match backend.settings {
-        BackendSettings::OpenAiCompatible { .. } => parse(&backend.name, model, status, &text),
-        BackendSettings::Anthropic { .. } => parse_anthropic(&backend.name, model, status, &text),
-    }
-}
-
-/// An answer from Anthropic's Messages API: the text blocks of `content`.
-fn parse_anthropic(backend: &str, model: &str, status: u16, body: &str) -> Result<AgentRun, Error> {
-    if !(200..300).contains(&status) {
-        return Err(Error::Api {
-            backend: backend.into(),
-            status,
-            message: body.to_string(),
-        });
-    }
-    let protocol = |detail: String| Error::Protocol {
-        backend: backend.into(),
-        detail,
-    };
-    let json: Value =
-        serde_json::from_str(body).map_err(|e| protocol(format!("the answer is not JSON: {e}")))?;
-    let blocks = json["content"]
-        .as_array()
-        .ok_or_else(|| protocol(format!("no content in: {body}")))?;
-    let mut text = blocks
-        .iter()
-        .filter(|b| b["type"] == "text")
-        .filter_map(|b| b["text"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string();
-    if json["stop_reason"] == "max_tokens" {
-        text.push_str("\n[cut off at max_tokens; the answer is unfinished]");
-    }
-    let tokens = |key: &str| json["usage"][key].as_u64().unwrap_or(0) as u32;
-    Ok(AgentRun {
-        text,
-        model: json["model"].as_str().unwrap_or(model).to_string(),
-        usage: Usage {
-            prompt_tokens: tokens("input_tokens"),
-            completion_tokens: tokens("output_tokens"),
-        },
-        steps: 1,
-        ..empty(model)
-    })
-}
-
-fn parse(backend: &str, model: &str, status: u16, body: &str) -> Result<AgentRun, Error> {
-    if !(200..300).contains(&status) {
-        return Err(Error::Api {
-            backend: backend.into(),
-            status,
-            message: body.to_string(),
-        });
-    }
-    let protocol = |detail: String| Error::Protocol {
-        backend: backend.into(),
-        detail,
-    };
-    let json: Value =
-        serde_json::from_str(body).map_err(|e| protocol(format!("the answer is not JSON: {e}")))?;
-    let choice = &json["choices"][0];
-    let content = choice["message"]["content"]
-        .as_str()
-        .ok_or_else(|| protocol(format!("no choices[0].message.content in: {body}")))?;
-    let mut text = content.trim().to_string();
-    if choice["finish_reason"] == "length" {
-        text.push_str("\n[cut off at max_tokens; the answer is unfinished]");
-    }
-    let tokens = |key: &str| json["usage"][key].as_u64().unwrap_or(0) as u32;
-    Ok(AgentRun {
-        text,
-        model: json["model"].as_str().unwrap_or(model).to_string(),
-        usage: Usage {
-            prompt_tokens: tokens("prompt_tokens"),
-            completion_tokens: tokens("completion_tokens"),
-        },
-        steps: 1,
-        ..empty(model)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Adapter, Budget, Isolation};
+    use crate::config::{Adapter, BackendSettings, Budget, Isolation};
+    use serde_json::json;
     use std::io::{BufRead, BufReader, Read, Write};
 
     fn agent(prompt: Option<&str>, max_seconds: u32) -> (AgentConfig, DirectAdapter) {
@@ -450,21 +324,6 @@ mod tests {
         assert_eq!(body["system"], "You summarise.");
         assert_eq!(body["max_tokens"], 200);
         assert_eq!(body["messages"][0]["content"], "Context:\nctx\n\nsummarise");
-    }
-
-    #[test]
-    fn an_anthropic_answer_cut_off_or_refused_says_so() {
-        let cut = parse_anthropic(
-            "b",
-            "m",
-            200,
-            r#"{"content":[{"type":"text","text":"half"}],"stop_reason":"max_tokens"}"#,
-        )
-        .unwrap();
-        assert!(cut.text.contains("cut off at max_tokens"), "{}", cut.text);
-        let refused = parse_anthropic("b", "m", 401, "{\"error\":\"bad key\"}").unwrap_err();
-        assert!(refused.to_string().contains("401"), "{refused}");
-        assert!(parse_anthropic("b", "m", 200, "{}").is_err());
     }
 
     #[test]

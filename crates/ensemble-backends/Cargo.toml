@@ -1,0 +1,14 @@
+[package]
+name = "ensemble-backends"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Ensemble's LLM backends: one chat request in the backend's own format, and the models it serves."
+
+[dependencies]
+ensemble-config.workspace = true
+ensemble-core.workspace = true
+serde_json.workspace = true
+ureq.workspace = true

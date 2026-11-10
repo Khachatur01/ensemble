@@ -938,7 +938,7 @@ state directory), `--context <text>` (for `run`).
 | `src/router.rs` | agents to adapters; the ensemble itself, and `health` |
 | `src/external/` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `direct` adapter (one chat request), and gates |
 | `src/workspace.rs` | the working folder, a `repo` inside it, and what a run changed |
-| `src/llm_backend.rs` | asking a model server which models it serves, for `health` |
+| `crates/ensemble-backends/` | one chat request to a model server in its own format (`chat.rs`), and asking it which models it serves, for `health` (`models.rs`) |
 | `src/port.rs` | the shared error type |
 | `src/review.rs` | `review`, `diff` and `merge` of a worktree task's branch |
 | `src/records.rs` | the record of every run, and the sums `ensemble stats` prints |
