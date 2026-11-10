@@ -474,20 +474,15 @@
         }
       }
     },
-    "direct_adapter": {
+    "when_none": {
+      "description": "What happens when none of the models in `try` can be used: no backend answers, or none serves its model. fail: the delegation or task fails, saying what each backend answered. wait: a task waits in the queue and is tried again later; a delegation, which someone is waiting for, fails.",
+      "enum": ["fail", "wait"]
+    },
+    "direct_candidate": {
       "type": "object",
-      "required": [
-        "type",
-        "backend",
-        "model",
-        "max_tokens"
-      ],
+      "required": ["backend", "model"],
       "additionalProperties": false,
       "properties": {
-        "type": {
-          "description": "direct: a light agent, one chat request straight to an LLM backend with the agent's prompt as the system prompt. No CLI and no tools: it reads and changes nothing, and answers from the task and its context. For cheap work such as summarising, classifying or drafting.",
-          "const": "direct"
-        },
         "backend": {
           "description": "Name of a backend under `llm_backends`.",
           "type": "string",
@@ -497,7 +492,30 @@
           "description": "The model id the endpoint serves, as its /models lists it.",
           "type": "string",
           "minLength": 1
+        }
+      }
+    },
+    "direct_adapter": {
+      "type": "object",
+      "required": [
+        "type",
+        "try",
+        "when_none",
+        "max_tokens"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "direct: a light agent, one chat request straight to an LLM backend with the agent's prompt as the system prompt. No CLI and no tools: it reads and changes nothing, and answers from the task and its context. For cheap work such as summarising, classifying or drafting.",
+          "const": "direct"
         },
+        "try": {
+          "description": "The models it may run on, in order. Each run uses the first whose backend answers and serves it; with one model, it is simply used.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/direct_candidate" }
+        },
+        "when_none": { "$ref": "#/definitions/when_none" },
         "max_tokens": {
           "description": "Most tokens of answer; an answer cut off there is marked unfinished.",
           "type": "integer",
@@ -531,16 +549,33 @@
       "type": "object",
       "required": [
         "type",
+        "try",
+        "when_none"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "llm_backend: models that `llm_backends` serve. Ensemble gives OpenCode the endpoint and key of the one a run uses.",
+          "const": "llm_backend"
+        },
+        "try": {
+          "description": "The models it may run on, in order. Each run uses the first whose backend answers and serves it; with one model, it is simply used.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/opencode_llm_backend_candidate" }
+        },
+        "when_none": { "$ref": "#/definitions/when_none" }
+      }
+    },
+    "opencode_llm_backend_candidate": {
+      "type": "object",
+      "required": [
         "backend",
         "name",
         "context_window"
       ],
       "additionalProperties": false,
       "properties": {
-        "type": {
-          "description": "llm_backend: a model that one of `llm_backends` serves. Ensemble gives OpenCode that endpoint and its key for the run.",
-          "const": "llm_backend"
-        },
         "backend": {
           "description": "Name of a backend under `llm_backends`.",
           "type": "string",

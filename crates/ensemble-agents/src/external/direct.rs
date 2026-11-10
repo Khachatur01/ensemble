@@ -24,7 +24,7 @@ fn user_message(task: &str, context: Option<&str>) -> String {
 
 fn ask<'a>(agent: &'a AgentConfig, la: &'a DirectAdapter, user: &'a str) -> Ask<'a> {
     Ask {
-        model: &la.model,
+        model: la.model(),
         system: agent.prompt.as_deref(),
         user,
         max_tokens: la.max_tokens,
@@ -70,7 +70,9 @@ pub fn run(
     let backend = backend.clone();
     progress(&format!(
         "{} · asking {} on {}",
-        agent.name, la.model, backend.name
+        agent.name,
+        la.model(),
+        backend.name
     ));
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -88,7 +90,7 @@ pub fn run(
         if let Some(why) = why {
             return Ok(AgentRun {
                 text: format!("[{why} before the model answered; the work is unfinished]"),
-                ..empty(&la.model)
+                ..empty(la.model())
             });
         }
         match rx.recv_timeout(Duration::from_millis(50)) {
@@ -108,7 +110,7 @@ pub fn run(
         model: answer.model,
         usage: answer.usage,
         steps: 1,
-        ..empty(&la.model)
+        ..empty(la.model())
     })
 }
 
@@ -127,14 +129,22 @@ fn empty(model: &str) -> AgentRun {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ensemble_config::{Adapter, BackendSettings, Budget, Isolation};
+    use ensemble_config::{
+        Adapter, BackendSettings, Budget, Candidate, Fallback, Isolation, WhenNone,
+    };
     use serde_json::json;
     use std::io::{BufRead, BufReader, Read, Write};
 
     fn agent(prompt: Option<&str>, max_seconds: u32) -> (AgentConfig, DirectAdapter) {
         let la = DirectAdapter {
-            backend: "local".into(),
-            model: "small".into(),
+            fallback: Fallback {
+                candidates: vec![Candidate {
+                    backend: "local".into(),
+                    model: "small".into(),
+                    context_window: None,
+                }],
+                when_none: WhenNone::Fail,
+            },
             max_tokens: 200,
         };
         let a = AgentConfig {

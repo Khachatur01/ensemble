@@ -15,14 +15,31 @@ use serde_norway::{Mapping, Value};
 /// both used is prefixed with its team's, the prompts are dropped, and the
 /// trackers must agree, because there is one now. An agent named `team/agent`
 /// in a version 2 task is read as `agent` by the task store.
+///
+/// A model on an LLM backend became a `try` list in version 3: a single
+/// `backend` (with `name` and `context_window` for OpenCode, `model` for
+/// `direct`) becomes a list of that one model, with `when_none: fail`, which is
+/// what one backend always meant. This is done for a version 3 document too,
+/// and a document with nothing to change is returned as it is.
 pub fn to_v3(text: &str) -> Result<String, String> {
     let doc: Value = serde_norway::from_str(text).map_err(|e| e.to_string())?;
-    let Value::Mapping(old) = doc else {
+    let Value::Mapping(mut old) = doc else {
         return Err("the document is not a mapping".into());
     };
     let version = old.get("version").cloned();
     if version == Some(Value::Number(3.into())) {
-        return Ok(text.to_string());
+        // Every agent is looked at, so no shortcut once one has changed.
+        let mut changed = false;
+        if let Some(agents) = old.get_mut("agents").and_then(Value::as_mapping_mut) {
+            for agent in agents.values_mut() {
+                changed |= one_model_to_try(agent);
+            }
+        }
+        return if changed {
+            serde_norway::to_string(&Value::Mapping(old)).map_err(|e| e.to_string())
+        } else {
+            Ok(text.to_string())
+        };
     }
     let key = |s: &str| Value::String(s.to_string());
     let mut top = Mapping::new();
@@ -146,7 +163,8 @@ fn flatten_teams(
     Ok(())
 }
 
-/// `type: llm` became `type: direct` in version 3.
+/// `type: llm` became `type: direct` in version 3, and one model on a backend
+/// became a `try` list.
 fn rename_adapters(agents: Mapping) -> Mapping {
     agents
         .into_iter()
@@ -156,9 +174,45 @@ fn rename_adapters(agents: Mapping) -> Mapping {
             {
                 adapter.insert(Value::String("type".into()), Value::String("direct".into()));
             }
+            one_model_to_try(&mut agent);
             (name, agent)
         })
         .collect()
+}
+
+/// An agent's single model on a backend, as a `try` list of that one model
+/// with `when_none: fail`. Says whether anything changed.
+fn one_model_to_try(agent: &mut Value) -> bool {
+    let key = |s: &str| Value::String(s.to_string());
+    let Some(adapter) = agent.get_mut("adapter").and_then(Value::as_mapping_mut) else {
+        return false;
+    };
+    let kind = adapter
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let (holder, keys): (&mut Mapping, &[&str]) = match kind.as_deref() {
+        Some("direct") => (adapter, &["backend", "model"]),
+        Some("opencode") => match adapter.get_mut("model").and_then(Value::as_mapping_mut) {
+            Some(model) if model.get("type") == Some(&key("llm_backend")) => {
+                (model, &["backend", "name", "context_window"])
+            }
+            _ => return false,
+        },
+        _ => return false,
+    };
+    if holder.contains_key("try") || !holder.contains_key("backend") {
+        return false;
+    }
+    let mut one = Mapping::new();
+    for k in keys {
+        if let Some(v) = holder.remove(*k) {
+            one.insert(key(k), v);
+        }
+    }
+    holder.insert(key("try"), Value::Sequence(vec![Value::Mapping(one)]));
+    holder.insert(key("when_none"), key("fail"));
+    true
 }
 
 #[cfg(test)]
@@ -236,6 +290,32 @@ mod tests {
             doc["agents"]["s"]["adapter"]["type"],
             Value::String("direct".into())
         );
+    }
+
+    #[test]
+    fn one_model_on_a_backend_becomes_a_try_list_of_it() {
+        let doc = doc(
+            "version: 1\nllm_backends: {}\ngates: {}\nagents:\n  s:\n    adapter: { type: llm, backend: b, model: m, max_tokens: 1 }\n  o:\n    adapter: { type: opencode, model: { type: llm_backend, backend: b, name: n, context_window: 8 } }\n  p:\n    adapter: { type: opencode, model: { type: provider, name: x/y } }\n",
+        );
+        let s = &doc["agents"]["s"]["adapter"];
+        assert_eq!(s["try"][0]["backend"], Value::String("b".into()));
+        assert_eq!(s["try"][0]["model"], Value::String("m".into()));
+        assert_eq!(s["when_none"], Value::String("fail".into()));
+        assert!(s.get("backend").is_none() && s.get("model").is_none());
+        assert_eq!(s["max_tokens"], Value::Number(1.into()));
+        let o = &doc["agents"]["o"]["adapter"]["model"];
+        assert_eq!(o["try"][0]["name"], Value::String("n".into()));
+        assert_eq!(o["try"][0]["context_window"], Value::Number(8.into()));
+        assert_eq!(o["when_none"], Value::String("fail".into()));
+        assert!(doc["agents"]["p"]["adapter"]["model"].get("try").is_none());
+    }
+
+    #[test]
+    fn a_version_3_document_is_brought_to_try_lists_and_left_alone_when_it_has_them() {
+        let old = "version: 3\nagents:\n  s:\n    adapter: { type: direct, backend: b, model: m, max_tokens: 1 }\n";
+        let new = to_v3(old).unwrap();
+        assert!(new.contains("try"), "{new}");
+        assert_eq!(to_v3(&new).unwrap(), new, "nothing left to change");
     }
 
     #[test]

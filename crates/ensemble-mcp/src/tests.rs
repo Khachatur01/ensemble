@@ -581,7 +581,9 @@ impl Shared {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
             let out = String::from_utf8(self.0.lock().unwrap().clone()).unwrap();
-            for line in out.lines() {
+            // Only finished lines: the server may be halfway through writing
+            // the last one.
+            for line in out.split_inclusive('\n').filter(|l| l.ends_with('\n')) {
                 let m: Value = serde_json::from_str(line).unwrap();
                 if m["id"] == id {
                     return m["result"]["content"][0]["text"]
@@ -1566,4 +1568,46 @@ fn a_token_budget_counts_what_runs_reported_and_refuses_when_it_is_used() {
     );
     let r = call(&e2, "delegate", json!({"agent": "scout", "task": "look"}));
     assert_eq!(r["result"]["isError"], false, "{}", text_of(&r));
+}
+
+#[test]
+fn a_task_whose_agent_has_no_usable_model_waits_and_says_why() {
+    let tmp = TempDir::new();
+    let project = project(&tmp);
+    std::fs::create_dir_all(&project).unwrap();
+    let down = |n: u16| format!("http://127.0.0.1:{n}/v1");
+    let yaml = format!(
+        "version: 3\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"{}\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"{}\", timeout_seconds: 5 }}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ backend: home, model: small }}\n        - {{ backend: central, model: big }}\n      when_none: wait\n      max_tokens: 10\n",
+        down(1),
+        down(2)
+    );
+    let cfg = config::parse(&yaml, std::path::Path::new("config.yaml"), &BTreeMap::new()).unwrap();
+    let e = Ensemble::new(cfg, Some(project.clone())).with_state(project.join(".ensemble"));
+    session(&e, |ask| {
+        let r = ask(
+            "submit",
+            json!({"agent": "summariser", "title": "Sum it", "task": "sum"}),
+        );
+        assert!(r.contains("0001-sum-it"), "{r}");
+        let log = project.join(".ensemble/runs/0001-sum-it/log.txt");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !log.is_file() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let said = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            said.contains("waiting for a backend") && said.contains("home (small)"),
+            "{said}"
+        );
+        let status = ask("status", json!({}));
+        assert!(
+            status.contains("0001-sum-it · summariser · queued"),
+            "{status}"
+        );
+        assert!(
+            !project
+                .join(".ensemble/tasks/0001-sum-it/result.md")
+                .exists()
+        );
+    });
 }

@@ -257,8 +257,10 @@ in either process.
 ## Build order
 
 1. Config version 3: the flat helper team, `direct`, `--team`. (Done.)
-2. The module split into a Cargo workspace, behavior-preserving.
-3. Per-agent backend fallback and the resolver.
+2. The module split into a Cargo workspace, behavior-preserving. (Done:
+   `ensemble-core`, `-config`, `-backends`, `-agents`, `-tasks`, `-mcp`.)
+3. Per-agent backend fallback and the resolver. (Done: `try` and `when_none`
+   for models on LLM backends.)
 4. Memory: vault, pipeline, the `share` tool, recall.
 5. Hub server, link, identity, tracker adapters.
 

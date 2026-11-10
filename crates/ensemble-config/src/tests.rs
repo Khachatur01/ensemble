@@ -276,6 +276,93 @@ fn an_opencode_model_is_a_provider_model_or_an_llm_backend_model() {
     assert!(detail.contains("agents.x"), "{detail}");
 }
 
+/// Two openai-compatible backends and an Anthropic one, and one agent of each
+/// kind that runs on a backend, with `try` and `when_none` as given.
+fn with_fallback(opencode_try: &str, direct_try: &str, when_none: &str) -> String {
+    format!(
+        "version: 3\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:2/v1\", timeout_seconds: 5 }}\n  claude: {{ type: anthropic-api, base_url: \"https://api.anthropic.com\", timeout_seconds: 5 }}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: opencode\n      model:\n        type: llm_backend\n        try: {opencode_try}\n        when_none: {when_none}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try: {direct_try}\n      when_none: {when_none}\n      max_tokens: 10\n"
+    )
+}
+
+#[test]
+fn an_agent_lists_its_models_in_order_and_says_what_happens_when_none_works() {
+    let doc = with_fallback(
+        "[{ backend: home, name: small, context_window: 8 }, { backend: central, name: big, context_window: 64 }]",
+        "[{ backend: home, model: small }, { backend: claude, model: haiku }]",
+        "wait",
+    );
+    let c = super::parse(&doc, &p(), &env(&[])).unwrap();
+    let coder = &c.agents["coder"];
+    assert_eq!(
+        coder.llm_backends(),
+        [("home", "small"), ("central", "big")]
+    );
+    assert_eq!(coder.fallback().unwrap().when_none, WhenNone::Wait);
+    assert_eq!(
+        (coder.llm_backend(), coder.model(), coder.context_window()),
+        (Some("home"), "small", Some(8)),
+        "what it says it runs on is its first model"
+    );
+    let bound = coder.bound_to(1);
+    assert_eq!(
+        (bound.llm_backend(), bound.model(), bound.context_window()),
+        (Some("central"), "big", Some(64))
+    );
+    assert_eq!(bound.llm_backends().len(), 1);
+    let summariser = &c.agents["summariser"];
+    assert_eq!(
+        summariser.llm_backends(),
+        [("home", "small"), ("claude", "haiku")]
+    );
+    assert_eq!(summariser.bound_to(1).runs_on(), "direct on claude");
+}
+
+#[test]
+fn every_model_in_a_try_list_is_checked() {
+    let joined = joined_problems(&with_fallback(
+        "[]",
+        "[{ backend: home, model: small }, { backend: nowhere, model: \"\" }]",
+        "fail",
+    ));
+    assert!(
+        joined.contains("agents.coder.adapter: `model.try` is empty"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("agents.summariser.adapter.try[1]: LLM backend 'nowhere' is not defined"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("agents.summariser.adapter.try[1]: `model` is empty"),
+        "{joined}"
+    );
+    let joined = joined_problems(&with_fallback(
+        "[{ backend: home, name: small, context_window: 8 }, { backend: claude, name: haiku, context_window: 0 }]",
+        "[{ backend: home, model: small }]",
+        "fail",
+    ));
+    assert!(
+        joined.contains(
+            "agents.coder.adapter.model.try[1]: LLM backend 'claude' is of type 'anthropic-api'"
+        ),
+        "{joined}"
+    );
+    assert!(
+        joined
+            .contains("agents.coder.adapter.model.try[1]: `context_window` must be greater than 0"),
+        "{joined}"
+    );
+    let detail = refusal(&with_fallback(
+        "[{ backend: home, name: small, context_window: 8 }]",
+        "[{ backend: home, model: small }]",
+        "retry",
+    ));
+    assert!(
+        detail.contains("retry") && detail.contains("fail") && detail.contains("wait"),
+        "{detail}"
+    );
+}
+
 #[test]
 fn opencode_s_own_prompt_is_kept_or_replaced_and_only_a_prompt_replaces_it() {
     let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
@@ -432,6 +519,16 @@ fn the_schema_names_exactly_the_keys_the_config_accepts() {
             accepted_keys::<RawBackendModel>(),
             "opencode llm_backend model",
         ),
+        (
+            "opencode_llm_backend_candidate",
+            accepted_keys::<RawBackendCandidate>(),
+            "opencode llm_backend model's try entry",
+        ),
+        (
+            "direct_candidate",
+            accepted_keys::<RawDirectCandidate>(),
+            "direct adapter's try entry",
+        ),
     ] {
         assert_eq!(schema_keys(&defs[def]), keys, "{label}");
     }
@@ -467,6 +564,8 @@ fn the_schema_requires_every_key_but_the_optional_two() {
         ("opencode_provider_model", vec![]),
         ("direct_adapter", vec![]),
         ("opencode_llm_backend_model", vec![]),
+        ("opencode_llm_backend_candidate", vec![]),
+        ("direct_candidate", vec![]),
     ] {
         assert_eq!(schema_required(&defs[def]), optional(def, &keys), "{def}");
     }
@@ -654,9 +753,29 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
         ("direct_adapter", adapters(DIRECT_AGENT)),
         ("opencode_provider_model", models(PROVIDER_MODEL)),
         ("opencode_llm_backend_model", models(LLM_BACKEND_MODEL)),
+        (
+            "opencode_llm_backend_candidate",
+            models(LLM_BACKEND_MODEL)
+                .into_iter()
+                .flat_map(|m| m["try"].as_array().unwrap())
+                .collect(),
+        ),
+        (
+            "direct_candidate",
+            adapters(DIRECT_AGENT)
+                .into_iter()
+                .flat_map(|a| a["try"].as_array().unwrap())
+                .collect(),
+        ),
     ] {
         assert_eq!(missing(def, objects), Vec::<String>::new(), "{def}");
     }
+    assert!(
+        models(LLM_BACKEND_MODEL)
+            .iter()
+            .any(|m| m["try"].as_array().unwrap().len() > 1),
+        "the sample shows no agent with a fallback model"
+    );
     let id = schema["$id"].as_str().unwrap().to_string();
     assert!(SAMPLE.starts_with(&format!("# yaml-language-server: $schema={id}")));
 }

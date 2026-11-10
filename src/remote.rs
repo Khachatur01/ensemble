@@ -403,8 +403,14 @@ pub fn describe(config: &Config) -> String {
                 }
             }
             Adapter::Direct(l) => out.push_str(&format!(
-                "  {}: one chat request to backend '{}', no tools\n",
-                a.name, l.backend
+                "  {}: one chat request to {}, no tools\n",
+                a.name,
+                l.fallback
+                    .candidates
+                    .iter()
+                    .map(|c| format!("backend '{}'", c.backend))
+                    .collect::<Vec<_>>()
+                    .join(", else ")
             )),
         }
         if a.can_change_files() && a.isolation == Isolation::Shared {

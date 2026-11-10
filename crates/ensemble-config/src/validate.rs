@@ -243,7 +243,9 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
     // from a shared config is how you break someone else's setup. Say so once
     // and carry on.
     for name in backends.keys() {
-        let used = agents.values().any(|a| a.llm_backend() == Some(name));
+        let used = agents
+            .values()
+            .any(|a| a.llm_backends().iter().any(|(b, _)| b == name));
         if !used {
             eprintln!("ensemble: note: LLM backend '{name}' is defined but no agent uses it");
         }
@@ -273,18 +275,34 @@ pub(super) fn direct_adapter(
     declared: &BTreeMap<String, RawLlmBackend>,
     problems: &mut Vec<String>,
 ) -> DirectAdapter {
-    if !declared.contains_key(&ad.backend) {
-        problems.push(undefined_backend(at, &ad.backend, declared));
+    if ad.candidates.is_empty() {
+        problems.push(format!(
+            "{at}: `try` is empty; name at least one model, as {{ backend, model }}"
+        ));
     }
-    if ad.model.trim().is_empty() {
-        problems.push(format!("{at}: `model` is empty"));
+    let mut candidates = Vec::new();
+    for (i, c) in ad.candidates.iter().enumerate() {
+        let here = format!("{at}.try[{i}]");
+        if !declared.contains_key(&c.backend) {
+            problems.push(undefined_backend(&here, &c.backend, declared));
+        }
+        if c.model.trim().is_empty() {
+            problems.push(format!("{here}: `model` is empty"));
+        }
+        candidates.push(Candidate {
+            backend: c.backend.clone(),
+            model: c.model.clone(),
+            context_window: None,
+        });
     }
     if ad.max_tokens == 0 {
         problems.push(format!("{at}: `max_tokens` must be greater than 0"));
     }
     DirectAdapter {
-        backend: ad.backend.clone(),
-        model: ad.model.clone(),
+        fallback: Fallback {
+            candidates,
+            when_none: ad.when_none,
+        },
         max_tokens: ad.max_tokens,
     }
 }
@@ -350,31 +368,42 @@ pub(super) fn opencode_adapter(
                 model: p.name.clone(),
             }
         }
-        RawOpenCodeModel::LlmBackend(b) => {
-            if !declared.contains_key(&b.backend) {
-                problems.push(undefined_backend(at, &b.backend, declared));
-            }
-            if let Some(RawLlmBackend::AnthropicApi(_)) = declared.get(&b.backend) {
+        RawOpenCodeModel::LlmBackend(m) => {
+            if m.candidates.is_empty() {
                 problems.push(format!(
-                    "{at}: LLM backend '{}' is of type '{ANTHROPIC_API}', which OpenCode cannot use: it needs an '{OPENAI_COMPATIBLE_API}' one. Use a model of type '{PROVIDER_MODEL}', or a `claude-code` agent",
-                    b.backend
+                    "{at}: `model.try` is empty; name at least one model, as {{ backend, name, context_window }}"
                 ));
             }
-            // On a backend the model is the id the endpoint serves; Ensemble
-            // names the provider.
-            if b.name.trim().is_empty() {
-                problems.push(format!("{at}: `model.name` is empty"));
+            let mut candidates = Vec::new();
+            for (i, b) in m.candidates.iter().enumerate() {
+                let here = format!("{at}.model.try[{i}]");
+                if !declared.contains_key(&b.backend) {
+                    problems.push(undefined_backend(&here, &b.backend, declared));
+                }
+                if let Some(RawLlmBackend::AnthropicApi(_)) = declared.get(&b.backend) {
+                    problems.push(format!(
+                        "{here}: LLM backend '{}' is of type '{ANTHROPIC_API}', which OpenCode cannot use: it needs an '{OPENAI_COMPATIBLE_API}' one. Use a model of type '{PROVIDER_MODEL}', a `claude-code` agent, or a `direct` agent",
+                        b.backend
+                    ));
+                }
+                // On a backend the model is the id the endpoint serves; Ensemble
+                // names the provider.
+                if b.name.trim().is_empty() {
+                    problems.push(format!("{here}: `name` is empty"));
+                }
+                if b.context_window == 0 {
+                    problems.push(format!("{here}: `context_window` must be greater than 0"));
+                }
+                candidates.push(Candidate {
+                    backend: b.backend.clone(),
+                    model: b.name.clone(),
+                    context_window: Some(b.context_window),
+                });
             }
-            if b.context_window == 0 {
-                problems.push(format!(
-                    "{at}: `model.context_window` must be greater than 0"
-                ));
-            }
-            OpenCodeModel::LlmBackend {
-                backend: b.backend.clone(),
-                model: b.name.clone(),
-                context_window: b.context_window,
-            }
+            OpenCodeModel::LlmBackend(Fallback {
+                candidates,
+                when_none: m.when_none,
+            })
         }
     };
     if ad.command.trim().is_empty() {

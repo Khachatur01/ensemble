@@ -440,7 +440,7 @@ pub fn health_finding(
             let users: Vec<&str> = config
                 .agents
                 .values()
-                .filter(|a| a.kind() == kind || a.llm_backend() == Some(name))
+                .filter(|a| a.kind() == kind || a.llm_backends().iter().any(|(b, _)| *b == name))
                 .map(|a| a.name.as_str())
                 .collect();
             let remove = users

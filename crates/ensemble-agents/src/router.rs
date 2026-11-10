@@ -6,9 +6,13 @@
 //! reports them.
 
 use crate::external::AgentRun;
-use ensemble_config::{Adapter, AgentConfig, CLAUDE_CODE_AGENT, Config, OPENCODE_AGENT};
+use ensemble_backends::resolve::{Refusal, Resolver};
+use ensemble_config::{
+    Adapter, AgentConfig, CLAUDE_CODE_AGENT, Config, LlmBackend, OPENCODE_AGENT, WhenNone,
+};
 use ensemble_core::port::Error;
 use ensemble_core::workspace::Changes;
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
@@ -49,6 +53,13 @@ pub enum RouteError {
     /// The agent is not in the config. Carries the ones that are, because the
     /// caller is usually a model that guessed a plausible name.
     UnknownAgent { asked: String, known: Vec<String> },
+    /// None of the models in the agent's `try` list can be used now.
+    NoBackend {
+        agent: String,
+        refusals: Vec<Refusal>,
+        /// Its `when_none` is `wait`: its tasks wait instead of failing.
+        waits: bool,
+    },
     /// The agent is configured but did not do the work.
     Agent(Error),
 }
@@ -61,6 +72,25 @@ impl std::fmt::Display for RouteError {
                 "no agent '{asked}' is configured. Available agents: {}.",
                 known.join(", ")
             ),
+            RouteError::NoBackend {
+                agent,
+                refusals,
+                waits,
+            } => write!(
+                f,
+                "agent '{agent}' has no model it can run on now: {}.{} \
+                 `ensemble health` shows what each backend answers.",
+                refusals
+                    .iter()
+                    .map(|r| format!("{} ({}): {}", r.backend, r.model, r.why))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                if *waits {
+                    " Its tasks wait and are tried again."
+                } else {
+                    ""
+                }
+            ),
             RouteError::Agent(e) => write!(f, "{e}"),
         }
     }
@@ -72,6 +102,8 @@ impl RouteError {
     pub fn is_retryable(&self) -> bool {
         match self {
             RouteError::UnknownAgent { .. } => false,
+            // A backend that is off now may be on later.
+            RouteError::NoBackend { .. } => true,
             RouteError::Agent(e) => e.is_retryable(),
         }
     }
@@ -88,6 +120,8 @@ pub struct Ensemble {
     /// tell a run whether another one overlapped it.
     active: AtomicUsize,
     started: AtomicU64,
+    /// Picks the model of an agent with a `try` list of more than one.
+    resolver: Resolver,
 }
 
 impl Ensemble {
@@ -99,7 +133,88 @@ impl Ensemble {
             usage: None,
             active: AtomicUsize::new(0),
             started: AtomicU64::new(0),
+            resolver: Resolver::default(),
         }
+    }
+
+    /// The backends and models of `agent`'s `try` list, in order. A backend
+    /// the config does not define is left out; validation refuses one anyway.
+    fn candidates<'a>(&'a self, agent: &'a AgentConfig) -> Vec<(&'a LlmBackend, &'a str)> {
+        agent
+            .llm_backends()
+            .into_iter()
+            .filter_map(|(b, m)| self.config.llm_backends.get(b).map(|b| (b, m)))
+            .collect()
+    }
+
+    /// `agent` bound to the model a run uses now, and a note when that is not
+    /// its first model.
+    fn bind<'a>(
+        &self,
+        agent: &'a AgentConfig,
+    ) -> Result<(Cow<'a, AgentConfig>, Option<String>), RouteError> {
+        let Some(fallback) = agent.fallback() else {
+            return Ok((Cow::Borrowed(agent), None));
+        };
+        let candidates = self.candidates(agent);
+        match self.resolver.choose(&candidates) {
+            Ok(0) => Ok((Cow::Owned(agent.bound_to(0)), None)),
+            Ok(i) => Ok((
+                Cow::Owned(agent.bound_to(i)),
+                Some(format!("fallback {} of {}", i + 1, candidates.len())),
+            )),
+            Err(refusals) => Err(RouteError::NoBackend {
+                agent: agent.name.clone(),
+                refusals,
+                waits: fallback.when_none == WhenNone::Wait,
+            }),
+        }
+    }
+
+    /// Can a task of `name` start now? `false` only for an agent whose `try`
+    /// list has no usable model and whose `when_none` is `wait`: such a task
+    /// waits. Asks the backends, at most once a minute each.
+    pub fn backend_ready(&self, name: &str) -> Result<(), String> {
+        let Some(agent) = self.config.agent(name) else {
+            return Ok(());
+        };
+        if agent
+            .fallback()
+            .is_none_or(|f| f.when_none != WhenNone::Wait || f.candidates.len() < 2)
+        {
+            return Ok(());
+        }
+        match self.bind(agent) {
+            Err(e @ RouteError::NoBackend { .. }) => Err(e.to_string()),
+            _ => Ok(()),
+        }
+    }
+
+    /// `Some` with a short note when `name`'s first model was found unusable
+    /// the last time its backends were asked; asks none of them now.
+    pub fn fallback_note(&self, name: &str) -> Option<&'static str> {
+        let agent = self.config.agent(name)?;
+        agent.fallback().filter(|f| f.candidates.len() > 1)?;
+        match self.resolver.known(&self.candidates(agent))? {
+            Ok(0) => None,
+            Ok(_) => Some("on a fallback model"),
+            Err(()) => Some("no model reachable"),
+        }
+    }
+
+    /// The index of the model a run of `name` would use now, asking its
+    /// backends, or why there is none. For `ensemble show --probe`.
+    pub fn probe(&self, name: &str) -> Result<usize, RouteError> {
+        let agent = self.resolve(name)?;
+        self.resolver
+            .choose(&self.candidates(agent))
+            .map_err(|refusals| RouteError::NoBackend {
+                agent: agent.name.clone(),
+                refusals,
+                waits: agent
+                    .fallback()
+                    .is_some_and(|f| f.when_none == WhenNone::Wait),
+            })
     }
 
     /// Keep state in `dir` instead of the per-user state directory.
@@ -215,7 +330,26 @@ impl Ensemble {
         progress: &dyn Fn(&str),
         cancel: &AtomicBool,
     ) -> Result<Outcome, RouteError> {
-        let agent = self.resolve(name)?;
+        let (bound, note) = self.bind(self.resolve(name)?)?;
+        let mut outcome = self.run_on(&bound, name, task, context, workdir, progress, cancel)?;
+        if let Some(note) = note {
+            outcome.runs_on = format!("{} ({note})", outcome.runs_on);
+        }
+        Ok(outcome)
+    }
+
+    /// Run `agent`, already bound to one model, once.
+    #[allow(clippy::too_many_arguments)]
+    fn run_on(
+        &self,
+        agent: &AgentConfig,
+        name: &str,
+        task: &str,
+        context: Option<&str>,
+        workdir: &std::path::Path,
+        progress: &dyn Fn(&str),
+        cancel: &AtomicBool,
+    ) -> Result<Outcome, RouteError> {
         match &agent.adapter {
             Adapter::ClaudeCode(cc) => self.run_tracked(agent, workdir, |dir| {
                 crate::external::claude_code::run(agent, cc, task, context, dir, progress, cancel)
@@ -224,9 +358,9 @@ impl Ensemble {
                 crate::external::codex::run(agent, cx, task, context, dir, progress, cancel)
             }),
             Adapter::Direct(la) => {
-                let backend = self.config.llm_backends.get(&la.backend).ok_or_else(|| {
+                let backend = self.config.llm_backends.get(la.backend()).ok_or_else(|| {
                     RouteError::Agent(Error::Unsupported {
-                        backend: la.backend.clone(),
+                        backend: la.backend().to_string(),
                         detail: format!("LLM backend for agent '{name}' is not defined"),
                     })
                 })?;
@@ -363,8 +497,8 @@ impl Ensemble {
                 // No program: its backend, checked below, is all it needs.
                 Adapter::Direct(_) => {}
             }
-            if let Some(b) = a.llm_backend() {
-                backends.entry(b).or_default().push(a.model());
+            for (b, model) in a.llm_backends() {
+                backends.entry(b).or_default().push(model);
             }
         }
         commands.sort_unstable();
@@ -492,6 +626,128 @@ agents:
         let cfg =
             config::parse(&yaml, std::path::Path::new("config.yaml"), &BTreeMap::new()).unwrap();
         Ensemble::new(cfg, workdir)
+    }
+
+    /// A model server that serves `models` and answers every chat request
+    /// with `answer`, as many times as it is asked.
+    fn model_server(models: &[&str], answer: &str) -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let data: Vec<String> = models
+            .iter()
+            .map(|m| format!("{{\"id\":\"{m}\"}}"))
+            .collect();
+        let list = format!("{{\"data\":[{}]}}", data.join(","));
+        let chat = format!(
+            "{{\"choices\":[{{\"message\":{{\"content\":\"{answer}\"}},\"finish_reason\":\"stop\"}}]}}"
+        );
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let mut reader = BufReader::new(&stream);
+                let (mut first, mut length) = (String::new(), 0);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
+                        break;
+                    }
+                    if first.is_empty() {
+                        first = line.clone();
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0; length];
+                let _ = reader.read_exact(&mut body);
+                let reply = if first.starts_with("GET") {
+                    &list
+                } else {
+                    &chat
+                };
+                let mut stream = &stream;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+            }
+        });
+        format!("http://127.0.0.1:{port}/v1")
+    }
+
+    /// A URL nothing listens on.
+    fn nowhere() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}/v1")
+    }
+
+    /// A `direct` agent that tries `home`, then `central`, in a fresh folder.
+    fn with_fallback(home: &str, central: &str, when_none: &str) -> (Ensemble, TempDir) {
+        let yaml = format!(
+            "version: 3\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"{home}\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"{central}\", timeout_seconds: 5 }}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ backend: home, model: small }}\n        - {{ backend: central, model: big }}\n      when_none: {when_none}\n      max_tokens: 10\n"
+        );
+        let cfg =
+            config::parse(&yaml, std::path::Path::new("config.yaml"), &BTreeMap::new()).unwrap();
+        let tmp = TempDir::new();
+        let e = Ensemble::new(cfg, Some(tmp.0.clone())).with_state(tmp.0.join("state"));
+        (e, tmp)
+    }
+
+    #[test]
+    fn a_run_falls_back_to_the_next_model_and_says_so() {
+        let (e, _tmp) = with_fallback(&nowhere(), &model_server(&["big"], "from central"), "fail");
+        let out = e.delegate("summariser", "sum it", None).unwrap();
+        assert_eq!(out.text, "from central");
+        assert_eq!(out.model, "big");
+        assert_eq!(out.runs_on, "direct on central (fallback 2 of 2)");
+        assert_eq!(e.fallback_note("summariser"), Some("on a fallback model"));
+        assert_eq!(e.probe("summariser").unwrap(), 1);
+    }
+
+    #[test]
+    fn the_first_model_is_used_when_its_backend_serves_it() {
+        let home = model_server(&["small"], "from home");
+        let (e, _tmp) = with_fallback(&home, &nowhere(), "fail");
+        let out = e.delegate("summariser", "sum it", None).unwrap();
+        assert_eq!(
+            (out.text.as_str(), out.runs_on.as_str()),
+            ("from home", "direct on home")
+        );
+        assert_eq!(e.fallback_note("summariser"), None);
+    }
+
+    #[test]
+    fn with_no_usable_model_a_run_fails_or_its_tasks_wait() {
+        let not_served = model_server(&["other"], "x");
+        let (e, _tmp) = with_fallback(&nowhere(), &not_served, "fail");
+        let err = e.delegate("summariser", "sum it", None).unwrap_err();
+        let RouteError::NoBackend {
+            refusals, waits, ..
+        } = &err
+        else {
+            panic!("{err:?}");
+        };
+        assert!(!waits);
+        assert_eq!(refusals.len(), 2);
+        let said = err.to_string();
+        assert!(
+            said.contains("home (small)") && said.contains("central (big): does not serve it"),
+            "{said}"
+        );
+        assert!(err.is_retryable());
+        assert!(
+            e.backend_ready("summariser").is_ok(),
+            "a failing agent's tasks run and fail"
+        );
+
+        let (e, _tmp) = with_fallback(&nowhere(), &not_served, "wait");
+        let why = e.backend_ready("summariser").unwrap_err();
+        assert!(why.contains("Its tasks wait"), "{why}");
+        assert_eq!(e.fallback_note("summariser"), Some("no model reachable"));
     }
 
     #[test]

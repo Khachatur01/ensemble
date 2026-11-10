@@ -2174,3 +2174,43 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
     let again = ensemble(&s, &["review", "0001-rename-foo"]);
     assert!(!again.status.success(), "its branch is gone");
 }
+
+#[test]
+fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
+    let s = Scratch::new("show-probe");
+    let central = models_stub(r#"{"data":[{"id":"big"}]}"#);
+    s.write(
+        ".ensemble/config.yaml",
+        &format!(
+            "version: 3\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"{central}\", timeout_seconds: 5 }}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ backend: home, model: small }}\n        - {{ backend: central, model: big }}\n      when_none: wait\n      max_tokens: 10\n"
+        ),
+    );
+    let out = ensemble(&s, &["show", "summariser"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(
+        text.contains("models, in order (the first is shown above; when none works: wait):"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  1. home / small\n  2. central / big\n"),
+        "{text}"
+    );
+    assert!(!text.contains("a run now"), "{text}");
+
+    let probed = ensemble(&s, &["show", "summariser", "--probe"]);
+    assert!(probed.status.success(), "{}", stderr_of(&probed));
+    assert!(
+        stdout_of(&probed).contains("a run now would use 2."),
+        "{}",
+        stdout_of(&probed)
+    );
+
+    let health = ensemble(&s, &["health"]);
+    assert!(!health.status.success(), "home is down");
+    let said = stdout_of(&health);
+    assert!(
+        said.contains("home: FAILED") && said.contains("central: ok"),
+        "{said}"
+    );
+}

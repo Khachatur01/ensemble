@@ -1,6 +1,6 @@
 //! The config document as written: serde structs that refuse unknown keys.
 
-use super::{Isolation, SystemPrompt};
+use super::{Isolation, SystemPrompt, WhenNone};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -174,12 +174,23 @@ pub(crate) enum RawAdapter {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawDirectAdapter {
+    /// The models it may run on, in the order they are tried.
+    #[serde(rename = "try")]
+    pub(crate) candidates: Vec<RawDirectCandidate>,
+    /// What happens when none of them can be used.
+    pub(crate) when_none: WhenNone,
+    /// Most tokens of answer.
+    pub(crate) max_tokens: u32,
+}
+
+/// One model a `direct` agent may run on.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawDirectCandidate {
     /// Which of `llm_backends` serves the model.
     pub(crate) backend: String,
     /// The id the endpoint serves the model under.
     pub(crate) model: String,
-    /// Most tokens of answer.
-    pub(crate) max_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,6 +248,17 @@ pub(crate) struct RawProviderModel {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawBackendModel {
+    /// The models it may run on, in the order they are tried.
+    #[serde(rename = "try")]
+    pub(crate) candidates: Vec<RawBackendCandidate>,
+    /// What happens when none of them can be used.
+    pub(crate) when_none: WhenNone,
+}
+
+/// One model an OpenCode agent may run on.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawBackendCandidate {
     /// Which of `llm_backends` serves the model. Ensemble gives OpenCode the
     /// endpoint and key for the run.
     pub(crate) backend: String,

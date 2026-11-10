@@ -534,11 +534,14 @@ mod tests {
     }
 
     fn on_local_box(model: &str, context_window: u32) -> OpenCodeModel {
-        OpenCodeModel::LlmBackend {
-            backend: "local box".into(),
-            model: model.into(),
-            context_window,
-        }
+        OpenCodeModel::LlmBackend(ensemble_config::Fallback {
+            candidates: vec![ensemble_config::Candidate {
+                backend: "local box".into(),
+                model: model.into(),
+                context_window: Some(context_window),
+            }],
+            when_none: ensemble_config::WhenNone::Fail,
+        })
     }
 
     fn local_backend(api_key: Option<&str>) -> LlmBackend {

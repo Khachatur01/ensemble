@@ -80,8 +80,10 @@ COMMANDS:
     stats [--since 7d] [--json]
                             What each agent has done: runs, failures, time and
                             tokens, from the record every run leaves.
-    show <AGENT>            Print how an agent is started: its command line and
-                            the config handed to its CLI, API keys hidden.
+    show <AGENT> [--probe]  Print how an agent is started: its command line and
+                            the config handed to its CLI, API keys hidden, and
+                            its models in order. --probe asks their backends
+                            which one a run would use now.
     check                   Load and validate the config, then report the helper
                             team.
     schema                  Print the JSON Schema for config.yaml, so an editor
@@ -607,11 +609,14 @@ fn cmd_run(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
 }
 
 /// How an agent is started, without starting it: the command line, and the
-/// config its CLI is handed. API keys are hidden.
+/// config its CLI is handed, on its first model. API keys are hidden. An agent
+/// with several models lists them in order; `--probe` asks their backends which
+/// one a run would use now.
 fn cmd_show(config: &Config, args: &Args) -> Result<ExitCode, String> {
     let name = args
         .rest
-        .first()
+        .iter()
+        .find(|a| !a.starts_with("--"))
         .ok_or("show: needs an agent. Try `ensemble agents` to see them.")?;
     let agent = config.agent(name).ok_or_else(|| {
         format!(
@@ -630,14 +635,14 @@ fn cmd_show(config: &Config, args: &Args) -> Result<ExitCode, String> {
             println!("{}", command_line(&cx.command, &argv));
         }
         Adapter::Direct(la) => {
-            let (path, body) = match config.llm_backends.get(&la.backend) {
+            let (path, body) = match config.llm_backends.get(la.backend()) {
                 Some(backend) => {
                     let (path, body) =
                         ensemble::external::direct::request_for(backend, agent, la, TASK, None);
                     (format!("{}{path}", backend.settings.base_url()), body)
                 }
                 None => (
-                    format!("<undefined backend {}>", la.backend),
+                    format!("<undefined backend {}>", la.backend()),
                     ensemble::external::direct::request(agent, la, TASK, None),
                 ),
             };
@@ -664,6 +669,37 @@ fn cmd_show(config: &Config, args: &Args) -> Result<ExitCode, String> {
                 "{}",
                 serde_json::to_string_pretty(&inline).map_err(|e| e.to_string())?
             );
+        }
+    }
+    let Some(fallback) = agent.fallback().filter(|f| f.candidates.len() > 1) else {
+        return Ok(ExitCode::SUCCESS);
+    };
+    println!();
+    println!(
+        "models, in order (the first is shown above; when none works: {}):",
+        match fallback.when_none {
+            config::WhenNone::Fail => "fail",
+            config::WhenNone::Wait => "wait",
+        }
+    );
+    for (i, c) in fallback.candidates.iter().enumerate() {
+        println!("  {}. {} / {}", i + 1, c.backend, c.model);
+    }
+    if has(args, "--probe") {
+        let candidates: Vec<(&config::LlmBackend, &str)> = agent
+            .llm_backends()
+            .into_iter()
+            .filter_map(|(b, m)| config.llm_backends.get(b).map(|b| (b, m)))
+            .collect();
+        match ensemble::backends::resolve::Resolver::default().choose(&candidates) {
+            Ok(i) => println!("a run now would use {}.", i + 1),
+            Err(refusals) => {
+                println!("none can be used now:");
+                for r in refusals {
+                    println!("  {} / {}: {}", r.backend, r.model, r.why);
+                }
+                return Ok(ExitCode::FAILURE);
+            }
         }
     }
     Ok(ExitCode::SUCCESS)

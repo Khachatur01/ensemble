@@ -170,9 +170,11 @@ agents:
       type: opencode
       model:
         type: llm_backend
-        backend: local
-        name: qwen3.5-9b
-        context_window: 262144
+        try:
+          - backend: local
+            name: qwen3.5-9b
+            context_window: 262144
+        when_none: fail
       tools: [read, glob, grep, list, edit, bash]
       system_prompt: append
       max_steps: 30
@@ -217,10 +219,11 @@ one professional your agent can hand work to. It has:
 | `budget` | how much it may run in an hour: `{ type: unlimited }`, `{ type: per_hour, delegations: 20 }` (runs), or `{ type: per_hour_tokens, tokens: 2000000 }` (the tokens its runs reported). Tasks, each gate retry, and delegations, blocking or in the background, all count, across sessions and projects (`usage.json` in the helper team's state directory). Over it, a delegation is refused saying when the next run is allowed, a task waits (`queued, over its agent's budget for 12 more minutes`), and a gate retry is not made |
 | `adapter` | what runs it. `type` decides which other fields the adapter takes |
 
-An **LLM backend** is a model server of yours, defined once. An OpenCode agent
-names it in its model (`type: llm_backend`), and Ensemble hands the agent's CLI the endpoint and key for
-each run, so you never configure the same server again in the CLI's own
-settings. It has a `type`:
+An **LLM backend** is a model server of yours, or one your company runs, defined
+once. An OpenCode agent names it in its model (`type: llm_backend`), and a
+`direct` agent in its adapter, and Ensemble hands the agent's CLI the endpoint
+and key for each run, so you never configure the same server again in the CLI's
+own settings. It has a `type`:
 
 - `openai-compatible-api`: any `/chat/completions` endpoint: llama-server, vLLM,
   Ollama, Unsloth, a hosted API. `opencode` and `direct` agents can run on it.
@@ -233,6 +236,31 @@ Either requires `base_url` (the URL itself; no variable overrides it) and
 `timeout_seconds` (per request), and takes `api_key_env`, the name of the
 variable holding the key, when the server wants one. `health` asks each for the
 models it serves.
+
+An agent on backends lists its models in **`try`**, in order, and says in
+**`when_none`** what happens when none of them can be used:
+
+```yaml
+model:
+  type: llm_backend
+  try:
+    - { backend: local, name: qwen3.5-9b, context_window: 32768 }
+    - { backend: central, name: qwen3.5-72b, context_window: 131072 }
+  when_none: wait
+```
+
+Each run uses the first model whose backend answers and serves it, so a shared
+helper team keeps working on whatever each person has: your own server when it
+is on, the company's otherwise. With one model there is nothing to choose, and
+it is simply used. With several, Ensemble asks each backend which models it
+serves (`GET /models`), at most once a minute per backend. When none works,
+`fail` makes the delegation or task fail, saying what each backend answered;
+`wait` keeps a task in the queue, noted in its log (`waiting for a backend`),
+and tries again later, while a delegation, which someone is waiting for, fails.
+A run on a later model says so in what it reports (`opencode on central
+(fallback 2 of 2)`); `agents` marks an agent whose first model was last found
+down, and `ensemble show <agent> --probe` says which model a run would use now.
+Claude Code and Codex use your own login and have no `try` list.
 
 A **gate** is a check a task's work must pass, so an agent that says "done"
 too early gets sent back instead of being believed. You define each gate once,
@@ -280,10 +308,12 @@ agents:
     adapter:
       type: opencode
       model:
-        type: llm_backend      # one of llm_backends serves the model
-        backend: local
-        name: qwen3.5-9b       # the id the server serves
-        context_window: 262144 # what the server runs it with
+        type: llm_backend      # models that llm_backends serve
+        try:                   # in order; a run uses the first that works
+          - backend: local
+            name: qwen3.5-9b       # the id the server serves
+            context_window: 262144 # what the server runs it with
+        when_none: fail        # or wait: a task waits for a backend
       tools: [read, glob, grep, list, edit, "bash(git *)"]
       system_prompt: append
       max_steps: 30
@@ -378,8 +408,10 @@ agents:
       type: unlimited
     adapter:
       type: direct
-      backend: local         # one of llm_backends
-      model: qwen3.5:9b      # the id the server serves
+      try:                   # in order; a run uses the first that works
+        - backend: local     # one of llm_backends
+          model: qwen3.5:9b  # the id the server serves
+      when_none: fail        # or wait: a task waits for a backend
       max_tokens: 1000       # an answer cut off here is marked unfinished
 ```
 
@@ -912,7 +944,7 @@ $ ensemble init --stdout           # print it instead (init refuses to overwrite
 $ ensemble migrate <file> --team <dir>  # a version 1 or 2 config becomes a version 3 helper team
 $ ensemble check  --team <dir>     # validate the config, print the gates and agents
 $ ensemble agents --team <dir>     # the routing table
-$ ensemble show <agent> --team <dir>  # how an agent is started: command line and generated config, keys hidden
+$ ensemble show <agent> --team <dir> [--probe]  # how an agent is started, keys hidden; --probe: which model a run would use now
 $ ensemble health --team <dir>     # every agent CLI starts, every LLM backend serves its models? non-zero if not
 $ ensemble run <agent> <task> --team <dir>  # send one task to one agent (it works in --dir)
 $ ensemble team trust <url>#<commit>   # read what a remote helper team runs, and trust that commit

@@ -51,7 +51,7 @@ pub fn agent_block(name: &str, a: &NewAgent<'_>) -> Result<String, String> {
             };
             let model = match (a.backend, a.model) {
                 (Some(backend), Some(model)) => format!(
-                    "      model:\n        type: {LLM_BACKEND_MODEL}\n        backend: {backend}\n        name: {model}\n        context_window: 32768\n"
+                    "      model:\n        type: {LLM_BACKEND_MODEL}\n        try:\n          - backend: {backend}\n            name: {model}\n            context_window: 32768\n        when_none: fail\n"
                 ),
                 (Some(_), None) => {
                     return Err("an opencode agent on an LLM backend needs --model, the name the server serves it under".into());
@@ -84,7 +84,7 @@ pub fn agent_block(name: &str, a: &NewAgent<'_>) -> Result<String, String> {
                 .model
                 .ok_or("a direct agent needs --model, the name the server serves it under")?;
             out.push_str(&format!(
-                "      type: {DIRECT_AGENT}\n      backend: {backend}\n      model: {model}\n      max_tokens: 1000\n"
+                "      type: {DIRECT_AGENT}\n      try:\n        - backend: {backend}\n          model: {model}\n      when_none: fail\n      max_tokens: 1000\n"
             ));
         }
         other => {

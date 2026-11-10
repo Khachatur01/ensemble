@@ -232,9 +232,66 @@ pub enum SystemPrompt {
 /// with no tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectAdapter {
-    pub backend: String,
-    pub model: String,
+    /// The models it may run on, in the order they are tried.
+    pub fallback: Fallback,
     pub max_tokens: u32,
+}
+
+impl DirectAdapter {
+    /// The LLM backend of its first model.
+    pub fn backend(&self) -> &str {
+        self.fallback.first().map_or("", |c| c.backend.as_str())
+    }
+
+    /// The id its first model is served under.
+    pub fn model(&self) -> &str {
+        self.fallback.first().map_or("", |c| c.model.as_str())
+    }
+}
+
+/// What an agent does when none of the models in its `try` list can be used:
+/// no backend answers, or none serves the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WhenNone {
+    /// The delegation or task fails, saying what each backend answered.
+    Fail,
+    /// A task waits in the queue and is tried again later. A delegation, which
+    /// someone is waiting for, fails.
+    Wait,
+}
+
+/// One model an agent may run on: the backend that serves it, and its id there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub backend: String,
+    /// The id the endpoint serves the model under.
+    pub model: String,
+    /// Tokens of context the server runs it with, for an OpenCode agent.
+    pub context_window: Option<u32>,
+}
+
+/// The models an agent may run on, in the order they are tried. The first one
+/// that is reachable and serves the model is the one a run uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fallback {
+    pub candidates: Vec<Candidate>,
+    pub when_none: WhenNone,
+}
+
+impl Fallback {
+    /// The first model: the one it runs on whenever that one is there.
+    pub fn first(&self) -> Option<&Candidate> {
+        self.candidates.first()
+    }
+
+    /// This list with only model `index` in it: what one run is bound to.
+    pub fn bound(&self, index: usize) -> Fallback {
+        Fallback {
+            candidates: self.candidates.get(index).cloned().into_iter().collect(),
+            when_none: self.when_none,
+        }
+    }
 }
 
 /// Where an OpenCode agent's model comes from.
@@ -243,37 +300,34 @@ pub enum OpenCodeModel {
     /// `provider/model`, as OpenCode names it, on a provider it is already
     /// set up for.
     Provider { model: String },
-    /// A model served by one of [`Config::llm_backends`].
-    LlmBackend {
-        backend: String,
-        /// The id the endpoint serves the model under.
-        model: String,
-        context_window: u32,
-    },
+    /// Models served by [`Config::llm_backends`], in the order they are tried.
+    LlmBackend(Fallback),
 }
 
 impl OpenCodeAdapter {
-    /// The model: `provider/model`, or the id an LLM backend serves it under.
+    /// The model: `provider/model`, or the id an LLM backend serves its first
+    /// model under.
     pub fn model_id(&self) -> &str {
         match &self.model {
-            OpenCodeModel::Provider { model } | OpenCodeModel::LlmBackend { model, .. } => model,
+            OpenCodeModel::Provider { model } => model,
+            OpenCodeModel::LlmBackend(f) => f.first().map_or("", |c| c.model.as_str()),
         }
     }
 
-    /// The LLM backend its model runs on, when it runs on one.
+    /// The LLM backend its first model runs on, when it runs on one.
     pub fn llm_backend(&self) -> Option<&str> {
         match &self.model {
             OpenCodeModel::Provider { .. } => None,
-            OpenCodeModel::LlmBackend { backend, .. } => Some(backend),
+            OpenCodeModel::LlmBackend(f) => f.first().map(|c| c.backend.as_str()),
         }
     }
 
-    /// Tokens of context the model's server runs it with, when it runs on an
-    /// LLM backend.
+    /// Tokens of context the first model's server runs it with, when it runs
+    /// on an LLM backend.
     pub fn context_window(&self) -> Option<u32> {
         match &self.model {
             OpenCodeModel::Provider { .. } => None,
-            OpenCodeModel::LlmBackend { context_window, .. } => Some(*context_window),
+            OpenCodeModel::LlmBackend(f) => f.first().and_then(|c| c.context_window),
         }
     }
 }
@@ -293,17 +347,54 @@ impl AgentConfig {
             Adapter::ClaudeCode(c) => &c.model,
             Adapter::OpenCode(o) => o.model_id(),
             Adapter::Codex(c) => &c.model,
-            Adapter::Direct(d) => &d.model,
+            Adapter::Direct(d) => d.model(),
         }
     }
 
-    /// The LLM backend its model runs on, when it runs on one.
+    /// The LLM backend its first model runs on, when it runs on one.
     pub fn llm_backend(&self) -> Option<&str> {
         match &self.adapter {
             Adapter::ClaudeCode(_) | Adapter::Codex(_) => None,
             Adapter::OpenCode(o) => o.llm_backend(),
-            Adapter::Direct(d) => Some(&d.backend),
+            Adapter::Direct(d) => Some(d.backend()),
         }
+    }
+
+    /// The models it may run on, in order, when it runs on LLM backends.
+    pub fn fallback(&self) -> Option<&Fallback> {
+        match &self.adapter {
+            Adapter::ClaudeCode(_) | Adapter::Codex(_) => None,
+            Adapter::OpenCode(o) => match &o.model {
+                OpenCodeModel::Provider { .. } => None,
+                OpenCodeModel::LlmBackend(f) => Some(f),
+            },
+            Adapter::Direct(d) => Some(&d.fallback),
+        }
+    }
+
+    /// Every LLM backend it may run on, with the model it would ask there.
+    pub fn llm_backends(&self) -> Vec<(&str, &str)> {
+        self.fallback().map_or_else(Vec::new, |f| {
+            f.candidates
+                .iter()
+                .map(|c| (c.backend.as_str(), c.model.as_str()))
+                .collect()
+        })
+    }
+
+    /// This agent bound to model `index` of its `try` list, for one run. An
+    /// agent with no such list is returned as it is.
+    pub fn bound_to(&self, index: usize) -> AgentConfig {
+        let mut bound = self.clone();
+        match &mut bound.adapter {
+            Adapter::OpenCode(OpenCodeAdapter {
+                model: OpenCodeModel::LlmBackend(f),
+                ..
+            }) => *f = f.bound(index),
+            Adapter::Direct(d) => d.fallback = d.fallback.bound(index),
+            _ => {}
+        }
+        bound
     }
 
     /// Tokens of context its model's server runs it with, when it runs on an

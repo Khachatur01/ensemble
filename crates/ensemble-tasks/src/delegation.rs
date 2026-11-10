@@ -658,7 +658,11 @@ pub fn call<'s>(
                     Some(a) if a.has_tools() => " [read-only]",
                     _ => "",
                 };
-                format!("{role}{kind}: {purpose}")
+                // Whether it can run now names no model, and helps the caller plan.
+                let note = ensemble
+                    .fallback_note(role)
+                    .map_or(String::new(), |n| format!(" ({n})"));
+                format!("{role}{kind}{note}: {purpose}")
             };
             let lines: Vec<String> = config.agent_names().into_iter().map(line).collect();
             ToolResult::ok(lines.join("\n"))
@@ -748,7 +752,7 @@ pub(super) fn run_delegation(
                 " Retrying this unchanged will fail the same way."
             };
             let detail = match &e {
-                RouteError::UnknownAgent { .. } => String::new(),
+                RouteError::UnknownAgent { .. } | RouteError::NoBackend { .. } => String::new(),
                 RouteError::Agent(_) => format!(" (agent '{role}')"),
             };
             ToolResult::err(format!("delegation failed{detail}: {e}{hint}"))

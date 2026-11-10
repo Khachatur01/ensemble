@@ -32,7 +32,7 @@ use ensemble_agents::external::gate;
 use ensemble_agents::router::Ensemble;
 use ensemble_agents::worktree;
 use ensemble_config::{Budget, Isolation};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -89,6 +89,9 @@ struct Inner {
     /// caller's answer.
     asks: HashMap<String, Ask>,
     asked: u64,
+    /// Tasks already noted as waiting for a backend, so the note is written
+    /// once per wait, not once per scan.
+    backend_waits: HashSet<String>,
 }
 
 /// A delegation that stopped to ask, kept so that an answer can resume it. It
@@ -454,6 +457,18 @@ impl<'e> Queue<'e> {
         };
         loop {
             let entries = store.scan();
+            // Agents whose tasks wait for a backend (`when_none: wait` and no
+            // usable model), found before the lock is taken: asking a backend
+            // can take seconds. Each backend is asked at most once a minute.
+            let mut blocked: HashMap<&str, Option<String>> = HashMap::new();
+            for entry in &entries {
+                if let Entry::Task(t, None) = entry
+                    && !t.agent.is_empty()
+                    && !blocked.contains_key(t.agent.as_str())
+                {
+                    blocked.insert(&t.agent, self.ensemble.backend_ready(&t.agent).err());
+                }
+            }
             let mut inner = self.lock();
             if inner.closed {
                 return;
@@ -472,6 +487,12 @@ impl<'e> Queue<'e> {
                 {
                     continue;
                 }
+                if let Some(Some(why)) = blocked.get(ticket.agent.as_str()) {
+                    if inner.backend_waits.insert(ticket.id.clone()) {
+                        store.log(&ticket.id, &format!("waiting for a backend: {why}"));
+                    }
+                    continue;
+                }
                 let ticket = ticket.clone();
                 if self.over_budget(&inner, &ticket.agent).is_some() {
                     continue;
@@ -481,6 +502,7 @@ impl<'e> Queue<'e> {
                 };
                 // Cannot fail: the budget was checked under this same lock.
                 let _ = self.spend_locked(&mut inner, &ticket.agent);
+                inner.backend_waits.remove(&ticket.id);
                 let cancel = Arc::new(AtomicBool::new(false));
                 inner.live.insert(
                     ticket.id.clone(),
