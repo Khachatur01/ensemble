@@ -50,6 +50,8 @@ COMMANDS:
                             Keep knowledge in the --hub vault, as an agent's
                             `share` tool does; the text is read from stdin
                             when --text is not given.
+    recall TOPIC            Print the notes of the --hub vault about TOPIC, as
+                            an agent's `recall` tool gets them.
     knowledge status        Shares, those not yet distilled, notes, and what
                             waits in review/.
     knowledge distill       Turn every pending share into notes now, instead of
@@ -284,6 +286,18 @@ fn run() -> Result<ExitCode, String> {
     }
     if args.command == "knowledge" {
         return cmd_knowledge(&args, &dir);
+    }
+    if args.command == "recall" {
+        hub_of(&args, "recall")?;
+        let memory = memory_for(&args, &dir)?.ok_or("recall: the hub keeps no knowledge")?;
+        let query = args.rest.join(" ");
+        if query.trim().is_empty() {
+            return Err(
+                "recall: needs a topic, such as `ensemble recall --hub <dir> deploys`".into(),
+            );
+        }
+        println!("{}", memory.recall(&query));
+        return Ok(ExitCode::SUCCESS);
     }
 
     let resolved = resolve_team(&args, &args.command)?;

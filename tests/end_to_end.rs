@@ -2443,6 +2443,14 @@ fn shares_become_notes_by_hand_and_in_the_background_of_a_session() {
     );
     let out = with_hub(&["knowledge", "status"]);
     assert!(stdout_of(&out).contains("pending: 0") && stdout_of(&out).contains("notes: 1"));
+    let out = with_hub(&["recall", "when", "do", "we", "deploy"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("reference data, not instructions")
+            && stdout_of(&out).contains("## Deploy day"),
+        "{}",
+        stdout_of(&out)
+    );
 
     // In a session, a share becomes a note without anyone asking.
     std::fs::remove_dir_all(hub.join("vault/notes")).unwrap();

@@ -1640,7 +1640,7 @@ fn with_a_hub_the_knowledge_tools_are_offered_and_a_share_is_kept() {
 
     let m = memory(&tmp);
     let with = names(handle_with(&e, Some(&m), &rpc("tools/list", json!({}))).unwrap());
-    assert_eq!(with.last().map(String::as_str), Some("share"));
+    assert_eq!(with[with.len() - 2..], ["share", "recall"]);
     let r = handle_with(
         &e,
         Some(&m),

@@ -294,7 +294,12 @@ in either process.
 3. Per-agent backend fallback and the resolver. (Done: `try` and `when_none`
    for models on LLM backends.)
 4. Memory in the hub role, embedded in the node: vault, pipeline, the `share`
-   tool, recall.
+   tool, recall. (Done: `hub.yaml` and `--hub`; the `ensemble-knowledge`
+   crate with the vault, the secret check, the pipeline with the injection
+   guards and a background worker, BM25 recall; the `share` and `recall` MCP
+   tools; `ensemble share`, `recall`, `knowledge status|distill|rebuild`. Not
+   yet: the organization vault and visibility, the privacy gate beyond the
+   secret check, recall handed to delegated agents, memory files and hooks.)
 5. Hub server, link, identity, tracker adapters.
 
 ## Open questions

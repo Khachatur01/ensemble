@@ -26,6 +26,10 @@ answer with what it changed. Four adapters ship:
 
 A team can mix them, and your agent delegates to any of them the same way.
 
+With a hub (`--hub`), Ensemble also keeps your knowledge: what your agent
+shares when you ask becomes notes in a git vault, and later work recalls them.
+See [Knowledge](#knowledge).
+
 ```
    Your agent (Claude Code, OpenCode, ...)
         |  MCP over stdio, project as cwd
@@ -855,6 +859,84 @@ ensemble: ~/my-team/config.yaml is invalid:
 A typo'd key is an error, never a silent default, and a missing key is an
 error too: ``agents.coder: `max_seconds` is required at line 12 column 5``.
 
+## Knowledge
+
+A **hub** keeps your knowledge: what your agents share becomes notes in a
+vault, and later work recalls them. It is configured in its own `hub.yaml`, in a
+directory you name with `--hub`, apart from the helper team, which a company may
+share. Without `--hub` there is no knowledge; everything above works the same.
+
+```console
+$ ensemble hub init --hub ~/hub     # writes ~/hub/hub.yaml and makes ~/hub/vault a git repository
+$ ensemble hub check --hub ~/hub    # validates it; says which model would distill shares now
+$ ensemble connect --manager claude-code --team ~/team --hub ~/hub
+```
+
+```yaml
+version: 1
+owner: Ana                  # named in everything you share
+llm_backends:               # the hub's own model servers, the same kinds as config.yaml
+  local: { type: openai-compatible-api, base_url: "http://127.0.0.1:11434/v1", timeout_seconds: 300 }
+knowledge:                  # leave it out for no knowledge
+  vault: vault              # a git repository, relative to this directory
+  distill:                  # the models that turn shares into notes; no tools
+    try:
+      - { backend: local, model: qwen3.5:9b }
+    when_none: wait         # or fail: the share goes to review/ with why
+    max_tokens: 4000
+  recall:
+    max_notes: 8
+    max_chars: 6000         # all returned notes together
+```
+
+**Sharing is explicit.** Nothing reads your CLI's transcripts and nothing
+proxies its traffic, so a private or throwaway conversation stays private and no
+subscription's rules are touched. When you want something kept, tell your agent
+in plain words ("share what we decided about the deploys"); it picks what is
+worth keeping and calls the `share` tool. `ensemble share --hub <dir> --title T`
+does the same by hand. A share that looks like it holds a key or a private key
+is refused, so the agent shares again without it: the vault keeps everything it
+is given.
+
+**Only Ensemble writes notes.** Each share is kept as it arrived, and the
+pipeline turns it into notes in the background, while `ensemble mcp` or
+`ensemble serve` runs, or now with `ensemble knowledge distill`:
+
+1. One chat request extracts typed items (decision, fact, how-to, lesson,
+   commitment, preference, ownership); chatter gives none and is skipped.
+2. Each item is compared with the notes most like it. It becomes a new note,
+   is merged into one, confirms one, or, when it contradicts one, waits in
+   `review/` for you.
+3. The notes are written and the vault is committed, one commit per share.
+
+To correct a note, share the correction. To read the vault, open it as a
+folder in Obsidian, or anything that reads Markdown:
+
+```text
+vault/
+  shares/<yyyy>/<mm>/<id>.md   each share as it arrived, never changed
+  notes/<slug>.md              one note per topic, frontmatter: kind, title, tags,
+                               scope, sources (share ids), shared_by, pipeline, updated
+  review/<share-id>.md         what the pipeline would not write, and why
+  log.jsonl                    what the pipeline did with each share
+```
+
+Because the notes are made from the shares, a better model or a new note format
+needs no migration: `ensemble knowledge rebuild` deletes the notes and makes
+them again from every share, in one commit.
+
+**Shared text is data, not instructions.** It may carry instructions meant for
+a model, so the model that distills has no tools (one chat request, never an
+agent CLI); shared text goes in between markers with a nonce nobody can guess;
+an answer must be the JSON asked for and may only change the notes it was
+offered, or it goes to `review/`; and every note names the shares it came from.
+
+**Recall.** Your agent calls `recall` with a topic before work where your
+earlier decisions or setup may matter, and gets the matching notes, best first,
+within `max_notes` and `max_chars`, marked as reference data.
+`ensemble recall --hub <dir> <topic>` prints the same. The search is by words
+(BM25, a title's words counting more), with no index to keep.
+
 ## Installation
 
 Linux is where it is built and tested; the rest of Unix should work. Windows is not supported:
@@ -931,6 +1013,7 @@ $ ensemble share --hub <dir> --title T [--text T]   # keep knowledge by hand; te
 $ ensemble knowledge status --hub <dir>    # shares, pending, notes, what waits in review/
 $ ensemble knowledge distill --hub <dir>   # turn pending shares into notes now
 $ ensemble knowledge rebuild --hub <dir> [--yes]   # delete the notes and make them again from every share
+$ ensemble recall --hub <dir> <topic>      # the notes about a topic, as an agent's `recall` gets them
 $ ensemble doctor --team <dir>     # what is wrong, and how to fix each thing
 $ ensemble add-agent <name> --adapter A --team <dir>   # add an agent, every setting written
 $ ensemble remove-agent <name> --team <dir>
@@ -975,7 +1058,7 @@ server, are added as crates on top.
 | `ensemble-core` | the shared error type (`port.rs`), the per-user state and cache directories (`state.rs`), the working folder, a `repo` inside it and what a run changed (`workspace.rs`), and the record of every run with the sums `ensemble stats` prints (`records.rs`), the one-worker-per-directory lock (`lock.rs`), dates in UTC (`time.rs`) |
 | `ensemble-config` | the helper team's `config.yaml`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), versions 1 and 2 to 3 (`migrate.rs`), and adding or removing an agent as text, comments kept (`edit.rs`); the hub's `hub.yaml` (`hub.rs`) |
 | `ensemble-backends` | one chat request to a model server in its own format (`chat.rs`), asking it which models it serves, for `health` (`models.rs`), choosing the first usable model of a `try` list (`resolve.rs`), and a stand-in model server for tests (`testing.rs`) |
-| `ensemble-knowledge` | the hub's knowledge: the vault of shares and notes, a git repository (`vault.rs`), the secret check a share passes first (`secrets.rs`), the pipeline that turns shares into notes (`pipeline.rs`), finding notes by their words (`search.rs`), and the `share` tool and the background worker (`lib.rs`) |
+| `ensemble-knowledge` | the hub's knowledge: the vault of shares and notes, a git repository (`vault.rs`), the secret check a share passes first (`secrets.rs`), the pipeline that turns shares into notes (`pipeline.rs`), finding notes by their words (`search.rs`), and the `share` and `recall` tools and the background worker (`lib.rs`) |
 | `ensemble-agents` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `direct` adapter, and gates (`external/`); a git worktree and branch per task (`worktree.rs`); agents to adapters, slots, budgets and `health` (`router.rs`) |
 | `ensemble-tasks` | tasks as files (`tasks.rs`); the `Tracker` trait and `LocalMarkdown`, its one implementation (`tracker.rs`); the worker that runs tasks and background delegations within each agent's slots (`queue.rs`); the tools your agent calls (`delegation.rs`); `review`, `diff` and `merge` of a worktree task's branch (`review.rs`) |
 | `ensemble-mcp` | the MCP server over stdio: the loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`); and `ensemble serve` (`serve.rs`) |
@@ -1047,3 +1130,9 @@ scripts stand in for the CLIs.
 - **The working folder is fixed when the server starts.** The working
   directory of the process (or `--dir`). A call can work in a folder inside it
   with `repo`, but not outside.
+- **Knowledge is personal and on this computer.** The hub runs inside your
+  node and keeps one person's vault; a hub server shared by a team, an
+  organization vault and connectors to chats and mail are not built yet.
+  Recall is a word search, so it finds notes that use your words, not ones that
+  only mean the same. Your agent recalls when it decides to; delegated agents
+  get no notes on their own.
