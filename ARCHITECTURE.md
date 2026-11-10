@@ -64,7 +64,13 @@ access from elsewhere moves the hub's state and vault repository to a server.
 A node may connect to several hubs: a home hub with the person's own knowledge,
 and one workplace hub per organization they work for. Each has its own identity,
 token and policy, and nothing passes between them except what the export rules
-below allow.
+below allow. One agent session talks to one hub: the hub is set per project when
+Ensemble is registered with the CLI, so work projects use the workplace hub and
+personal ones the home hub, and a share always goes to the session's hub.
+(Decided 2026-11-10.)
+
+A hub server may face the public internet behind TLS, or run on a local network
+or behind a VPN; nothing in Ensemble assumes either. (Decided 2026-11-10.)
 
 ### Rules that hold everywhere
 
@@ -119,9 +125,10 @@ and no tools, is called `direct` (it was `llm` before version 3). The chat
 client it uses belongs to the backends module, so the knowledge pipeline and the
 hub's chat API can share it.
 
-An organization limits helper teams through policy, not structure: which
-backends its data may be sent to, gates its repositories require, budgets per
-user, forbidden tools and permission modes. (Exactly which limits exist is open.)
+An organization may later limit helper teams through policy, not structure:
+which backends its data may be sent to, gates its repositories require, budgets
+per user, forbidden tools and permission modes. For now there are no such
+limits. (Decided 2026-11-10.)
 
 ## Tasks
 
@@ -141,7 +148,8 @@ become one adapter and the embedded inbox.
 
 Tasks are assigned to a **user**, never to an agent: the tracker knows people,
 and the person stays accountable. A task carries an explicit signal that agents
-may take it (its form is open). The flow:
+may take it: a label, such as `ensemble`, which every tracker has and which
+needs no extra account. (Decided 2026-11-10.) The flow:
 
 1. The inbox sees a task assigned to me with the signal and delivers it.
 2. My personal agent reads it with a context package from recall.
@@ -248,6 +256,12 @@ login <hub>`), tokens in the OS keyring, stored hashed by the hub. Nodes,
 connectors and agents are identities too, and an agent acts on behalf of a
 person.
 
+There are no teams of people in the hub, only roles. Ensemble defines a fixed
+set of permissions (such as managing users, managing the hub's backends,
+sharing, recalling, receiving tasks), and each hub's config names its own roles
+as sets of them, so an organization decides what roles it has. (Decided
+2026-11-10.)
+
 ## Clients
 
 | Way | What happens |
@@ -304,12 +318,6 @@ in either process.
 
 ## Open questions
 
-1. Which organization limits on helper teams exist: backends, tools, budgets,
-   gates.
-2. The delegation signal in a tracker: a label or column, or a pseudo-user.
-3. Capture routing between hubs when a destination is unclear.
-4. Export from workplace to home: who approves.
-5. Hub exposure: public internet behind TLS, or a VPN only.
-6. Do teams of people exist in the hub, and are they taken from tracker groups?
-7. Recording from a browser without sending audio to the hub.
-8. Telegram as a team chat source: keep it or drop it.
+1. Export from workplace to home: who approves.
+2. Recording from a browser without sending audio to the hub.
+3. Telegram as a team chat source: keep it or drop it.
