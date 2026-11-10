@@ -133,8 +133,8 @@ impl Tracker for crate::tasks::Store {
 }
 
 /// The tracker of the configured type. Today there is one.
-pub fn for_config(tracker: crate::config::Tracker, store: &crate::tasks::Store) -> &dyn Tracker {
+pub fn for_config(tracker: ensemble_config::Tracker, store: &crate::tasks::Store) -> &dyn Tracker {
     match tracker {
-        crate::config::Tracker::LocalMarkdown => store,
+        ensemble_config::Tracker::LocalMarkdown => store,
     }
 }

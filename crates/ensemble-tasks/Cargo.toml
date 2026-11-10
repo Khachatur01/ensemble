@@ -1,0 +1,23 @@
+[package]
+name = "ensemble-tasks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Ensemble's tasks: tickets as files, the tracker they come from, the queue that runs them, the tools that delegate, and review of a task's branch."
+
+[dependencies]
+ensemble-agents.workspace = true
+ensemble-config.workspace = true
+ensemble-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_norway.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+ensemble-agents = { workspace = true, features = ["test-support"] }
+ensemble-core = { workspace = true, features = ["test-support"] }

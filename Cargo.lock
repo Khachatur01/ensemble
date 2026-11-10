@@ -53,6 +53,7 @@ dependencies = [
  "ensemble-backends",
  "ensemble-config",
  "ensemble-core",
+ "ensemble-tasks",
  "libc",
  "serde",
  "serde_json",
@@ -97,6 +98,19 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ensemble-tasks"
+version = "0.1.0"
+dependencies = [
+ "ensemble-agents",
+ "ensemble-config",
+ "ensemble-core",
+ "libc",
+ "serde",
+ "serde_json",
+ "serde_norway",
 ]
 
 [[package]]

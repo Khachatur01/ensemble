@@ -5,7 +5,7 @@
 //! `merge` is for a person to type; the manager gets no tool for it.
 
 use crate::tasks::{Status, Store};
-use crate::workspace;
+use ensemble_core::workspace;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -204,7 +204,7 @@ pub fn merge(task: &Task, worktree_dir: &Path, options: MergeOptions) -> Result<
 mod tests {
     use super::*;
     use crate::tasks::Ticket;
-    use crate::workspace::testing::TempDir;
+    use ensemble_core::workspace::testing::TempDir;
 
     fn run(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")

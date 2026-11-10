@@ -23,15 +23,15 @@
 //! its agent first, so `max_concurrent` means what it says.
 
 use super::delegation::{ToolResult, run_delegation};
-use crate::config::{Budget, Isolation};
-use crate::external::gate;
-use crate::router::Ensemble;
 use crate::tasks::{
     ASK_MARKER, Entry, HANDOFF_MARKER, Status, Store, Ticket, handoff_in, idle_line, minutes,
     question_in, waiting_for,
 };
 use crate::tracker::Tracker;
-use crate::worktree;
+use ensemble_agents::external::gate;
+use ensemble_agents::router::Ensemble;
+use ensemble_agents::worktree;
+use ensemble_config::{Budget, Isolation};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -112,7 +112,7 @@ impl Ask {
         format!(
             "{}\n\n{}\n\nYou stopped earlier to ask: {}\nThe answer: {}\n\nYour reply when you last stopped:\n{}\n\nGo on from there.",
             self.task,
-            crate::harness::delegation::ASK_INSTRUCTION,
+            crate::delegation::ASK_INSTRUCTION,
             self.question,
             answer.trim(),
             self.reply.trim()
@@ -214,7 +214,7 @@ impl<'e> Queue<'e> {
             None => vec![agent],
         };
         let now = unix_now();
-        let mut runs: Vec<(u64, u64)> = crate::records::read(&self.ensemble.records_dir()?)
+        let mut runs: Vec<(u64, u64)> = ensemble_core::records::read(&self.ensemble.records_dir()?)
             .into_iter()
             .filter(|r| members.contains(&r.agent.as_str()) && now < r.started + HOUR)
             .map(|r| {
@@ -508,7 +508,7 @@ impl<'e> Queue<'e> {
             .workdir()
             .map_err(|e| format!("no project directory to work in: {e}"))
             .and_then(|workdir| match ticket.repo.as_deref() {
-                Some(repo) => crate::workspace::resolve_repo(&workdir, repo),
+                Some(repo) => ensemble_core::workspace::resolve_repo(&workdir, repo),
                 None => Ok(workdir),
             })
             .and_then(

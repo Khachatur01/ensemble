@@ -74,7 +74,7 @@ pub fn acquire(state: &Path) -> Result<WorkerLock, u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::testing::TempDir;
+    use ensemble_core::workspace::testing::TempDir;
 
     #[test]
     fn a_held_lock_names_its_holder_and_is_released_on_drop() {

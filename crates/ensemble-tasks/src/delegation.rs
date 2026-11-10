@@ -7,8 +7,8 @@
 //! `model` parameter would quietly undo it at the first opportunity.
 
 use super::queue::{Ask, Queue, Task};
-use crate::router::{Ensemble, RouteError};
 use crate::tasks::question_in;
+use ensemble_agents::router::{Ensemble, RouteError};
 use serde_json::{Value, json};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -708,7 +708,7 @@ fn repo_of(ensemble: &Ensemble, args: &Value) -> Result<Option<std::path::PathBu
     let workdir = ensemble
         .workdir()
         .map_err(|e| format!("no working directory: {e}"))?;
-    crate::workspace::resolve_repo(&workdir, repo).map(Some)
+    ensemble_core::workspace::resolve_repo(&workdir, repo).map(Some)
 }
 
 /// Delegate and turn the outcome into a tool result: the agent's work and a
@@ -736,7 +736,10 @@ pub(super) fn run_delegation(
             // Telling the model whether another attempt could work is
             // the difference between a useful retry and a loop against
             // a typo'd agent name.
-            let timed_out = matches!(&e, RouteError::Agent(crate::port::Error::Timeout { .. }));
+            let timed_out = matches!(
+                &e,
+                RouteError::Agent(ensemble_core::port::Error::Timeout { .. })
+            );
             let hint = if timed_out {
                 " This may be transient; the same call is worth one retry."
             } else if e.is_retryable() {
@@ -758,7 +761,7 @@ const MAX_LISTED_COMMANDS: usize = 10;
 
 /// What an agent did, under its report: enough for the caller to review the
 /// work without asking the agent to describe it.
-fn agent_footer(role: &str, a: &crate::router::AgentStats) -> String {
+fn agent_footer(role: &str, a: &ensemble_agents::router::AgentStats) -> String {
     let mut out = format!(
         "[{role}: {} step(s), {} tool call(s)]",
         a.steps, a.tool_calls

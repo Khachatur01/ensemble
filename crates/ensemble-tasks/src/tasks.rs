@@ -961,7 +961,7 @@ pub fn utc(t: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::testing::TempDir;
+    use ensemble_core::workspace::testing::TempDir;
     use std::time::Duration;
 
     /// A ticket with only what every ticket has.

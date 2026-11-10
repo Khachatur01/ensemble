@@ -22,12 +22,10 @@
 
 pub mod harness;
 pub mod remote;
-pub mod review;
 pub mod setup;
-pub mod tasks;
-pub mod tracker;
 
 pub use ensemble_agents::{external, router, worktree};
 pub use ensemble_backends as backends;
 pub use ensemble_config as config;
 pub use ensemble_core::{port, records, state, workspace};
+pub use ensemble_tasks::{review, tasks, tracker};
