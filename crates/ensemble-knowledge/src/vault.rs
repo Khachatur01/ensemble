@@ -31,7 +31,9 @@ pub struct Vault {
 /// What someone shared, as it arrived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Share {
-    /// `20261110-153012-ab12`: when it arrived, so ids sort by time.
+    /// `20261110-153012-123456-ab`: when it arrived, to the microsecond, so ids
+    /// sort in the order shares arrived; two random digits keep two processes
+    /// apart.
     pub id: String,
     /// `2026-11-10T15:30:12Z`.
     pub at: String,
@@ -155,7 +157,8 @@ impl Vault {
         title: &str,
         text: &str,
     ) -> Result<Share, String> {
-        let now = SystemTime::now();
+        let micros = next_micros();
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_micros(micros);
         let at = ensemble_core::time::utc(now);
         // 2026-11-10T15:30:12Z -> 20261110-153012
         let stamp: String = at
@@ -164,7 +167,7 @@ impl Vault {
             .collect::<String>()
             .replace('T', "-");
         let share = Share {
-            id: format!("{stamp}-{}", random_hex(4)),
+            id: format!("{stamp}-{:06}-{}", micros % 1_000_000, random_hex(2)),
             at,
             shared_by: shared_by.to_string(),
             client: client.map(str::to_string),
@@ -417,6 +420,24 @@ fn write_atomically(path: &Path, text: &str) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
+/// Microseconds since 1970, never the same twice in this process, so the shares
+/// one process adds sort in the order it added them.
+fn next_micros() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros() as u64);
+    let mut last = LAST.load(Ordering::Relaxed);
+    loop {
+        let next = now.max(last + 1);
+        match LAST.compare_exchange(last, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(seen) => last = seen,
+        }
+    }
+}
+
 /// `n` hex digits nobody can guess: from std's randomly keyed hasher, the
 /// time and the process.
 pub(crate) fn random_hex(n: usize) -> String {
@@ -461,7 +482,7 @@ mod tests {
                 "---\nnot a head\n",
             )
             .unwrap();
-        assert!(first.id[..15] <= second.id[..15], "ids start with the time");
+        assert!(first.id < second.id, "ids sort in the order shares arrived");
         let year = &first.id[0..4];
         assert!(vault.root().join("shares").join(year).exists());
         let shares = vault.shares();

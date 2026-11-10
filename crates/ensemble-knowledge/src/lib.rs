@@ -8,16 +8,29 @@
 //!
 //! The vault (`vault`) keeps each share as it arrived. A share is checked for
 //! secrets first (`secrets`), because the vault is a git repository and a key
-//! in it would stay in the history.
+//! in it would stay in the history. The pipeline (`pipeline`) turns shares into
+//! notes, in the background, finding related notes by their words (`search`).
 
-use ensemble_config::{Hub, Knowledge};
+use ensemble_backends::resolve::Resolver;
+use ensemble_config::{Hub, Knowledge, LlmBackend};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
+pub mod pipeline;
+pub mod search;
 pub mod secrets;
 pub mod vault;
 
+pub use pipeline::{PIPELINE_VERSION, Step};
 pub use vault::{Note, Processed, Share, Vault};
+
+/// How often the worker looks for new shares.
+const POLL: Duration = Duration::from_secs(5);
+/// How long it waits before asking again when no model could be used.
+const RETRY: Duration = Duration::from_secs(60);
 
 pub const SHARE: &str = "share";
 
@@ -37,6 +50,18 @@ pub struct Memory {
     project: Option<String>,
     /// The agent CLI on the other end, once it has said its name.
     client: Mutex<Option<String>>,
+    /// The hub's own model endpoints.
+    backends: BTreeMap<String, LlmBackend>,
+    resolver: Resolver,
+}
+
+/// What a run of the pipeline over the pending shares did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Run {
+    /// Shares that became notes, were skipped, or went to review, by outcome.
+    pub done: Vec<Processed>,
+    /// Why it stopped with shares still pending, when no model could be used.
+    pub waiting: Option<String>,
 }
 
 impl Memory {
@@ -48,7 +73,117 @@ impl Memory {
             knowledge: hub.knowledge.clone()?,
             project,
             client: Mutex::new(None),
+            backends: hub.llm_backends.clone(),
+            resolver: Resolver::default(),
         })
+    }
+
+    pub(crate) fn backends(&self) -> &BTreeMap<String, LlmBackend> {
+        &self.backends
+    }
+
+    pub(crate) fn resolver(&self) -> &Resolver {
+        &self.resolver
+    }
+
+    /// Process every pending share, oldest first, until none is left or no
+    /// model can be used. Fails when another process holds the vault: it does
+    /// this work already.
+    pub fn distill(&self) -> Result<Run, String> {
+        let vault = self.vault();
+        let _lock = self.lock()?;
+        self.distill_held(&vault, true)
+    }
+
+    fn distill_held(&self, vault: &Vault, commit: bool) -> Result<Run, String> {
+        let mut run = Run::default();
+        for share in pipeline::pending(vault) {
+            match self.process(&share, commit)? {
+                Step::Done(line) => run.done.push(line),
+                Step::Waiting(why) => {
+                    run.waiting = Some(why);
+                    break;
+                }
+            }
+        }
+        Ok(run)
+    }
+
+    /// Throw the notes away and make them again from every share, in one
+    /// commit: what a new pipeline version or a better model is for.
+    pub fn rebuild(&self) -> Result<Run, String> {
+        let vault = self.vault();
+        let _lock = self.lock()?;
+        vault.clear_products()?;
+        let run = self.distill_held(&vault, false)?;
+        vault.commit(&format!(
+            "rebuild the notes from {} shares, pipeline {PIPELINE_VERSION}",
+            run.done.len()
+        ))?;
+        Ok(run)
+    }
+
+    fn lock(&self) -> Result<ensemble_core::lock::WorkerLock, String> {
+        let vault = self.vault();
+        if !vault.exists() {
+            return Err(format!(
+                "the knowledge vault {} is not a git repository yet; `ensemble hub init` makes it",
+                vault.root().display()
+            ));
+        }
+        ensemble_core::lock::acquire(&vault.lock_dir()).map_err(|pid| {
+            format!("process {pid} is distilling this vault already; it gets to every share")
+        })
+    }
+
+    /// Distill shares as they arrive, until `stop` is set. Another process
+    /// that holds the vault does this already, and then this returns at once.
+    /// `say` gets one line per share, and one when it starts waiting for a
+    /// model.
+    pub fn work(&self, stop: &AtomicBool, say: &(dyn Fn(&str) + Sync)) {
+        let vault = self.vault();
+        let Ok(_lock) = self.lock() else { return };
+        let mut said_waiting = false;
+        while !stop.load(Ordering::Relaxed) {
+            let mut pause = POLL;
+            for share in pipeline::pending(&vault) {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                match self.process(&share, true) {
+                    Ok(Step::Done(line)) => {
+                        said_waiting = false;
+                        say(&format!(
+                            "knowledge: share {} -> {}{}",
+                            line.share,
+                            line.outcome,
+                            if line.notes.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" ({})", line.notes.join(", "))
+                            }
+                        ));
+                    }
+                    Ok(Step::Waiting(why)) => {
+                        if !said_waiting {
+                            say(&format!("knowledge: waiting for a model: {why}"));
+                            said_waiting = true;
+                        }
+                        pause = RETRY;
+                        break;
+                    }
+                    Err(e) => {
+                        say(&format!("knowledge: share {}: {e}", share.id));
+                        pause = RETRY;
+                        break;
+                    }
+                }
+            }
+            let until = Instant::now() + pause;
+            while Instant::now() < until && !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
     }
 
     pub fn vault(&self) -> Vault {

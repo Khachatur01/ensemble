@@ -2,6 +2,7 @@
 //! them, so a queue goes on after the manager has closed.
 
 use ensemble_agents::router::Ensemble;
+use ensemble_knowledge::Memory;
 use ensemble_tasks::lock;
 use ensemble_tasks::queue::{Queue, Task};
 use ensemble_tasks::tasks::Store;
@@ -13,9 +14,11 @@ use std::time::Duration;
 /// that had not started stay queued. Fails when another worker has the folder.
 ///
 /// When nothing is left to do it says so, once, and goes on waiting for the
-/// next task; with `exit_when_idle` it stops there instead.
+/// next task; with `exit_when_idle` it stops there instead. With `memory`, a
+/// hub's knowledge, shares become notes alongside.
 pub fn run(
     ensemble: &Ensemble,
+    memory: Option<&Memory>,
     stop: &AtomicBool,
     say: &(dyn Fn(&str) + Sync),
     exit_when_idle: bool,
@@ -35,6 +38,7 @@ pub fn run(
         "serving the tasks in {}",
         state.join("tasks").display()
     ));
+    let knowledge_stop = &AtomicBool::new(false);
     std::thread::scope(|scope| {
         let queue = &queue;
         scope.spawn(move || {
@@ -42,6 +46,9 @@ pub fn run(
                 scope.spawn(task);
             })
         });
+        if let Some(memory) = memory {
+            scope.spawn(move || memory.work(knowledge_stop, say));
+        }
         let mut idle = false;
         let mut checked = std::time::Instant::now() - Duration::from_secs(60);
         while !stop.load(Ordering::Relaxed) {
@@ -66,6 +73,7 @@ pub fn run(
         }
         say("stopping: running tasks are stopped and queued again");
         queue.close();
+        knowledge_stop.store(true, Ordering::Relaxed);
     });
     Ok(())
 }

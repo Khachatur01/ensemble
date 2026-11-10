@@ -631,59 +631,10 @@ agents:
     /// A model server that serves `models` and answers every chat request
     /// with `answer`, as many times as it is asked.
     fn model_server(models: &[&str], answer: &str) -> String {
-        use std::io::{BufRead, BufReader, Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let data: Vec<String> = models
-            .iter()
-            .map(|m| format!("{{\"id\":\"{m}\"}}"))
-            .collect();
-        let list = format!("{{\"data\":[{}]}}", data.join(","));
-        let chat = format!(
-            "{{\"choices\":[{{\"message\":{{\"content\":\"{answer}\"}},\"finish_reason\":\"stop\"}}]}}"
-        );
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { return };
-                let mut reader = BufReader::new(&stream);
-                let (mut first, mut length) = (String::new(), 0);
-                loop {
-                    let mut line = String::new();
-                    if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
-                        break;
-                    }
-                    if first.is_empty() {
-                        first = line.clone();
-                    }
-                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                        length = v.trim().parse().unwrap_or(0);
-                    }
-                }
-                let mut body = vec![0; length];
-                let _ = reader.read_exact(&mut body);
-                let reply = if first.starts_with("GET") {
-                    &list
-                } else {
-                    &chat
-                };
-                let mut stream = &stream;
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
-                    reply.len()
-                );
-            }
-        });
-        format!("http://127.0.0.1:{port}/v1")
+        ensemble_backends::testing::model_server(models, &[answer]).url
     }
 
-    /// A URL nothing listens on.
-    fn nowhere() -> String {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        format!("http://127.0.0.1:{port}/v1")
-    }
+    use ensemble_backends::testing::nowhere;
 
     /// A `direct` agent that tries `home`, then `central`, in a fresh folder.
     fn with_fallback(home: &str, central: &str, when_none: &str) -> (Ensemble, TempDir) {

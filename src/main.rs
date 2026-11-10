@@ -50,6 +50,13 @@ COMMANDS:
                             Keep knowledge in the --hub vault, as an agent's
                             `share` tool does; the text is read from stdin
                             when --text is not given.
+    knowledge status        Shares, those not yet distilled, notes, and what
+                            waits in review/.
+    knowledge distill       Turn every pending share into notes now, instead of
+                            waiting for `ensemble mcp` or `serve` to.
+    knowledge rebuild [--yes]
+                            Delete the notes and make them again from every
+                            share, in one commit.
     doctor                  Say what is wrong with the helper team and the
                             agents it needs, and how to fix each thing.
     add-agent NAME --adapter A [--model M] [--backend B] [--prompt P] [--writes]
@@ -274,6 +281,9 @@ fn run() -> Result<ExitCode, String> {
     }
     if args.command == "share" {
         return cmd_share(&args, &dir);
+    }
+    if args.command == "knowledge" {
+        return cmd_knowledge(&args, &dir);
     }
 
     let resolved = resolve_team(&args, &args.command)?;
@@ -558,6 +568,69 @@ fn memory_for(args: &Args, dir: &Path) -> Result<Option<ensemble::knowledge::Mem
         );
     }
     Ok(memory)
+}
+
+/// `ensemble knowledge status|distill|rebuild`.
+fn cmd_knowledge(args: &Args, dir: &Path) -> Result<ExitCode, String> {
+    let what = args
+        .rest
+        .first()
+        .map(String::as_str)
+        .ok_or("knowledge: needs status, distill or rebuild. Try --help.")?;
+    hub_of(args, &format!("knowledge {what}"))?;
+    let memory = memory_for(args, dir)?.ok_or("knowledge: the hub keeps no knowledge")?;
+    let vault = memory.vault();
+    let report = |run: &ensemble::knowledge::Run| {
+        for line in &run.done {
+            println!(
+                "{} -> {}{}",
+                line.share,
+                line.outcome,
+                if line.notes.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", line.notes.join(", "))
+                }
+            );
+        }
+        match &run.waiting {
+            Some(why) => {
+                println!("stopped: no model could be used: {why}");
+                ExitCode::FAILURE
+            }
+            None => ExitCode::SUCCESS,
+        }
+    };
+    match what {
+        "status" => {
+            println!("vault: {}", vault.root().display());
+            println!("shares: {}", vault.shares().len());
+            println!(
+                "pending: {}",
+                ensemble::knowledge::pipeline::pending(&vault).len()
+            );
+            println!("notes: {}", vault.notes().len());
+            println!("in review/: {}", vault.review_count());
+            Ok(ExitCode::SUCCESS)
+        }
+        "distill" => Ok(report(&memory.distill()?)),
+        "rebuild" => {
+            if !confirm(
+                &format!(
+                    "Delete every note and review item in {} and make them again from the {} shares?",
+                    vault.root().display(),
+                    vault.shares().len()
+                ),
+                args,
+            )? {
+                return Ok(ExitCode::FAILURE);
+            }
+            Ok(report(&memory.rebuild()?))
+        }
+        other => Err(format!(
+            "knowledge: unknown '{other}'. Use status, distill or rebuild."
+        )),
+    }
 }
 
 /// `ensemble share`: keep knowledge in the hub's vault by hand, as the `share`
@@ -1485,9 +1558,11 @@ fn cmd_serve(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, Stri
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
     }
+    let memory = memory_for(args, &dir)?;
     let ensemble = ensemble_for(config, dir, args);
     ensemble::harness::serve::run(
         &ensemble,
+        memory.as_ref(),
         &STOP,
         &|line| eprintln!("ensemble: {line}"),
         has(args, "--exit-when-idle"),

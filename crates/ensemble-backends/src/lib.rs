@@ -5,3 +5,6 @@
 pub mod chat;
 pub mod models;
 pub mod resolve;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;

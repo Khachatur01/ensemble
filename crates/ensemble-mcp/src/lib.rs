@@ -192,7 +192,8 @@ pub fn handle_reporting<'s>(
 /// they work. `notifications/cancelled` stops the named call at its next step,
 /// and it gets no reply: the client has stopped waiting for one.
 ///
-/// Alongside, a worker runs the tasks in the state directory's `tasks/`.
+/// Alongside, a worker runs the tasks in the state directory's `tasks/`, and,
+/// with a hub's knowledge, another turns shares into notes.
 /// When stdin closes, running tasks and background delegations are stopped
 /// (tasks that had not started stay queued for the next session), and blocking
 /// calls still running are finished before this returns.
@@ -249,9 +250,14 @@ pub fn serve_with<W: Write + Send>(
     let queue = Queue::new(ensemble, Some(store));
     let (send, notify, running, queue) = (&send, &notify, &running, &queue);
 
+    let knowledge_stop = &AtomicBool::new(false);
     std::thread::scope(|scope| {
         if worker {
             scope.spawn(move || queue.work(&spawner(scope)));
+        }
+        // Shares become notes alongside, unless another process does that.
+        if let Some(memory) = memory {
+            scope.spawn(move || memory.work(knowledge_stop, &|line| eprintln!("ensemble: {line}")));
         }
         let result = (|| -> std::io::Result<()> {
             for line in input.lines() {
@@ -334,6 +340,7 @@ pub fn serve_with<W: Write + Send>(
         // The caller is gone, so nobody will ask for what background work
         // produces: stop it, or this would wait out its time limits.
         queue.close();
+        knowledge_stop.store(true, Ordering::Relaxed);
         result
     })
 }

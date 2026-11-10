@@ -2369,3 +2369,107 @@ fn knowledge_is_shared_by_hand_or_by_the_agent_through_mcp() {
         "{files:?}"
     );
 }
+
+/// A hub whose knowledge is distilled on `url`, made beside the project.
+fn hub_on(scratch: &Scratch, url: &str) -> PathBuf {
+    let hub = hub_of(scratch);
+    std::fs::write(
+        hub.join("hub.yaml"),
+        format!(
+            "version: 1\nowner: Ana\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\nknowledge:\n  vault: vault\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 500\n  recall: {{ max_notes: 3, max_chars: 2000 }}\n"
+        ),
+    )
+    .unwrap();
+    hub
+}
+
+/// A model that answers every chat request with these items.
+fn items_stub(items: &str) -> String {
+    let chat = serde_json::json!({
+        "choices": [{"message": {"content": items}, "finish_reason": "stop"}]
+    });
+    models_stub(&chat.to_string())
+}
+
+#[test]
+fn shares_become_notes_by_hand_and_in_the_background_of_a_session() {
+    let s = Scratch::new("hub-distill");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    let url = items_stub(
+        r#"{"items":[{"kind":"decision","title":"Deploy day","body":"Deploys go out on Tuesdays.","tags":["ops"]}]}"#,
+    );
+    let hub = hub_on(&s, &url);
+    let with_hub = |args: &[&str]| {
+        command(&s)
+            .args(args)
+            .arg("--hub")
+            .arg(&hub)
+            .output()
+            .unwrap()
+    };
+    assert!(
+        with_hub(&[
+            "share",
+            "--title",
+            "Deploys",
+            "--text",
+            "We deploy on Tuesdays."
+        ])
+        .status
+        .success()
+    );
+    let out = with_hub(&["knowledge", "status"]);
+    assert!(
+        stdout_of(&out).contains("pending: 1"),
+        "{}",
+        stdout_of(&out)
+    );
+    let out = with_hub(&["knowledge", "distill"]);
+    assert!(
+        out.status.success(),
+        "{}{}",
+        stdout_of(&out),
+        stderr_of(&out)
+    );
+    assert!(
+        stdout_of(&out).contains("-> notes (deploy-day)"),
+        "{}",
+        stdout_of(&out)
+    );
+    let note = std::fs::read_to_string(hub.join("vault/notes/deploy-day.md")).unwrap();
+    assert!(
+        note.contains("kind: decision") && note.contains("Tuesdays"),
+        "{note}"
+    );
+    let out = with_hub(&["knowledge", "status"]);
+    assert!(stdout_of(&out).contains("pending: 0") && stdout_of(&out).contains("notes: 1"));
+
+    // In a session, a share becomes a note without anyone asking.
+    std::fs::remove_dir_all(hub.join("vault/notes")).unwrap();
+    let out = with_hub(&["knowledge", "rebuild"]);
+    assert!(
+        !out.status.success(),
+        "a rebuild asks first: {}",
+        stdout_of(&out)
+    );
+    let mut session = McpSession::start_with(&s, &["--hub".as_ref(), hub.as_os_str()]);
+    session.request(
+        "initialize",
+        serde_json::json!({"protocolVersion": "2025-06-18"}),
+    );
+    let reply = session.request(
+        "tools/call",
+        serde_json::json!({"name": "share", "arguments": {
+            "title": "Reviews", "text": "Every change gets one review."}}),
+    );
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let vault = ensemble::knowledge::Vault::new(hub.join("vault"));
+    while !ensemble::knowledge::pipeline::pending(&vault).is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the share was not distilled"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
