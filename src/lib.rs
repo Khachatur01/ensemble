@@ -24,14 +24,12 @@ pub mod config;
 pub mod external;
 pub mod harness;
 pub mod llm_backend;
-pub mod port;
-pub mod records;
 pub mod remote;
 pub mod review;
 pub mod router;
 pub mod setup;
-pub mod state;
 pub mod tasks;
 pub mod tracker;
-pub mod workspace;
 pub mod worktree;
+
+pub use ensemble_core::{port, records, state, workspace};

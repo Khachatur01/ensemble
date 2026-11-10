@@ -1,39 +1,61 @@
-[package]
-name = "ensemble"
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "A helper team of coding agents (Claude Code, OpenCode, Codex) behind one MCP server."
 license = "MIT"
 repository = "https://github.com/Khachatur01/ensemble"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Config and wire formats. serde_norway is the maintained fork of serde_yaml,
+# which upstream deprecated.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_norway = "0.9"
+# Blocking HTTP client for `health` and the `direct` adapter. Chosen over
+# reqwest so the whole program stays synchronous: no async runtime is pulled in
+# for one request.
+ureq = "3"
+# killpg: a time limit or a cancel must take an agent CLI's whole process tree
+# down, and std can signal one pid. Already in the tree via ureq, so this costs
+# no extra compilation.
+libc = "0.2"
+ensemble-core = { path = "crates/ensemble-core" }
+
+[package]
+name = "ensemble"
+version.workspace = true
+edition.workspace = true
+description = "A helper team of coding agents (Claude Code, OpenCode, Codex) behind one MCP server."
+license.workspace = true
+repository.workspace = true
 readme = "README.md"
 keywords = ["mcp", "agents", "claude-code", "opencode", "codex"]
 categories = ["command-line-utilities", "development-tools"]
-rust-version = "1.85"
+rust-version.workspace = true
 
 [[bin]]
 name = "ensemble"
 path = "src/main.rs"
 
 [dependencies]
-# Config and wire formats. serde_norway is the maintained fork of serde_yaml,
-# which upstream deprecated.
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_norway = "0.9"
-# Blocking HTTP client for `health`, which asks an LLM backend which models it
-# serves. Chosen over reqwest so the whole program stays synchronous: no async
-# runtime is pulled in for one request.
-ureq = "3"
+ensemble-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_norway.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
-# Nothing. The test suites use the std harness and shell scripts standing in for
-# the agent CLIs, so `cargo test` needs no network, model server or agent CLI.
+# Only the test helpers of the workspace's own crates. The suites use the std
+# harness and shell scripts standing in for the agent CLIs, so `cargo test`
+# needs no network, model server or agent CLI.
+ensemble-core = { workspace = true, features = ["test-support"] }
 
 [profile.release]
 strip = true
 
 [target.'cfg(unix)'.dependencies]
-# killpg: a time limit or a cancel must take an agent CLI's whole process tree
-# down, and std can signal one pid. Already in the tree via ureq, so this costs
-# no extra compilation.
-libc = "0.2"
+libc.workspace = true

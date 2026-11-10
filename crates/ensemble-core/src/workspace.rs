@@ -170,7 +170,7 @@ pub fn resolve_repo(workdir: &Path, repo: &str) -> Result<PathBuf, String> {
     Ok(found)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod testing {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};

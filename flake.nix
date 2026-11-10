@@ -1,5 +1,5 @@
 {
-  description = "ensemble — an organization of coding agents behind one MCP server";
+  description = "ensemble — a helper team of coding agents behind one MCP server";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -25,7 +25,7 @@
           nativeCheckInputs = [ pkgs.git ];
 
           meta = {
-            description = "An organization of coding agents (Claude Code, OpenCode, Codex) behind one MCP server";
+            description = "A helper team of coding agents (Claude Code, OpenCode, Codex) behind one MCP server";
             mainProgram = "ensemble";
           };
         };

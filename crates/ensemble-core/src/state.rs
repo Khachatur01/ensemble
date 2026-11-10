@@ -54,7 +54,7 @@ pub fn team_dir(config: &Path) -> Result<PathBuf, String> {
     Ok(root()?.join("orgs").join(labelled(&canonical)))
 }
 
-pub(crate) fn labelled_text(text: &str) -> String {
+pub fn labelled_text(text: &str) -> String {
     labelled(Path::new(text))
 }
 

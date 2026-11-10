@@ -1,0 +1,16 @@
+[package]
+name = "ensemble-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Ensemble's shared vocabulary: the error type, the state directory, the working folder and the record of runs."
+
+[features]
+# The scratch directory and stand-in CLIs other crates' tests build on.
+test-support = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
