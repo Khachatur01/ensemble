@@ -34,10 +34,12 @@ setting the config rules allow.
 | Level | What runs | Who it is for |
 |---|---|---|
 | 0. Node alone | Helper team, agent runs, worktrees, gates, tasks from a tracker reached with the user's own token | Anyone who wants agents to work on tasks. This is today's Ensemble. |
-| 1. Node + memory | A local knowledge vault, fed by explicit shares, recalled in later runs | Users who want their agents to remember |
+| 1. Node + memory | The hub role embedded in the node: a knowledge vault, fed by explicit shares, recalled in later runs | Users who want their agents to remember |
 | 2. Node + hub | Sharing, people, always-on work, a tracker shared by a team, connectors, a central model server | Teams and organizations |
 
-Each level works without the next.
+Each level works without the next. Knowledge always belongs to a hub: a node
+with no hub role has none, and a single user who wants it turns the hub role on
+in their own node (level 1). (Decided 2026-11-10.)
 
 ## Hub and node
 
@@ -159,8 +161,16 @@ A vault is a Git repository of Markdown notes: text knowledge only, already
 analyzed and broken down into one note per concept, linked with `[[...]]`, with
 frontmatter naming the source person, the initiator, the connector, the
 pipeline version and the visibility. Provenance is a link to the source (a
-message URL, a task id), not a copy. A recording transcript is the only raw text
-kept, briefly; audio is never kept.
+message URL, a task id), not a copy.
+
+Each share is also kept as it arrived, in the same scope's repository, and the
+notes are a product of the shares. A change to the note format rebuilds the
+notes from the shares instead of migrating them, and a wrong note traces back to
+the text it came from, so the first format may be simple: Markdown with YAML
+frontmatter (id, kind, title, scope, sources, who shared, pipeline version), one
+topic per note, linked with `[[...]]`. Git history is the audit trail, and a
+search index is built from the notes. (Decided 2026-11-10.) A recording
+transcript is kept briefly; audio is never kept.
 
 Scopes are separate repositories, because Git cannot hide single files: one
 organization vault, and one personal vault per user. Recall merges them,
@@ -190,11 +200,33 @@ ingest queue → filter → extract → integrate → vault
 ```
 
 Only the integrate step writes a vault. Agents and people propose: `share` and
-"remember this" are inputs to the same pipeline, never writes. People may edit
-notes in Obsidian; the pipeline proposes changes to human-written notes through
-`review/`. A novelty check confirms, skips or flags a contradiction instead of
+"remember this" are inputs to the same pipeline, never writes. Only the system
+writes notes, so there are no edit conflicts: people read them (in Obsidian too)
+and correct one the way agents do, by sharing the correction. (Decided
+2026-11-10.) A novelty check confirms, skips or flags a contradiction instead of
 duplicating. Text from a user's machine passes a privacy gate first: secret
 check, off-topic filter, exclusions, a pause switch.
+
+The pipeline runs in the hub role and distills with a model the hub's config
+names; a single user's embedded hub uses that user's own backends or API key.
+(Decided 2026-11-10.)
+
+### Prompt injection
+
+Shared text may carry instructions meant for a model. The first guards
+(decided 2026-11-10):
+
+- The model that distills has no tools: text in, text out, through the chat
+  client, never an agent CLI.
+- Shared text is passed as quoted data, apart from the pipeline's instructions.
+- The answer must match the note schema, or it is rejected and the share waits
+  in `review/`.
+- Every note names who shared what it came from, so all notes from one source
+  can be found and removed.
+- Recall marks the notes it returns as reference data, not instructions.
+
+Stronger checks come with connectors, which bring in text nobody on the team
+wrote.
 
 ### Visibility and export
 
@@ -224,7 +256,7 @@ person.
 | OpenAI-compatible API | Any chat UI, IDE plugin or SDK, with an API key. The token is the key; `model` names the agent. |
 | Remote MCP | Desktop and web agents, with OAuth. |
 | Web UI | Chat, knowledge, review queue, tasks, roster, node status, admin. |
-| Obsidian over Git | Direct read and edit of the vaults. |
+| Obsidian over Git | Direct read of the vaults; a correction is shared like any knowledge. |
 | Task tracker | Assign a task to a person and add the delegation signal. |
 | `ensemble` CLI | `ask`, `share`, `record start`, `node status`. |
 
@@ -261,7 +293,8 @@ in either process.
    `ensemble-core`, `-config`, `-backends`, `-agents`, `-tasks`, `-mcp`.)
 3. Per-agent backend fallback and the resolver. (Done: `try` and `when_none`
    for models on LLM backends.)
-4. Memory: vault, pipeline, the `share` tool, recall.
+4. Memory in the hub role, embedded in the node: vault, pipeline, the `share`
+   tool, recall.
 5. Hub server, link, identity, tracker adapters.
 
 ## Open questions
@@ -269,14 +302,9 @@ in either process.
 1. Which organization limits on helper teams exist: backends, tools, budgets,
    gates.
 2. The delegation signal in a tracker: a label or column, or a pseudo-user.
-3. Knowledge data model: note and entity types, frontmatter, how notes split.
-4. A human edit and a pipeline merge into the same note.
-5. Prompt injection from ingested chats and mail.
-6. Who distills standalone: the user's own CLI headless, a local model, or an
-   API key.
-7. Capture routing between hubs when a destination is unclear.
-8. Export from workplace to home: who approves.
-9. Hub exposure: public internet behind TLS, or a VPN only.
-10. Do teams of people exist in the hub, and are they taken from tracker groups?
-11. Recording from a browser without sending audio to the hub.
-12. Telegram as a team chat source: keep it or drop it.
+3. Capture routing between hubs when a destination is unclear.
+4. Export from workplace to home: who approves.
+5. Hub exposure: public internet behind TLS, or a VPN only.
+6. Do teams of people exist in the hub, and are they taken from tracker groups?
+7. Recording from a browser without sending audio to the hub.
+8. Telegram as a team chat source: keep it or drop it.
