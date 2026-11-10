@@ -984,7 +984,7 @@ scripts stand in for the CLIs.
 | `src/tasks.rs` | ticket files: reading, ids, results written once, run logs |
 | `src/harness/mcp/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session |
 | `tests/end_to_end.rs` | the real binary: CLI, `show`, `health` against a stub server, MCP over real pipes, an agent changing a file |
-| `tests/fixtures/` | saved event streams per CLI version, replayed through each adapter's parser (see its README) |
+| `crates/ensemble-agents/tests/fixtures/` | saved event streams per CLI version, replayed through each adapter's parser (see its README) |
 | `tests/real_cli.rs` | the real `claude`, `opencode` and `codex` CLIs: `health` and one trivial run. Ignored; run with `ENSEMBLE_REAL_CLI=1 cargo test --test real_cli -- --ignored`. |
 
 ## Limitations

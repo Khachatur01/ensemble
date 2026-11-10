@@ -5,10 +5,10 @@
 //! may name a model or a harness: the config decides those, and the result
 //! reports them.
 
-use crate::config::{Adapter, AgentConfig, CLAUDE_CODE_AGENT, Config, OPENCODE_AGENT};
 use crate::external::AgentRun;
-use crate::port::Error;
-use crate::workspace::Changes;
+use ensemble_config::{Adapter, AgentConfig, CLAUDE_CODE_AGENT, Config, OPENCODE_AGENT};
+use ensemble_core::port::Error;
+use ensemble_core::workspace::Changes;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
@@ -124,7 +124,7 @@ impl Ensemble {
                 .config
                 .source
                 .is_file()
-                .then(|| crate::state::team_dir(&self.config.source).ok())
+                .then(|| ensemble_core::state::team_dir(&self.config.source).ok())
                 .flatten(),
         }
     }
@@ -133,7 +133,7 @@ impl Ensemble {
     pub fn state_dir(&self) -> std::io::Result<PathBuf> {
         match &self.state {
             Some(dir) => Ok(dir.clone()),
-            None => crate::state::dir_for(&self.workdir()?).map_err(std::io::Error::other),
+            None => ensemble_core::state::dir_for(&self.workdir()?).map_err(std::io::Error::other),
         }
     }
 
@@ -287,7 +287,7 @@ impl Ensemble {
         let (run, overlapped) = match run {
             Ok(done) => done,
             Err(e) => {
-                self.record(crate::records::Record {
+                self.record(ensemble_core::records::Record {
                     agent: agent.name.clone(),
                     model: Some(agent.model().to_string()),
                     started,
@@ -304,7 +304,7 @@ impl Ensemble {
         };
         // No tokens reported is not the same as none spent.
         let reported = run.usage.prompt_tokens > 0 || run.usage.completion_tokens > 0;
-        self.record(crate::records::Record {
+        self.record(ensemble_core::records::Record {
             agent: agent.name.clone(),
             model: Some(run.model.clone()).filter(|m| !m.is_empty()),
             started,
@@ -340,9 +340,9 @@ impl Ensemble {
         self.usage_dir().or_else(|| self.state_dir().ok())
     }
 
-    fn record(&self, record: crate::records::Record) {
+    fn record(&self, record: ensemble_core::records::Record) {
         if let Some(dir) = self.records_dir() {
-            crate::records::append(&dir, &record);
+            ensemble_core::records::append(&dir, &record);
         }
     }
 
@@ -359,7 +359,7 @@ impl Ensemble {
             match &a.adapter {
                 Adapter::ClaudeCode(cc) => commands.push((CLAUDE_CODE_AGENT, &cc.command)),
                 Adapter::OpenCode(oc) => commands.push((OPENCODE_AGENT, &oc.command)),
-                Adapter::Codex(cx) => commands.push((crate::config::CODEX_AGENT, &cx.command)),
+                Adapter::Codex(cx) => commands.push((ensemble_config::CODEX_AGENT, &cx.command)),
                 // No program: its backend, checked below, is all it needs.
                 Adapter::Direct(_) => {}
             }
@@ -375,7 +375,7 @@ impl Ensemble {
             .map(|(kind, command)| {
                 let result = if kind == OPENCODE_AGENT {
                     crate::external::opencode::health(command)
-                } else if kind == crate::config::CODEX_AGENT {
+                } else if kind == ensemble_config::CODEX_AGENT {
                     crate::external::codex::health(command)
                 } else {
                     crate::external::claude_code::health(command)
@@ -387,7 +387,7 @@ impl Ensemble {
             wanted.sort_unstable();
             wanted.dedup();
             let result = match self.config.llm_backends.get(name) {
-                Some(b) => crate::backends::models::models(b)
+                Some(b) => ensemble_backends::models::models(b)
                     .and_then(|served| served_all(name, &wanted, &served)),
                 None => Err(Error::Unsupported {
                     backend: name.into(),
@@ -431,8 +431,8 @@ fn served_all(backend: &str, wanted: &[&str], served: &[String]) -> Result<(), E
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config;
-    use crate::workspace::testing::TempDir;
+    use ensemble_config as config;
+    use ensemble_core::workspace::testing::TempDir;
     use std::collections::BTreeMap;
 
     /// A config whose agents run `program`, a stand-in for the CLI.

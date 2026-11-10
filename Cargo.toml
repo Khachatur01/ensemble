@@ -26,6 +26,7 @@ libc = "0.2"
 ensemble-core = { path = "crates/ensemble-core" }
 ensemble-config = { path = "crates/ensemble-config" }
 ensemble-backends = { path = "crates/ensemble-backends" }
+ensemble-agents = { path = "crates/ensemble-agents" }
 
 [package]
 name = "ensemble"
@@ -44,6 +45,7 @@ name = "ensemble"
 path = "src/main.rs"
 
 [dependencies]
+ensemble-agents.workspace = true
 ensemble-backends.workspace = true
 ensemble-config.workspace = true
 ensemble-core.workspace = true
@@ -56,6 +58,7 @@ ureq.workspace = true
 # Only the test helpers of the workspace's own crates. The suites use the std
 # harness and shell scripts standing in for the agent CLIs, so `cargo test`
 # needs no network, model server or agent CLI.
+ensemble-agents = { workspace = true, features = ["test-support"] }
 ensemble-core = { workspace = true, features = ["test-support"] }
 
 [profile.release]

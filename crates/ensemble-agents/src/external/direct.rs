@@ -5,10 +5,10 @@
 //! The request itself is `ensemble_backends::chat`; this is the agent around it.
 
 use super::AgentRun;
-use crate::config::{AgentConfig, DIRECT_AGENT, DirectAdapter, LlmBackend};
-use crate::port::Error;
-use crate::workspace::Changes;
 use ensemble_backends::chat::{self, Ask};
+use ensemble_config::{AgentConfig, DIRECT_AGENT, DirectAdapter, LlmBackend};
+use ensemble_core::port::Error;
+use ensemble_core::workspace::Changes;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -127,7 +127,7 @@ fn empty(model: &str) -> AgentRun {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Adapter, BackendSettings, Budget, Isolation};
+    use ensemble_config::{Adapter, BackendSettings, Budget, Isolation};
     use serde_json::json;
     use std::io::{BufRead, BufReader, Read, Write};
 

@@ -21,11 +21,11 @@
 
 use super::AgentRun;
 use super::process;
-use crate::config::{
+use ensemble_config::{
     AgentConfig, LlmBackend, OPENCODE_AGENT, OpenCodeAdapter, SystemPrompt, opencode_tool_writes,
 };
-use crate::port::{Error, Usage};
-use crate::workspace::{self, Changes, Workspace};
+use ensemble_core::port::{Error, Usage};
+use ensemble_core::workspace::{self, Changes, Workspace};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -469,9 +469,9 @@ pub fn health(command: &str) -> Result<(), Error> {
 mod tests {
     use super::process::testing::{emitting, fake};
     use super::*;
-    use crate::config::BackendSettings;
-    use crate::config::{Adapter, OpenCodeModel};
-    use crate::workspace::testing::TempDir;
+    use ensemble_config::BackendSettings;
+    use ensemble_config::{Adapter, OpenCodeModel};
+    use ensemble_core::workspace::testing::TempDir;
 
     fn agent(tools: &[&str], max_seconds: u32) -> (AgentConfig, OpenCodeAdapter) {
         let oc = OpenCodeAdapter {
@@ -488,8 +488,8 @@ mod tests {
             prompt: Some("You review code.".into()),
             max_seconds,
             max_concurrent: 1,
-            isolation: crate::config::Isolation::Shared,
-            budget: crate::config::Budget::Unlimited,
+            isolation: ensemble_config::Isolation::Shared,
+            budget: ensemble_config::Budget::Unlimited,
             limit: None,
             adapter: Adapter::OpenCode(oc.clone()),
         };
@@ -749,7 +749,7 @@ mod tests {
         let (r, _) = go(&fake(&tmp.0, &script), &a, &oc, &tmp.0);
         assert_eq!(
             r.unwrap().changes.get("made.txt"),
-            Some(&crate::workspace::Change::Added)
+            Some(&ensemble_core::workspace::Change::Added)
         );
     }
 

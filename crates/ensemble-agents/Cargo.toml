@@ -1,0 +1,24 @@
+[package]
+name = "ensemble-agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Ensemble's agents: the CLI adapters, the direct adapter, worktrees, gates and the router that runs an agent once."
+
+[features]
+# Test helpers other crates' tests build on, such as a git repository with a commit.
+test-support = ["ensemble-core/test-support"]
+
+[dependencies]
+ensemble-backends.workspace = true
+ensemble-config.workspace = true
+ensemble-core.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+ensemble-core = { workspace = true, features = ["test-support"] }

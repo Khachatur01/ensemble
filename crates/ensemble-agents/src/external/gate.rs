@@ -2,7 +2,7 @@
 //! run in the task's working directory after the agent is done.
 
 use super::process;
-use crate::config::Gate;
+use ensemble_config::Gate;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -65,7 +65,7 @@ pub fn run(gate: &Gate, dir: &Path, cancel: &AtomicBool) -> Verdict {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::testing::TempDir;
+    use ensemble_core::workspace::testing::TempDir;
 
     fn gate(command: &str, timeout_seconds: u32) -> Gate {
         Gate {

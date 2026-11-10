@@ -18,10 +18,10 @@
 
 use super::AgentRun;
 use super::process;
-use crate::config::{AgentConfig, CODEX_AGENT, CodexAdapter, codex_sandbox_writes};
-use crate::port::{Error, Usage};
-use crate::workspace::Changes;
-use crate::workspace::{self, Workspace};
+use ensemble_config::{AgentConfig, CODEX_AGENT, CodexAdapter, codex_sandbox_writes};
+use ensemble_core::port::{Error, Usage};
+use ensemble_core::workspace::Changes;
+use ensemble_core::workspace::{self, Workspace};
 use serde_json::Value;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -283,8 +283,8 @@ pub fn health(command: &str) -> Result<(), Error> {
 mod tests {
     use super::process::testing::{emitting, fake};
     use super::*;
-    use crate::config::Adapter;
-    use crate::workspace::testing::TempDir;
+    use ensemble_config::Adapter;
+    use ensemble_core::workspace::testing::TempDir;
     use serde_json::json;
 
     fn agent(sandbox: &str, max_seconds: u32) -> (AgentConfig, CodexAdapter) {
@@ -298,8 +298,8 @@ mod tests {
             prompt: Some("You fix things.".into()),
             max_seconds,
             max_concurrent: 1,
-            isolation: crate::config::Isolation::Shared,
-            budget: crate::config::Budget::Unlimited,
+            isolation: ensemble_config::Isolation::Shared,
+            budget: ensemble_config::Budget::Unlimited,
             limit: None,
             adapter: Adapter::Codex(cx.clone()),
         };

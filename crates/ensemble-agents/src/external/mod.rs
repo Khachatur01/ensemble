@@ -8,8 +8,8 @@ pub mod gate;
 pub mod opencode;
 mod process;
 
-use crate::port::Usage;
-use crate::workspace::Changes;
+use ensemble_core::port::Usage;
+use ensemble_core::workspace::Changes;
 
 /// What one agent run produced.
 #[derive(Debug, Clone)]

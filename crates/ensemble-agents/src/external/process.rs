@@ -2,7 +2,7 @@
 //! to the adapter line by line as it arrives, and stop it — the whole process
 //! tree — at the deadline or on a cancel.
 
-use crate::port::Error;
+use ensemble_core::port::Error;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};

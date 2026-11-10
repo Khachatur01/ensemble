@@ -88,8 +88,8 @@ pub fn commit(wt: &Worktree, message: &str) -> Result<Option<String>, String> {
     git(&wt.dir, &["rev-parse", "--short", "HEAD"]).map(Some)
 }
 
-#[cfg(test)]
-pub(crate) mod testing {
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing {
     use std::path::Path;
     use std::process::Command;
 
@@ -129,7 +129,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::testing::TempDir;
+    use ensemble_core::workspace::testing::TempDir;
 
     #[test]
     fn a_task_gets_a_worktree_on_its_own_branch_and_its_work_is_committed_there() {
