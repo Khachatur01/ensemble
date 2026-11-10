@@ -1,6 +1,6 @@
 //! Getting started: finding what is installed, writing a starter helper team,
 //! registering Ensemble with the manager, and saying what is wrong and how to
-//! fi.is_some_and(|x| x.contains("add-agent <name>")) it. The pieces that to.map(|u| format!("ensemble remove-agent {u} --team {}", team.display()))ch nothing outside take what they need as
+//! fix it. The pieces that touch nothing outside take what they need as
 //! arguments, so tests can run them without a terminal or a network.
 
 use crate::config::edit::{NewAgent, add_agent, agent_block};
