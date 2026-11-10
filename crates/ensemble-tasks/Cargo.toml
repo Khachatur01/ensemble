@@ -15,9 +15,6 @@ serde.workspace = true
 serde_json.workspace = true
 serde_norway.workspace = true
 
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
-
 [dev-dependencies]
 ensemble-agents = { workspace = true, features = ["test-support"] }
 ensemble-core = { workspace = true, features = ["test-support"] }

@@ -26,6 +26,7 @@ libc = "0.2"
 ensemble-core = { path = "crates/ensemble-core" }
 ensemble-config = { path = "crates/ensemble-config" }
 ensemble-backends = { path = "crates/ensemble-backends" }
+ensemble-knowledge = { path = "crates/ensemble-knowledge" }
 ensemble-agents = { path = "crates/ensemble-agents" }
 ensemble-tasks = { path = "crates/ensemble-tasks" }
 ensemble-mcp = { path = "crates/ensemble-mcp" }
@@ -51,6 +52,7 @@ ensemble-agents.workspace = true
 ensemble-backends.workspace = true
 ensemble-config.workspace = true
 ensemble-core.workspace = true
+ensemble-knowledge.workspace = true
 ensemble-mcp.workspace = true
 ensemble-tasks.workspace = true
 serde.workspace = true

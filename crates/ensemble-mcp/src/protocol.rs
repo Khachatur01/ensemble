@@ -1,5 +1,6 @@
 //! The protocol's fixed parts: its version, the server's name, and the tool catalogue.
 
+use ensemble_knowledge::Memory;
 use ensemble_tasks::delegation;
 use serde_json::{Value, json};
 
@@ -8,16 +9,24 @@ pub const SERVER_NAME: &str = "ensemble";
 
 /// The shared tool catalogue, wrapped in MCP's envelope.
 ///
-/// `agents` is the whole helper team.
-pub(super) fn tool_definitions(agents: &[&str]) -> Value {
+/// `agents` is the whole helper team; `memory`, a hub's knowledge, adds its
+/// tools.
+pub(super) fn tool_definitions(agents: &[&str], memory: Option<&Memory>) -> Value {
+    let team = delegation::tools(agents)
+        .into_iter()
+        .map(|t| (t.name, t.description, t.parameters));
+    let knowledge = memory
+        .map(Memory::tools)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| (t.name, t.description, t.parameters));
     Value::Array(
-        delegation::tools(agents)
-            .into_iter()
-            .map(|t| {
+        team.chain(knowledge)
+            .map(|(name, description, parameters)| {
                 json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "inputSchema": t.parameters,
+                    "name": name,
+                    "description": description,
+                    "inputSchema": parameters,
                 })
             })
             .collect(),

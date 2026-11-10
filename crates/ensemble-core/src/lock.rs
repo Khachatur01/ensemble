@@ -1,6 +1,7 @@
-//! One worker per working folder. The worker that runs a folder's tasks, in
+//! One worker per directory. The worker that runs a folder's tasks, in
 //! `ensemble mcp` or in `ensemble serve`, holds a lock file in the folder's
-//! state directory; another that finds it held does not run tasks of its own.
+//! state directory, and the one that distills a knowledge vault holds one in
+//! the vault's `.git`; another that finds it held leaves that work to it.
 
 use std::path::{Path, PathBuf};
 
@@ -74,7 +75,7 @@ pub fn acquire(state: &Path) -> Result<WorkerLock, u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ensemble_core::workspace::testing::TempDir;
+    use crate::workspace::testing::TempDir;
 
     #[test]
     fn a_held_lock_names_its_holder_and_is_released_on_drop() {

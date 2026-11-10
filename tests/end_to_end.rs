@@ -553,8 +553,14 @@ struct McpSession {
 
 impl McpSession {
     fn start(scratch: &Scratch) -> Self {
+        Self::start_with(scratch, &[])
+    }
+
+    /// `ensemble mcp` with `extra` arguments, such as `--hub <dir>`.
+    fn start_with(scratch: &Scratch, extra: &[&std::ffi::OsStr]) -> Self {
         let mut child = command(scratch)
             .arg("mcp")
+            .args(extra)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2275,5 +2281,91 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
         stdout_of(&out).contains("distilled by small on up"),
         "{}",
         stdout_of(&out)
+    );
+}
+
+/// A hub made by `ensemble hub init`, beside the project.
+fn hub_of(scratch: &Scratch) -> PathBuf {
+    let hub = scratch.0.with_extension("hub");
+    let out = command(scratch)
+        .args(["hub", "init", "--hub"])
+        .arg(&hub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    hub
+}
+
+/// The files under the vault's `shares/`.
+fn share_files(hub: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut dirs = vec![hub.join("vault/shares")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                found.push(std::fs::read_to_string(path).unwrap());
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn knowledge_is_shared_by_hand_or_by_the_agent_through_mcp() {
+    let s = Scratch::new("hub-share");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    let hub = hub_of(&s);
+
+    let out = command(&s)
+        .args([
+            "share",
+            "--title",
+            "Ports",
+            "--text",
+            "The shop listens on 8080.",
+            "--hub",
+        ])
+        .arg(&hub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).starts_with("shared as "),
+        "{}",
+        stdout_of(&out)
+    );
+    let files = share_files(&hub);
+    assert_eq!(files.len(), 1);
+    assert!(files[0].contains("client: ensemble-cli"), "{}", files[0]);
+    assert!(
+        files[0].contains("The shop listens on 8080."),
+        "{}",
+        files[0]
+    );
+
+    let mut session = McpSession::start_with(&s, &["--hub".as_ref(), hub.as_os_str()]);
+    session.request(
+        "initialize",
+        serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {},
+                           "clientInfo": {"name": "claude-code", "version": "2"}}),
+    );
+    let list = session.request("tools/list", serde_json::json!({}));
+    assert!(list.to_string().contains("\"share\""), "{list}");
+    let reply = session.request(
+        "tools/call",
+        serde_json::json!({"name": "share", "arguments": {
+            "title": "Deploys", "text": "Deploys go out on Tuesdays only."}}),
+    );
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let files = share_files(&hub);
+    assert_eq!(files.len(), 2);
+    assert!(
+        files
+            .iter()
+            .any(|f| f.contains("client: claude-code") && f.contains("Tuesdays")),
+        "{files:?}"
     );
 }

@@ -1611,3 +1611,70 @@ fn a_task_whose_agent_has_no_usable_model_waits_and_says_why() {
         );
     });
 }
+
+/// The knowledge of a hub whose vault is in `tmp`.
+fn memory(tmp: &TempDir) -> Memory {
+    let yaml = format!(
+        "version: 1\nowner: Ana\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\n",
+        tmp.0.join("vault").display()
+    );
+    let hub = config::parse_hub(&yaml, std::path::Path::new("hub.yaml"), &BTreeMap::new()).unwrap();
+    let memory = Memory::new(&hub, Some("shop".into())).unwrap();
+    memory.vault().init().unwrap();
+    memory
+}
+
+#[test]
+fn with_a_hub_the_knowledge_tools_are_offered_and_a_share_is_kept() {
+    let (e, tmp) = working();
+    let names = |r: Value| -> Vec<String> {
+        r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let without = names(handle(&e, &rpc("tools/list", json!({}))).unwrap());
+    assert!(!without.contains(&"share".to_string()), "no hub, no share");
+
+    let m = memory(&tmp);
+    let with = names(handle_with(&e, Some(&m), &rpc("tools/list", json!({}))).unwrap());
+    assert_eq!(with.last().map(String::as_str), Some("share"));
+    let r = handle_with(
+        &e,
+        Some(&m),
+        &rpc(
+            "initialize",
+            json!({"clientInfo": {"name": "claude-code", "version": "2"}}),
+        ),
+    )
+    .unwrap();
+    let instructions = r["result"]["instructions"].as_str().unwrap();
+    assert!(instructions.contains("call `share`"), "{instructions}");
+
+    let r = handle_with(
+        &e,
+        Some(&m),
+        &rpc(
+            "tools/call",
+            json!({"name": "share", "arguments": {"title": "Ports", "text": "The shop listens on 8080."}}),
+        ),
+    )
+    .unwrap();
+    assert_eq!(r["result"]["isError"], false, "{r}");
+    let shares = m.vault().shares();
+    assert_eq!(shares.len(), 1);
+    assert_eq!(shares[0].client.as_deref(), Some("claude-code"));
+
+    let r = handle_with(
+        &e,
+        Some(&m),
+        &rpc(
+            "tools/call",
+            json!({"name": "share", "arguments": {"title": "x"}}),
+        ),
+    )
+    .unwrap();
+    assert_eq!(r["result"]["isError"], true, "{r}");
+}

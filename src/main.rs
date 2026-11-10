@@ -46,6 +46,10 @@ COMMANDS:
                             git repository.
     hub check               Load and validate hub.yaml, and say which model
                             would distill shares now.
+    share --title T [--text T]
+                            Keep knowledge in the --hub vault, as an agent's
+                            `share` tool does; the text is read from stdin
+                            when --text is not given.
     doctor                  Say what is wrong with the helper team and the
                             agents it needs, and how to fix each thing.
     add-agent NAME --adapter A [--model M] [--backend B] [--prompt P] [--writes]
@@ -195,7 +199,7 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             "--context" => context = Some(value("--context")?),
             "--manager" | "--adapter" | "--model" | "--backend" | "--starter" | "--prompt"
             | "--status" | "--text" | "--goal" | "--repo" | "--gate" | "--since" | "--after"
-            | "--files" | "--constraints" | "--done-when" | "--ref" => {
+            | "--files" | "--constraints" | "--done-when" | "--ref" | "--title" => {
                 opts.insert(arg.clone(), value(&arg)?);
             }
             other if other.starts_with('-') && command.is_none() => {
@@ -267,6 +271,9 @@ fn run() -> Result<ExitCode, String> {
     }
     if args.command == "hub" {
         return cmd_hub(&args);
+    }
+    if args.command == "share" {
+        return cmd_share(&args, &dir);
     }
 
     let resolved = resolve_team(&args, &args.command)?;
@@ -350,7 +357,7 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
             let hub = config::parse_hub(config::hub::HUB_SAMPLE, &path, &SystemEnv)
                 .map_err(|e| e.to_string())?;
             if let Some(knowledge) = &hub.knowledge {
-                init_vault(&knowledge.vault)?;
+                ensemble::knowledge::Vault::new(&knowledge.vault).init()?;
                 println!(
                     "made the knowledge vault, a git repository: {}",
                     knowledge.vault.display()
@@ -376,7 +383,7 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
                 return Ok(ExitCode::SUCCESS);
             };
             println!("knowledge vault: {}", knowledge.vault.display());
-            if !knowledge.vault.join(".git").exists() {
+            if !ensemble::knowledge::Vault::new(&knowledge.vault).exists() {
                 println!("  it is not a git repository yet; `ensemble hub init` makes it");
                 return Ok(ExitCode::FAILURE);
             }
@@ -410,29 +417,6 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
             }
         }
         other => Err(format!("hub: unknown '{other}'. Use init or check.")),
-    }
-}
-
-/// Make `vault` a git repository, unless it is one already.
-fn init_vault(vault: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(vault)
-        .map_err(|e| format!("cannot create {}: {e}", vault.display()))?;
-    if vault.join(".git").exists() {
-        return Ok(());
-    }
-    let out = std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(vault)
-        .output()
-        .map_err(|e| format!("cannot run git: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "git init in {} failed: {}",
-            vault.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
     }
 }
 
@@ -544,10 +528,58 @@ fn cmd_mcp(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
              ensemble: a harness spawns this; for a one-off try `ensemble run <agent> <task>`."
         );
     }
+    let memory = memory_for(args, &dir)?;
     let ensemble = ensemble_for(config, dir, args);
     let stdin = std::io::stdin();
     // Not locked: delegations reply from their own threads.
-    mcp::serve(&ensemble, stdin.lock(), std::io::stdout()).map_err(|e| format!("mcp: {e}"))?;
+    mcp::serve_with(&ensemble, memory.as_ref(), stdin.lock(), std::io::stdout())
+        .map_err(|e| format!("mcp: {e}"))?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The knowledge of the hub `--hub` names, for work in `dir`. None without a
+/// hub, or with one that keeps no knowledge, which is said on stderr.
+fn memory_for(args: &Args, dir: &Path) -> Result<Option<ensemble::knowledge::Memory>, String> {
+    let Some(hub_dir) = &args.hub else {
+        return Ok(None);
+    };
+    let hub = config::load_hub(
+        &config::hub_path(hub_dir),
+        args.env_file.as_deref(),
+        &SystemEnv,
+    )
+    .map_err(|e| e.to_string())?;
+    let project = dir.file_name().map(|n| n.to_string_lossy().into_owned());
+    let memory = ensemble::knowledge::Memory::new(&hub, project);
+    if memory.is_none() {
+        eprintln!(
+            "ensemble: the hub {} has no `knowledge` block, so it keeps no knowledge",
+            hub_dir.display()
+        );
+    }
+    Ok(memory)
+}
+
+/// `ensemble share`: keep knowledge in the hub's vault by hand, as the `share`
+/// tool does for an agent.
+fn cmd_share(args: &Args, dir: &Path) -> Result<ExitCode, String> {
+    hub_of(args, "share")?;
+    let memory = memory_for(args, dir)?.ok_or("share: the hub keeps no knowledge")?;
+    let title = opt(args, "--title").ok_or("share: needs --title, what it is about")?;
+    let text = match opt(args, "--text") {
+        Some(text) => text.to_string(),
+        None => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                .map_err(|e| format!("share: cannot read the text from stdin: {e}"))?;
+            text
+        }
+    };
+    if text.trim().is_empty() {
+        return Err("share: the text is empty; give it with --text or on stdin".into());
+    }
+    let share = memory.share(Some("ensemble-cli"), title, &text)?;
+    println!("shared as {}", share.id);
     Ok(ExitCode::SUCCESS)
 }
 

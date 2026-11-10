@@ -1,0 +1,19 @@
+[package]
+name = "ensemble-knowledge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Ensemble's knowledge, kept by the hub: a vault of shares and the notes distilled from them, and recall."
+
+[dependencies]
+ensemble-backends.workspace = true
+ensemble-config.workspace = true
+ensemble-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_norway.workspace = true
+
+[dev-dependencies]
+ensemble-core = { workspace = true, features = ["test-support"] }

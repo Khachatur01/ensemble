@@ -23,6 +23,7 @@
 //! the worker that runs a folder's tasks with no session around it.
 
 use ensemble_agents::router::Ensemble;
+use ensemble_knowledge::Memory;
 use ensemble_tasks::delegation;
 use ensemble_tasks::queue::{Queue, Task};
 use ensemble_tasks::tasks::Store;
@@ -51,8 +52,14 @@ pub use protocol::{PROTOCOL_VERSION, SERVER_NAME};
 /// this returns and there are no tasks; [`serve`] is what runs them alongside
 /// the rest.
 pub fn handle(ensemble: &Ensemble, request: &Value) -> Option<Value> {
+    handle_with(ensemble, None, request)
+}
+
+/// [`handle`], with the knowledge of a hub when there is one.
+pub fn handle_with(ensemble: &Ensemble, memory: Option<&Memory>, request: &Value) -> Option<Value> {
     handle_reporting(
         ensemble,
+        memory,
         request,
         &|_| {},
         &AtomicBool::new(false),
@@ -64,9 +71,11 @@ pub fn handle(ensemble: &Ensemble, request: &Value) -> Option<Value> {
 /// [`handle`], with `notify` called for each notification to send to the client
 /// before the reply, such as what a delegated agent is doing. Setting `cancel`
 /// stops a delegation at its next step. Tasks and background delegations are
-/// kept in `queue`, and background work is started with `spawn`.
+/// kept in `queue`, and background work is started with `spawn`. With
+/// `memory`, the knowledge tools are offered too.
 pub fn handle_reporting<'s>(
     ensemble: &'s Ensemble,
+    memory: Option<&Memory>,
     request: &Value,
     notify: &dyn Fn(Value),
     cancel: &AtomicBool,
@@ -87,15 +96,28 @@ pub fn handle_reporting<'s>(
                 .and_then(|p| p.get("protocolVersion"))
                 .and_then(Value::as_str)
                 .unwrap_or(PROTOCOL_VERSION);
+            // Who is on the other end, named in what it shares.
+            if let (Some(memory), Some(client)) = (
+                memory,
+                request
+                    .pointer("/params/clientInfo/name")
+                    .and_then(Value::as_str),
+            ) {
+                memory.set_client(client);
+            }
+            let mut instructions = protocol::instructions(ensemble.config());
+            if let Some(memory) = memory {
+                instructions.push_str(memory.instructions());
+            }
             reply(json!({
                 "protocolVersion": version,
                 "capabilities": { "tools": { "listChanged": false }, "logging": {} },
                 "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-                "instructions": protocol::instructions(ensemble.config())
+                "instructions": instructions
             }))
         }
 
-        "tools/list" => reply(json!({ "tools": tool_definitions(&ensemble.agents()) })),
+        "tools/list" => reply(json!({ "tools": tool_definitions(&ensemble.agents(), memory) })),
 
         "tools/call" => {
             let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -112,6 +134,16 @@ pub fn handle_reporting<'s>(
                 .cloned()
                 .or_else(|| id.clone())
                 .unwrap_or_else(|| json!("ensemble"));
+            if let Some(result) = memory.and_then(|m| m.call(name, &args)) {
+                let (text, is_error) = match result {
+                    Ok(text) => (text, false),
+                    Err(text) => (text, true),
+                };
+                return reply(json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "isError": is_error
+                }));
+            }
             let count = Cell::new(0u64);
             let result = delegation::call(
                 ensemble,
@@ -166,6 +198,17 @@ pub fn handle_reporting<'s>(
 /// calls still running are finished before this returns.
 pub fn serve<W: Write + Send>(
     ensemble: &Ensemble,
+    input: impl BufRead,
+    output: W,
+) -> std::io::Result<()> {
+    serve_with(ensemble, None, input, output)
+}
+
+/// [`serve`], with the knowledge of a hub when there is one: its tools are
+/// offered.
+pub fn serve_with<W: Write + Send>(
+    ensemble: &Ensemble,
+    memory: Option<&Memory>,
     input: impl BufRead,
     output: W,
 ) -> std::io::Result<()> {
@@ -254,6 +297,7 @@ pub fn serve<W: Write + Send>(
                         scope.spawn(move || {
                             let response = handle_reporting(
                                 ensemble,
+                                memory,
                                 &request,
                                 notify,
                                 &cancel,
@@ -275,6 +319,7 @@ pub fn serve<W: Write + Send>(
                 }
                 if let Some(response) = handle_reporting(
                     ensemble,
+                    memory,
                     &request,
                     notify,
                     &AtomicBool::new(false),

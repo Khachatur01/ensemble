@@ -5,7 +5,7 @@
 //! (`lock`), and the review and merge of a worktree task's branch (`review`).
 
 pub mod delegation;
-pub mod lock;
+pub use ensemble_core::lock;
 pub mod queue;
 pub mod review;
 pub mod tasks;
