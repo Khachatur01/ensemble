@@ -930,11 +930,11 @@ state directory), `--context <text>` (for `run`).
 
 | | |
 | --- | --- |
-| `src/config/` | the helper team's `config.yaml`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`mod.rs`), versions 1 and 2 to 3 (`migrate.rs`) |
+| `crates/ensemble-config/` | the helper team's `config.yaml`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), versions 1 and 2 to 3 (`migrate.rs`) |
 | `src/state.rs` | the per-user state and cache directories |
 | `src/remote.rs` | remote helper teams: parsing, pinning, the cache, trust, and describing what a config would run |
 | `src/setup.rs` | `setup`, `connect` and `doctor`: detecting CLIs and servers, starters, registrations, findings |
-| `src/config/edit.rs` | adding and removing an agent in `config.yaml` as text, comments kept |
+| `crates/ensemble-config/src/edit.rs` | adding and removing an agent in `config.yaml` as text, comments kept |
 | `src/router.rs` | agents to adapters; the ensemble itself, and `health` |
 | `src/external/` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `direct` adapter (one chat request), and gates |
 | `src/workspace.rs` | the working folder, a `repo` inside it, and what a run changed |
@@ -978,7 +978,7 @@ scripts stand in for the CLIs.
 
 | suite | what it covers |
 | --- | --- |
-| `src/config/tests.rs` | every validation rule, environment precedence, secrets, typos, the schema kept in step with the code |
+| `crates/ensemble-config/src/tests.rs` | every validation rule, environment precedence, secrets, typos, the schema kept in step with the code |
 | `src/external/` | each CLI's command line, generated config and event stream, denials, limits, failures, the time limit killing the process tree |
 | `src/router.rs`, `src/llm_backend.rs` | routing, `health` and its model check |
 | `src/tasks.rs` | ticket files: reading, ids, results written once, run logs |

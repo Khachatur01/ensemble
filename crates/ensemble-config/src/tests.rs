@@ -522,7 +522,7 @@ fn a_malformed_dotenv_line_is_reported_with_its_number() {
 
 #[test]
 fn an_env_file_fills_in_what_the_environment_lacks() {
-    let tmp = crate::workspace::testing::TempDir::new();
+    let tmp = ensemble_core::workspace::testing::TempDir::new();
     let org = tmp.0.join("org");
     std::fs::create_dir_all(&org).unwrap();
     std::fs::write(
@@ -555,7 +555,7 @@ fn an_env_file_fills_in_what_the_environment_lacks() {
 
 #[test]
 fn a_dotenv_beside_the_config_is_not_read() {
-    let tmp = crate::workspace::testing::TempDir::new();
+    let tmp = ensemble_core::workspace::testing::TempDir::new();
     std::fs::write(
         tmp.0.join(CONFIG_FILENAME),
         migrate::to_v3(REFERENCE).unwrap(),
@@ -568,7 +568,7 @@ fn a_dotenv_beside_the_config_is_not_read() {
 
 #[test]
 fn a_named_env_file_that_is_missing_is_an_error() {
-    let tmp = crate::workspace::testing::TempDir::new();
+    let tmp = ensemble_core::workspace::testing::TempDir::new();
     std::fs::write(
         tmp.0.join(CONFIG_FILENAME),
         migrate::to_v3(REFERENCE).unwrap(),

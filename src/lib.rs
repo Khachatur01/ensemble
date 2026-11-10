@@ -20,7 +20,6 @@
 //! nothing about the CLIs; the router knows agents, and the adapters in
 //! `external` know how each CLI is started and read.
 
-pub mod config;
 pub mod external;
 pub mod harness;
 pub mod llm_backend;
@@ -32,4 +31,5 @@ pub mod tasks;
 pub mod tracker;
 pub mod worktree;
 
+pub use ensemble_config as config;
 pub use ensemble_core::{port, records, state, workspace};

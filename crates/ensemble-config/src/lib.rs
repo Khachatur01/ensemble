@@ -28,11 +28,11 @@ pub const CONFIG_FILENAME: &str = "config.yaml";
 
 /// The JSON Schema for `config.yaml`, for editors. `ensemble schema`
 /// prints it; the tests keep it in step with the structs below.
-pub const SCHEMA: &str = include_str!("../../ensemble.schema.json");
+pub const SCHEMA: &str = include_str!("../../../ensemble.schema.json");
 
 /// The config `ensemble init` writes: every setting at least once, with what
 /// it does. The tests keep it loading and complete.
-pub const SAMPLE: &str = include_str!("../sample.yaml");
+pub const SAMPLE: &str = include_str!("sample.yaml");
 
 /// The first line of a config, which points an editor at the JSON Schema.
 pub const SCHEMA_URL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json";

@@ -24,6 +24,7 @@ ureq = "3"
 # no extra compilation.
 libc = "0.2"
 ensemble-core = { path = "crates/ensemble-core" }
+ensemble-config = { path = "crates/ensemble-config" }
 
 [package]
 name = "ensemble"
@@ -42,6 +43,7 @@ name = "ensemble"
 path = "src/main.rs"
 
 [dependencies]
+ensemble-config.workspace = true
 ensemble-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
