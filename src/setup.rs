@@ -1,6 +1,6 @@
-//! Getting started: finding what is installed, writing a starter organization,
+//! Getting started: finding what is installed, writing a starter helper team,
 //! registering Ensemble with the manager, and saying what is wrong and how to
-//! fix it. The pieces that touch nothing outside take what they need as
+//! fi.is_some_and(|x| x.contains("add-agent <name>")) it. The pieces that to.map(|u| format!("ensemble remove-agent {u} --team {}", team.display()))ch nothing outside take what they need as
 //! arguments, so tests can run them without a terminal or a network.
 
 use crate::config::edit::{NewAgent, add_agent, agent_block};
@@ -72,12 +72,10 @@ pub fn detect(probe: bool) -> Detected {
     }
 }
 
-/// A starter organization: one team and the agents it begins with.
+/// A starter helper team: the agents it begins with.
 #[derive(Debug)]
 pub struct Starter {
     pub name: &'static str,
-    pub team: &'static str,
-    pub prompt: &'static str,
     /// (name, what it is for, whether it may change files)
     pub agents: &'static [(&'static str, &'static str, bool)],
 }
@@ -85,8 +83,6 @@ pub struct Starter {
 pub const STARTERS: [Starter; 3] = [
     Starter {
         name: "software",
-        team: "software",
-        prompt: "Builds and reviews the software of the project.",
         agents: &[
             (
                 "coder",
@@ -102,8 +98,6 @@ pub const STARTERS: [Starter; 3] = [
     },
     Starter {
         name: "hardware",
-        team: "hardware",
-        prompt: "Designs and checks the hardware of the project: KiCad schematics and boards.",
         agents: &[
             (
                 "designer",
@@ -119,8 +113,6 @@ pub const STARTERS: [Starter; 3] = [
     },
     Starter {
         name: "docs",
-        team: "docs",
-        prompt: "Writes and edits the documentation of the project.",
         agents: &[
             (
                 "writer",
@@ -150,15 +142,15 @@ pub fn starter(name: &str) -> Result<&'static Starter, String> {
     })
 }
 
-/// The text of a starter organization built for what is `found`: agents that
+/// The text of a starter helper team built for what is `found`: agents that
 /// change files run on OpenCode when it is there, reviewers on Claude Code, and
 /// either stands in for the other. A local model server that answered becomes
 /// an LLM backend, ready for an agent to name.
-pub fn starter_org(starter: &Starter, found: &Detected) -> Result<String, String> {
+pub fn starter_team(starter: &Starter, found: &Detected) -> Result<String, String> {
     if !found.claude && !found.opencode && !found.codex {
         return Err("no agent CLI found on PATH. Install `claude` (Claude Code), `opencode` or `codex`, then run this again.".into());
     }
-    let mut text = format!("{SCHEMA_URL_LINE}\n\nversion: 2\n\n");
+    let mut text = format!("{SCHEMA_URL_LINE}\n\nversion: 3\n\n");
     if found.servers.is_empty() {
         text.push_str("llm_backends: {}\n\n");
     } else {
@@ -170,10 +162,7 @@ pub fn starter_org(starter: &Starter, found: &Detected) -> Result<String, String
         }
         text.push('\n');
     }
-    text.push_str("limits: {}\n\nteams: {}\n");
-    // `teams: {}` is a flow mapping; give add_agent a block to extend.
-    text = text.replace("teams: {}\n", "teams:\n");
-    let mut team_added = false;
+    text.push_str("limits: {}\n\ntracker:\n  type: local_markdown\n\ngates: {}\n\nagents: {}\n");
     for (name, prompt, writes) in starter.agents {
         // Writers go to OpenCode, then Codex, then Claude Code; readers to Claude
         // Code, then Codex, then OpenCode: whichever of them is there.
@@ -204,10 +193,8 @@ pub fn starter_org(starter: &Starter, found: &Detected) -> Result<String, String
                 writes: *writes,
             },
         )?;
-        text = add_agent(&text, starter.team, name, &block, starter.prompt)?;
-        team_added = true;
+        text = add_agent(&text, name, &block)?;
     }
-    debug_assert!(team_added);
     Ok(text)
 }
 
@@ -242,29 +229,24 @@ fn shell_word(s: &str) -> String {
     }
 }
 
-/// How to register `ensemble mcp` with `manager`, serving the organization at
-/// `org` (an absolute path).
+/// How to register `ensemble mcp` with `manager`, serving the helper team at
+/// `team` (an absolute path).
 pub fn registration(
     manager: &str,
     ensemble: &str,
-    org: &Path,
+    team: &Path,
     env_file: Option<&Path>,
-    only: Option<&str>,
     global: bool,
 ) -> Result<Registration, String> {
     let mut serve = vec![
         ensemble.to_string(),
         "mcp".into(),
-        "--org".into(),
-        org.display().to_string(),
+        "--team".into(),
+        team.display().to_string(),
     ];
     if let Some(env_file) = env_file {
         serve.push("--env-file".into());
         serve.push(env_file.display().to_string());
-    }
-    if let Some(only) = only {
-        serve.push("--only".into());
-        serve.push(only.to_string());
     }
     let (program, mut args): (&'static str, Vec<String>) = match manager {
         CLAUDE_CODE_AGENT => (
@@ -411,34 +393,17 @@ pub fn risks(config: &Config) -> Vec<Finding> {
     out
 }
 
-/// Checks that need no running agent: the structure of the organization.
-pub fn structure(config: &Config, org: &Path, workdir: &Path) -> Vec<Finding> {
+/// Checks that need no running agent: the structure of the helper team.
+pub fn structure(config: &Config, team: &Path, workdir: &Path) -> Vec<Finding> {
     let mut out = Vec::new();
-    for team in config.teams.values() {
-        if team.agents.is_empty() {
-            out.push(Finding::bad(
-                format!("team '{}' has no agents", team.name),
-                format!(
-                    "ensemble add-agent {}/<name> --adapter opencode --org {}",
-                    team.name,
-                    org.display()
-                ),
-            ));
-        }
-    }
-    let teams: Vec<_> = config.teams.values().collect();
-    for (i, a) in teams.iter().enumerate() {
-        for b in &teams[i + 1..] {
-            if a.summary().eq_ignore_ascii_case(b.summary()) {
-                out.push(Finding::bad(
-                    format!(
-                        "teams '{}' and '{}' have the same prompt, so the manager cannot tell them apart",
-                        a.name, b.name
-                    ),
-                    "give each team a `prompt` that says what it is for",
-                ));
-            }
-        }
+    if config.agents.is_empty() {
+        out.push(Finding::bad(
+            "the helper team has no agents",
+            format!(
+                "ensemble add-agent <name> --adapter opencode --team {}",
+                team.display()
+            ),
+        ));
     }
     let wants_git = config
         .agents
@@ -455,11 +420,7 @@ pub fn structure(config: &Config, org: &Path, workdir: &Path) -> Vec<Finding> {
     }
     out.extend(risks(config));
     if out.iter().all(|f| f.level != Level::Problem) {
-        out.push(Finding::ok(format!(
-            "{} teams, {} agents",
-            config.teams.len(),
-            config.agents.len()
-        )));
+        out.push(Finding::ok(format!("{} agents", config.agents.len())));
     }
     out
 }
@@ -469,7 +430,7 @@ pub fn health_finding(
     name: &str,
     result: &Result<(), crate::port::Error>,
     config: &Config,
-    org: &Path,
+    team: &Path,
 ) -> Finding {
     match result {
         Ok(()) => Finding::ok(format!("{name}: ok")),
@@ -484,7 +445,7 @@ pub fn health_finding(
                 .collect();
             let remove = users
                 .iter()
-                .map(|u| format!("ensemble remove-agent {u} --org {}", org.display()))
+                .map(|u| format!("ensemble remove-agent {u} --team {}", team.display()))
                 .collect::<Vec<_>>()
                 .join("; ");
             let fix = if kind == CLAUDE_CODE_AGENT || kind == OPENCODE_AGENT {
@@ -529,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn every_starter_is_a_valid_organization_for_every_set_of_clis() {
+    fn every_starter_is_a_valid_helper_team_for_every_set_of_clis() {
         for s in &STARTERS {
             for (claude, opencode, codex) in [
                 (true, true, false),
@@ -544,8 +505,8 @@ mod tests {
                     codex,
                     servers: Vec::new(),
                 };
-                let c = loads(&starter_org(s, &found).unwrap());
-                assert_eq!(c.teams[s.team].agents.len(), s.agents.len());
+                let c = loads(&starter_team(s, &found).unwrap());
+                assert_eq!(c.agents.len(), s.agents.len());
                 for a in c.agents.values() {
                     assert!(
                         (a.kind() == CLAUDE_CODE_AGENT && claude)
@@ -561,41 +522,40 @@ mod tests {
 
     #[test]
     fn writers_run_on_opencode_and_reviewers_on_claude_code_when_both_are_there() {
-        let c = loads(&starter_org(starter("software").unwrap(), &both()).unwrap());
-        assert_eq!(c.agents["software/coder"].kind(), OPENCODE_AGENT);
-        assert_eq!(c.agents["software/reviewer"].kind(), CLAUDE_CODE_AGENT);
-        assert!(c.agents["software/coder"].can_change_files());
-        assert!(!c.agents["software/reviewer"].can_change_files());
+        let c = loads(&starter_team(starter("software").unwrap(), &both()).unwrap());
+        assert_eq!(c.agents["coder"].kind(), OPENCODE_AGENT);
+        assert_eq!(c.agents["reviewer"].kind(), CLAUDE_CODE_AGENT);
+        assert!(c.agents["coder"].can_change_files());
+        assert!(!c.agents["reviewer"].can_change_files());
     }
 
     #[test]
     fn nothing_is_written_without_an_agent_cli_and_a_server_becomes_a_backend() {
         let none = Detected::default();
-        let err = starter_org(starter("docs").unwrap(), &none).unwrap_err();
+        let err = starter_team(starter("docs").unwrap(), &none).unwrap_err();
         assert!(err.contains("claude") && err.contains("opencode"), "{err}");
         let with = Detected {
             servers: vec![("ollama".into(), "http://127.0.0.1:11434/v1".into())],
             ..both()
         };
-        let c = loads(&starter_org(starter("docs").unwrap(), &with).unwrap());
+        let c = loads(&starter_team(starter("docs").unwrap(), &with).unwrap());
         assert!(c.llm_backends.contains_key("ollama"));
         assert!(starter("nope").unwrap_err().contains("software"));
     }
 
     #[test]
-    fn registrations_name_the_org_and_the_scope() {
+    fn registrations_name_the_team_and_the_scope() {
         let org = Path::new("/home/me/org");
-        let r = registration("claude-code", "ensemble", org, None, None, false).unwrap();
+        let r = registration("claude-code", "ensemble", org, None, false).unwrap();
         assert_eq!(
             r.line(),
-            "claude mcp add --scope local ensemble -- ensemble mcp --org /home/me/org"
+            "claude mcp add --scope local ensemble -- ensemble mcp --team /home/me/org"
         );
         let r = registration(
             "claude-code",
             "ensemble",
             org,
             Some(Path::new("/k.env")),
-            Some("a,b"),
             true,
         )
         .unwrap();
@@ -603,29 +563,25 @@ mod tests {
             r.line()
                 .starts_with("claude mcp add --scope user ensemble -- ")
         );
-        assert!(
-            r.line().ends_with("--env-file /k.env --only a,b"),
-            "{}",
-            r.line()
-        );
-        let r = registration("opencode", "ensemble", org, None, None, true).unwrap();
+        assert!(r.line().ends_with("--env-file /k.env"), "{}", r.line());
+        let r = registration("opencode", "ensemble", org, None, true).unwrap();
         assert_eq!(
             r.line(),
-            "opencode mcp add --global ensemble -- ensemble mcp --org /home/me/org"
+            "opencode mcp add --global ensemble -- ensemble mcp --team /home/me/org"
         );
-        let r = registration("opencode", "ensemble", Path::new("/a b"), None, None, false).unwrap();
-        assert!(r.line().ends_with("--org '/a b'"), "{}", r.line());
-        let r = registration("codex", "ensemble", org, None, None, true).unwrap();
+        let r = registration("opencode", "ensemble", Path::new("/a b"), None, false).unwrap();
+        assert!(r.line().ends_with("--team '/a b'"), "{}", r.line());
+        let r = registration("codex", "ensemble", org, None, true).unwrap();
         assert_eq!(
             r.line(),
-            "codex mcp add ensemble -- ensemble mcp --org /home/me/org"
+            "codex mcp add ensemble -- ensemble mcp --team /home/me/org"
         );
-        assert!(registration("emacs", "ensemble", org, None, None, false).is_err());
+        assert!(registration("emacs", "ensemble", org, None, false).is_err());
     }
 
     #[test]
     fn the_structure_check_names_what_is_wrong() {
-        let c = loads(&starter_org(starter("software").unwrap(), &both()).unwrap());
+        let c = loads(&starter_team(starter("software").unwrap(), &both()).unwrap());
         let tmp = crate::workspace::testing::TempDir::new();
         let findings = structure(&c, Path::new("/org"), &tmp.0);
         assert!(
@@ -643,12 +599,10 @@ mod tests {
 
         let bare = crate::config::edit::remove_agent(
             &crate::config::edit::remove_agent(
-                &starter_org(starter("software").unwrap(), &both()).unwrap(),
-                "software",
+                &starter_team(starter("software").unwrap(), &both()).unwrap(),
                 "coder",
             )
             .unwrap(),
-            "software",
             "reviewer",
         )
         .unwrap();
@@ -658,7 +612,7 @@ mod tests {
                 && f.what.contains("no agents")
                 && f.fix
                     .as_deref()
-                    .is_some_and(|x| x.contains("add-agent software/<name>"))),
+                    .is_some_and(|x| x.contains("add-agent <name>"))),
             "{findings:?}"
         );
     }

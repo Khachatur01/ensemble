@@ -1,7 +1,7 @@
 //! Tasks as files: tickets the manager or a person writes, that agents work
 //! through while `ensemble mcp` runs.
 //!
-//! A task is a directory under `.ensemble/tasks/`, named by its id
+//! A task is a directory under the state directory's `tasks/`, named by its id
 //! (`0007-add-retry`), holding two files that are meant to be committed, like
 //! a ticket and its resolution:
 //!
@@ -70,7 +70,7 @@ agent's `max_concurrent`.
     done_when: [cargo test passes]
     after: [0001-add-ureq]     # tasks that must be done first
     repo: backend           # a folder of the working directory, when it holds several repos
-    gate: { name: test, attempts: 3 }   # a check from the team's gates in config.yaml
+    gate: { name: test, attempts: 3 }   # a check from `gates` in config.yaml
     ---
     Retry a failed request three times, waiting 1s, 2s, 4s.
 
@@ -121,12 +121,9 @@ pub struct GateRef {
 pub struct Ticket {
     pub id: String,
     pub title: String,
-    /// Its assignee, `team/agent`: a ticket written as `agent` is taken as the
-    /// agent of the team whose folder it is in. Empty for a task in the backlog,
-    /// which no agent works on until it is assigned.
+    /// Its assignee. Empty for a task in the backlog, which no agent works on
+    /// until it is assigned.
     pub agent: String,
-    /// The team whose folder the task is in; its tracker.
-    pub team: String,
     /// Background for the agent, passed as the delegation's context.
     pub context: Option<String>,
     /// The outcome wanted, in a sentence.
@@ -285,7 +282,7 @@ pub struct Store {
     tasks: PathBuf,
     runs: PathBuf,
     /// Where usage counters are kept when not in `runs/`: the directory of
-    /// the organization, shared by every project that uses it.
+    /// the helper team, shared by every project that uses it.
     usage: Option<PathBuf>,
 }
 
@@ -323,24 +320,8 @@ impl Store {
     /// Write `ticket` as a new task and return its id: the next number, then
     /// a slug of the title. The ticket's own `id` is not used.
     pub fn create(&self, ticket: &Ticket) -> io::Result<String> {
-        // The team is the assignee's, or the one named for a backlog task.
-        let team = if ticket.agent.is_empty() {
-            Some(ticket.team.as_str())
-        } else {
-            ticket.agent.split_once('/').map(|(team, _)| team)
-        }
-        .filter(|team| valid_id(team))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "agent '{}' is not team/agent, so there is no team to keep the task in",
-                    ticket.agent
-                ),
-            )
-        })?;
-        let folder = self.tasks.join(team);
-        fs::create_dir_all(&folder)?;
+        let folder = &self.tasks;
+        fs::create_dir_all(folder)?;
         let mut front = format!("title: {}\n", yaml_str(&ticket.title));
         if !ticket.agent.is_empty() {
             front.push_str(&format!("agent: {}\n", yaml_str(&ticket.agent)));
@@ -391,28 +372,11 @@ impl Store {
         }
     }
 
-    /// The folder of team `team`'s tasks, and every team's.
-    fn team_dirs(&self) -> Vec<(String, PathBuf)> {
-        let mut teams = dir_names(&self.tasks);
-        teams.sort();
-        teams
-            .into_iter()
-            .map(|team| {
-                let dir = self.tasks.join(&team);
-                (team, dir)
-            })
-            .collect()
-    }
-
-    /// The directory of task `id`, in whichever team has it. Ids are numbered
-    /// across the folder, so an id names one task.
+    /// The directory of task `id`. Ids are numbered across the folder, so an
+    /// id names one task.
     fn dir(&self, id: &str) -> PathBuf {
         if valid_id(id) {
-            for (_, dir) in self.team_dirs() {
-                if dir.join(id).join(TASK_FILE).is_file() {
-                    return dir.join(id);
-                }
-            }
+            return self.tasks.join(id);
         }
         // Not a task: a path that is not there.
         self.tasks.join("-").join("-")
@@ -420,9 +384,8 @@ impl Store {
 
     /// One past the highest number any task id starts with.
     fn next_number(&self) -> u32 {
-        self.team_dirs()
-            .iter()
-            .flat_map(|(_, dir)| dir_names(dir))
+        dir_names(&self.tasks)
+            .into_iter()
             .filter_map(|name| {
                 let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
                 digits.parse::<u32>().ok()
@@ -431,12 +394,46 @@ impl Store {
             .map_or(1, |n| n + 1)
     }
 
+    /// Before version 3 tasks lived in a folder per team, `tasks/<team>/<id>`.
+    /// A folder under `tasks/` that is no task itself but holds tasks is one of
+    /// those: its tasks are moved up, once, so none is lost. A task that is
+    /// already there under the same id stays, and the old one is left where it
+    /// is and said so.
+    fn adopt_team_folders(&self) {
+        for team in dir_names(&self.tasks) {
+            let folder = self.tasks.join(&team);
+            if folder.join(TASK_FILE).is_file() {
+                continue;
+            }
+            for id in dir_names(&folder) {
+                let old = folder.join(&id);
+                if !old.join(TASK_FILE).is_file() {
+                    continue;
+                }
+                let new = self.tasks.join(&id);
+                if new.exists() {
+                    eprintln!(
+                        "ensemble: tasks/{team}/{id} was not moved to tasks/{id}: a task of that id is already there"
+                    );
+                    continue;
+                }
+                match fs::rename(&old, &new) {
+                    Ok(()) => eprintln!("ensemble: moved tasks/{team}/{id} to tasks/{id}"),
+                    Err(e) => {
+                        eprintln!("ensemble: cannot move tasks/{team}/{id} to tasks/{id}: {e}")
+                    }
+                }
+            }
+            // An emptied team folder goes; one with anything else in it stays.
+            let _ = fs::remove_dir(&folder);
+        }
+    }
+
     /// Every task, by id. A directory without a `task.md` is not a task yet.
     pub fn scan(&self) -> Vec<Entry> {
-        let mut ids: Vec<String> = self
-            .team_dirs()
-            .iter()
-            .flat_map(|(_, dir)| dir_names(dir))
+        self.adopt_team_folders();
+        let mut ids: Vec<String> = dir_names(&self.tasks)
+            .into_iter()
             .filter(|id| self.dir(id).join(TASK_FILE).is_file())
             .collect();
         ids.sort();
@@ -464,30 +461,16 @@ impl Store {
         let path = dir.join(TASK_FILE);
         let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut ticket = parse_ticket(id, &text).map_err(|e| format!("{}: {e}", path.display()))?;
-        let team = dir
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        match ticket.agent.split_once('/') {
-            _ if ticket.agent.is_empty() => {}
-            Some((of, _)) if of != team => {
-                return Err(format!(
-                    "{}: agent '{}' is in team '{of}', but the task is in team '{team}': a team's tasks go to its own agents",
-                    path.display(),
-                    ticket.agent
-                ));
-            }
-            Some(_) => {}
-            None => ticket.agent = format!("{team}/{}", ticket.agent),
-        }
+        // A ticket from before version 3 names its agent as `team/agent`; the
+        // team is gone, so the agent is the part after the slash.
+        let plain = |agent: &str| agent.rsplit('/').next().unwrap_or(agent).to_string();
+        ticket.agent = plain(&ticket.agent);
         // Who it is assigned to now, if it was assigned or handed on since.
         if let Ok(now) = fs::read_to_string(dir.join(ASSIGNEE_FILE))
             && !now.trim().is_empty()
         {
-            ticket.agent = now.trim().to_string();
+            ticket.agent = plain(now.trim());
         }
-        ticket.team = team;
         Ok(ticket)
     }
 
@@ -647,7 +630,7 @@ impl Store {
     }
 
     /// When each agent started its recent runs, in seconds since the epoch.
-    /// Assign task `id` to `agent` (`team/agent`), whoever has it now. The
+    /// Assign task `id` to `agent`, whoever has it now. The
     /// ticket itself is not rewritten: the assignee is kept beside it.
     pub fn assign(&self, id: &str, agent: &str) -> io::Result<()> {
         if !self.exists(id) {
@@ -770,7 +753,7 @@ pub fn active_tasks(entries: &[Entry], store: Option<&Store>) -> usize {
         .count()
 }
 
-/// A line saying the organization has nothing active, and what is waiting for
+/// A line saying the helper team has nothing active, and what is waiting for
 /// the owner; `None` while something is.
 pub fn idle_line(entries: &[Entry], store: Option<&Store>) -> Option<String> {
     if active_tasks(entries, store) > 0 {
@@ -796,7 +779,7 @@ pub fn idle_line(entries: &[Entry], store: Option<&Store>) -> Option<String> {
         waiting.push(format!("{asking} waiting for an answer"));
     }
     Some(format!(
-        "Idle: no active tasks{}. The organization waits for planning: tell your manager what to do next.",
+        "Idle: no active tasks{}. The helper team waits for planning: tell your agent what to do next.",
         if waiting.is_empty() {
             String::new()
         } else {
@@ -913,7 +896,6 @@ fn parse_ticket(id: &str, text: &str) -> Result<Ticket, String> {
         id: id.to_string(),
         title: front.title.trim().to_string(),
         agent: front.agent.unwrap_or_default().trim().to_string(),
-        team: String::new(),
         context: some(front.context),
         goal: some(front.goal),
         constraints: front.constraints.unwrap_or_default(),
@@ -986,11 +968,7 @@ mod tests {
     pub(crate) fn draft(title: &str, agent: &str, text: &str) -> Ticket {
         Ticket {
             title: title.into(),
-            agent: if agent.contains('/') {
-                agent.into()
-            } else {
-                format!("default/{agent}")
-            },
+            agent: agent.into(),
             text: text.into(),
             ..Ticket::default()
         }
@@ -1024,7 +1002,6 @@ mod tests {
             t,
             Ticket {
                 id: id.clone(),
-                team: "default".into(),
                 ..written
             }
         );
@@ -1104,30 +1081,23 @@ mod tests {
     }
 
     #[test]
-    fn tasks_live_in_their_teams_folder_and_ids_count_across_teams() {
+    fn tasks_live_in_one_folder_and_ids_count_across_them() {
         let tmp = TempDir::new();
         let store = Store::new(&tmp.0);
-        let a = store
-            .create(&draft("Wire it", "hardware/layout", "t"))
-            .unwrap();
-        let b = store
-            .create(&draft("Code it", "software/coder", "t"))
-            .unwrap();
+        let a = store.create(&draft("Wire it", "layout", "t")).unwrap();
+        let b = store.create(&draft("Code it", "coder", "t")).unwrap();
         assert_eq!((a.as_str(), b.as_str()), ("0001-wire-it", "0002-code-it"));
-        assert!(tmp.0.join("tasks/hardware/0001-wire-it/task.md").is_file());
-        assert!(tmp.0.join("tasks/software/0002-code-it/task.md").is_file());
-        let teams: Vec<String> = store
+        assert!(tmp.0.join("tasks/0001-wire-it/task.md").is_file());
+        assert!(tmp.0.join("tasks/0002-code-it/task.md").is_file());
+        let agents: Vec<String> = store
             .scan()
             .iter()
             .map(|e| match e {
-                Entry::Task(t, _) => format!("{}:{}", t.team, t.agent),
+                Entry::Task(t, _) => t.agent.clone(),
                 other => panic!("{other:?}"),
             })
             .collect();
-        assert_eq!(
-            teams,
-            ["hardware:hardware/layout", "software:software/coder"]
-        );
+        assert_eq!(agents, ["layout", "coder"]);
         assert!(store.exists(&b));
         store.ask(&b, "which?", "reply").unwrap();
         assert_eq!(store.open_question(&b).as_deref(), Some("which?"));
@@ -1135,11 +1105,11 @@ mod tests {
     }
 
     #[test]
-    fn a_task_names_its_teams_agents_only_and_a_short_name_means_one_of_them() {
+    fn tasks_of_the_old_team_folders_are_moved_up_once_and_their_agents_lose_the_team() {
         let tmp = TempDir::new();
         let store = Store::new(&tmp.0);
-        let write = |team: &str, id: &str, agent: &str| {
-            let dir = tmp.0.join("tasks").join(team).join(id);
+        let write = |path: &str, agent: &str| {
+            let dir = tmp.0.join("tasks").join(path);
             fs::create_dir_all(&dir).unwrap();
             fs::write(
                 dir.join(TASK_FILE),
@@ -1147,44 +1117,39 @@ mod tests {
             )
             .unwrap();
         };
-        write("software", "0001-short", "coder");
-        write("software", "0002-full", "software/coder");
-        write("software", "0003-foreign", "hardware/layout");
-        let agent = |id: &str| store.read(id).map(|t| t.agent);
-        assert_eq!(agent("0001-short").unwrap(), "software/coder");
-        assert_eq!(agent("0002-full").unwrap(), "software/coder");
-        let err = agent("0003-foreign").unwrap_err();
+        write("software/0001-short", "coder");
+        write("software/0002-full", "software/coder");
+        write("hardware/0003-board", "hardware/layout");
+        fs::write(
+            tmp.0.join("tasks/hardware/0003-board").join(ASSIGNEE_FILE),
+            "hardware/checker",
+        )
+        .unwrap();
+        // One of that id is already in place: the old one stays where it is.
+        write("0002-full", "coder");
+        let ids: Vec<String> = store.scan().iter().map(|e| e.id().to_string()).collect();
+        assert_eq!(ids, ["0001-short", "0002-full", "0003-board"]);
+        assert!(tmp.0.join("tasks/0001-short/task.md").is_file());
         assert!(
-            err.contains("its own agents") && err.contains("hardware"),
-            "{err}"
+            tmp.0.join("tasks/software/0002-full/task.md").is_file(),
+            "the clash is left in place"
         );
-        // A task that cannot be read does not stop the others.
-        assert_eq!(store.scan().len(), 3);
-    }
-
-    #[test]
-    fn a_ticket_needs_a_team_to_be_kept_in() {
-        let tmp = TempDir::new();
-        let store = Store::new(&tmp.0);
-        let err = store
-            .create(&Ticket {
-                title: "t".into(),
-                agent: "coder".into(),
-                text: "t".into(),
-                ..Ticket::default()
-            })
-            .unwrap_err();
-        assert!(err.to_string().contains("team"), "{err}");
-        assert!(!tmp.0.join("tasks").exists());
+        assert!(
+            !tmp.0.join("tasks/hardware").exists(),
+            "an emptied team folder goes"
+        );
+        let agent = |id: &str| store.read(id).unwrap().agent;
+        assert_eq!(agent("0001-short"), "coder");
+        assert_eq!(agent("0003-board"), "checker");
     }
 
     #[test]
     fn ids_count_up_past_the_highest_and_skip_a_taken_one() {
         let tmp = TempDir::new();
         let store = Store::new(&tmp.0);
-        fs::create_dir_all(tmp.0.join("tasks/default/0007-by-hand")).unwrap();
+        fs::create_dir_all(tmp.0.join("tasks/0007-by-hand")).unwrap();
         assert_eq!(store.create(&draft("Next", "a", "t")).unwrap(), "0008-next");
-        fs::create_dir_all(tmp.0.join("tasks/default/0009-same")).unwrap();
+        fs::create_dir_all(tmp.0.join("tasks/0009-same")).unwrap();
         assert_eq!(store.create(&draft("Same", "a", "t")).unwrap(), "0010-same");
         assert_eq!(store.create(&draft("", "a", "t")).unwrap(), "0011");
     }
@@ -1204,7 +1169,7 @@ mod tests {
         write("b-no-front", "Find the parser.\n");
         write("c-typo", "---\ntitle: x\nagnet: scout\n---\nt\n");
         write("d-empty", "---\ntitle: x\nagent: scout\n---\n\n");
-        fs::create_dir_all(tmp.0.join("tasks/default/e-not-yet")).unwrap();
+        fs::create_dir_all(tmp.0.join("tasks/e-not-yet")).unwrap();
         let entries = store.scan();
         assert_eq!(entries.len(), 4, "{entries:?}");
         assert!(matches!(&entries[0], Entry::Task(t, None) if t.text == "Find the parser."));

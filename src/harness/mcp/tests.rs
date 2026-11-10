@@ -71,7 +71,7 @@ fn team_with(
                 "  {name}:\n    prompt: \"The {name}. Second line.\"\n    max_seconds: 1800\n    max_concurrent: {max_concurrent}\n    isolation: {isolation}\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {{ type: provider, name: opencode/m-{name} }}\n      tools: [{tools}]\n      system_prompt: append\n      max_steps: 30\n      command: \"{command}\"\n"
             ));
     }
-    let yaml = config::migrate::to_v2(&yaml).unwrap();
+    let yaml = config::migrate::to_v3(&yaml).unwrap();
     let cfg = config::parse(&yaml, std::path::Path::new("config.yaml"), &BTreeMap::new()).unwrap();
     let state = project.join(".ensemble");
     (Ensemble::new(cfg, Some(project)).with_state(state), tmp)
@@ -116,10 +116,10 @@ fn agents_are_labelled_and_a_delegation_reports_what_it_did() {
     let listing = call(&e, "agents", json!({}));
     let listing = text_of(&listing);
     assert!(
-        listing.contains("default/coder [can change files]: The coder. Second line."),
+        listing.contains("coder [can change files]: The coder. Second line."),
         "{listing}"
     );
-    assert!(listing.contains("default/scout [read-only]"), "{listing}");
+    assert!(listing.contains("scout [read-only]"), "{listing}");
 
     let (e, _tmp) = scouting();
     let r = call(&e, "delegate", json!({"agent": "scout", "task": "look"}));
@@ -180,7 +180,7 @@ fn a_delegation_streams_progress_and_log_messages_before_its_reply() {
     assert_eq!(counters, [1, 2, 3], "the counter rises");
     assert_eq!(
         progress[1]["params"]["message"],
-        "default/scout · step 1 · read(a.txt)"
+        "scout · step 1 · read(a.txt)"
     );
 
     let logs: Vec<&Value> = before
@@ -188,7 +188,7 @@ fn a_delegation_streams_progress_and_log_messages_before_its_reply() {
         .filter(|m| m["method"] == "notifications/message")
         .collect();
     assert_eq!(logs.len(), 3);
-    assert_eq!(logs[2]["params"]["data"], "default/scout · done");
+    assert_eq!(logs[2]["params"]["data"], "scout · done");
     assert_eq!(logs[2]["params"]["level"], "info");
 }
 
@@ -319,7 +319,7 @@ fn tools_list_advertises_the_tools_with_the_real_agent_names() {
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert_eq!(agents, vec!["default/coder", "default/reviewer"]);
+    assert_eq!(agents, vec!["coder", "reviewer"]);
 }
 
 #[test]
@@ -440,7 +440,7 @@ fn health_reports_each_cli_and_flags_a_broken_one() {
     assert!(text_of(&good).contains(": ok"), "{}", text_of(&good));
 
     let cfg = config::parse(
-            &config::migrate::to_v2("version: 1\nllm_backends: {}\ngates: {}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 4\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter: { type: opencode, model: { type: provider, name: a/b }, tools: [read], system_prompt: append, max_steps: 3, command: /nonexistent/opencode }\n").unwrap(),
+            &config::migrate::to_v3("version: 1\nllm_backends: {}\ngates: {}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 4\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter: { type: opencode, model: { type: provider, name: a/b }, tools: [read], system_prompt: append, max_steps: 3, command: /nonexistent/opencode }\n").unwrap(),
             std::path::Path::new("config.yaml"),
             &BTreeMap::new(),
         )
@@ -797,7 +797,7 @@ fn project(tmp: &TempDir) -> std::path::PathBuf {
 }
 
 fn tasks(tmp: &TempDir) -> std::path::PathBuf {
-    project(tmp).join(".ensemble/tasks/default")
+    project(tmp).join(".ensemble/tasks")
 }
 
 fn write_task(tmp: &TempDir, id: &str, agent: &str, text: &str) {
@@ -836,16 +836,16 @@ fn a_task_written_by_hand_is_run_and_its_result_written_once() {
     session(&e, |ask| {
         let result = ask("wait", json!({"task": "0001-look", "timeout_seconds": 20}));
         assert!(
-            result.starts_with("---\nstatus: done\nagent: \"default/scout\"\n"),
+            result.starts_with("---\nstatus: done\nagent: \"scout\"\n"),
             "{result}"
         );
         assert!(
-            result.contains("found it") && result.contains("[default/scout: 1 step(s)"),
+            result.contains("found it") && result.contains("[scout: 1 step(s)"),
             "{result}"
         );
         let status = ask("status", json!({}));
         assert!(
-            status.contains("0001-look · default/scout · done · Task 0001-look"),
+            status.contains("0001-look · scout · done · Task 0001-look"),
             "{status}"
         );
         assert!(status.contains("0002-bad · unreadable"), "{status}");
@@ -893,7 +893,7 @@ fn a_submitted_task_is_a_ticket_on_disk_whose_result_wait_returns() {
     let ticket = std::fs::read_to_string(tasks(&tmp).join("0001-find-the-parser/task.md")).unwrap();
     assert_eq!(
         ticket,
-        "---\ntitle: \"Find the parser\"\nagent: \"default/scout\"\ncontext: \"src/\"\n---\nLook.\n"
+        "---\ntitle: \"Find the parser\"\nagent: \"scout\"\ncontext: \"src/\"\n---\nLook.\n"
     );
 }
 
@@ -938,11 +938,8 @@ fn the_end_of_a_session_interrupts_running_tasks_and_leaves_queued_ones() {
     write_task(&tmp, "0002-b", "scout", "b");
     let started = std::time::Instant::now();
     session(&e, |ask| {
-        let status = until(ask, json!({}), "0001-a · default/scout · running");
-        assert!(
-            status.contains("0002-b · default/scout · queued"),
-            "{status}"
-        );
+        let status = until(ask, json!({}), "0001-a · scout · running");
+        assert!(status.contains("0002-b · scout · queued"), "{status}");
     });
     assert!(started.elapsed() < std::time::Duration::from_secs(15));
     let s = store(&tmp);
@@ -1204,8 +1201,7 @@ fn an_agent_over_its_budget_is_refused_and_its_tasks_wait() {
     let (e, tmp) = team(&[("scout", "read", &emit(&step(vec![text("found it")])))]);
     // One run an hour; the record is kept across sessions.
     let mut config = e.config().clone();
-    config.agents.get_mut("default/scout").unwrap().budget =
-        config::Budget::PerHour { delegations: 1 };
+    config.agents.get_mut("scout").unwrap().budget = config::Budget::PerHour { delegations: 1 };
     let e = Ensemble::new(config, Some(project(&tmp))).with_state(project(&tmp).join(".ensemble"));
     session(&e, |ask| {
         let r = ask("delegate", json!({"agent": "scout", "task": "a"}));
@@ -1222,11 +1218,11 @@ fn an_agent_over_its_budget_is_refused_and_its_tasks_wait() {
     write_task(&tmp, "0001-a", "scout", "a");
     session(&e, |ask| {
         let s = until(ask, json!({"task": "0001-a"}), "over its agent's budget");
-        assert!(s.contains("0001-a · default/scout · queued"), "{s}");
+        assert!(s.contains("0001-a · scout · queued"), "{s}");
     });
     assert!(store(&tmp).outcome("0001-a").is_none());
     let usage = store(&tmp).usage();
-    assert_eq!(usage["default/scout"].len(), 1, "{usage:?}");
+    assert_eq!(usage["scout"].len(), 1, "{usage:?}");
 }
 
 #[test]
@@ -1267,30 +1263,25 @@ fn a_repo_outside_the_project_is_refused_by_delegate_and_submit() {
 }
 
 #[test]
-fn agents_can_be_listed_for_one_team_and_an_unknown_team_is_named() {
+fn agents_lists_every_agent_and_takes_no_team() {
     let (e, _tmp) = team(&[("coder", "read, edit", "true"), ("scout", "read", "true")]);
-    let one = call(&e, "agents", json!({"team": "default"}));
+    let all = call(&e, "agents", json!({}));
     assert!(
-        text_of(&one).contains("default/scout [read-only]"),
+        text_of(&all).contains("scout [read-only]") && text_of(&all).contains("coder"),
         "{}",
-        text_of(&one)
+        text_of(&all)
     );
-    let bad = call(&e, "agents", json!({"team": "nope"}));
-    assert_eq!(bad["result"]["isError"], true);
-    assert!(
-        text_of(&bad).contains("Teams: default"),
-        "{}",
-        text_of(&bad)
-    );
+    assert!(!text_of(&all).contains("team"), "{}", text_of(&all));
 }
 
 #[test]
-fn initialize_tells_the_manager_the_teams_and_how_to_hand_work_over() {
+fn initialize_tells_the_calling_agent_the_team_and_how_to_hand_work_over() {
     let (e, _tmp) = team(&[("coder", "read, edit", "true"), ("scout", "read", "true")]);
     let r = handle(&e, &rpc("initialize", json!({}))).unwrap();
     let text = r["result"]["instructions"].as_str().unwrap();
     assert!(
-        text.contains("- default: The agents of this project. (2 agents)"),
+        text.contains("- coder: The coder. Second line.")
+            && text.contains("- scout: The scout. Second line."),
         "{text}"
     );
     assert!(
@@ -1340,7 +1331,7 @@ fn a_delegation_leaves_a_record_of_the_run() {
     let records = crate::records::read(&project(&tmp).join(".ensemble"));
     assert_eq!(records.len(), 1, "{records:?}");
     let run = &records[0];
-    assert_eq!(run.agent, "default/scout");
+    assert_eq!(run.agent, "scout");
     assert!(run.ok && run.error.is_none());
     assert_eq!(
         (run.prompt_tokens, run.completion_tokens),
@@ -1410,10 +1401,7 @@ fn a_plain_answer_is_not_mistaken_for_a_question() {
 fn a_backlog_task_waits_for_an_assignee_and_then_runs_for_that_agent() {
     let (e, tmp) = team(&[("scout", "read", &emit(&step(vec![text("found it")])))]);
     session(&e, |ask| {
-        let r = ask(
-            "submit",
-            json!({"team": "default", "title": "Look around", "task": "look"}),
-        );
+        let r = ask("submit", json!({"title": "Look around", "task": "look"}));
         assert!(r.contains("0001-look-around"), "{r}");
         std::thread::sleep(std::time::Duration::from_millis(1500));
         let status = ask("status", json!({}));
@@ -1430,7 +1418,7 @@ fn a_backlog_task_waits_for_an_assignee_and_then_runs_for_that_agent() {
             "assign",
             json!({"task": "0001-look-around", "agent": "scout"}),
         );
-        assert!(r.contains("assigned to default/scout"), "{r}");
+        assert!(r.contains("assigned to scout"), "{r}");
         let r = ask(
             "wait",
             json!({"task": "0001-look-around", "timeout_seconds": 20}),
@@ -1472,14 +1460,11 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
             r.contains("status: done") && r.contains("checked the plan"),
             "{r}"
         );
-        assert!(
-            r.contains("default/scout"),
-            "the result names who finished it: {r}"
-        );
+        assert!(r.contains("scout"), "the result names who finished it: {r}");
     });
     let notes = std::fs::read_to_string(tasks(&tmp).join("0001-plan/handoffs.md")).unwrap();
     assert!(
-        notes.contains("default/coder handed this to default/scout")
+        notes.contains("coder handed this to scout")
             && notes.contains("now check it against the code")
             && notes.contains("wrote the plan"),
         "{notes}"
@@ -1536,8 +1521,7 @@ fn agents_on_one_shared_limit_do_not_overlap_whatever_each_would_allow() {
 fn a_token_budget_counts_what_runs_reported_and_refuses_when_it_is_used() {
     let (e, tmp) = team(&[("scout", "read", &emit(&step(vec![text("found it")])))]);
     let mut config = e.config().clone();
-    config.agents.get_mut("default/scout").unwrap().budget =
-        config::Budget::PerHourTokens { tokens: 100 };
+    config.agents.get_mut("scout").unwrap().budget = config::Budget::PerHourTokens { tokens: 100 };
     let e = Ensemble::new(config, Some(project(&tmp))).with_state(project(&tmp).join(".ensemble"));
     let dir = project(&tmp).join(".ensemble");
     let now = std::time::SystemTime::now()
@@ -1545,7 +1529,7 @@ fn a_token_budget_counts_what_runs_reported_and_refuses_when_it_is_used() {
         .unwrap()
         .as_secs();
     let run = |started: u64, tokens: Option<(u64, u64)>| crate::records::Record {
-        agent: "default/scout".into(),
+        agent: "scout".into(),
         model: None,
         started,
         seconds: 1.0,
@@ -1573,8 +1557,7 @@ fn a_token_budget_counts_what_runs_reported_and_refuses_when_it_is_used() {
     // Runs older than an hour are not counted.
     let (e2, tmp2) = team(&[("scout", "read", &emit(&step(vec![text("ok")])))]);
     let mut config = e2.config().clone();
-    config.agents.get_mut("default/scout").unwrap().budget =
-        config::Budget::PerHourTokens { tokens: 100 };
+    config.agents.get_mut("scout").unwrap().budget = config::Budget::PerHourTokens { tokens: 100 };
     let e2 =
         Ensemble::new(config, Some(project(&tmp2))).with_state(project(&tmp2).join(".ensemble"));
     crate::records::append(

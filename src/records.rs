@@ -1,7 +1,7 @@
 //! A record of every run an agent made: when, how long, on what model, how many
 //! tokens, whether it worked. One line of JSON per run, appended to
 //! `records.jsonl` beside the usage counters, so `ensemble stats` can say what
-//! the team costs and how it is doing.
+//! the helper team costs and how it is doing.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ const FILE: &str = "records.jsonl";
 /// One run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Record {
-    /// `team/agent`.
+    /// The agent's name.
     pub agent: String,
     /// What answered, when it said.
     pub model: Option<String>,

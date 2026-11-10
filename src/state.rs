@@ -20,7 +20,7 @@ pub fn root() -> Result<PathBuf, String> {
 }
 
 /// `$XDG_CACHE_HOME/ensemble`, or `~/.cache/ensemble`: what can be fetched again,
-/// such as remote organizations.
+/// such as remote helper teams.
 pub fn cache_root() -> Result<PathBuf, String> {
     let base = match std::env::var_os("XDG_CACHE_HOME").filter(|v| !v.is_empty()) {
         Some(dir) => PathBuf::from(dir),
@@ -44,10 +44,10 @@ pub fn dir_for(workdir: &Path) -> Result<PathBuf, String> {
     Ok(root()?.join("workdirs").join(labelled(&canonical)))
 }
 
-/// What is shared by every project that uses the organization at `config`: how
+/// What is shared by every project that uses the helper team at `config`: how
 /// many runs each agent has started, because a subscription or a model server
 /// is shared too.
-pub fn org_dir(config: &Path) -> Result<PathBuf, String> {
+pub fn team_dir(config: &Path) -> Result<PathBuf, String> {
     let canonical = config
         .canonicalize()
         .map_err(|e| format!("{}: {e}", config.display()))?;

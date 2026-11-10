@@ -14,31 +14,21 @@ pub(crate) struct RawConfig {
     pub(crate) version: u32,
     /// Model endpoints. An agent names one with `llm_backend`, and Ensemble
     /// hands its harness the endpoint, so it is defined once, here, for the
-    /// whole organization.
+    /// whole helper team.
     pub(crate) llm_backends: BTreeMap<String, RawLlmBackend>,
     /// Named limits that agents share, such as one model server's concurrency
     /// or one subscription's budget. `{}` when there are none.
     pub(crate) limits: BTreeMap<String, RawLimit>,
-    /// The organization's teams.
-    pub(crate) teams: BTreeMap<String, RawTeam>,
-}
-
-/// One team of the organization.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawTeam {
-    /// What the team is for. The manager reads it to choose a team.
-    pub(crate) prompt: String,
     /// Where the team's tasks come from.
     pub(crate) tracker: RawTracker,
     /// Commands a task's work must pass. Defined here, by a person, so a task
     /// names a gate and cannot bring a command of its own.
     pub(crate) gates: BTreeMap<String, RawGate>,
-    /// The team's agents.
+    /// The helper team: its agents, by name.
     pub(crate) agents: BTreeMap<String, RawAgent>,
 }
 
-/// Where a team's tasks come from. `type` decides which settings it has.
+/// Where the team's tasks come from. `type` decides which settings it has.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub(crate) enum RawTracker {
@@ -98,7 +88,7 @@ pub(crate) struct RawAgent {
     /// What the agent is for. Its first line is what the calling agent sees
     /// when it lists the team, and the whole of it goes into the agent's
     /// system prompt. Absent: a CLI agent runs on its CLI's own system prompt
-    /// alone, and an `llm` agent has none.
+    /// alone, and a `direct` agent has none.
     pub(crate) prompt: Option<String>,
     /// Wall-clock cap on one delegation, in seconds. A run that reaches it
     /// stops and reports what it did, so a hung model cannot hold the caller
@@ -115,9 +105,8 @@ pub(crate) struct RawAgent {
     /// How much it may run in an hour. Written with `max_concurrent`, or not
     /// at all when `limit` names a shared one.
     pub(crate) budget: Option<RawBudget>,
-    /// The name of one of the organization's `limits`, which it then shares
-    /// with the other agents that name it, in place of `max_concurrent` and
-    /// `budget`.
+    /// The name of one of the team's `limits`, which it then shares with the
+    /// other agents that name it, in place of `max_concurrent` and `budget`.
     pub(crate) limit: Option<String>,
     /// What runs the agent, and how.
     pub(crate) adapter: RawAdapter,
@@ -175,16 +164,16 @@ pub(crate) enum RawAdapter {
     OpenCode(RawOpenCodeAdapter),
     #[serde(rename = "codex")]
     Codex(RawCodexAdapter),
-    #[serde(rename = "llm")]
-    Llm(RawLlmAdapter),
+    #[serde(rename = "direct")]
+    Direct(RawDirectAdapter),
 }
 
 /// A light agent: the task, and the agent's prompt as the system prompt,
-/// sent to an LLM backend as one chat request. It has no tools, so it reads
-/// and changes nothing; it answers from what it is given.
+/// sent to an LLM backend as one chat request, with no CLI in between. It has
+/// no tools, so it reads and changes nothing; it answers from what it is given.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawLlmAdapter {
+pub(crate) struct RawDirectAdapter {
     /// Which of `llm_backends` serves the model.
     pub(crate) backend: String,
     /// The id the endpoint serves the model under.

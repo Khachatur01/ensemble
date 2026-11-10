@@ -1,9 +1,9 @@
-//! Where a team's tasks come from.
+//! Where the helper team's tasks come from.
 //!
 //! The queue (`harness::queue`) asks a [`Tracker`] for tickets and tells it how
 //! they went; it does not know where they are kept. One implementation exists,
 //! [`LocalMarkdown`]: a folder of markdown files in the state directory, one
-//! directory per task, in a folder per team. Others (GitLab, Jira, a project
+//! directory per task. Others (GitLab, Jira, a project
 //! management service) would implement the same trait; they are not built.
 
 use crate::tasks::{Entry, Outcome, Ticket};
@@ -11,7 +11,7 @@ use std::io;
 use std::path::Path;
 use std::time::SystemTime;
 
-/// A team's tasks, and the record of how each went.
+/// The team's tasks, and the record of how each went.
 pub trait Tracker: Sync {
     /// Where its files live, for messages and for worktrees.
     fn root(&self) -> &Path;
@@ -43,8 +43,7 @@ pub trait Tracker: Sync {
     fn open_question(&self, id: &str) -> Option<String>;
     fn answer(&self, id: &str, answer: &str) -> Result<(), String>;
     fn conversation(&self, id: &str) -> Option<(String, String)>;
-    /// Give a task to `agent` (`team/agent`), from the backlog or from whoever
-    /// has it.
+    /// Give a task to `agent`, from the backlog or from whoever has it.
     fn assign(&self, id: &str, agent: &str) -> io::Result<()>;
     /// Note that `from` handed a task to `to`, with what remains and what it had
     /// said.
@@ -60,7 +59,7 @@ pub trait Tracker: Sync {
     fn handoffs(&self, id: &str) -> Option<String>;
 }
 
-/// Tasks as markdown files: `tasks/<team>/<id>-<slug>/task.md`, with
+/// Tasks as markdown files: `tasks/<id>-<slug>/task.md`, with
 /// `result.md` and `questions.md` beside it.
 pub type LocalMarkdown = crate::tasks::Store;
 
@@ -133,8 +132,8 @@ impl Tracker for crate::tasks::Store {
     }
 }
 
-/// The tracker for a team's configured type. Today there is one.
-pub fn for_team(tracker: crate::config::Tracker, store: &crate::tasks::Store) -> &dyn Tracker {
+/// The tracker of the configured type. Today there is one.
+pub fn for_config(tracker: crate::config::Tracker, store: &crate::tasks::Store) -> &dyn Tracker {
     match tracker {
         crate::config::Tracker::LocalMarkdown => store,
     }

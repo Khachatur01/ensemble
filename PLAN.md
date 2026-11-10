@@ -5,6 +5,15 @@ Read "Product model" and "Ground rules" first. Then do the phases in order. Each
 phase ends in a green `cargo fmt --check`, `cargo clippy -- -D warnings` and
 `cargo test`, and in one commit.
 
+> **Direction change, November 2026.** `ARCHITECTURE.md` records where Ensemble
+> is going: one binary with a hub role and a node role, a flat helper team per
+> user, tasks assigned to people, and a knowledge pipeline. Config version 3 has
+> landed: the "organization" with a `teams:` map below is now a flat **helper
+> team**, `--org` is `--team`, and the `llm` adapter is `direct`. The phases
+> below are the record of how level 0 was built; read "organization" and "team"
+> in them as "helper team". What comes next is the build order in
+> `ARCHITECTURE.md`.
+
 ## Product model (decided with the owner; this replaces the old per-project model)
 
 - **Manager.** The agent the user talks to (Claude Code, OpenCode, ...). Ensemble

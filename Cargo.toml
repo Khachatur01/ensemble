@@ -2,7 +2,7 @@
 name = "ensemble"
 version = "0.1.0"
 edition = "2024"
-description = "An organization of coding agents (Claude Code, OpenCode, Codex) behind one MCP server."
+description = "A helper team of coding agents (Claude Code, OpenCode, Codex) behind one MCP server."
 license = "MIT"
 repository = "https://github.com/Khachatur01/ensemble"
 readme = "README.md"

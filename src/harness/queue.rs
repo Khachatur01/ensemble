@@ -185,27 +185,17 @@ impl<'e> Queue<'e> {
         self.lock().asks.remove(session)
     }
 
-    /// `agent` as `team/agent`, so that `coder` and `default/coder` share one
-    /// slot count and one budget. A name that is not an agent stays as it is.
-    fn qualified(&self, agent: &str) -> String {
-        self.ensemble
-            .config()
-            .qualify(agent)
-            .unwrap_or_else(|_| agent.to_string())
-    }
-
     /// What `agent`'s slots and budget are counted under: its own name, or the
     /// shared limit it names, so that every agent on one limit uses one count.
     fn key(&self, agent: &str) -> String {
-        let qualified = self.qualified(agent);
         match self
             .ensemble
             .config()
-            .agent(&qualified)
+            .agent(agent)
             .and_then(|a| a.limit.as_ref())
         {
             Some(limit) => format!("limit:{limit}"),
-            None => qualified,
+            None => agent.to_string(),
         }
     }
 
@@ -259,7 +249,6 @@ impl<'e> Queue<'e> {
 
     /// Seconds until `agent` may start another run, or `None` if it may now.
     fn over_budget(&self, inner: &Inner, agent: &str) -> Option<u64> {
-        let agent = &self.qualified(agent);
         let key = self.key(agent);
         let delegations = match self.ensemble.config().agent(agent).map(|a| a.budget) {
             Some(Budget::PerHour { delegations }) => delegations,
@@ -284,7 +273,6 @@ impl<'e> Queue<'e> {
     /// Count a run of `agent` against its budget, or say how long until it
     /// may start one.
     fn spend_locked(&self, inner: &mut Inner, agent: &str) -> Result<(), u64> {
-        let agent = &self.qualified(agent);
         if let Some(wait) = self.over_budget(inner, agent) {
             return Err(wait);
         }
@@ -312,7 +300,6 @@ impl<'e> Queue<'e> {
 
     /// Take a slot of `agent` if one is free.
     fn take(&self, inner: &mut Inner, agent: &str) -> Option<Slot<'_>> {
-        let agent = &self.qualified(agent);
         let key = self.key(agent);
         let used = inner.busy.entry(key.clone()).or_default();
         if *used >= self.limit(agent) {
@@ -499,14 +486,8 @@ impl<'e> Queue<'e> {
                     ticket.id.clone(),
                     Self::live(&ticket.agent, &ticket.title, cancel.clone(), false),
                 );
-                // The team's tracker keeps its tasks.
-                let tracker = self
-                    .ensemble
-                    .config()
-                    .teams
-                    .get(&ticket.team)
-                    .map_or(crate::config::Tracker::LocalMarkdown, |t| t.tracker);
-                let tracker = crate::tracker::for_team(tracker, store);
+                // The configured tracker keeps the tasks.
+                let tracker = crate::tracker::for_config(self.ensemble.config().tracker, store);
                 spawn(Box::new(move || {
                     self.run_ticket(tracker, *ticket, slot, &cancel)
                 }));
@@ -565,13 +546,14 @@ impl<'e> Queue<'e> {
             && !cancel.load(Ordering::Relaxed)
             && let Some((target, note)) = handoff_in(&result.text)
         {
-            match self.ensemble.config().qualify(&target) {
-                Ok(to) if to != ticket.agent => handoff = Some((to, note)),
-                Ok(_) => {}
-                Err(e) => {
+            match self.ensemble.config().agent(&target) {
+                Some(_) if target != ticket.agent => handoff = Some((target.clone(), note)),
+                Some(_) => {}
+                None => {
                     result = ToolResult::err(format!(
-                        "{}\n\n[it tried to hand the task to '{target}', which is not an agent: {e}]",
-                        result.text
+                        "{}\n\n[it tried to hand the task to '{target}', which is not an agent. Agents: {}.]",
+                        result.text,
+                        self.ensemble.config().agent_names().join(", ")
                     ));
                 }
             }
@@ -695,7 +677,7 @@ impl<'e> Queue<'e> {
             ));
         }
         base.push_str(&format!(
-            "\n\nIf you cannot finish without a decision that only the person who asked can make, stop and end your reply with one line: {ASK_MARKER} <your question>\nIf the next part belongs to another agent, end your reply with one line: {HANDOFF_MARKER} <team/agent> <what remains>"
+            "\n\nIf you cannot finish without a decision that only the person who asked can make, stop and end your reply with one line: {ASK_MARKER} <your question>\nIf the next part belongs to another agent, end your reply with one line: {HANDOFF_MARKER} <agent> <what remains>"
         ));
         let delegate = |prompt: &str| {
             run_delegation(
@@ -712,11 +694,10 @@ impl<'e> Queue<'e> {
             return (delegate(&base), Vec::new());
         };
         let config = self.ensemble.config();
-        let team = config.agent(&ticket.agent).map_or("", |a| a.team.as_str());
-        let Some(check) = config.gate(team, &gate.name) else {
+        let Some(check) = config.gate(&gate.name) else {
             return (
                 ToolResult::err(format!(
-                    "gate '{}' is not defined under the team's `gates` in config.yaml, so the task did not run.",
+                    "gate '{}' is not defined under `gates` in config.yaml, so the task did not run.",
                     gate.name
                 )),
                 Vec::new(),
@@ -968,9 +949,14 @@ impl<'e> Queue<'e> {
             let entries = store.scan();
             return ToolResult::err(unknown(&self.lock(), &entries, id));
         }
-        let to = match self.ensemble.config().qualify(agent) {
-            Ok(to) => to,
-            Err(e) => return ToolResult::err(format!("cannot assign {id}: {e}")),
+        let to = match self.ensemble.config().agent(agent) {
+            Some(a) => a.name.clone(),
+            None => {
+                return ToolResult::err(format!(
+                    "cannot assign {id}: no agent '{agent}'. Agents: {}.",
+                    self.ensemble.config().agent_names().join(", ")
+                ));
+            }
         };
         if store.outcome(id).is_some() {
             return ToolResult::err(format!(

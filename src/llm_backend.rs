@@ -31,9 +31,10 @@ pub fn models(backend: &LlmBackend) -> Result<Vec<String>, Error> {
             }
         }
         BackendSettings::Anthropic { .. } => {
-            let req = agent
-                .get(format!("{base_url}/v1/models"))
-                .header("anthropic-version", crate::external::llm::ANTHROPIC_VERSION);
+            let req = agent.get(format!("{base_url}/v1/models")).header(
+                "anthropic-version",
+                crate::external::direct::ANTHROPIC_VERSION,
+            );
             match api_key {
                 Some(key) => req.header("x-api-key", key),
                 None => req,

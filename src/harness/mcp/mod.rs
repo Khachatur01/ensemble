@@ -1,8 +1,8 @@
 //! The harness interface: MCP over stdio.
 //!
-//! The agent that calls Ensemble (Claude Code, OpenCode, ...) is the manager.
-//! It spawns `ensemble mcp` with the project as its working directory and sees
-//! the team as tools: `agents`, `delegate`, `submit` and the tools that follow
+//! The agent that calls Ensemble (Claude Code, OpenCode, ...) spawns
+//! `ensemble mcp` with the project as its working directory and sees the helper
+//! team as tools: `agents`, `delegate`, `submit` and the tools that follow
 //! tasks, `health`. While it runs, agents work through the project's tasks.
 //!
 //! Ensemble is a subprocess the harness spawns, speaking JSON-RPC 2.0 as

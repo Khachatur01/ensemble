@@ -66,7 +66,7 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                     "agent": {
                         "type": "string",
                         "enum": agents,
-                        "description": "Which agent does the work, as team/agent. Required unless you `continue` a question."
+                        "description": "Which agent does the work. Required unless you `continue` a question."
                     },
                     "task": {
                         "type": "string",
@@ -111,11 +111,7 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                     "agent": {
                         "type": "string",
                         "enum": agents,
-                        "description": "Who does the work. Leave it out, and give `team`, to put the task in that team's backlog for someone to assign."
-                    },
-                    "team": {
-                        "type": "string",
-                        "description": "With no `agent`: the team whose backlog the task goes to."
+                        "description": "Who does the work. Leave it out to put the task in the backlog for someone to assign."
                     },
                     "title": {
                         "type": "string",
@@ -233,7 +229,7 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "task": { "type": "string", "description": "The task id." },
-                    "agent": { "type": "string", "description": "Who gets it, as team/agent." }
+                    "agent": { "type": "string", "description": "Who gets it." }
                 },
                 "required": ["task", "agent"],
                 "additionalProperties": false
@@ -279,19 +275,12 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
 
     out.push(Tool {
         name: AGENTS,
-        description: "List the teams of this ensemble, and the agents of each with what each is \
-                      for. Call this first if you are unsure who should do a piece of work. \
-                      In a large organization it lists the teams only; pass `team` to list one \
-                      team's agents."
+        description: "List the agents of the helper team, with what each is for. Call this \
+                      first if you are unsure who should do a piece of work."
             .into(),
         parameters: json!({
             "type": "object",
-            "properties": {
-                "team": {
-                    "type": "string",
-                    "description": "Optional: list only this team's agents."
-                }
-            },
+            "properties": {},
             "additionalProperties": false
         }),
     });
@@ -499,32 +488,19 @@ pub fn call<'s>(
             if title.contains('\n') {
                 return ToolResult::err(format!("{SUBMIT}: `title` is one line"));
             }
-            // With an agent the task is assigned; with only a team it goes to
-            // that team's backlog, for the manager to assign.
-            let (role, team) = match (text("agent").filter(|a| !a.is_empty()), text("team")) {
-                (Some(agent), _) => match ensemble.config().qualify(agent) {
-                    Ok(qualified) => {
-                        let team = ensemble.config().agents[&qualified].team.clone();
-                        (qualified, team)
+            // With an agent the task is assigned; without one it goes to the
+            // backlog, for the calling agent to assign.
+            let role = match text("agent").filter(|a| !a.is_empty()) {
+                Some(agent) => match ensemble.config().agent(agent) {
+                    Some(a) => a.name.clone(),
+                    None => {
+                        return ToolResult::err(format!(
+                            "{SUBMIT}: no agent '{agent}'. Agents: {}.",
+                            ensemble.config().agent_names().join(", ")
+                        ));
                     }
-                    Err(e) => return ToolResult::err(format!("{SUBMIT}: {e}")),
                 },
-                (None, Some(team)) if ensemble.config().teams.contains_key(team) => {
-                    (String::new(), team.to_string())
-                }
-                (None, Some(team)) => {
-                    let known: Vec<&str> =
-                        ensemble.config().teams.keys().map(String::as_str).collect();
-                    return ToolResult::err(format!(
-                        "{SUBMIT}: no team '{team}'. Teams: {}.",
-                        known.join(", ")
-                    ));
-                }
-                (None, None) => {
-                    return ToolResult::err(format!(
-                        "{SUBMIT}: name an `agent` to assign it to, or a `team` to put it in the backlog of"
-                    ));
-                }
+                None => String::new(),
             };
             let role = &role;
             let mut lists = Vec::new();
@@ -556,16 +532,11 @@ pub fn call<'s>(
                             "{SUBMIT}: `gate.attempts` must be at least 1"
                         ));
                     }
-                    Ok(g) if ensemble.config().gate(&team, &g.name).is_none() => {
-                        let prefix = format!("{team}/");
-                        let known: Vec<&str> = ensemble
-                            .config()
-                            .gates
-                            .keys()
-                            .filter_map(|k| k.strip_prefix(prefix.as_str()))
-                            .collect();
+                    Ok(g) if ensemble.config().gate(&g.name).is_none() => {
+                        let known: Vec<&str> =
+                            ensemble.config().gates.keys().map(String::as_str).collect();
                         return ToolResult::err(format!(
-                            "{SUBMIT}: no gate '{}' is configured for team '{team}'. Gates: {}.",
+                            "{SUBMIT}: no gate '{}' is configured under `gates`. Gates: {}.",
                             g.name,
                             if known.is_empty() {
                                 "(none)".to_string()
@@ -589,7 +560,6 @@ pub fn call<'s>(
             queue.submit(&crate::tasks::Ticket {
                 title: title.to_string(),
                 agent: role.to_string(),
-                team: team.clone(),
                 context: optional("context"),
                 goal: optional("goal"),
                 repo: optional("repo"),
@@ -690,42 +660,7 @@ pub fn call<'s>(
                 };
                 format!("{role}{kind}: {purpose}")
             };
-            let wanted = match args.get("team") {
-                None | Some(Value::Null) => None,
-                Some(Value::String(team)) => Some(team.as_str()),
-                Some(_) => return ToolResult::err(format!("{AGENTS}: `team` must be a string")),
-            };
-            if let Some(team) = wanted
-                && !config.teams.contains_key(team)
-            {
-                let known: Vec<&str> = config.teams.keys().map(String::as_str).collect();
-                return ToolResult::err(format!(
-                    "{AGENTS}: no team '{team}'. Teams: {}.",
-                    known.join(", ")
-                ));
-            }
-            // A small organization is listed whole; a large one by team, so
-            // that the caller's context is not spent on every agent.
-            let whole = wanted.is_some() || config.agents.len() <= WHOLE_LISTING;
-            let mut lines = Vec::new();
-            for team in config
-                .teams
-                .values()
-                .filter(|t| wanted.is_none_or(|w| w == t.name))
-            {
-                if whole {
-                    lines.push(format!("# team {}: {}", team.name, team.summary()));
-                    lines.extend(team.agents.iter().map(|a| line(a)));
-                } else {
-                    lines.push(format!(
-                        "# team {}: {} ({} agents; `{AGENTS}` with team={} lists them)",
-                        team.name,
-                        team.summary(),
-                        team.agents.len(),
-                        team.name
-                    ));
-                }
-            }
+            let lines: Vec<String> = config.agent_names().into_iter().map(line).collect();
             ToolResult::ok(lines.join("\n"))
         }
 
@@ -756,12 +691,6 @@ pub fn call<'s>(
     }
 }
 
-/// Delegate and turn the outcome into a tool result: the agent's work and a
-/// footer of what it did, or why it failed and whether another attempt could
-/// work. The agent works in `workdir`, or in the project without one.
-/// Up to this many agents, `agents` lists them all.
-const WHOLE_LISTING: usize = 12;
-
 /// Told to an agent a blocking delegation goes to, so that it can stop and ask.
 pub(crate) const ASK_INSTRUCTION: &str = "If you cannot finish without a decision only the person who asked can make, stop and end your reply with one line: NEEDS INPUT: <your question>";
 
@@ -782,6 +711,9 @@ fn repo_of(ensemble: &Ensemble, args: &Value) -> Result<Option<std::path::PathBu
     crate::workspace::resolve_repo(&workdir, repo).map(Some)
 }
 
+/// Delegate and turn the outcome into a tool result: the agent's work and a
+/// footer of what it did, or why it failed and whether another attempt could
+/// work. The agent works in `workdir`, or in the project without one.
 pub(super) fn run_delegation(
     ensemble: &Ensemble,
     role: &str,
@@ -813,9 +745,7 @@ pub(super) fn run_delegation(
                 " Retrying this unchanged will fail the same way."
             };
             let detail = match &e {
-                RouteError::UnknownAgent { .. } | RouteError::AmbiguousAgent { .. } => {
-                    String::new()
-                }
+                RouteError::UnknownAgent { .. } => String::new(),
                 RouteError::Agent(_) => format!(" (agent '{role}')"),
             };
             ToolResult::err(format!("delegation failed{detail}: {e}{hint}"))

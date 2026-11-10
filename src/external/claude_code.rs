@@ -1,4 +1,4 @@
-//! The `claude-code` adapter: the Claude Code CLI as a member of the team.
+//! The `claude-code` adapter: the Claude Code CLI as a member of the helper team.
 //!
 //! WHAT THIS IS, AND WHAT IT DELIBERATELY IS NOT
 //! ----------------------------------------------
@@ -403,7 +403,6 @@ mod tests {
         };
         let a = AgentConfig {
             name: "reviewer".into(),
-            team: "default".into(),
             prompt: Some("You review code.".into()),
             max_seconds,
             max_concurrent: 1,

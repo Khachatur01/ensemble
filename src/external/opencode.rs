@@ -1,4 +1,4 @@
-//! The `opencode` adapter: the OpenCode CLI as a member of the team.
+//! The `opencode` adapter: the OpenCode CLI as a member of the helper team.
 //!
 //! OpenCode is a whole agent: it runs its own loop with its own tools in the
 //! project directory, on whichever provider and model it is given. Its `run`
@@ -485,7 +485,6 @@ mod tests {
         };
         let a = AgentConfig {
             name: "code reviewer".into(),
-            team: "default".into(),
             prompt: Some("You review code.".into()),
             max_seconds,
             max_concurrent: 1,

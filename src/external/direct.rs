@@ -1,10 +1,10 @@
-//! The `llm` adapter: a light agent that is one chat request to an LLM
-//! backend. No CLI, no tools: the model answers from the task, its context
+//! The `direct` adapter: a light agent that is one chat request to an LLM
+//! backend, with no CLI in between. No tools: the model answers from the task, its context
 //! and the agent's prompt, so it suits cheap work that needs no files, such
 //! as summarising, classifying or drafting from what it is given.
 
 use super::AgentRun;
-use crate::config::{AgentConfig, BackendSettings, LLM_AGENT, LlmAdapter, LlmBackend};
+use crate::config::{AgentConfig, BackendSettings, DIRECT_AGENT, DirectAdapter, LlmBackend};
 use crate::port::{Error, Usage};
 use crate::workspace::Changes;
 use serde_json::{Value, json};
@@ -19,7 +19,7 @@ pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub fn request_for(
     backend: &LlmBackend,
     agent: &AgentConfig,
-    la: &LlmAdapter,
+    la: &DirectAdapter,
     task: &str,
     context: Option<&str>,
 ) -> (&'static str, Value) {
@@ -46,7 +46,12 @@ pub fn request_for(
 }
 
 /// The request, as it is sent to `{base_url}/chat/completions`.
-pub fn request(agent: &AgentConfig, la: &LlmAdapter, task: &str, context: Option<&str>) -> Value {
+pub fn request(
+    agent: &AgentConfig,
+    la: &DirectAdapter,
+    task: &str,
+    context: Option<&str>,
+) -> Value {
     let mut messages = Vec::new();
     if let Some(prompt) = agent.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
         messages.push(json!({ "role": "system", "content": prompt }));
@@ -64,7 +69,7 @@ pub fn request(agent: &AgentConfig, la: &LlmAdapter, task: &str, context: Option
 /// request itself ends at the backend's `timeout_seconds`.
 pub fn run(
     agent: &AgentConfig,
-    la: &LlmAdapter,
+    la: &DirectAdapter,
     backend: &LlmBackend,
     task: &str,
     context: Option<&str>,
@@ -101,7 +106,7 @@ pub fn run(
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Err(Error::Protocol {
-                    backend: LLM_AGENT.into(),
+                    backend: DIRECT_AGENT.into(),
                     detail: "the request ended without an answer".into(),
                 });
             }
@@ -252,22 +257,21 @@ mod tests {
     use crate::config::{Adapter, Budget, Isolation};
     use std::io::{BufRead, BufReader, Read, Write};
 
-    fn agent(prompt: Option<&str>, max_seconds: u32) -> (AgentConfig, LlmAdapter) {
-        let la = LlmAdapter {
+    fn agent(prompt: Option<&str>, max_seconds: u32) -> (AgentConfig, DirectAdapter) {
+        let la = DirectAdapter {
             backend: "local".into(),
             model: "small".into(),
             max_tokens: 200,
         };
         let a = AgentConfig {
             name: "summariser".into(),
-            team: "default".into(),
             prompt: prompt.map(String::from),
             max_seconds,
             max_concurrent: 1,
             isolation: Isolation::Shared,
             budget: Budget::Unlimited,
             limit: None,
-            adapter: Adapter::Llm(la.clone()),
+            adapter: Adapter::Direct(la.clone()),
         };
         (a, la)
     }

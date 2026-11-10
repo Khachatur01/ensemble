@@ -1,13 +1,15 @@
 # ensemble
 
-An MCP server that gives your agent a team of agents.
+An MCP server that gives your agent a helper team of agents.
 
-You describe your organization, with its teams, in one `config.yaml` in a
-directory of its own (usually a git repo). Each agent is a coding agent CLI you
-already have, with an adapter that says how to start it. Your own agent (Claude
-Code, OpenCode, anything that speaks MCP) is the manager. It sees the teams as
-tools and delegates to an agent by name. Nothing of Ensemble lives in your
-projects.
+You describe your helper team in one `config.yaml` in a directory of its own
+(usually a git repo): a flat list of professional agents, such as a coder, a
+reviewer or a PCB designer. The directory can be yours alone or one your company
+shares. Each agent is a coding agent CLI you already have, with an adapter that
+says how to start it, or one request straight to a model. Your own agent (Claude
+Code, OpenCode, anything that speaks MCP) sees the team as tools and delegates to
+an agent by name, so cheap work goes to cheap models and you keep working on your
+own tasks. Nothing of Ensemble lives in your projects.
 
 Ensemble runs no agent loop of its own. It starts the agent's CLI headless in
 the project with the task, reads what it does as it works, and returns the
@@ -19,13 +21,13 @@ answer with what it changed. Four adapters ship:
   provider OpenCode is set up for, or on a model server of yours that you
   define once in Ensemble's config.
 - **`codex`**, the Codex CLI, on your own login, limited by Codex's own sandbox.
-- **`llm`**, a light agent: one chat request to a model server of yours, with
-  no CLI and no tools, for cheap work that needs no files.
+- **`direct`**, a light agent: one chat request straight to a model server of
+  yours, with no CLI and no tools, for cheap work that needs no files.
 
 A team can mix them, and your agent delegates to any of them the same way.
 
 ```
-   Your agent (Claude Code, OpenCode, ...)      = the manager
+   Your agent (Claude Code, OpenCode, ...)
         |  MCP over stdio, project as cwd
         v
      Ensemble                                   src/router.rs
@@ -45,25 +47,25 @@ $ ensemble setup
 ```
 
 That is all most people need. `setup` finds the agent CLIs you have (`claude`,
-`opencode`) and any local model server, asks which agent you talk to (your
-manager) and where the organization should live, writes a starter organization
-there, registers Ensemble with your manager and checks that every agent starts.
-It ends with a sentence to try: restart your agent and ask it to have the team
-implement something. The manager learns the teams from Ensemble itself when it
-connects, so there is nothing to add to its `CLAUDE.md` or `AGENTS.md`.
+`opencode`) and any local model server, asks which agent you talk to and where
+the helper team should live, writes a starter team there, registers Ensemble
+with your agent and checks that every agent starts. It ends with a sentence to
+try: restart your agent and ask it to have the helper team implement something.
+Your agent learns the team from Ensemble itself when it connects, so there is
+nothing to add to its `CLAUDE.md` or `AGENTS.md`.
 
 Without a terminal, or to script it: `ensemble setup --yes --manager claude-code
---org ~/my-org --starter software`. Starters are `software`, `hardware` and
+--team ~/my-team --starter software`. Starters are `software`, `hardware` and
 `docs`. [Install](#installation) Ensemble first, so that `ensemble` is on your
 `PATH`.
 
-Afterwards, `ensemble doctor --org ~/my-org` says what is wrong and how to fix
-each thing, and `ensemble add-agent software/tester --adapter claude-code
---org ~/my-org` and `ensemble remove-agent` change the team without editing the
-file (the file stays yours: comments and order are kept, and every setting is
-written out).
+Afterwards, `ensemble doctor --team ~/my-team` says what is wrong and how to fix
+each thing, and `ensemble add-agent tester --adapter claude-code
+--team ~/my-team` and `ensemble remove-agent` change the team without editing
+the file (the file stays yours: comments and order are kept, and every setting
+is written out).
 
-The folder your agent opens is where the teams work, and it can be a parent of
+The folder your agent opens is where the team works, and it can be a parent of
 several repositories. Ensemble keeps nothing in it: tasks, run logs and
 worktrees go in a per-user state directory (`$XDG_STATE_HOME/ensemble`, by
 default `~/.local/state/ensemble`), one per folder. A tool takes a `repo`
@@ -73,16 +75,15 @@ path that leaves the folder is refused.
 ## Connect your agent
 
 Ensemble is a standard MCP server on stdio. `ensemble setup` and
-`ensemble connect --manager claude-code|opencode --org <dir>` register it for
-you and print what they run; this shows the same by hand. Any agent that can
-spawn one can
-use it; nothing in it is specific to one harness. Register it with the organization
-it serves: `--org` is the directory with `config.yaml`.
+`ensemble connect --manager claude-code|opencode|codex --team <dir>` register
+it for you and print what they run; this shows the same by hand. Any agent that
+can spawn one can use it; nothing in it is specific to one harness. Register it
+with the helper team it serves: `--team` is the directory with `config.yaml`.
 
 **OpenCode**
 
 ```console
-$ opencode mcp add ensemble -- ensemble mcp --org ~/my-org
+$ opencode mcp add ensemble -- ensemble mcp --team ~/my-team
 $ opencode mcp list
 ✓ ensemble  connected
 ```
@@ -93,7 +94,7 @@ register it for every project instead.
 **Claude Code**
 
 ```console
-$ claude mcp add --scope local ensemble -- ensemble mcp --org ~/my-org
+$ claude mcp add --scope local ensemble -- ensemble mcp --team ~/my-team
 $ claude mcp list
 ensemble: ensemble mcp - ✔ Connected
 ```
@@ -102,20 +103,21 @@ ensemble: ensemble mcp - ✔ Connected
 `--scope project` writes it to `.mcp.json` for everyone who clones the repo.
 
 A registration for every project (`--global`, `--scope user`) works too: the
-organization is named in the registration, so the same teams serve every folder
-you open. Ensemble reads no other config and searches for none; without `--org`
-the server exits at once with "no organization given".
+helper team is named in the registration, so the same team serves every folder
+you open. Ensemble reads no other config and searches for none; without
+`--team` the server exits at once with "no helper team given". `--org` is the
+old name of `--team` and still works for one release, with a notice.
 
 Your agent sees these tools: `delegate` (send a task to an agent, get the work
 back), `submit` (write a task for an agent to work through), `status`, `wait`
 and `cancel` (follow tasks and background delegations), `answer` (answer a
-question a task stopped to ask), `agents` (the teams and what each agent is for) and `health` (every agent
+question a task stopped to ask), `agents` (the team and what each agent is for) and `health` (every agent
 CLI starts, and every model server answers and serves its agents' models).
 
 ## Configuration
 
-The organization is one directory, `--org`, with one file in it: `config.yaml`,
-the llm backends and the teams. Commit it; it holds no secrets. Ensemble reads
+The helper team is one directory, `--team`, with one file in it: `config.yaml`,
+the llm backends and the agents. Commit it; it holds no secrets. Ensemble reads
 it from where it is named and nowhere else: nothing is searched for, and there
 is no user-level config. `ensemble init` writes a sample with every setting.
 
@@ -124,17 +126,20 @@ user, outside every project:
 
 | where | |
 | --- | --- |
-| `$XDG_STATE_HOME/ensemble/workdirs/<folder>-<hash>/tasks/<team>/` | a team's tasks for its agents to work through, one directory each |
+| `$XDG_STATE_HOME/ensemble/workdirs/<folder>-<hash>/tasks/` | the tasks for the agents to work through, one directory each |
 | `.../runs/` | what tasks and background delegations did as they ran |
 | `.../worktrees/` | a git worktree per task of an agent with `isolation: worktree` |
-| `$XDG_STATE_HOME/ensemble/orgs/<org>-<hash>/usage.json` | how many runs each agent started, shared by every project that uses the organization |
+| `$XDG_STATE_HOME/ensemble/orgs/<team>-<hash>/usage.json` | how many runs each agent started, shared by every project that uses the helper team |
 
-`--state <dir>` puts the first three somewhere else. A version 1 config, one
-team per project, becomes an organization with `ensemble migrate <file> --org
-<dir>`: its agents are then `default/<name>`.
+`--state <dir>` puts the first three somewhere else. An older config, version 1
+(one team per project) or version 2 (an organization of teams), becomes a
+version 3 helper team with `ensemble migrate <file> --team <dir>`: every team's
+agents and gates go into one list, and a name two teams both used becomes
+`<team>-<name>`. Tasks kept in the old `tasks/<team>/` folders are moved up the
+first time they are read.
 
 ```yaml
-version: 2
+version: 3
 
 llm_backends:
   local:
@@ -145,50 +150,48 @@ llm_backends:
 
 limits: {}
 
-teams:
-  software:
-    prompt: Writes and reviews the code of the project.
-    tracker:
-      type: local_markdown
-    gates:
-      test:
-        command: cargo test
-        timeout_seconds: 900
+tracker:
+  type: local_markdown
 
-    agents:
-      coder:
-        prompt: You implement exactly what is asked, in the style of the code around it.
-        max_seconds: 1800
-        max_concurrent: 1
-        isolation: shared
-        budget:
-          type: unlimited
-        adapter:
-          type: opencode
-          model:
-            type: llm_backend
-            backend: local
-            name: qwen3.5-9b
-            context_window: 262144
-          tools: [read, glob, grep, list, edit, bash]
-          system_prompt: append
-          max_steps: 30
-          command: opencode
+gates:
+  test:
+    command: cargo test
+    timeout_seconds: 900
 
-      reviewer:
-        prompt: You review code for correctness and report findings as file:line — problem.
-        max_seconds: 1800
-        max_concurrent: 1
-        isolation: shared
-        budget:
-          type: unlimited
-        adapter:
-          type: claude-code
-          model: sonnet
-          tools: [Read, Grep, Glob]
-          permission_mode: dontAsk
-          max_turns: 30
-          command: claude
+agents:
+  coder:
+    prompt: You implement exactly what is asked, in the style of the code around it.
+    max_seconds: 1800
+    max_concurrent: 1
+    isolation: shared
+    budget:
+      type: unlimited
+    adapter:
+      type: opencode
+      model:
+        type: llm_backend
+        backend: local
+        name: qwen3.5-9b
+        context_window: 262144
+      tools: [read, glob, grep, list, edit, bash]
+      system_prompt: append
+      max_steps: 30
+      command: opencode
+
+  reviewer:
+    prompt: You review code for correctness and report findings as file:line — problem.
+    max_seconds: 1800
+    max_concurrent: 1
+    isolation: shared
+    budget:
+      type: unlimited
+    adapter:
+      type: claude-code
+      model: sonnet
+      tools: [Read, Grep, Glob]
+      permission_mode: dontAsk
+      max_turns: 30
+      command: claude
 ```
 
 **Nothing has a default value.** Every setting is written in the file, and a
@@ -200,17 +203,18 @@ them out means "not used": an agent's `prompt` (the CLI's own system prompt
 alone) and a backend's `api_key_env` (no key). `llm_backends: {}` says there
 are none.
 
-An **agent** is a member of the team. Its names are yours; nothing is
-hardcoded as planner, coder or reviewer. It has:
+An **agent** is a member of the helper team. Its names are yours; nothing is
+hardcoded as planner, coder or reviewer. There is no hierarchy: every agent is
+one professional your agent can hand work to. It has:
 
 | key | |
 | --- | --- |
-| `prompt` | what it is for. The first line is what your agent sees in `agents`; the whole of it goes into the agent's system prompt, added to the CLI's own (OpenCode can also replace its own; see `system_prompt`). Optional: without it a CLI agent runs on its CLI's own system prompt alone, and an `llm` agent has none |
+| `prompt` | what it is for. The first line is what your agent sees in `agents`; the whole of it goes into the agent's system prompt, added to the CLI's own (OpenCode can also replace its own; see `system_prompt`). Optional: without it a CLI agent runs on its CLI's own system prompt alone, and a `direct` agent has none |
 | `max_seconds` | wall-clock limit for one delegation. At the limit the CLI and its whole process tree are killed and what it did is returned, marked unfinished |
-| `limit` | the name of one of the organization's [`limits`](#shared-limits), in place of `max_concurrent` and `budget` |
+| `limit` | the name of one of the team's [`limits`](#shared-limits), in place of `max_concurrent` and `budget` |
 | `max_concurrent` | most delegations to it that run at once in a session: tasks, background and blocking delegations alike. More wait for a free slot. `1` suits a model server that serves one request at a time |
 | `isolation` | where its tasks run: `shared`, in the project directory, or `worktree`, each task in a git worktree of its own (see [Tasks](#tasks-and-background-delegations)). Delegations always run in the project |
-| `budget` | how much it may run in an hour: `{ type: unlimited }`, `{ type: per_hour, delegations: 20 }` (runs), or `{ type: per_hour_tokens, tokens: 2000000 }` (the tokens its runs reported). Tasks, each gate retry, and delegations, blocking or in the background, all count, across sessions and projects (`usage.json` in the organization's state directory). Over it, a delegation is refused saying when the next run is allowed, a task waits (`queued, over its agent's budget for 12 more minutes`), and a gate retry is not made |
+| `budget` | how much it may run in an hour: `{ type: unlimited }`, `{ type: per_hour, delegations: 20 }` (runs), or `{ type: per_hour_tokens, tokens: 2000000 }` (the tokens its runs reported). Tasks, each gate retry, and delegations, blocking or in the background, all count, across sessions and projects (`usage.json` in the helper team's state directory). Over it, a delegation is refused saying when the next run is allowed, a task waits (`queued, over its agent's budget for 12 more minutes`), and a gate retry is not made |
 | `adapter` | what runs it. `type` decides which other fields the adapter takes |
 
 An **LLM backend** is a model server of yours, defined once. An OpenCode agent
@@ -219,9 +223,9 @@ each run, so you never configure the same server again in the CLI's own
 settings. It has a `type`:
 
 - `openai-compatible-api`: any `/chat/completions` endpoint: llama-server, vLLM,
-  Ollama, Unsloth, a hosted API. `opencode` and `llm` agents can run on it.
+  Ollama, Unsloth, a hosted API. `opencode` and `direct` agents can run on it.
 - `anthropic-api`: Anthropic's own Messages API (`base_url:
-  https://api.anthropic.com`, the key sent as `x-api-key`). Only an `llm` agent can
+  https://api.anthropic.com`, the key sent as `x-api-key`). Only a `direct` agent can
   run on it; OpenCode needs an openai-compatible one, and a config that says
   otherwise is refused by name. Claude Code uses your own login, not a backend.
 
@@ -252,7 +256,12 @@ A task cannot bring a command of its own, so what runs on your machine is
 what this file says. `gates: {}` says there are none, which is fine: tasks
 then simply have no check. Blocking `delegate` calls never run gates.
 
-There is no manager in the file: the agent that calls Ensemble is the manager.
+The **tracker** says where the team's tasks come from. Today it is
+`{ type: local_markdown }`: markdown files in the state directory (see
+[Tasks](#tasks-and-background-delegations)).
+
+There is no leader in the file: the agent that calls Ensemble decides who does
+what.
 
 ### The `opencode` adapter
 
@@ -349,11 +358,12 @@ OPENCODE_CONFIG_CONTENT:
 Your own OpenCode configuration (providers, models, the project's
 `opencode.json`) still applies; the agent and provider are added to it.
 
-### The `llm` adapter
+### The `direct` adapter
 
 A light agent: no CLI, no tools, no loop. The task (after its context) and the
-agent's prompt (as the system prompt) go to an LLM backend as one
-`/chat/completions` request, and the answer comes back. It reads and changes
+agent's prompt (as the system prompt) go straight to an LLM backend as one
+`/chat/completions` request, and the answer comes back. Before version 3 it was
+called `llm`; `ensemble migrate` renames it. It reads and changes
 nothing, so it suits cheap work on what it is given: summarising a log,
 classifying findings, drafting a commit message, on a small local model.
 
@@ -367,7 +377,7 @@ agents:
     budget:
       type: unlimited
     adapter:
-      type: llm
+      type: direct
       backend: local         # one of llm_backends
       model: qwen3.5:9b      # the id the server serves
       max_tokens: 1000       # an answer cut off here is marked unfinished
@@ -379,7 +389,7 @@ the request; `health` checks the backend serves the model.
 
 ### The `codex` adapter
 
-The Codex CLI as a member of the team, run with `codex exec --json`, on your own
+The Codex CLI as a member of the helper team, run with `codex exec --json`, on your own
 login:
 
 ```yaml
@@ -470,15 +480,15 @@ The agents' tools are the CLIs' own and run with your permissions; `tools` and
 
 Every run, whether a delegation, a task, a gate retry or a background run, leaves
 one line in `records.jsonl` beside the usage counters (shared by every project
-that uses the organization): the agent, the model that answered, when it started
+that uses the helper team): the agent, the model that answered, when it started
 and how long it took, the tokens, the steps and tool calls, and whether it
 worked. `ensemble stats` sums them per agent:
 
 ```console
-$ ensemble stats --org ~/my-org --since 7d
+$ ensemble stats --team ~/my-team --since 7d
 agent              runs  failures    total s    mean s   tokens in  tokens out
-software/coder       12         1     1843.2     153.6      418220       30114
-software/reviewer     9         0      402.7      44.7           -           -
+coder                12         1     1843.2     153.6      418220       30114
+reviewer              9         0      402.7      44.7           -           -
 ```
 
 A `-` means no run of that agent reported tokens: an agent's CLI or server that
@@ -495,7 +505,7 @@ notifications per step and tool call, before the final reply:
 `logging/setLevel` to silence the logs; progress is not filtered. A request
 without a `progressToken` gets its request id as the token. Neither
 notification reaches the model: they go to the client program, so they cost the
-manager no tokens.
+calling agent no tokens.
 
 ### Tasks and background delegations
 
@@ -505,7 +515,7 @@ tool call after about a minute, whatever progress notifications arrive). On a
 slow machine every delegation to a local model can hit that. Two ways around
 it both answer at once:
 
-- **`submit`** writes a **task**: a ticket in the team's folder of the state directory, `tasks/<team>/<id>/task.md`. The team is the agent's. Ids are numbered across the folder, so an id names one task, and a task's `agent` may be written without its team: it is then an agent of the team whose folder the ticket is in. A ticket that names an agent of another team is refused. While `ensemble mcp` runs, agents work through the
+- **`submit`** writes a **task**: a ticket in the state directory, `tasks/<id>/task.md`. Ids are numbered across the folder, so an id names one task. A ticket from before version 3 that names its agent as `team/agent` is read as `agent`. While `ensemble mcp` runs, agents work through the
   tasks without a result, oldest id first, each agent at most
   `max_concurrent` at a time, and write `result.md` beside the ticket when one
   ends. You can write a `task.md` by hand too; it is picked up within a few
@@ -517,12 +527,12 @@ Then, for either:
 
 - `status` lists them (agent, queued / waiting for a slot / running / done /
   failed / cancelled, seconds run) with each running one's last few steps and
-  tool calls, or shows one with `task`. This is the only way the manager itself
+  tool calls, or shows one with `task`. This is the only way the calling agent
   can see what an agent is doing.
 - `wait` with `task` returns the result: for a task, its `result.md`; for a
   background delegation, the reply in the same form as a blocking `delegate`.
   It waits up to `timeout_seconds` (default 30, at most 300); one still queued
-  or running by then is reported, not failed, and the manager calls `wait`
+  or running by then is reported, not failed, and the calling agent calls `wait`
   again.
 - `cancel` with `task` kills the agent's CLI and its process tree. A task that
   has not started gets a `cancelled` result and never runs.
@@ -611,9 +621,9 @@ own, `worktrees/<id>` in the state directory, on the branch `ensemble/<id>` made
 from the repository's `HEAD`. The repository's own files are not touched, so such tasks can run
 side by side. The gate runs in the worktree too. When the task ends, everything
 it changed is committed on its branch (`--no-verify`, your git identity), and
-`result.md` records `branch` and `commit`. Ensemble never merges on its own, and the manager has no tool that does. Look at
+`result.md` records `branch` and `commit`. Ensemble never merges on its own, and the calling agent has no tool that does. Look at
 the work with `ensemble review <id>` (the branch, what changed on it, the result;
-the manager has a read-only `review` tool for the same) and `ensemble diff <id>`.
+the calling agent has a read-only `review` tool for the same) and `ensemble diff <id>`.
 Take it in with `ensemble merge <id>`, which only you run: it refuses a task that
 is not done, a repository with uncommitted changes, and a merge that conflicts
 (which it undoes, naming the files). `--squash` makes one commit; `--cleanup`
@@ -621,37 +631,37 @@ then removes the task's worktree and branch, and nothing is deleted without it. 
 session's end interrupted, carries on in the worktree it had. The working folder, or
 the task's `repo`, must be a git repository with at least one commit.
 
-### An organization that works on its own
+### A helper team that works on its own
 
-You are the organization's owner, not its operator: you talk to your own agent,
-the manager, about what you want, and it plans the work into tasks. You can see
-who does what, but you do not have to.
+You own the work, not operate it: you talk to your own agent about what you
+want, and it plans the work into tasks. You can see who does what, but you do
+not have to.
 
-- **Tasks have an assignee**, an agent. A task with none is in its team's
-  **backlog**: `submit` with a `team` and no `agent` (or `ensemble submit TITLE
-  --team T`) puts it there, and `assign` (the tool, or `ensemble assign ID
-  AGENT`) gives it to an agent. The assignee is kept in `assignee.txt` beside the
-  ticket, which is never rewritten.
+- **Tasks have an assignee**, an agent. A task with none is in the
+  **backlog**: `submit` with no `agent` (or `ensemble submit TITLE --backlog`)
+  puts it there, and `assign` (the tool, or `ensemble assign ID AGENT`) gives it
+  to an agent. The assignee is kept in `assignee.txt` beside the ticket, which is
+  never rewritten.
 - **An agent works only on tasks assigned to it** and stays idle until one
-  appears for it. Nothing pulls from the backlog on its own: the manager, with you,
-  decides who gets what.
+  appears for it. Nothing pulls from the backlog on its own: your agent, with
+  you, decides who gets what.
 - **An agent may finish a task or hand it on**: it ends its reply with `HAND OFF:
-  <team/agent> <what remains>`. The task goes to that agent, who is shown the note
+  <agent> <what remains>`. The task goes to that agent, who is shown the note
   and what was done (`handoffs.md`); a worktree stays as it is. A hand-off to a
   name that is no agent fails the task and says so.
 - **When nothing is active** (no task is assigned, unfinished and not waiting for
-  your answer) the organization says so, and what waits: `Idle: no active tasks (2
-  in the backlog, to be assigned, 1 waiting for an answer). The organization waits
-  for planning: tell your manager what to do next.` `status` and `ensemble tasks`
+  your answer) the team says so, and what waits: `Idle: no active tasks (2
+  in the backlog, to be assigned, 1 waiting for an answer). The helper team waits
+  for planning: tell your agent what to do next.` `status` and `ensemble tasks`
   show it, and `ensemble serve` prints it once without stopping;
   `ensemble serve --exit-when-idle` stops there instead.
 
-Tasks that ask you something (`NEEDS INPUT:`) wait for your answer, through the
-manager or `ensemble answer`.
+Tasks that ask you something (`NEEDS INPUT:`) wait for your answer, through
+your agent or `ensemble answer`.
 
 ### Running tasks without a session
 
-`ensemble serve --org <dir>`, run in the working folder, is the same worker with
+`ensemble serve --team <dir>`, run in the working folder, is the same worker with
 no agent around it: it works through the folder's tasks until it gets Ctrl-C or
 SIGTERM, then stops the running ones (they run again next time) and leaves the
 rest queued. Only one worker runs a folder's tasks, so a second `serve`
@@ -665,7 +675,7 @@ To keep it running, as a systemd user unit (`~/.config/systemd/user/ensemble.ser
 ```ini
 [Service]
 WorkingDirectory=%h/work/myproject
-ExecStart=ensemble serve --org %h/my-org --env-file %h/.config/ensemble.env
+ExecStart=ensemble serve --team %h/my-team --env-file %h/.config/ensemble.env
 Restart=on-failure
 
 [Install]
@@ -681,7 +691,7 @@ and `systemctl --user enable --now ensemble`. On macOS, a launchd agent
   <key>WorkingDirectory</key><string>/Users/me/work/myproject</string>
   <key>ProgramArguments</key><array>
     <string>ensemble</string><string>serve</string>
-    <string>--org</string><string>/Users/me/my-org</string>
+    <string>--team</string><string>/Users/me/my-team</string>
   </array>
   <key>KeepAlive</key><true/>
 </dict></plist>
@@ -693,13 +703,13 @@ session; tasks that had not started stay queued. Tasks of a `shared` agent share
 project like any other parallel delegations, so give two of them that change
 the same files to an agent with `max_concurrent: 1`, or `isolation: worktree`. A blocking
 `delegate` takes a slot of its agent too, waiting for one if needed; raising
-the MCP timeout in the manager's config is the other fix for a client that
+the MCP timeout in your agent's config is the other fix for a client that
 times out.
 
 ### Shared limits
 
 Two agents on one model server, or one subscription, should not each assume
-they have it to themselves. The organization's `limits` name a limit once, and
+they have it to themselves. The team's `limits` name a limit once, and
 an agent takes it in place of its own `max_concurrent` and `budget`:
 
 ```yaml
@@ -707,12 +717,9 @@ limits:
   local-server:
     max_concurrent: 1
     budget: { type: per_hour_tokens, tokens: 2000000 }
-teams:
-  software:
-    # ...
-    agents:
-      coder:
-        limit: local-server    # no max_concurrent, no budget
+agents:
+  coder:
+    limit: local-server    # no max_concurrent, no budget
 ```
 
 Every agent that names `local-server` uses one count of slots and one budget, so
@@ -726,38 +733,38 @@ There is no sandbox: the agents' tools are their CLIs' own. `ensemble check` and
 directly in your working folder (`isolation: shared`), about Claude Code
 permission modes that skip the checks, and about token budgets.
 
-### Remote organizations
+### Remote helper teams
 
-An organization can live in a git repository you do not have checked out, and be
+A helper team can live in a git repository you do not have checked out, and be
 shared by a department or a company:
 
 ```console
-$ ensemble connect --manager claude-code --org github.com/acme/org@v1.2
+$ ensemble connect --manager claude-code --team github.com/acme/team@v1.2
 ```
 
 `connect` resolves `@v1.2` (a tag or a branch) to the commit it is now, clones it
 into your cache (`$XDG_CACHE_HOME/ensemble`), prints every agent command, gate
 command, tool list and permission mode the config would run on your machine,
 with a warning for each risk, and asks you to trust that commit. Only then does
-it register `github.com/acme/org#<commit>`. Git does the talking, with your own
+it register `github.com/acme/team#<commit>`. Git does the talking, with your own
 SSH agent or credential helper; Ensemble stores no credentials.
 
-A remote organization is code that runs with your permissions, so:
+A remote helper team is code that runs with your permissions, so:
 
 - **It is pinned.** `ensemble mcp` and every other command accept only
   `<url>#<commit>`; a branch or tag is never followed at run time, so a moved
   tag cannot swap what you approved.
-- **It is trusted per commit.** `ensemble org trust <url>#<commit>` shows what
+- **It is trusted per commit.** `ensemble team trust <url>#<commit>` shows what
   it would run and records your approval for that exact commit. An untrusted
   commit is refused with that command to run; the MCP server cannot ask,
   because stdio is the protocol. There is no trusting a whole publisher.
 - **The cache is checked.** A cached copy that is not at the commit, or has been
   changed by hand, is refused.
-- **Updating is explicit.** `ensemble org update <url>#<commit> --ref main` shows
+- **Updating is explicit.** `ensemble team update <url>#<commit> --ref main` shows
   what changed in `config.yaml` and prints the new pin; nothing is trusted or
   registered until you do both.
 
-A remote organization is read-only: clone it to change it. Its keys are not in
+A remote helper team is read-only: clone it to change it. Its keys are not in
 it; they come from your environment or `--env-file`, as always.
 
 ### Secrets
@@ -774,8 +781,8 @@ The values come from the environment, or from a file you name with `--env-file`
 OPENAI_LOCAL_API_KEY=sk-...
 ```
 
-A variable set in the environment wins over the file. The organization holds no
-secrets, so nothing is read from beside it, and a remote or shared organization
+A variable set in the environment wins over the file. The helper team holds no
+secrets, so nothing is read from beside it, and a remote or shared helper team
 cannot carry keys by accident. The file feeds only
 Ensemble's own settings: a backend's key reaches an agent's CLI only as that
 backend's provider key in `OPENCODE_CONFIG_CONTENT`, in the CLI's environment
@@ -805,16 +812,16 @@ the tests, so it cannot list a key the config rejects.
 Every independent problem is reported in one pass:
 
 ```console
-$ ensemble check --org ~/my-org
-ensemble: ~/my-org/config.yaml is invalid:
-  - version: 4 is not supported; this build understands version 2
+$ ensemble check --team ~/my-team
+ensemble: ~/my-team/config.yaml is invalid:
+  - version: 4 is not supported; this build understands version 3
   - llm_backends.x: type 'ollama' is unknown. Known types: openai-compatible-api.
-  - teams.software.agents.coder.adapter: LLM backend 'lcoal' is not defined. Defined LLM backends: local.
-  - teams.software.agents.coder.adapter: LLM backend 'lcoal' is not defined. Defined LLM backends: local.
+  - agents.coder.adapter: LLM backend 'lcoal' is not defined. Defined LLM backends: local.
+  - agents.reviewer.adapter: LLM backend 'lcoal' is not defined. Defined LLM backends: local.
 ```
 
 A typo'd key is an error, never a silent default, and a missing key is an
-error too: ``teams.software.agents.coder: `max_seconds` is required at line 12 column 5``.
+error too: ``agents.coder: `max_seconds` is required at line 12 column 5``.
 
 ## Installation
 
@@ -885,33 +892,37 @@ up and for debugging it.
 
 ```console
 $ ensemble setup                      # find the CLIs, write a starter, register it, check it
-$ ensemble connect --manager M --org <dir> [--only T,T] [--global]  # register with claude-code or opencode
-$ ensemble doctor --org <dir>      # what is wrong, and how to fix each thing
-$ ensemble add-agent <team/name> --adapter A --org <dir>   # add an agent, every setting written
-$ ensemble remove-agent <team/name> --org <dir>
+$ ensemble connect --manager M --team <dir> [--global]  # register with claude-code, opencode or codex
+$ ensemble doctor --team <dir>     # what is wrong, and how to fix each thing
+$ ensemble add-agent <name> --adapter A --team <dir>   # add an agent, every setting written
+$ ensemble remove-agent <name> --team <dir>
 $ ensemble review <id>            # a worktree task: its branch, what changed, its result
 $ ensemble diff <id>              # the whole change
 $ ensemble merge <id> [--squash] [--cleanup]   # only you run this; undone on a conflict
 $ ensemble tasks [--status S]      # the tasks of this working folder and where each stands
 $ ensemble task <id>               # one task: ticket, state, question or result
 $ ensemble submit <agent> <title> --text T   # write a task (also --goal --context --repo --gate --after ...)
+$ ensemble submit <title> --backlog --text T # write a task with no assignee yet
+$ ensemble assign <id> <agent>     # give a task to an agent
 $ ensemble answer <id> <text>      # answer the question a task stopped to ask
-$ ensemble stats --org <dir> [--since 7d] [--json]   # what each agent has done: runs, failures, time, tokens
-$ ensemble serve --org <dir>       # run this folder's tasks with no session, until stopped
-$ ensemble init --org <dir>        # write a sample organization: <dir>/config.yaml
+$ ensemble stats --team <dir> [--since 7d] [--json]   # what each agent has done: runs, failures, time, tokens
+$ ensemble serve --team <dir>      # run this folder's tasks with no session, until stopped
+$ ensemble init --team <dir>       # write a sample helper team: <dir>/config.yaml
 $ ensemble init --stdout           # print it instead (init refuses to overwrite without --force)
-$ ensemble migrate <file> --org <dir>  # a version 1 config becomes an organization
-$ ensemble check  --org <dir>      # validate the config, print the teams and agents
-$ ensemble agents --org <dir>      # the routing table
-$ ensemble show <agent> --org <dir>  # how an agent is started: command line and generated config, keys hidden
-$ ensemble health --org <dir>      # every agent CLI starts, every LLM backend serves its models? non-zero if not
-$ ensemble run <agent> <task> --org <dir>  # send one task to one agent (it works in --dir)
+$ ensemble migrate <file> --team <dir>  # a version 1 or 2 config becomes a version 3 helper team
+$ ensemble check  --team <dir>     # validate the config, print the gates and agents
+$ ensemble agents --team <dir>     # the routing table
+$ ensemble show <agent> --team <dir>  # how an agent is started: command line and generated config, keys hidden
+$ ensemble health --team <dir>     # every agent CLI starts, every LLM backend serves its models? non-zero if not
+$ ensemble run <agent> <task> --team <dir>  # send one task to one agent (it works in --dir)
+$ ensemble team trust <url>#<commit>   # read what a remote helper team runs, and trust that commit
+$ ensemble team update <url>#<commit>  # what changed since, and the new pin
 $ ensemble schema                  # print the JSON Schema for config.yaml
-$ ensemble mcp --org <dir>         # serve the teams over stdio
+$ ensemble mcp --team <dir>        # serve the helper team over stdio
 ```
 
 `run` prints the answer on stdout and the provenance on stderr, so it pipes
-cleanly. Options: `--org <dir>`, `--env-file <path>`, `--dir <path>` (the working
+cleanly. Options: `--team <dir>` (`--org` is its old name), `--env-file <path>`, `--dir <path>` (the working
 folder, default the current directory), `--state <dir>` (instead of the per-user
 state directory), `--context <text>` (for `run`).
 
@@ -919,13 +930,13 @@ state directory), `--context <text>` (for `run`).
 
 | | |
 | --- | --- |
-| `src/config/` | the organization's `config.yaml`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`mod.rs`), version 1 to 2 (`migrate.rs`) |
+| `src/config/` | the helper team's `config.yaml`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`mod.rs`), versions 1 and 2 to 3 (`migrate.rs`) |
 | `src/state.rs` | the per-user state and cache directories |
-| `src/remote.rs` | remote organizations: parsing, pinning, the cache, trust, and describing what a config would run |
+| `src/remote.rs` | remote helper teams: parsing, pinning, the cache, trust, and describing what a config would run |
 | `src/setup.rs` | `setup`, `connect` and `doctor`: detecting CLIs and servers, starters, registrations, findings |
 | `src/config/edit.rs` | adding and removing an agent in `config.yaml` as text, comments kept |
 | `src/router.rs` | agents to adapters; the ensemble itself, and `health` |
-| `src/external/` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `llm` adapter (one chat request), and gates |
+| `src/external/` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `direct` adapter (one chat request), and gates |
 | `src/workspace.rs` | the working folder, a `repo` inside it, and what a run changed |
 | `src/llm_backend.rs` | asking a model server which models it serves, for `health` |
 | `src/port.rs` | the shared error type |
@@ -978,10 +989,11 @@ scripts stand in for the CLIs.
 
 ## Limitations
 
-- **Three adapters so far.** `claude-code`, `opencode` and `llm`. Codex is planned, not
-  built.
-- **Only `opencode` and `llm` agents run on an LLM backend**, and an Anthropic
-  one only an `llm` agent. Claude Code and Codex use your own login.
+- **Four adapters so far.** `claude-code`, `opencode`, `codex` and `direct`.
+- **Only `opencode` and `direct` agents run on an LLM backend**, and an Anthropic
+  one only a `direct` agent. Claude Code and Codex use your own login.
+- **One flat team.** A helper team is a list of agents with no hierarchy, and a
+  user connects one helper team at a time.
 - **Only the end of a run can ask.** An agent stops with a question
   (`NEEDS INPUT:`) at the end of a run, never halfway through one: the CLIs'
   headless modes do not wait for an answer. For a delegation, the reply says
@@ -992,9 +1004,9 @@ scripts stand in for the CLIs.
   permission settings are what limit them.
 - **Limits are per agent unless shared.** Agents on one server share a limit only
   when they name the same one. Budgets are shared by every project that uses the
-  organization. A token budget counts what runs report, which not every CLI does.
+  helper team. A token budget counts what runs report, which not every CLI does.
 - **Tasks run only while a worker runs.** The worker lives in `ensemble mcp`, so
-  tasks stop with the manager's session; `ensemble serve` is a worker with no
+  tasks stop with the calling agent's session; `ensemble serve` is a worker with no
   session, for queues that should go on. One worker runs a folder's tasks at a
   time.
 - **The working folder is fixed when the server starts.** The working

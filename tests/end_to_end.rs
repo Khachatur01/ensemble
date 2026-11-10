@@ -36,7 +36,7 @@ impl Scratch {
         &self.0
     }
 
-    /// The organization directory, kept beside the project so it is not one of
+    /// The helper team directory, kept beside the project so it is not one of
     /// the files a run changes.
     fn org(&self) -> PathBuf {
         self.0.with_extension("org")
@@ -48,14 +48,10 @@ impl Scratch {
     }
 
     /// A path in the project, or one of the old `.ensemble/` names, which are
-    /// the organization (`config.yaml`, `.env`) and the state (the rest).
+    /// the helper team (`config.yaml`, `.env`) and the state (the rest).
     fn place(&self, name: &str) -> PathBuf {
         match name.strip_prefix(".ensemble/") {
             Some(rest) if rest == "config.yaml" || rest == ".env" => self.org().join(rest),
-            Some(rest) if rest.starts_with("tasks/") && !rest.starts_with("tasks/default/") => self
-                .state()
-                .join("tasks/default")
-                .join(&rest["tasks/".len()..]),
             Some(rest) => self.state().join(rest),
             None => self.0.join(name),
         }
@@ -65,7 +61,7 @@ impl Scratch {
         let p = self.place(name);
         let converted;
         let contents = if name == ".ensemble/config.yaml" {
-            converted = ensemble::config::migrate::to_v2(contents).unwrap_or(contents.to_string());
+            converted = ensemble::config::migrate::to_v3(contents).unwrap_or(contents.to_string());
             converted.as_str()
         } else {
             contents
@@ -171,9 +167,9 @@ agents:
     )
 }
 
-/// The same, as the version 2 organization it is loaded as.
+/// The same, as the version 3 helper team it is loaded as.
 fn config_yaml(command: &str, backend_url: &str) -> String {
-    ensemble::config::migrate::to_v2(&config_v1(command, backend_url)).expect("a version 1 sample")
+    ensemble::config::migrate::to_v3(&config_v1(command, backend_url)).expect("a version 1 sample")
 }
 
 /// The binary, run in `scratch` with none of the test variables inherited:
@@ -183,7 +179,7 @@ fn command(scratch: &Scratch) -> Command {
     c.current_dir(scratch.path())
         .env("XDG_STATE_HOME", scratch.0.with_extension("xdg-state"))
         .env("XDG_CACHE_HOME", scratch.0.with_extension("xdg-cache"))
-        .arg("--org")
+        .arg("--team")
         .arg(scratch.org())
         .arg("--state")
         .arg(scratch.state())
@@ -257,10 +253,10 @@ fn check_accepts_a_valid_config_and_reports_the_team() {
     let out = ensemble(&s, &["check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
-    assert!(text.contains("ok (version 2)"), "{text}");
+    assert!(text.contains("ok (version 3)"), "{text}");
     assert!(text.contains("mcp: ready"), "{text}");
     assert!(
-        text.contains("default/coder  ->  opencode on openai-local / qwen3-coder"),
+        text.contains("coder  ->  opencode on openai-local / qwen3-coder"),
         "{text}"
     );
     assert!(text.contains("openai-compatible-api"), "{text}");
@@ -349,8 +345,8 @@ fn nothing_is_found_without_an_org() {
         .current_dir(s.path())
         .output()
         .unwrap();
-    assert!(!out.status.success(), "no --org means no organization");
-    assert!(stderr_of(&out).contains("--org"), "{}", stderr_of(&out));
+    assert!(!out.status.success(), "no --team means no helper team");
+    assert!(stderr_of(&out).contains("--team"), "{}", stderr_of(&out));
 }
 
 #[test]
@@ -374,11 +370,11 @@ fn agents_prints_the_routing_table() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(
-        text.contains("default/coder\topencode on openai-local\tqwen3-coder"),
+        text.contains("coder\topencode on openai-local\tqwen3-coder"),
         "{text}"
     );
     assert!(
-        text.contains("default/reviewer\topencode\topencode/reviewer-model"),
+        text.contains("reviewer\topencode\topencode/reviewer-model"),
         "{text}"
     );
 }
@@ -417,7 +413,7 @@ fn run_starts_the_agents_cli_with_the_task_and_prints_its_answer() {
     );
     // Provenance goes to stderr so stdout stays pipeable.
     assert!(
-        stderr_of(&out).contains("default/reviewer via opencode / opencode/reviewer-model"),
+        stderr_of(&out).contains("reviewer via opencode / opencode/reviewer-model"),
         "{}",
         stderr_of(&out)
     );
@@ -428,7 +424,7 @@ fn run_starts_the_agents_cli_with_the_task_and_prints_its_answer() {
     );
     let config: serde_json::Value = serde_json::from_str(&s.seen("config")).unwrap();
     assert_eq!(
-        config["agent"]["ensemble-default-reviewer"]["prompt"],
+        config["agent"]["ensemble-reviewer"]["prompt"],
         "Reviews code and reports findings."
     );
     assert!(config.get("provider").is_none(), "{config}");
@@ -475,7 +471,7 @@ fn show_prints_how_an_agent_starts_with_the_key_hidden() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(
-        text.starts_with("opencode run --standalone --format json --agent ensemble-default-coder -m ensemble-openai-local/qwen3-coder -- '<task>'"),
+        text.starts_with("opencode run --standalone --format json --agent ensemble-coder -m ensemble-openai-local/qwen3-coder -- '<task>'"),
         "{text}"
     );
     assert!(
@@ -488,7 +484,7 @@ fn show_prints_how_an_agent_starts_with_the_key_hidden() {
     let out = ensemble(&s, &["show", "nobody"]);
     assert!(!out.status.success());
     assert!(
-        stderr_of(&out).contains("default/coder, default/reviewer"),
+        stderr_of(&out).contains("coder, reviewer"),
         "{}",
         stderr_of(&out)
     );
@@ -735,10 +731,7 @@ fn a_harness_can_delegate_through_mcp_and_get_the_work_back() {
     session.request("initialize", serde_json::json!({}));
 
     let agents = tool_text(&session.call("agents", serde_json::json!({})));
-    assert!(
-        agents.contains("default/coder [can change files]"),
-        "{agents}"
-    );
+    assert!(agents.contains("coder [can change files]"), "{agents}");
 
     let reply = session.call(
         "delegate",
@@ -891,16 +884,17 @@ fn an_invalid_config_stops_the_mcp_server_before_it_serves_anything() {
 }
 
 #[test]
-fn init_writes_a_sample_organization_that_checks_and_never_overwrites_by_accident() {
+fn init_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_accident() {
     let s = Scratch::new("init");
     let out = ensemble(&s, &["init"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let written = std::fs::read_to_string(s.org().join("config.yaml")).unwrap();
     assert!(written.contains("type: opencode"), "{written}");
-    assert!(written.contains("teams:"), "{written}");
+    assert!(written.contains("\nagents:\n"), "{written}");
+    assert!(!written.contains("teams:"), "{written}");
     assert!(
         !s.org().join(".env").exists() && !s.org().join(".gitignore").exists(),
-        "an organization holds no secrets, so it needs no .env"
+        "a helper team holds no secrets, so it needs no .env"
     );
     assert!(
         !s.path().join(".ensemble").exists(),
@@ -910,7 +904,7 @@ fn init_writes_a_sample_organization_that_checks_and_never_overwrites_by_acciden
     let check = ensemble(&s, &["check"]);
     assert!(check.status.success(), "{}", stderr_of(&check));
     let text = stdout_of(&check);
-    assert!(text.contains("software"), "{text}");
+    assert!(text.contains("coder  ->"), "{text}");
 
     s.write(".ensemble/config.yaml", "mine");
     let again = ensemble(&s, &["init"]);
@@ -935,7 +929,7 @@ fn init_writes_a_sample_organization_that_checks_and_never_overwrites_by_acciden
 }
 
 #[test]
-fn migrate_turns_a_version_1_config_into_an_organization() {
+fn migrate_turns_a_version_1_config_into_a_helper_team() {
     let s = Scratch::new("migrate");
     let old = s.write("old.yaml", &{
         let v1 = r#"
@@ -964,13 +958,33 @@ agents:
     assert!(out.status.success(), "{}", stderr_of(&out));
     let check = ensemble(&s, &["check"]);
     assert!(check.status.success(), "{}", stderr_of(&check));
-    assert!(
-        stdout_of(&check).contains("default/solo"),
-        "{}",
-        stdout_of(&check)
-    );
+    assert!(stdout_of(&check).contains("solo"), "{}", stdout_of(&check));
     let again = ensemble(&s, &["migrate", old.to_str().unwrap()]);
     assert!(!again.status.success(), "migrate does not overwrite");
+}
+
+#[test]
+fn migrate_turns_the_version_2_sample_into_a_flat_helper_team() {
+    let s = Scratch::new("migrate-v2");
+    let old =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/config/v2.yaml");
+    let out = ensemble(&s, &["migrate", old.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let written = std::fs::read_to_string(s.org().join("config.yaml")).unwrap();
+    assert!(written.contains("version: 3"), "{written}");
+    assert!(!written.contains("teams"), "{written}");
+    assert!(written.contains("type: direct"), "{written}");
+    let agents = ensemble(&s, &["agents"]);
+    assert!(agents.status.success(), "{}", stderr_of(&agents));
+    for name in ["coder", "explorer", "summariser", "fixer", "reviewer"] {
+        assert!(
+            stdout_of(&agents)
+                .lines()
+                .any(|l| l.starts_with(&format!("{name}\t"))),
+            "{name}: {}",
+            stdout_of(&agents)
+        );
+    }
 }
 
 #[test]
@@ -1023,7 +1037,7 @@ fn check_reports_a_task_that_could_not_run() {
         "{text}"
     );
     assert!(
-        text.contains("0003-who: agent 'default/architect' is not configured"),
+        text.contains("0003-who: agent 'architect' is not configured"),
         "{text}"
     );
 }
@@ -1064,7 +1078,7 @@ fn a_light_agent_is_one_request_to_its_backend() {
         r#"{"data":[{"id":"small"},{"id":"qwen3-coder"}],"choices":[{"message":{"content":"three bullets"},"finish_reason":"stop"}]}"#,
     );
     let config = format!(
-        "{}  summariser:\n    prompt: You summarise.\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: llm\n      backend: openai-local\n      model: small\n      max_tokens: 300\n",
+        "{}  summariser:\n    prompt: You summarise.\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: direct\n      backend: openai-local\n      model: small\n      max_tokens: 300\n",
         config_v1("opencode", &url)
     );
     s.write(".ensemble/config.yaml", &config);
@@ -1090,7 +1104,7 @@ fn a_light_agent_is_one_request_to_its_backend() {
 
     let check = stdout_of(&ensemble(&s, &["check"]));
     assert!(
-        check.contains("summariser  ->  llm on openai-local / small"),
+        check.contains("summariser  ->  direct on openai-local / small"),
         "{check}"
     );
 }
@@ -1132,7 +1146,7 @@ fn with_path(scratch: &Scratch, bin: &Path) -> Command {
 }
 
 #[test]
-fn connect_registers_the_org_with_the_manager_and_says_what_it_ran() {
+fn connect_registers_the_team_with_the_agent_you_talk_to_and_says_what_it_ran() {
     for (manager, program, scope) in [
         ("claude-code", "claude", "--scope\nuser\n"),
         ("opencode", "opencode", "--global\n"),
@@ -1141,15 +1155,8 @@ fn connect_registers_the_org_with_the_manager_and_says_what_it_ran() {
         s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
         let bin = stub_clis(&s, &[program]);
         let out = with_path(&s, &bin)
-            .args([
-                "connect",
-                "--manager",
-                manager,
-                "--global",
-                "--only",
-                "default",
-            ])
-            .arg("--org")
+            .args(["connect", "--manager", manager, "--global"])
+            .arg("--team")
             .arg(s.org())
             .output()
             .unwrap();
@@ -1159,9 +1166,8 @@ fn connect_registers_the_org_with_the_manager_and_says_what_it_ran() {
         let args = std::fs::read_to_string(bin.join(format!("{program}.args"))).unwrap();
         assert!(args.starts_with("mcp\nadd\n"), "{args}");
         assert!(args.contains(scope), "{args}");
-        assert!(args.contains("\nmcp\n--org\n"), "{args}");
+        assert!(args.contains("\nmcp\n--team\n"), "{args}");
         assert!(args.contains(&s.org().display().to_string()), "{args}");
-        assert!(args.ends_with("--only\ndefault\n"), "{args}");
     }
 }
 
@@ -1172,7 +1178,7 @@ fn connect_without_the_manager_cli_prints_the_command_and_fails() {
     let bin = stub_clis(&s, &[]);
     let out = with_path(&s, &bin)
         .args(["connect", "--manager", "claude-code"])
-        .arg("--org")
+        .arg("--team")
         .arg(s.org())
         .output()
         .unwrap();
@@ -1202,7 +1208,7 @@ fn setup_writes_a_starter_registers_it_and_checks_it() {
             "--starter",
             "hardware",
         ])
-        .arg("--org")
+        .arg("--team")
         .arg(s.org())
         .output()
         .unwrap();
@@ -1215,12 +1221,12 @@ fn setup_writes_a_starter_registers_it_and_checks_it() {
         "{written}"
     );
     let args = std::fs::read_to_string(bin.join("claude.args")).unwrap();
-    assert!(args.contains("--org\n"), "{args}");
+    assert!(args.contains("--team\n"), "{args}");
 
     // A second run keeps what is there.
     let again = with_path(&s, &bin)
         .args(["setup", "--yes", "--manager", "claude-code"])
-        .arg("--org")
+        .arg("--team")
         .arg(s.org())
         .output()
         .unwrap();
@@ -1241,7 +1247,7 @@ fn setup_without_any_agent_cli_says_what_to_install() {
     let bin = stub_clis(&s, &[]);
     let out = with_path(&s, &bin)
         .args(["setup", "--yes"])
-        .arg("--org")
+        .arg("--team")
         .arg(s.org())
         .output()
         .unwrap();
@@ -1265,10 +1271,7 @@ fn doctor_says_what_is_wrong_and_how_to_fix_it() {
         "{text}"
     );
     assert!(text.contains("fix: install `opencode`"), "{text}");
-    assert!(
-        text.contains("ensemble remove-agent default/coder"),
-        "{text}"
-    );
+    assert!(text.contains("ensemble remove-agent coder"), "{text}");
     assert!(text.contains("problem: openai-local"), "{text}");
     assert!(text.contains("fix: start the model server"), "{text}");
 
@@ -1291,7 +1294,7 @@ fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
         &s,
         &[
             "add-agent",
-            "default/tester",
+            "tester",
             "--adapter",
             "claude-code",
             "--prompt",
@@ -1301,15 +1304,12 @@ fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let agents = ensemble(&s, &["agents"]);
     assert!(
-        stdout_of(&agents).contains("default/tester\tclaude-code\tsonnet"),
+        stdout_of(&agents).contains("tester\tclaude-code\tsonnet"),
         "{}",
         stdout_of(&agents)
     );
 
-    let dup = ensemble(
-        &s,
-        &["add-agent", "default/tester", "--adapter", "claude-code"],
-    );
+    let dup = ensemble(&s, &["add-agent", "tester", "--adapter", "claude-code"]);
     assert!(!dup.status.success());
     assert!(
         stderr_of(&dup).contains("already has"),
@@ -1317,21 +1317,18 @@ fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
         stderr_of(&dup)
     );
 
-    let bad = ensemble(&s, &["add-agent", "default/x", "--adapter", "llm"]);
-    assert!(
-        !bad.status.success(),
-        "an llm agent needs a backend and a model"
-    );
+    let bad = ensemble(&s, &["add-agent", "x", "--adapter", "llm"]);
+    assert!(!bad.status.success(), "`llm` is no adapter any more");
 
-    let gone = ensemble(&s, &["remove-agent", "default/tester"]);
+    let gone = ensemble(&s, &["remove-agent", "tester"]);
     assert!(gone.status.success(), "{}", stderr_of(&gone));
     assert!(!stdout_of(&ensemble(&s, &["agents"])).contains("tester"));
-    let missing = ensemble(&s, &["remove-agent", "default/tester"]);
+    let missing = ensemble(&s, &["remove-agent", "tester"]);
     assert!(!missing.status.success());
 }
 
 // ---------------------------------------------------------------------------
-// Remote organizations
+// Remote helper teams
 // ---------------------------------------------------------------------------
 
 /// A git repository holding `config.yaml`, as a `file://` URL and its commit.
@@ -1385,18 +1382,18 @@ fn remote_cmd(scratch: &Scratch, bin: Option<&Path>) -> Command {
 }
 
 #[test]
-fn a_remote_organization_is_pinned_trusted_and_then_used() {
+fn a_remote_helper_team_is_pinned_trusted_and_then_used() {
     let s = Scratch::new("remote");
     let (url, sha) = origin(&s, &config_yaml("true", NOWHERE));
     let pinned = format!("{url}#{sha}");
 
     let out = remote_cmd(&s, None)
-        .args(["check", "--org", &pinned])
+        .args(["check", "--team", &pinned])
         .output()
         .unwrap();
     assert!(
         !out.status.success(),
-        "an untrusted organization is not used"
+        "an untrusted helper team is not used"
     );
     assert!(
         stderr_of(&out).contains("ensemble org trust"),
@@ -1405,7 +1402,7 @@ fn a_remote_organization_is_pinned_trusted_and_then_used() {
     );
 
     let unpinned = remote_cmd(&s, None)
-        .args(["check", "--org", &format!("{url}@main")])
+        .args(["check", "--team", &format!("{url}@main")])
         .output()
         .unwrap();
     assert!(!unpinned.status.success());
@@ -1416,36 +1413,32 @@ fn a_remote_organization_is_pinned_trusted_and_then_used() {
     );
 
     let no_pin = remote_cmd(&s, None)
-        .args(["org", "trust", &url, "--yes"])
+        .args(["team", "trust", &url, "--yes"])
         .output()
         .unwrap();
     assert!(!no_pin.status.success(), "trust needs the commit");
 
     let trusted = remote_cmd(&s, None)
-        .args(["org", "trust", &pinned, "--yes"])
+        .args(["team", "trust", &pinned, "--yes"])
         .output()
         .unwrap();
     assert!(trusted.status.success(), "{}", stderr_of(&trusted));
     let said = stdout_of(&trusted);
-    assert!(said.contains("default/coder: runs `true`"), "{said}");
+    assert!(said.contains("coder: runs `true`"), "{said}");
     assert!(said.contains("Trusted"), "{said}");
 
     let out = remote_cmd(&s, None)
-        .args(["check", "--org", &pinned])
+        .args(["check", "--team", &pinned])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(
-        stdout_of(&out).contains("default/coder"),
-        "{}",
-        stdout_of(&out)
-    );
+    assert!(stdout_of(&out).contains("coder"), "{}", stdout_of(&out));
 
     // Without a terminal and without --yes there is nobody to ask: a refusal.
     let (url2, sha2) = origin(&s, &config_yaml("opencode", NOWHERE));
     assert_eq!(url, url2);
     let refused = remote_cmd(&s, None)
-        .args(["org", "trust", &format!("{url}#{sha2}")])
+        .args(["team", "trust", &format!("{url}#{sha2}")])
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -1458,7 +1451,7 @@ fn a_remote_organization_is_pinned_trusted_and_then_used() {
 }
 
 #[test]
-fn connect_pins_a_remote_organization_shows_it_and_registers_the_pin() {
+fn connect_pins_a_remote_helper_team_shows_it_and_registers_the_pin() {
     let s = Scratch::new("remote-connect");
     let (url, sha) = origin(&s, &config_yaml("true", NOWHERE));
     let bin = stub_clis(&s, &["claude"]);
@@ -1468,7 +1461,7 @@ fn connect_pins_a_remote_organization_shows_it_and_registers_the_pin() {
             "--manager",
             "claude-code",
             "--yes",
-            "--org",
+            "--team",
             &format!("{url}@main"),
         ])
         .output()
@@ -1481,19 +1474,19 @@ fn connect_pins_a_remote_organization_shows_it_and_registers_the_pin() {
 
     // What it registered is usable now: it was trusted on the way.
     let used = remote_cmd(&s, None)
-        .args(["agents", "--org", &format!("{url}#{sha}")])
+        .args(["agents", "--team", &format!("{url}#{sha}")])
         .output()
         .unwrap();
     assert!(used.status.success(), "{}", stderr_of(&used));
 }
 
 #[test]
-fn org_update_shows_what_changed_and_pins_nothing_by_itself() {
+fn team_update_shows_what_changed_and_pins_nothing_by_itself() {
     let s = Scratch::new("remote-update");
     let (url, old) = origin(&s, &config_yaml("true", NOWHERE));
     let (_, new) = origin(&s, &config_yaml("opencode", NOWHERE));
     let out = remote_cmd(&s, None)
-        .args(["org", "update", &format!("{url}#{old}"), "--ref", "main"])
+        .args(["team", "update", &format!("{url}#{old}"), "--ref", "main"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -1506,9 +1499,9 @@ fn org_update_shows_what_changed_and_pins_nothing_by_itself() {
         said.contains("-      command: \"true\"") || said.contains("command"),
         "{said}"
     );
-    assert!(said.contains("ensemble org trust"), "{said}");
+    assert!(said.contains("ensemble team trust"), "{said}");
     let again = remote_cmd(&s, None)
-        .args(["org", "update", &format!("{url}#{new}"), "--ref", "main"])
+        .args(["team", "update", &format!("{url}#{new}"), "--ref", "main"])
         .output()
         .unwrap();
     assert!(
@@ -1518,7 +1511,7 @@ fn org_update_shows_what_changed_and_pins_nothing_by_itself() {
     );
     // Updating trusts nothing.
     let used = remote_cmd(&s, None)
-        .args(["agents", "--org", &format!("{url}#{new}")])
+        .args(["agents", "--team", &format!("{url}#{new}")])
         .output()
         .unwrap();
     assert!(!used.status.success());
@@ -1565,7 +1558,7 @@ fn a_task_written_by_submit_is_listed_shown_and_run_by_a_session() {
 
     let listed = ensemble(&s, &["tasks"]);
     assert!(
-        stdout_of(&listed).contains("0001-rename-foo · default/coder · queued · Rename foo"),
+        stdout_of(&listed).contains("0001-rename-foo · coder · queued · Rename foo"),
         "{}",
         stdout_of(&listed)
     );
@@ -1870,14 +1863,14 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
     let text = stdout_of(&table);
     let row = text
         .lines()
-        .find(|l| l.starts_with("default/reviewer"))
+        .find(|l| l.starts_with("reviewer"))
         .unwrap_or_else(|| panic!("{text}"));
     let cells: Vec<&str> = row.split_whitespace().collect();
     assert_eq!((cells[1], cells[2]), ("3", "1"), "3 runs, 1 failure: {row}");
 
     let json = ensemble(&s, &["stats", "--json", "--since", "1h"]);
     let parsed: serde_json::Value = serde_json::from_str(&stdout_of(&json)).unwrap();
-    assert_eq!(parsed[0]["agent"], "default/reviewer");
+    assert_eq!(parsed[0]["agent"], "reviewer");
     assert_eq!(parsed[0]["runs"], 3);
 
     let bad = ensemble(&s, &["stats", "--since", "soon"]);
@@ -1886,11 +1879,11 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
 }
 
 // ---------------------------------------------------------------------------
-// An organization that works on its own
+// A helper team that works on its own
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_backlog_task_is_assigned_then_served_and_the_organization_says_when_it_is_idle() {
+fn a_backlog_task_is_assigned_then_served_and_the_helper_team_says_when_it_is_idle() {
     let s = Scratch::new("backlog");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
     s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
@@ -1901,8 +1894,7 @@ fn a_backlog_task_is_assigned_then_served_and_the_organization_says_when_it_is_i
         &[
             "submit",
             "Rename foo",
-            "--team",
-            "default",
+            "--backlog",
             "--text",
             "rename foo to bar",
         ],
@@ -1914,10 +1906,7 @@ fn a_backlog_task_is_assigned_then_served_and_the_organization_says_when_it_is_i
         listed.contains("Idle: no active tasks (1 in the backlog, to be assigned)"),
         "{listed}"
     );
-    assert!(
-        s.place(".ensemble/tasks/default/0001-rename-foo/task.md")
-            .is_file()
-    );
+    assert!(s.place(".ensemble/tasks/0001-rename-foo/task.md").is_file());
 
     // Nothing runs it while it has no assignee.
     let idle = command(&s)
@@ -1932,7 +1921,7 @@ fn a_backlog_task_is_assigned_then_served_and_the_organization_says_when_it_is_i
         stderr_of(&idle)
     );
     assert!(
-        !s.place(".ensemble/tasks/default/0001-rename-foo/result.md")
+        !s.place(".ensemble/tasks/0001-rename-foo/result.md")
             .exists()
     );
 
@@ -1941,12 +1930,12 @@ fn a_backlog_task_is_assigned_then_served_and_the_organization_says_when_it_is_i
     let ok = ensemble(&s, &["assign", "0001-rename-foo", "coder"]);
     assert!(ok.status.success(), "{}", stderr_of(&ok));
     assert!(
-        stdout_of(&ok).contains("assigned to default/coder"),
+        stdout_of(&ok).contains("assigned to coder"),
         "{}",
         stdout_of(&ok)
     );
     let listed = stdout_of(&ensemble(&s, &["tasks"]));
-    assert!(listed.contains("default/coder · queued"), "{listed}");
+    assert!(listed.contains("coder · queued"), "{listed}");
     assert!(!listed.contains("Idle"), "{listed}");
 
     // Served, then it stops by itself because nothing is left.
@@ -1971,7 +1960,7 @@ fn a_backlog_task_is_assigned_then_served_and_the_organization_says_when_it_is_i
 }
 
 #[test]
-fn an_empty_organization_is_idle_and_serve_can_end_there() {
+fn an_empty_helper_team_is_idle_and_serve_can_end_there() {
     let s = Scratch::new("idle-empty");
     s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
     let out = command(&s)
@@ -1981,7 +1970,7 @@ fn an_empty_organization_is_idle_and_serve_can_end_there() {
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stderr_of(&out).contains("Idle: no active tasks. The organization waits for planning"),
+        stderr_of(&out).contains("Idle: no active tasks. The helper team waits for planning"),
         "{}",
         stderr_of(&out)
     );
@@ -1996,11 +1985,11 @@ fn check_warns_about_what_agents_may_do_without_failing() {
     let text = stdout_of(&out);
     assert!(text.contains("warnings:"), "{text}");
     assert!(
-        text.contains("default/coder can change files directly in your working folder"),
+        text.contains("coder can change files directly in your working folder"),
         "{text}"
     );
     assert!(text.contains("isolation: worktree"), "{text}");
-    assert!(!text.contains("default/reviewer can change"), "{text}");
+    assert!(!text.contains("reviewer can change"), "{text}");
 }
 
 #[test]
@@ -2011,7 +2000,7 @@ fn show_prints_how_a_codex_agent_starts() {
         &s,
         &[
             "add-agent",
-            "default/fixer",
+            "fixer",
             "--adapter",
             "codex",
             "--prompt",
@@ -2029,10 +2018,7 @@ fn show_prints_how_a_codex_agent_starts() {
     );
     assert!(text.contains("Fixes it."), "{text}");
     let agents = stdout_of(&ensemble(&s, &["agents"]));
-    assert!(
-        agents.contains("default/fixer\tcodex\tgpt-5-codex"),
-        "{agents}"
-    );
+    assert!(agents.contains("fixer\tcodex\tgpt-5-codex"), "{agents}");
 }
 
 #[test]
@@ -2051,9 +2037,9 @@ fn a_light_agent_on_an_anthropic_backend_shows_a_messages_request() {
         &s,
         &[
             "add-agent",
-            "default/helper",
+            "helper",
             "--adapter",
-            "llm",
+            "direct",
             "--backend",
             "claude-api",
             "--model",

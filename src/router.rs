@@ -1,4 +1,4 @@
-//! The Ensemble itself: the agent team, and where work goes.
+//! The Ensemble itself: the helper team, and where work goes.
 //!
 //! The harness names an **agent**. The router starts that agent's CLI in the
 //! project with the task and returns what it did. Nothing a caller passes in
@@ -49,11 +49,6 @@ pub enum RouteError {
     /// The agent is not in the config. Carries the ones that are, because the
     /// caller is usually a model that guessed a plausible name.
     UnknownAgent { asked: String, known: Vec<String> },
-    /// The name fits agents of more than one team.
-    AmbiguousAgent {
-        asked: String,
-        candidates: Vec<String>,
-    },
     /// The agent is configured but did not do the work.
     Agent(Error),
 }
@@ -66,11 +61,6 @@ impl std::fmt::Display for RouteError {
                 "no agent '{asked}' is configured. Available agents: {}.",
                 known.join(", ")
             ),
-            RouteError::AmbiguousAgent { asked, candidates } => write!(
-                f,
-                "'{asked}' is the name of more than one agent: {}. Use the full name, team/agent.",
-                candidates.join(", ")
-            ),
             RouteError::Agent(e) => write!(f, "{e}"),
         }
     }
@@ -81,7 +71,7 @@ impl std::error::Error for RouteError {}
 impl RouteError {
     pub fn is_retryable(&self) -> bool {
         match self {
-            RouteError::UnknownAgent { .. } | RouteError::AmbiguousAgent { .. } => false,
+            RouteError::UnknownAgent { .. } => false,
             RouteError::Agent(e) => e.is_retryable(),
         }
     }
@@ -118,7 +108,7 @@ impl Ensemble {
         self
     }
 
-    /// Keep usage counters in `dir` instead of the organization's per-user
+    /// Keep usage counters in `dir` instead of the helper team's per-user
     /// directory.
     pub fn with_usage_dir(mut self, dir: PathBuf) -> Self {
         self.usage = Some(dir);
@@ -126,7 +116,7 @@ impl Ensemble {
     }
 
     /// Where usage counters are kept, when not beside the runs: shared by
-    /// every project that uses the organization.
+    /// every project that uses the helper team.
     pub fn usage_dir(&self) -> Option<PathBuf> {
         match &self.usage {
             Some(dir) => Some(dir.clone()),
@@ -134,7 +124,7 @@ impl Ensemble {
                 .config
                 .source
                 .is_file()
-                .then(|| crate::state::org_dir(&self.config.source).ok())
+                .then(|| crate::state::team_dir(&self.config.source).ok())
                 .flatten(),
         }
     }
@@ -164,18 +154,17 @@ impl Ensemble {
     }
 
     fn resolve(&self, name: &str) -> Result<&AgentConfig, RouteError> {
-        let qualified = self.config.qualify(name).map_err(|e| match e {
-            crate::config::NameError::Unknown { name, known } => {
-                RouteError::UnknownAgent { asked: name, known }
-            }
-            crate::config::NameError::Ambiguous { name, candidates } => {
-                RouteError::AmbiguousAgent {
-                    asked: name,
-                    candidates,
-                }
-            }
-        })?;
-        Ok(&self.config.agents[&qualified])
+        self.config
+            .agent(name)
+            .ok_or_else(|| RouteError::UnknownAgent {
+                asked: name.to_string(),
+                known: self
+                    .config
+                    .agent_names()
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+            })
     }
 
     /// Where an agent runs, and on which model. Used by `ensemble agents`;
@@ -234,7 +223,7 @@ impl Ensemble {
             Adapter::Codex(cx) => self.run_tracked(agent, workdir, |dir| {
                 crate::external::codex::run(agent, cx, task, context, dir, progress, cancel)
             }),
-            Adapter::Llm(la) => {
+            Adapter::Direct(la) => {
                 let backend = self.config.llm_backends.get(&la.backend).ok_or_else(|| {
                     RouteError::Agent(Error::Unsupported {
                         backend: la.backend.clone(),
@@ -242,7 +231,9 @@ impl Ensemble {
                     })
                 })?;
                 self.run_tracked(agent, workdir, |_| {
-                    crate::external::llm::run(agent, la, backend, task, context, progress, cancel)
+                    crate::external::direct::run(
+                        agent, la, backend, task, context, progress, cancel,
+                    )
                 })
             }
             Adapter::OpenCode(oc) => {
@@ -344,7 +335,7 @@ impl Ensemble {
     }
 
     /// Where records of runs are kept: with the usage counters, shared by every
-    /// project that uses the organization, else in the state directory.
+    /// project that uses the helper team, else in the state directory.
     pub fn records_dir(&self) -> Option<PathBuf> {
         self.usage_dir().or_else(|| self.state_dir().ok())
     }
@@ -370,7 +361,7 @@ impl Ensemble {
                 Adapter::OpenCode(oc) => commands.push((OPENCODE_AGENT, &oc.command)),
                 Adapter::Codex(cx) => commands.push((crate::config::CODEX_AGENT, &cx.command)),
                 // No program: its backend, checked below, is all it needs.
-                Adapter::Llm(_) => {}
+                Adapter::Direct(_) => {}
             }
             if let Some(b) = a.llm_backend() {
                 backends.entry(b).or_default().push(a.model());
@@ -497,7 +488,7 @@ agents:
       command: "{program}"
 "#
         );
-        let yaml = config::migrate::to_v2(&yaml).unwrap();
+        let yaml = config::migrate::to_v3(&yaml).unwrap();
         let cfg =
             config::parse(&yaml, std::path::Path::new("config.yaml"), &BTreeMap::new()).unwrap();
         Ensemble::new(cfg, workdir)
@@ -526,10 +517,7 @@ agents:
         let err = e.delegate("nobody", "x", None).unwrap_err();
         assert!(!err.is_retryable());
         let msg = err.to_string();
-        assert!(
-            msg.contains("default/doer, default/looker, default/reviewer"),
-            "{msg}"
-        );
+        assert!(msg.contains("doer, looker, reviewer"), "{msg}");
     }
 
     #[test]

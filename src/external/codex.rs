@@ -1,4 +1,4 @@
-//! The `codex` adapter: the Codex CLI as a member of the team.
+//! The `codex` adapter: the Codex CLI as a member of the helper team.
 //!
 //! Like the other CLI adapters it drives the official program as a subprocess,
 //! started locally by the person who owns the login: `codex exec --json`, the
@@ -294,8 +294,7 @@ mod tests {
             sandbox: sandbox.into(),
         };
         let a = AgentConfig {
-            name: "default/fixer".into(),
-            team: "default".into(),
+            name: "fixer".into(),
             prompt: Some("You fix things.".into()),
             max_seconds,
             max_concurrent: 1,
@@ -382,10 +381,10 @@ mod tests {
         assert_eq!(
             seen,
             vec![
-                "default/fixer · starting Codex",
-                "default/fixer · step 1 · command(cargo test)",
-                "default/fixer · step 2 · command(rm -rf /)",
-                "default/fixer · done",
+                "fixer · starting Codex",
+                "fixer · step 1 · command(cargo test)",
+                "fixer · step 2 · command(rm -rf /)",
+                "fixer · done",
             ]
         );
     }

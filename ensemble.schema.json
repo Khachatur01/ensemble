@@ -1,20 +1,22 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json",
-  "title": "Ensemble organization: config.yaml",
-  "description": "An organization of teams: the agents a calling agent can delegate to, grouped in teams, and the LLM backends they can run on. Nothing has a default value: every setting is written, except the two that may be left out because leaving them out means 'not used' (an agent's `prompt` and a backend's `api_key_env`).",
+  "title": "Ensemble helper team: config.yaml",
+  "description": "A helper team: the agents a calling agent can delegate to, and the LLM backends they can run on. Nothing has a default value: every setting is written, except the two that may be left out because leaving them out means 'not used' (an agent's `prompt` and a backend's `api_key_env`).",
   "type": "object",
   "required": [
     "version",
     "llm_backends",
     "limits",
-    "teams"
+    "tracker",
+    "gates",
+    "agents"
   ],
   "additionalProperties": false,
   "properties": {
     "version": {
-      "description": "Config format version. Always 2.",
-      "const": 2
+      "description": "Config format version. Always 3.",
+      "const": 3
     },
     "llm_backends": {
       "description": "Model endpoints. The key is the backend's name, which an `opencode` agent's model of type `llm_backend` refers to. Ensemble hands the endpoint and key to the agent's CLI for each run, so they are defined only here. `{}` when there are none.",
@@ -30,12 +32,21 @@
         "$ref": "#/definitions/limit"
       }
     },
-    "teams": {
-      "description": "The organization's teams. The key is the team's name; its agents are delegated to as `team/agent`, or as `agent` when the name is unique. The names are yours.",
+    "tracker": {
+      "description": "Where the team's tasks come from.",
+      "oneOf": [
+        { "$ref": "#/definitions/tracker_local_markdown" }
+      ]
+    },
+    "gates": {
+      "description": "Commands a task's work must pass. The key is the gate's name, which a task's `gate` refers to. Defined here so a task names a gate and cannot bring a command of its own. `{}` when there are none.",
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/definitions/team"
-      }
+      "additionalProperties": { "$ref": "#/definitions/gate" }
+    },
+    "agents": {
+      "description": "The helper team's agents, one professional each. The key is the agent's name, which the calling agent delegates by. The names are yours.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/agent" }
     }
   },
   "definitions": {
@@ -75,34 +86,7 @@
         }
       }
     },
-    "team": {
-      "type": "object",
-      "required": ["prompt", "tracker", "gates", "agents"],
-      "additionalProperties": false,
-      "properties": {
-        "prompt": {
-          "description": "What the team is for. The manager reads its first line to choose a team.",
-          "type": "string",
-          "minLength": 1
-        },
-        "tracker": {
-          "description": "Where the team's tasks come from.",
-          "oneOf": [
-            { "$ref": "#/definitions/tracker_local_markdown" }
-          ]
-        },
-        "gates": {
-          "description": "Commands a task's work must pass. The key is the gate's name, which a task's `gate` refers to. Defined here so a task names a gate and cannot bring a command of its own. `{}` when there are none.",
-          "type": "object",
-          "additionalProperties": { "$ref": "#/definitions/gate" }
-        },
-        "agents": {
-          "description": "The team's agents. The key is the agent's name. The names are yours.",
-          "type": "object",
-          "additionalProperties": { "$ref": "#/definitions/agent" }
-        }
-      }
-    },
+
     "tracker_local_markdown": {
       "type": "object",
       "required": ["type"],
@@ -187,7 +171,7 @@
       "additionalProperties": false,
       "properties": {
         "type": {
-          "description": "anthropic-api: Anthropic's own Messages API. Only an `llm` agent can run on it: OpenCode needs an openai-compatible-api backend, and Claude Code uses your own login.",
+          "description": "anthropic-api: Anthropic's own Messages API. Only a `direct` agent can run on it: OpenCode needs an openai-compatible-api backend, and Claude Code uses your own login.",
           "const": "anthropic-api"
         },
         "base_url": {
@@ -262,7 +246,7 @@
       "additionalProperties": false,
       "properties": {
         "prompt": {
-          "description": "What this agent is for. Its first line is what the calling agent sees when it lists the team; the whole of it goes into the agent's system prompt: added to Claude Code's own, added to or in place of OpenCode's own (see the adapter's `system_prompt`), and alone for an `llm` agent. Keep it short for small local models. Leave it out and a CLI agent runs on its CLI's own system prompt alone; an `llm` agent then has none.",
+          "description": "What this agent is for. Its first line is what the calling agent sees when it lists the team; the whole of it goes into the agent's system prompt: added to Claude Code's own, added to or in place of OpenCode's own (see the adapter's `system_prompt`), and alone for a `direct` agent. Keep it short for small local models. Leave it out and a CLI agent runs on its CLI's own system prompt alone; a `direct` agent then has none.",
           "type": "string"
         },
         "max_seconds": {
@@ -271,7 +255,7 @@
           "minimum": 1
         },
         "limit": {
-          "description": "The name of one of the organization's `limits`, in place of `max_concurrent` and `budget`: the slots and the budget are then shared with every agent that names it.",
+          "description": "The name of one of the team's `limits`, in place of `max_concurrent` and `budget`: the slots and the budget are then shared with every agent that names it.",
           "type": "string"
         },
         "max_concurrent": {
@@ -313,7 +297,7 @@
               "$ref": "#/definitions/codex_adapter"
             },
             {
-              "$ref": "#/definitions/llm_adapter"
+              "$ref": "#/definitions/direct_adapter"
             }
           ]
         }
@@ -490,7 +474,7 @@
         }
       }
     },
-    "llm_adapter": {
+    "direct_adapter": {
       "type": "object",
       "required": [
         "type",
@@ -501,8 +485,8 @@
       "additionalProperties": false,
       "properties": {
         "type": {
-          "description": "llm: a light agent, one chat request to an LLM backend with the agent's prompt as the system prompt. No CLI and no tools: it reads and changes nothing, and answers from the task and its context. For cheap work such as summarising, classifying or drafting.",
-          "const": "llm"
+          "description": "direct: a light agent, one chat request straight to an LLM backend with the agent's prompt as the system prompt. No CLI and no tools: it reads and changes nothing, and answers from the task and its context. For cheap work such as summarising, classifying or drafting.",
+          "const": "direct"
         },
         "backend": {
           "description": "Name of a backend under `llm_backends`.",

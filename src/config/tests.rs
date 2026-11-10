@@ -1,10 +1,10 @@
 use super::raw::*;
 use super::*;
 
-/// The documents below are written in version 1 shape, one team, which is how
-/// most of them read best; this turns each into version 2 before loading it.
+/// The documents below are written in version 1 shape, which is how most of
+/// them read best; this turns each into version 3 before loading it.
 fn parse(text: &str, path: &Path, env: &dyn Env) -> Result<Config, ConfigError> {
-    let text = migrate::to_v2(text).unwrap_or_else(|_| text.to_string());
+    let text = migrate::to_v3(text).unwrap_or_else(|_| text.to_string());
     super::parse(&text, path, env)
 }
 
@@ -20,14 +20,14 @@ fn p() -> PathBuf {
 }
 
 fn opencode(c: &Config, agent: &str) -> OpenCodeAdapter {
-    match &c.agents[&format!("default/{agent}")].adapter {
+    match &c.agents[agent].adapter {
         Adapter::OpenCode(oc) => oc.clone(),
         other => panic!("not an opencode agent: {other:?}"),
     }
 }
 
 fn claude(c: &Config, agent: &str) -> ClaudeCodeAdapter {
-    match &c.agents[&format!("default/{agent}")].adapter {
+    match &c.agents[agent].adapter {
         Adapter::ClaudeCode(cc) => cc.clone(),
         other => panic!("not a claude-code agent: {other:?}"),
     }
@@ -121,21 +121,18 @@ fn refusal(doc: &str) -> String {
 #[test]
 fn the_reference_config_loads() {
     let c = parse(REFERENCE, &p(), &env(&[])).expect("reference config must load");
-    assert_eq!(c.version, 2);
+    assert_eq!(c.version, 3);
     assert_eq!(c.llm_backends.len(), 2);
     assert_eq!(c.llm_backends["openai-remote"].timeout_seconds, 300);
-    assert_eq!(
-        c.agent_names(),
-        vec!["default/coder", "default/planner", "default/reviewer"]
-    );
-    let coder = &c.agents["default/coder"];
+    assert_eq!(c.agent_names(), vec!["coder", "planner", "reviewer"]);
+    let coder = &c.agents["coder"];
     assert_eq!(coder.llm_backend(), Some("openai-remote"));
     assert_eq!(coder.runs_on(), "opencode on openai-remote");
     assert_eq!(coder.context_window(), Some(32768));
     assert_eq!(coder.max_seconds, 900);
     assert!(coder.can_change_files());
-    assert_eq!(c.agents["default/reviewer"].llm_backend(), None);
-    assert_eq!(c.agents["default/reviewer"].context_window(), None);
+    assert_eq!(c.agents["reviewer"].llm_backend(), None);
+    assert_eq!(c.agents["reviewer"].context_window(), None);
 }
 
 #[test]
@@ -143,7 +140,7 @@ fn the_removed_ensemble_type_points_to_opencode() {
     let doc = REFERENCE.replace("type: claude-code", "type: ensemble");
     let detail = refusal(&doc);
     assert!(
-        detail.contains("teams.default.agents.reviewer.adapter")
+        detail.contains("agents.reviewer.adapter")
             && detail.contains("'ensemble' was removed")
             && detail.contains("type 'opencode'"),
         "{detail}"
@@ -164,31 +161,19 @@ fn settings_of_the_removed_harness_are_unknown_fields() {
 fn a_missing_setting_is_refused_by_name_and_place() {
     // (the line to take out, where it belongs, its key)
     for (line, at, key) in [
-        (
-            "    max_seconds: 900\n",
-            "teams.default.agents.coder",
-            "max_seconds",
-        ),
+        ("    max_seconds: 900\n", "agents.coder", "max_seconds"),
         (
             "      max_steps: 30\n      command: opencode\n  reviewer:",
-            "teams.default.agents.coder",
+            "agents.coder",
             "max_steps",
         ),
         (
             "      system_prompt: append\n      max_steps: 30\n      command: opencode\n  reviewer:",
-            "teams.default.agents.coder",
+            "agents.coder",
             "system_prompt",
         ),
-        (
-            "      max_turns: 30\n",
-            "teams.default.agents.reviewer",
-            "max_turns",
-        ),
-        (
-            "      command: claude\n",
-            "teams.default.agents.reviewer",
-            "command",
-        ),
+        ("      max_turns: 30\n", "agents.reviewer", "max_turns"),
+        ("      command: claude\n", "agents.reviewer", "command"),
         (
             "    timeout_seconds: 300\n",
             "llm_backends",
@@ -201,7 +186,7 @@ fn a_missing_setting_is_refused_by_name_and_place() {
         ),
         (
             "        context_window: 32768\n      tools: [read, edit, bash]",
-            "teams.default.agents.coder",
+            "agents.coder",
             "context_window",
         ),
     ] {
@@ -288,7 +273,7 @@ fn an_opencode_model_is_a_provider_model_or_an_llm_backend_model() {
         "{detail}"
     );
     let detail = refusal(&doc("opencode/big-pickle"));
-    assert!(detail.contains("teams.default.agents.x"), "{detail}");
+    assert!(detail.contains("agents.x"), "{detail}");
 }
 
 #[test]
@@ -299,7 +284,7 @@ fn opencode_s_own_prompt_is_kept_or_replaced_and_only_a_prompt_replaces_it() {
     let replaced = REFERENCE.replacen("system_prompt: append", "system_prompt: replace", 1);
     let detail = joined_problems(&replaced);
     assert!(
-        detail.contains("teams.default.agents.planner.adapter")
+        detail.contains("agents.planner.adapter")
             && detail.contains("`system_prompt: replace` needs the agent's `prompt`"),
         "{detail}"
     );
@@ -399,7 +384,6 @@ fn the_schema_names_exactly_the_keys_the_config_accepts() {
             accepted_keys::<RawOpenAiBackend>(),
             "openai-compatible-api backend",
         ),
-        ("team", accepted_keys::<RawTeam>(), "teams"),
         ("limit", accepted_keys::<RawLimit>(), "limits"),
         (
             "budget_per_hour_tokens",
@@ -439,9 +423,9 @@ fn the_schema_names_exactly_the_keys_the_config_accepts() {
             "opencode provider model",
         ),
         (
-            "llm_adapter",
-            accepted_keys::<RawLlmAdapter>(),
-            "llm adapter",
+            "direct_adapter",
+            accepted_keys::<RawDirectAdapter>(),
+            "direct adapter",
         ),
         (
             "opencode_llm_backend_model",
@@ -473,7 +457,6 @@ fn the_schema_requires_every_key_but_the_optional_two() {
         ("agent", vec!["prompt", "max_concurrent", "budget", "limit"]),
         ("limit", vec![]),
         ("budget_per_hour_tokens", vec![]),
-        ("team", vec![]),
         ("tracker_local_markdown", vec![]),
         ("gate", vec![]),
         ("budget_unlimited", vec![]),
@@ -482,7 +465,7 @@ fn the_schema_requires_every_key_but_the_optional_two() {
         ("codex_adapter", vec![]),
         ("opencode_adapter", vec![]),
         ("opencode_provider_model", vec![]),
-        ("llm_adapter", vec![]),
+        ("direct_adapter", vec![]),
         ("opencode_llm_backend_model", vec![]),
     ] {
         assert_eq!(schema_required(&defs[def]), optional(def, &keys), "{def}");
@@ -502,7 +485,7 @@ fn the_schemas_choices_are_the_codes() {
     assert_eq!(tag("codex_adapter"), CODEX_AGENT);
     assert_eq!(tag("tracker_local_markdown"), "local_markdown");
     assert_eq!(tag("opencode_adapter"), OPENCODE_AGENT);
-    assert_eq!(tag("llm_adapter"), LLM_AGENT);
+    assert_eq!(tag("direct_adapter"), DIRECT_AGENT);
     assert_eq!(tag("opencode_provider_model"), PROVIDER_MODEL);
     assert_eq!(tag("opencode_llm_backend_model"), LLM_BACKEND_MODEL);
     assert_eq!(schema["properties"]["version"]["const"], SUPPORTED_VERSION);
@@ -544,7 +527,7 @@ fn an_env_file_fills_in_what_the_environment_lacks() {
     std::fs::create_dir_all(&org).unwrap();
     std::fs::write(
         org.join(CONFIG_FILENAME),
-        migrate::to_v2(REFERENCE).unwrap(),
+        migrate::to_v3(REFERENCE).unwrap(),
     )
     .unwrap();
     let vars = tmp.0.join("keys.env");
@@ -575,7 +558,7 @@ fn a_dotenv_beside_the_config_is_not_read() {
     let tmp = crate::workspace::testing::TempDir::new();
     std::fs::write(
         tmp.0.join(CONFIG_FILENAME),
-        migrate::to_v2(REFERENCE).unwrap(),
+        migrate::to_v3(REFERENCE).unwrap(),
     )
     .unwrap();
     std::fs::write(tmp.0.join(".env"), "OPENAI_LOCAL_API_KEY=from-file\n").unwrap();
@@ -588,7 +571,7 @@ fn a_named_env_file_that_is_missing_is_an_error() {
     let tmp = crate::workspace::testing::TempDir::new();
     std::fs::write(
         tmp.0.join(CONFIG_FILENAME),
-        migrate::to_v2(REFERENCE).unwrap(),
+        migrate::to_v3(REFERENCE).unwrap(),
     )
     .unwrap();
     let err = load(
@@ -603,7 +586,7 @@ fn a_named_env_file_that_is_missing_is_an_error() {
 fn the_sample_loads_and_sets_every_setting_the_schema_has() {
     let c = parse(SAMPLE, &p(), &env(&[])).expect("the sample is a valid config");
     let kinds: Vec<&str> = c.agents.values().map(|a| a.kind()).collect();
-    for kind in [CLAUDE_CODE_AGENT, OPENCODE_AGENT, CODEX_AGENT, LLM_AGENT] {
+    for kind in [CLAUDE_CODE_AGENT, OPENCODE_AGENT, CODEX_AGENT, DIRECT_AGENT] {
         assert!(kinds.contains(&kind), "the sample has no {kind} agent");
     }
     assert!(
@@ -632,12 +615,8 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
     fn of_type<'a>(all: &[&'a serde_json::Value], kind: &str) -> Vec<&'a serde_json::Value> {
         all.iter().copied().filter(|b| b["type"] == kind).collect()
     }
-    let teams: Vec<&serde_json::Value> = doc["teams"].as_object().unwrap().values().collect();
-    let trackers: Vec<&serde_json::Value> = teams.iter().map(|t| &t["tracker"]).collect();
-    let agents: Vec<&serde_json::Value> = teams
-        .iter()
-        .flat_map(|t| t["agents"].as_object().unwrap().values())
-        .collect();
+    let trackers: Vec<&serde_json::Value> = vec![&doc["tracker"]];
+    let agents: Vec<&serde_json::Value> = doc["agents"].as_object().unwrap().values().collect();
     let adapters = |kind: &str| -> Vec<&serde_json::Value> {
         agents
             .iter()
@@ -665,7 +644,6 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
             of_type(&backends, OPENAI_COMPATIBLE_API),
         ),
         ("anthropic_api_backend", of_type(&backends, ANTHROPIC_API)),
-        ("team", teams.clone()),
         ("tracker_local_markdown", trackers),
         ("agent", agents.clone()),
         ("budget_unlimited", budgets("unlimited")),
@@ -673,7 +651,7 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
         ("claude_code_adapter", adapters(CLAUDE_CODE_AGENT)),
         ("codex_adapter", adapters(CODEX_AGENT)),
         ("opencode_adapter", adapters(OPENCODE_AGENT)),
-        ("llm_adapter", adapters(LLM_AGENT)),
+        ("direct_adapter", adapters(DIRECT_AGENT)),
         ("opencode_provider_model", models(PROVIDER_MODEL)),
         ("opencode_llm_backend_model", models(LLM_BACKEND_MODEL)),
     ] {
@@ -697,13 +675,13 @@ fn a_claude_code_agent_is_what_its_adapter_says() {
         ("acceptEdits", 9)
     );
     assert_eq!(f.command, "/opt/claude");
-    assert!(c.agents["default/reviewer"].can_change_files());
-    assert_eq!(c.agents["default/reviewer"].runs_on(), CLAUDE_CODE_AGENT);
+    assert!(c.agents["reviewer"].can_change_files());
+    assert_eq!(c.agents["reviewer"].runs_on(), CLAUDE_CODE_AGENT);
 
     // Read-only is what the config says, not something that is assumed.
     let r = REFERENCE.replace("tools: [Read, Grep, Glob]", "tools: []");
     let c = parse(&r, &p(), &env(&[])).unwrap();
-    assert!(!c.agents["default/reviewer"].has_tools());
+    assert!(!c.agents["reviewer"].has_tools());
 }
 
 #[test]
@@ -750,7 +728,7 @@ agents:
     assert_eq!(doer.tools, ["read", "edit", "bash(git *)"]);
     assert_eq!(doer.max_steps, 12);
     assert_eq!(doer.command, "/opt/opencode");
-    assert!(c.agents["default/doer"].can_change_files());
+    assert!(c.agents["doer"].can_change_files());
 
     let bad = r#"
 version: 1
@@ -798,7 +776,7 @@ fn an_unknown_adapter_type_lists_the_known_ones() {
     let doc = REFERENCE.replace("type: claude-code", "type: aider");
     let detail = refusal(&doc);
     assert!(
-        detail.contains("teams.default.agents.reviewer.adapter")
+        detail.contains("agents.reviewer.adapter")
             && detail.contains("unknown variant `aider`")
             && detail.contains("claude-code")
             && detail.contains("opencode"),
@@ -810,7 +788,7 @@ fn an_unknown_adapter_type_lists_the_known_ones() {
 fn isolation_is_shared_or_worktree() {
     let doc = REFERENCE.replacen("isolation: shared", "isolation: worktree", 1);
     let c = parse(&doc, &p(), &env(&[])).unwrap();
-    assert_eq!(c.agents["default/planner"].isolation, Isolation::Worktree);
+    assert_eq!(c.agents["planner"].isolation, Isolation::Worktree);
     let bad = REFERENCE.replacen("isolation: shared", "isolation: branch", 1);
     let detail = refusal(&bad);
     assert!(
@@ -822,7 +800,7 @@ fn isolation_is_shared_or_worktree() {
 #[test]
 fn a_budget_is_unlimited_or_a_number_of_runs_per_hour() {
     let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
-    assert_eq!(c.agents["default/coder"].budget, Budget::Unlimited);
+    assert_eq!(c.agents["coder"].budget, Budget::Unlimited);
     let doc = REFERENCE.replacen(
         "    budget:\n      type: unlimited\n",
         "    budget:\n      type: per_hour\n      delegations: 5\n",
@@ -830,7 +808,7 @@ fn a_budget_is_unlimited_or_a_number_of_runs_per_hour() {
     );
     let c = parse(&doc, &p(), &env(&[])).unwrap();
     assert_eq!(
-        c.agents["default/planner"].budget,
+        c.agents["planner"].budget,
         Budget::PerHour { delegations: 5 }
     );
     let zero = doc.replace("delegations: 5", "delegations: 0");
@@ -852,15 +830,15 @@ fn a_budget_is_unlimited_or_a_number_of_runs_per_hour() {
 #[test]
 fn an_llm_agent_is_one_request_to_a_defined_backend() {
     let doc = format!(
-        "{REFERENCE}  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: llm\n      backend: openai-local\n      model: small\n      max_tokens: 400\n"
+        "{REFERENCE}  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: direct\n      backend: openai-local\n      model: small\n      max_tokens: 400\n"
     );
     let c = parse(&doc, &p(), &env(&[])).unwrap();
-    let a = &c.agents["default/summariser"];
+    let a = &c.agents["summariser"];
     assert_eq!(
         (a.kind(), a.model(), a.llm_backend()),
-        (LLM_AGENT, "small", Some("openai-local"))
+        (DIRECT_AGENT, "small", Some("openai-local"))
     );
-    assert_eq!(a.runs_on(), "llm on openai-local");
+    assert_eq!(a.runs_on(), "direct on openai-local");
     assert!(!a.has_tools() && !a.can_change_files());
     let bad = doc.replace(
         "backend: openai-local\n      model: small\n      max_tokens: 400",
@@ -893,7 +871,7 @@ fn max_seconds_must_be_positive() {
     let zero = REFERENCE.replace("max_seconds: 900", "max_seconds: 0");
     assert!(joined_problems(&zero).contains("`max_seconds` must be greater than 0"));
     let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
-    assert_eq!(c.agents["default/coder"].max_seconds, 900);
+    assert_eq!(c.agents["coder"].max_seconds, 900);
 }
 
 #[test]
@@ -979,7 +957,7 @@ fn an_agent_with_an_empty_model_is_fatal() {
     let doc = REFERENCE.replace("model: sonnet", "model: \"  \"");
     let joined = joined_problems(&doc);
     assert!(
-        joined.contains("teams.default.agents.reviewer.adapter: `model` is empty"),
+        joined.contains("agents.reviewer.adapter: `model` is empty"),
         "{joined}"
     );
 }
@@ -1029,7 +1007,7 @@ agents: {}
 
 #[test]
 fn an_unsupported_version_is_refused() {
-    let yaml = "version: 3\nllm_backends: {}\ngates: {}\nagents: {}\n";
+    let yaml = "version: 9\nllm_backends: {}\nlimits: {}\ntracker: { type: local_markdown }\ngates: {}\nagents: {}\n";
     assert!(joined_problems(yaml).contains("version"));
 }
 
@@ -1081,108 +1059,57 @@ agents: {}
 #[test]
 fn agents_are_found_by_name() {
     let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
-    assert_eq!(c.agent("coder").unwrap().name, "default/coder");
-    assert_eq!(c.agent("default/coder").unwrap().short_name(), "coder");
+    assert_eq!(c.agent("coder").unwrap().name, "coder");
     assert!(c.agent("nope").is_none());
 }
 
 #[test]
 fn a_prompt_is_optional_and_absent_means_none() {
     let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
-    assert_eq!(c.agents["default/coder"].prompt, None);
+    assert_eq!(c.agents["coder"].prompt, None);
     let with = REFERENCE.replacen(
             "  coder:\n    max_seconds: 900\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n",
             "  coder:\n    prompt: Writes code.\n    max_seconds: 900\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n",
             1,
         );
     let c = parse(&with, &p(), &env(&[])).unwrap();
-    assert_eq!(
-        c.agents["default/coder"].prompt.as_deref(),
-        Some("Writes code.")
-    );
+    assert_eq!(c.agents["coder"].prompt.as_deref(), Some("Writes code."));
 }
 
-/// Two teams, each with a `coder`, and a `planner` in one of them.
-fn two_teams() -> String {
-    let agent = "        max_seconds: 60\n        max_concurrent: 1\n        isolation: shared\n        budget:\n          type: unlimited\n        adapter:\n          type: opencode\n          model: { type: provider, name: opencode/m }\n          tools: [read]\n          system_prompt: append\n          max_steps: 3\n          command: opencode\n";
-    let team = |name: &str, agents: &[&str]| {
-        let mut t = format!(
-            "  {name}:\n    prompt: The {name} team.\n    tracker: {{ type: local_markdown }}\n    gates:\n      test: {{ command: make test, timeout_seconds: 5 }}\n    agents:\n"
-        );
-        for a in agents {
-            t.push_str(&format!("      {a}:\n{agent}"));
-        }
-        t
-    };
+/// A helper team of a `coder` and a `planner`, with one gate.
+fn flat_team() -> String {
+    let agent = "    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: { type: provider, name: opencode/m }\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n";
     format!(
-        "version: 2\nllm_backends: {{}}\nlimits: {{}}\nteams:\n{}{}",
-        team("hardware", &["coder"]),
-        team("software", &["coder", "planner"])
+        "version: 3\nllm_backends: {{}}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates:\n  test: {{ command: make test, timeout_seconds: 5 }}\nagents:\n  coder:\n{agent}  planner:\n{agent}"
     )
 }
 
 #[test]
-fn an_agent_name_used_by_two_teams_needs_its_team() {
-    let c = parse(&two_teams(), &p(), &env(&[])).unwrap();
-    assert_eq!(
-        c.agent_names(),
-        vec!["hardware/coder", "software/coder", "software/planner"]
-    );
-    assert_eq!(c.qualify("planner").unwrap(), "software/planner");
-    assert_eq!(c.qualify("hardware/coder").unwrap(), "hardware/coder");
-    match c.qualify("coder").unwrap_err() {
-        NameError::Ambiguous { candidates, .. } => {
-            assert_eq!(candidates, vec!["hardware/coder", "software/coder"])
-        }
-        other => panic!("{other:?}"),
-    }
-    assert!(c.agent("coder").is_none(), "an ambiguous name is no agent");
-    let message = c.qualify("coder").unwrap_err().to_string();
-    assert!(message.contains("team/agent"), "{message}");
-    assert!(
-        c.qualify("nobody")
-            .unwrap_err()
-            .to_string()
-            .contains("Agents:")
-    );
+fn agents_and_gates_are_found_by_their_plain_names() {
+    let c = parse(&flat_team(), &p(), &env(&[])).unwrap();
+    assert_eq!(c.agent_names(), vec!["coder", "planner"]);
+    assert_eq!(c.agent("planner").unwrap().name, "planner");
+    assert!(c.agent("software/planner").is_none());
+    assert!(c.gate("test").is_some() && c.gate("drc").is_none());
+    assert_eq!(c.tracker, Tracker::LocalMarkdown);
 }
 
 #[test]
-fn gates_belong_to_their_team() {
-    let doc = two_teams().replacen(
-        "      test: { command: make test, timeout_seconds: 5 }\n",
-        "      drc: { command: kicad-cli pcb drc, timeout_seconds: 5 }\n",
-        1,
-    );
-    let c = parse(&doc, &p(), &env(&[])).unwrap();
-    assert!(c.gate("hardware", "drc").is_some());
-    assert!(c.gate("hardware", "test").is_none());
-    assert!(c.gate("software", "test").is_some());
-    assert!(c.gate("software", "drc").is_none());
-}
-
-#[test]
-fn teams_and_agents_need_names_without_a_slash_and_a_prompt() {
-    let slash = two_teams().replace("  hardware:", "  hard/ware:");
-    let joined = joined_problems(&slash);
-    assert!(joined.contains("hard/ware"), "{joined}");
-    let empty = two_teams().replacen("prompt: The hardware team.", "prompt: \"\"", 1);
-    let joined = joined_problems(&empty);
-    assert!(
-        joined.contains("teams.hardware: `prompt` is empty"),
-        "{joined}"
-    );
-    let doc = two_teams().replacen("      coder:\n", "      co/der:\n", 1);
+fn agent_and_gate_names_must_not_contain_a_slash() {
+    let doc = flat_team().replacen("  coder:\n", "  co/der:\n", 1);
     let joined = joined_problems(&doc);
     assert!(joined.contains("co/der"), "{joined}");
+    let doc = flat_team().replacen("  test:", "  te/st:", 1);
+    let joined = joined_problems(&doc);
+    assert!(joined.contains("te/st"), "{joined}");
 }
 
 #[test]
-fn a_team_must_name_its_tracker() {
-    let doc = two_teams().replacen("    tracker: { type: local_markdown }\n", "", 1);
+fn the_team_must_name_its_tracker() {
+    let doc = flat_team().replacen("tracker: { type: local_markdown }\n", "", 1);
     let detail = refusal(&doc);
     assert!(detail.contains("`tracker` is required"), "{detail}");
-    let doc = two_teams().replacen("local_markdown", "carrier_pigeon", 1);
+    let doc = flat_team().replacen("local_markdown", "carrier_pigeon", 1);
     let detail = refusal(&doc);
     assert!(
         detail.contains("carrier_pigeon") || detail.contains("unknown variant"),
@@ -1191,36 +1118,44 @@ fn a_team_must_name_its_tracker() {
 }
 
 #[test]
-fn a_user_can_keep_only_some_teams_and_an_unknown_one_is_named() {
-    let mut c = parse(&two_teams(), &p(), &env(&[])).unwrap();
-    let err = c.retain_teams(&["nope".into()]).unwrap_err();
-    assert!(err.contains("Teams: hardware, software"), "{err}");
-    c.retain_teams(&["software".into()]).unwrap();
-    assert_eq!(c.agent_names(), vec!["software/coder", "software/planner"]);
-    assert!(c.gate("software", "test").is_some() && c.gate("hardware", "test").is_none());
-    assert_eq!(c.teams.len(), 1);
-    // With the other team gone, the short name is no longer ambiguous.
-    assert_eq!(c.qualify("coder").unwrap(), "software/coder");
+fn version_two_is_refused_with_the_command_that_migrates_it() {
+    let doc = flat_team().replacen("version: 3", "version: 2", 1);
+    let joined = super::parse(&doc, &p(), &env(&[])).unwrap_err().to_string();
+    assert!(joined.contains("version: 2 is not supported"), "{joined}");
+}
+
+#[test]
+fn the_old_llm_adapter_name_says_what_it_is_called_now() {
+    let doc = REFERENCE.to_string()
+        + "  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: llm\n      backend: openai-local\n      model: small\n      max_tokens: 400\n";
+    let doc = migrate::to_v3(&doc)
+        .unwrap()
+        .replace("type: direct", "type: llm");
+    let detail = super::parse(&doc, &p(), &env(&[])).unwrap_err().to_string();
+    assert!(
+        detail.contains("'direct'") && detail.contains("ensemble migrate"),
+        "{detail}"
+    );
 }
 
 /// A document with one shared limit and two agents, written out in full.
 fn with_limits(agent_a: &str, agent_b: &str) -> String {
-    let adapter = "        isolation: shared\n        adapter: { type: opencode, model: { type: provider, name: opencode/m }, tools: [read], system_prompt: append, max_steps: 3, command: opencode }\n";
+    let adapter = "    isolation: shared\n    adapter: { type: opencode, model: { type: provider, name: opencode/m }, tools: [read], system_prompt: append, max_steps: 3, command: opencode }\n";
     format!(
-        "version: 2\nllm_backends: {{}}\nlimits:\n  server:\n    max_concurrent: 1\n    budget: {{ type: per_hour_tokens, tokens: 5000 }}\nteams:\n  t:\n    prompt: p\n    tracker: {{ type: local_markdown }}\n    gates: {{}}\n    agents:\n      a:\n        max_seconds: 60\n{agent_a}{adapter}      b:\n        max_seconds: 60\n{agent_b}{adapter}"
+        "version: 3\nllm_backends: {{}}\nlimits:\n  server:\n    max_concurrent: 1\n    budget: {{ type: per_hour_tokens, tokens: 5000 }}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  a:\n    max_seconds: 60\n{agent_a}{adapter}  b:\n    max_seconds: 60\n{agent_b}{adapter}"
     )
 }
 
 #[test]
 fn agents_can_share_a_named_limit_or_write_their_own_but_not_mix() {
-    let shared = "        limit: server\n";
-    let own = "        max_concurrent: 3\n        budget: { type: per_hour, delegations: 4 }\n";
+    let shared = "    limit: server\n";
+    let own = "    max_concurrent: 3\n    budget: { type: per_hour, delegations: 4 }\n";
     let c = parse(&with_limits(shared, own), &p(), &env(&[])).unwrap();
-    let a = &c.agents["t/a"];
+    let a = &c.agents["a"];
     assert_eq!(a.limit.as_deref(), Some("server"));
     assert_eq!(a.max_concurrent, 1);
     assert_eq!(a.budget, Budget::PerHourTokens { tokens: 5000 });
-    let b = &c.agents["t/b"];
+    let b = &c.agents["b"];
     assert_eq!(b.limit, None);
     assert_eq!(
         (b.max_concurrent, b.budget),
@@ -1230,20 +1165,17 @@ fn agents_can_share_a_named_limit_or_write_their_own_but_not_mix() {
 
     for (doc, needle) in [
         (
-            with_limits("        limit: server\n        max_concurrent: 2\n", own),
+            with_limits("    limit: server\n    max_concurrent: 2\n", own),
             "not a mix",
         ),
         (
-            with_limits(
-                "        limit: server\n        budget: { type: unlimited }\n",
-                own,
-            ),
+            with_limits("    limit: server\n    budget: { type: unlimited }\n", own),
             "not a mix",
         ),
-        (with_limits("        max_concurrent: 2\n", own), "not a mix"),
+        (with_limits("    max_concurrent: 2\n", own), "not a mix"),
         (with_limits("", own), "not neither"),
         (
-            with_limits("        limit: nope\n", own),
+            with_limits("    limit: nope\n", own),
             "limit 'nope' is not defined. Defined limits: server",
         ),
     ] {
@@ -1254,7 +1186,7 @@ fn agents_can_share_a_named_limit_or_write_their_own_but_not_mix() {
 
 #[test]
 fn a_limit_needs_real_numbers() {
-    let doc = with_limits("        limit: server\n", "        limit: server\n").replace(
+    let doc = with_limits("    limit: server\n", "    limit: server\n").replace(
         "max_concurrent: 1\n    budget: { type: per_hour_tokens, tokens: 5000 }",
         "max_concurrent: 0\n    budget: { type: per_hour_tokens, tokens: 0 }",
     );
@@ -1276,7 +1208,7 @@ fn a_codex_agent_is_what_its_adapter_says_and_its_sandbox_is_one_codex_has() {
         "      type: codex\n      model: gpt-5-codex\n      sandbox: workspace-write\n      command: /opt/codex",
     );
     let c = parse(&doc, &p(), &env(&[])).unwrap();
-    let r = &c.agents["default/reviewer"];
+    let r = &c.agents["reviewer"];
     assert_eq!((r.kind(), r.model()), (CODEX_AGENT, "gpt-5-codex"));
     assert!(r.can_change_files() && r.has_tools());
     assert_eq!(r.runs_on(), CODEX_AGENT);
@@ -1293,7 +1225,7 @@ fn a_codex_agent_is_what_its_adapter_says_and_its_sandbox_is_one_codex_has() {
         &env(&[]),
     )
     .unwrap();
-    assert!(!ro.agents["default/reviewer"].can_change_files());
+    assert!(!ro.agents["reviewer"].can_change_files());
 
     let bad = joined_problems(&doc.replace("workspace-write", "anything"));
     assert!(bad.contains("sandbox 'anything' is unknown. Sandboxes: read-only, workspace-write, danger-full-access"), "{bad}");
@@ -1326,10 +1258,10 @@ fn an_anthropic_backend_loads_and_only_an_llm_agent_may_run_on_it() {
     // An llm agent may name it.
     let llm = doc.replace(
         "      type: opencode\n      model:\n        type: llm_backend\n        backend: openai-remote\n        name: qwen3-coder\n        context_window: 32768\n      tools: [read, edit, bash]\n      system_prompt: append\n      max_steps: 30\n      command: opencode",
-        "      type: llm\n      backend: claude-api\n      model: claude-haiku-4-5\n      max_tokens: 500",
+        "      type: direct\n      backend: claude-api\n      model: claude-haiku-4-5\n      max_tokens: 500",
     );
     let c = parse(&llm, &p(), &env(&[])).unwrap();
-    assert_eq!(c.agents["default/coder"].llm_backend(), Some("claude-api"));
+    assert_eq!(c.agents["coder"].llm_backend(), Some("claude-api"));
 
     // An OpenCode agent may not: it needs an openai-compatible one.
     let oc = doc.replace(

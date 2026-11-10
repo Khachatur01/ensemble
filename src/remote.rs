@@ -1,6 +1,6 @@
-//! Organizations that live in a git repository somewhere else.
+//! Helper teams that live in a git repository somewhere else.
 //!
-//! A remote organization is a git URL pinned to one commit: `<url>#<sha>`. It is
+//! A remote helper team is a git URL pinned to one commit: `<url>#<sha>`. It is
 //! cloned into the user's cache, checked out at exactly that commit, and checked
 //! again every time it is used. Its config decides what runs on this machine
 //! (agent commands, gate commands, tools, permission modes), so it is never used
@@ -14,7 +14,7 @@ use crate::state;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where an organization comes from.
+/// Where a helper team comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     /// A directory on this machine.
@@ -38,7 +38,7 @@ pub fn is_sha(text: &str) -> bool {
 pub fn parse_source(text: &str) -> Result<Source, String> {
     let text = text.trim();
     if text.is_empty() {
-        return Err("the organization is empty".into());
+        return Err("the helper team is empty".into());
     }
     let local = text.starts_with('/')
         || text.starts_with("./")
@@ -53,7 +53,7 @@ pub fn parse_source(text: &str) -> Result<Source, String> {
         Some((rest, sha)) if is_sha(sha) => (rest, Some(sha.to_ascii_lowercase())),
         Some((_, bad)) => {
             return Err(format!(
-                "'#{bad}' is not a commit: a pinned organization is <url>#<40 hex digits>"
+                "'#{bad}' is not a commit: a pinned helper team is <url>#<40 hex digits>"
             ));
         }
         None => (text, None),
@@ -127,7 +127,7 @@ fn git(dir: Option<&Path>, args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                "`git` is not on PATH; it is needed to fetch a remote organization".to_string()
+                "`git` is not on PATH; it is needed to fetch a remote helper team".to_string()
             } else {
                 format!("cannot run git: {e}")
             }
@@ -242,7 +242,7 @@ fn verify(dir: &Path, sha: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// What a person has trusted: pinned organizations, one `<url>#<sha>` per line.
+/// What a person has trusted: pinned helper teams, one `<url>#<sha>` per line.
 fn trust_file() -> Result<PathBuf, String> {
     Ok(state::root()?.join("trusted-orgs"))
 }
@@ -273,7 +273,7 @@ pub fn trust(url: &str, sha: &str) -> Result<(), String> {
     std::fs::write(&file, text).map_err(|e| format!("cannot write {}: {e}", file.display()))
 }
 
-/// An organization ready to use.
+/// A helper team ready to use.
 #[derive(Debug, Clone)]
 pub struct Resolved {
     /// The directory with `config.yaml`.
@@ -402,7 +402,7 @@ pub fn describe(config: &Config) -> String {
                     ));
                 }
             }
-            Adapter::Llm(l) => out.push_str(&format!(
+            Adapter::Direct(l) => out.push_str(&format!(
                 "  {}: one chat request to backend '{}', no tools\n",
                 a.name, l.backend
             )),
@@ -498,13 +498,13 @@ mod tests {
     }
 
     #[test]
-    fn describing_an_org_lists_what_runs_and_warns_about_the_risky() {
-        let doc = "version: 2\nllm_backends: {}\nlimits: {}\nteams:\n  t:\n    prompt: p\n    tracker: { type: local_markdown }\n    gates:\n      test: { command: \"rm -rf build && make\", timeout_seconds: 5 }\n    agents:\n      doer:\n        max_seconds: 60\n        max_concurrent: 1\n        isolation: shared\n        budget: { type: unlimited }\n        adapter: { type: claude-code, model: sonnet, tools: [Read, \"Bash(*)\"], permission_mode: bypassPermissions, max_turns: 3, command: claude }\n";
+    fn describing_a_team_lists_what_runs_and_warns_about_the_risky() {
+        let doc = "version: 3\nllm_backends: {}\nlimits: {}\ntracker: { type: local_markdown }\ngates:\n  test: { command: \"rm -rf build && make\", timeout_seconds: 5 }\nagents:\n  doer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter: { type: claude-code, model: sonnet, tools: [Read, \"Bash(*)\"], permission_mode: bypassPermissions, max_turns: 3, command: claude }\n";
         let config =
             crate::config::parse(doc, Path::new("c.yaml"), &std::collections::BTreeMap::new())
                 .unwrap();
         let text = describe(&config);
-        assert!(text.contains("t/doer: runs `claude`"), "{text}");
+        assert!(text.contains("doer: runs `claude`"), "{text}");
         assert!(text.contains("test: rm -rf build && make"), "{text}");
         assert!(text.contains("bypassPermissions"), "{text}");
         assert!(

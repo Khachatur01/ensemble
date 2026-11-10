@@ -3,7 +3,7 @@
 use super::raw::*;
 use super::*;
 
-/// Load the organization config at `path`. Variables the environment does not
+/// Load the helper team config at `path`. Variables the environment does not
 /// set may come from `env_file`, a file of `NAME=value` lines the caller names;
 /// nothing is read beside the config, because it can live in a shared repo.
 pub fn load(path: &Path, env_file: Option<&Path>, env: &dyn Env) -> Result<Config, ConfigError> {
@@ -75,6 +75,11 @@ pub(super) fn explain(e: &serde_norway::Error) -> String {
     {
         detail = format!("{before}`{key}` is required{after}");
     }
+    if detail.contains(&format!("unknown variant `{RENAMED_LLM_AGENT}`")) {
+        detail.push_str(&format!(
+            ". Type '{RENAMED_LLM_AGENT}' is called '{DIRECT_AGENT}' since version 3; `ensemble migrate` renames it."
+        ));
+    }
     if detail.contains(&format!("unknown variant `{REMOVED_ENSEMBLE_AGENT}`")) {
         detail.push_str(&format!(
             ". Type '{REMOVED_ENSEMBLE_AGENT}' was removed; Ensemble no longer runs agents itself. To run a model on an LLM backend, use type '{OPENCODE_AGENT}' with a `model` of type '{LLM_BACKEND_MODEL}'."
@@ -125,138 +130,111 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
         );
     }
 
-    // --- teams: their gates and agents ---
-    let mut teams: BTreeMap<String, Team> = BTreeMap::new();
+    let tracker = match &raw.tracker {
+        RawTracker::LocalMarkdown(_) => Tracker::LocalMarkdown,
+    };
+
+    // --- gates ---
     let mut gates = BTreeMap::new();
-    let mut agents: BTreeMap<String, AgentConfig> = BTreeMap::new();
-    for (team_name, rt) in &raw.teams {
-        let here = format!("teams.{team_name}");
-        if team_name.trim().is_empty() || team_name.contains('/') {
+    for (name, g) in &raw.gates {
+        if name.trim().is_empty() || name.contains('/') {
             problems.push(format!(
-                "teams: the team name '{team_name}' must not be empty or contain '/'"
+                "gates: the gate name '{name}' must not be empty or contain '/'"
             ));
             continue;
         }
-        if rt.prompt.trim().is_empty() {
+        if g.command.trim().is_empty() {
+            problems.push(format!("gates.{name}: `command` is empty"));
+        }
+        if g.timeout_seconds == 0 {
             problems.push(format!(
-                "{here}: `prompt` is empty; the manager reads it to choose a team"
+                "gates.{name}: `timeout_seconds` must be greater than 0"
             ));
         }
-        let tracker = match &rt.tracker {
-            RawTracker::LocalMarkdown(_) => Tracker::LocalMarkdown,
-        };
+        gates.insert(
+            name.clone(),
+            Gate {
+                command: g.command.clone(),
+                timeout_seconds: g.timeout_seconds,
+            },
+        );
+    }
 
-        for (name, g) in &rt.gates {
-            if name.trim().is_empty() || name.contains('/') {
-                problems.push(format!(
-                    "{here}.gates: the gate name '{name}' must not be empty or contain '/'"
-                ));
-                continue;
-            }
-            if g.command.trim().is_empty() {
-                problems.push(format!("{here}.gates.{name}: `command` is empty"));
-            }
-            if g.timeout_seconds == 0 {
-                problems.push(format!(
-                    "{here}.gates.{name}: `timeout_seconds` must be greater than 0"
-                ));
-            }
-            gates.insert(
-                format!("{team_name}/{name}"),
-                Gate {
-                    command: g.command.clone(),
-                    timeout_seconds: g.timeout_seconds,
-                },
-            );
+    // --- agents ---
+    let mut agents: BTreeMap<String, AgentConfig> = BTreeMap::new();
+    for (name, ra) in &raw.agents {
+        if name.trim().is_empty() || name.contains('/') {
+            problems.push(format!(
+                "agents: the agent name '{name}' must not be empty or contain '/'"
+            ));
+            continue;
         }
-
-        let mut members = Vec::new();
-        for (name, ra) in &rt.agents {
-            if name.trim().is_empty() || name.contains('/') {
-                problems.push(format!(
-                    "{here}.agents: the agent name '{name}' must not be empty or contain '/'"
-                ));
-                continue;
-            }
-            let path = format!("{here}.agents.{name}");
-            if ra.max_seconds == 0 {
-                problems.push(format!("{path}: `max_seconds` must be greater than 0"));
-            }
-            // Its own limits, written out, or a shared one by name; never a mix.
-            let (max_concurrent, budget, limit) = match (&ra.limit, ra.max_concurrent, &ra.budget) {
-                (Some(name), None, None) => match limits.get(name) {
-                    Some(l) => (l.max_concurrent, l.budget, Some(name.clone())),
-                    None => {
-                        let known: Vec<&str> = limits.keys().map(String::as_str).collect();
-                        problems.push(format!(
-                            "{path}: limit '{name}' is not defined. Defined limits: {}.",
-                            if known.is_empty() {
-                                "(none)".to_string()
-                            } else {
-                                known.join(", ")
-                            }
-                        ));
-                        (1, Budget::Unlimited, None)
-                    }
-                },
-                (None, Some(max), Some(budget)) => {
-                    if max == 0 {
-                        problems.push(format!("{path}: `max_concurrent` must be greater than 0"));
-                    }
-                    (
-                        max,
-                        resolve_budget(&format!("{path}.budget"), budget, &mut problems),
-                        None,
-                    )
-                }
-                _ => {
+        let path = format!("agents.{name}");
+        if ra.max_seconds == 0 {
+            problems.push(format!("{path}: `max_seconds` must be greater than 0"));
+        }
+        // Its own limits, written out, or a shared one by name; never a mix.
+        let (max_concurrent, budget, limit) = match (&ra.limit, ra.max_concurrent, &ra.budget) {
+            (Some(name), None, None) => match limits.get(name) {
+                Some(l) => (l.max_concurrent, l.budget, Some(name.clone())),
+                None => {
+                    let known: Vec<&str> = limits.keys().map(String::as_str).collect();
                     problems.push(format!(
-                        "{path}: give either `limit`, the name of a shared one, or both `max_concurrent` and `budget`; not a mix and not neither"
+                        "{path}: limit '{name}' is not defined. Defined limits: {}.",
+                        if known.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            known.join(", ")
+                        }
                     ));
                     (1, Budget::Unlimited, None)
                 }
-            };
-            let at = format!("{path}.adapter");
-            let adapter = match &ra.adapter {
-                RawAdapter::ClaudeCode(c) => {
-                    Adapter::ClaudeCode(claude_code_adapter(&at, c, &mut problems))
+            },
+            (None, Some(max), Some(budget)) => {
+                if max == 0 {
+                    problems.push(format!("{path}: `max_concurrent` must be greater than 0"));
                 }
-                RawAdapter::OpenCode(o) => Adapter::OpenCode(opencode_adapter(
-                    &at,
-                    o,
-                    ra.prompt.as_deref(),
-                    &raw.llm_backends,
-                    &mut problems,
-                )),
-                RawAdapter::Codex(c) => Adapter::Codex(codex_adapter(&at, c, &mut problems)),
-                RawAdapter::Llm(l) => {
-                    Adapter::Llm(llm_adapter(&at, l, &raw.llm_backends, &mut problems))
-                }
-            };
-            let qualified = format!("{team_name}/{name}");
-            members.push(qualified.clone());
-            agents.insert(
-                qualified.clone(),
-                AgentConfig {
-                    name: qualified,
-                    team: team_name.clone(),
-                    prompt: ra.prompt.clone(),
-                    max_seconds: ra.max_seconds,
-                    max_concurrent,
-                    isolation: ra.isolation,
-                    budget,
-                    limit,
-                    adapter,
-                },
-            );
-        }
-        teams.insert(
-            team_name.clone(),
-            Team {
-                name: team_name.clone(),
-                prompt: rt.prompt.clone(),
-                tracker,
-                agents: members,
+                (
+                    max,
+                    resolve_budget(&format!("{path}.budget"), budget, &mut problems),
+                    None,
+                )
+            }
+            _ => {
+                problems.push(format!(
+                    "{path}: give either `limit`, the name of a shared one, or both `max_concurrent` and `budget`; not a mix and not neither"
+                ));
+                (1, Budget::Unlimited, None)
+            }
+        };
+        let at = format!("{path}.adapter");
+        let adapter = match &ra.adapter {
+            RawAdapter::ClaudeCode(c) => {
+                Adapter::ClaudeCode(claude_code_adapter(&at, c, &mut problems))
+            }
+            RawAdapter::OpenCode(o) => Adapter::OpenCode(opencode_adapter(
+                &at,
+                o,
+                ra.prompt.as_deref(),
+                &raw.llm_backends,
+                &mut problems,
+            )),
+            RawAdapter::Codex(c) => Adapter::Codex(codex_adapter(&at, c, &mut problems)),
+            RawAdapter::Direct(d) => {
+                Adapter::Direct(direct_adapter(&at, d, &raw.llm_backends, &mut problems))
+            }
+        };
+        agents.insert(
+            name.clone(),
+            AgentConfig {
+                name: name.clone(),
+                prompt: ra.prompt.clone(),
+                max_seconds: ra.max_seconds,
+                max_concurrent,
+                isolation: ra.isolation,
+                budget,
+                limit,
+                adapter,
             },
         );
     }
@@ -276,9 +254,9 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
             version: raw.version,
             llm_backends: backends,
             limits,
-            teams,
-            agents,
+            tracker,
             gates,
+            agents,
             source: path.to_path_buf(),
         })
     } else {
@@ -289,12 +267,12 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
     }
 }
 
-pub(super) fn llm_adapter(
+pub(super) fn direct_adapter(
     at: &str,
-    ad: &RawLlmAdapter,
+    ad: &RawDirectAdapter,
     declared: &BTreeMap<String, RawLlmBackend>,
     problems: &mut Vec<String>,
-) -> LlmAdapter {
+) -> DirectAdapter {
     if !declared.contains_key(&ad.backend) {
         problems.push(undefined_backend(at, &ad.backend, declared));
     }
@@ -304,7 +282,7 @@ pub(super) fn llm_adapter(
     if ad.max_tokens == 0 {
         problems.push(format!("{at}: `max_tokens` must be greater than 0"));
     }
-    LlmAdapter {
+    DirectAdapter {
         backend: ad.backend.clone(),
         model: ad.model.clone(),
         max_tokens: ad.max_tokens,

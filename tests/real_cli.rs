@@ -32,15 +32,15 @@ impl Project {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("org")).unwrap();
         std::fs::create_dir_all(dir.join("work")).unwrap();
-        let v2 = ensemble::config::migrate::to_v2(config).expect("a sample");
-        std::fs::write(dir.join("org/config.yaml"), v2).unwrap();
+        let v3 = ensemble::config::migrate::to_v3(config).expect("a sample");
+        std::fs::write(dir.join("org/config.yaml"), v3).unwrap();
         Project(dir)
     }
 
     fn ensemble(&self, args: &[&str]) -> std::process::Output {
         Command::new(BIN)
             .args(args)
-            .arg("--org")
+            .arg("--team")
             .arg(self.0.join("org"))
             .arg("--state")
             .arg(self.0.join("state"))

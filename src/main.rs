@@ -1,6 +1,6 @@
 //! The `ensemble` binary.
 //!
-//! `ensemble mcp` is the one a harness spawns: it offers the team's agents as MCP
+//! `ensemble mcp` is the one a harness spawns: it offers the helper team's agents as MCP
 //! tools. Everything else is for the person setting it up — validating the
 //! config, checking the backends are reachable, and sending one task to one
 //! agent with no harness in the way.
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-ensemble — a team of coding agents behind one MCP server
+ensemble — a helper team of coding agents behind one MCP server
 
 USAGE:
     ensemble <COMMAND> [OPTIONS]
@@ -28,28 +28,29 @@ COMMANDS:
                             agent (Claude Code, OpenCode, ...) spawns, with the
                             project as its working directory; it is not meant
                             to be run by hand.
-    init [--force|--stdout] Write a sample organization: config.yaml in the --org
+    init [--force|--stdout] Write a sample helper team: config.yaml in the --team
                             directory, with every setting. Refuses to overwrite
                             it unless --force; --stdout prints it instead.
-    migrate <FILE>          Rewrite a version 1 config (one team per project) as
-                            an organization in --org, as the team `default`.
-    setup [--org DIR] [--manager M] [--starter S] [--yes]
+    migrate <FILE>          Rewrite a version 1 or 2 config as a version 3
+                            helper team in --team: every agent in one flat list.
+    setup [--team DIR] [--manager M] [--starter S] [--yes]
                             Set everything up: find the agent CLIs, write a
-                            starter organization, register it with your agent
-                            (the manager) and check it. Asks what it needs.
-    connect --manager M --org DIR [--only T,T] [--env-file F] [--global]
-                            Register Ensemble with a manager: claude-code or
-                            opencode. Prints the command it runs.
-    doctor                  Say what is wrong with the organization and the
+                            starter helper team, register it with the agent you
+                            talk to and check it. Asks what it needs.
+    connect --manager M --team DIR [--env-file F] [--global]
+                            Register Ensemble with the agent you talk to:
+                            claude-code, opencode or codex. Prints the command
+                            it runs.
+    doctor                  Say what is wrong with the helper team and the
                             agents it needs, and how to fix each thing.
-    add-agent TEAM/NAME --adapter A [--model M] [--backend B] [--prompt P] [--writes]
-                            Add an agent to a team, every setting written.
-    remove-agent TEAM/NAME  Remove an agent from its team.
-    org trust URL#COMMIT [--yes]
-                            Read what a remote organization would run on this
+    add-agent NAME --adapter A [--model M] [--backend B] [--prompt P] [--writes]
+                            Add an agent to the team, every setting written.
+    remove-agent NAME       Remove an agent from the team.
+    team trust URL#COMMIT [--yes]
+                            Read what a remote helper team would run on this
                             machine and, if you approve, trust that commit.
-    org update URL#COMMIT [--ref R]
-                            Show what changed in a remote organization since
+    team update URL#COMMIT [--ref R]
+                            Show what changed in a remote helper team since
                             COMMIT and print its new pin. Trusts nothing.
     review ID               The branch, the change and the result of a task that
                             worked in a git worktree. Changes nothing.
@@ -64,7 +65,7 @@ COMMANDS:
                             stands. Reads files; starts nothing.
     task ID                 Show one task: its ticket, where it stands, its
                             question or its result.
-    submit AGENT TITLE --text T   (or TITLE --team T: put it in a team's backlog)
+    submit AGENT TITLE --text T   (or TITLE --backlog: put it in the backlog)
            [--goal G] [--context C] [--repo R] [--gate N:K]
            [--after ID,ID] [--files F,F] [--constraints C,C] [--done-when D,D]
                             Write a task. A running `ensemble mcp` picks it up.
@@ -81,7 +82,8 @@ COMMANDS:
                             tokens, from the record every run leaves.
     show <AGENT>            Print how an agent is started: its command line and
                             the config handed to its CLI, API keys hidden.
-    check                   Load and validate the config, then report the team.
+    check                   Load and validate the config, then report the helper
+                            team.
     schema                  Print the JSON Schema for config.yaml, so an editor
                             can complete and check it. Needs no config.
     agents                  List the agents and what runs each.
@@ -90,11 +92,11 @@ COMMANDS:
     run <AGENT> <TASK>      Send one task to one agent and print the answer.
 
 OPTIONS:
-    -o, --org <DIR|URL>     The organization: the directory with config.yaml, its
-                            llm_backends and teams. Nothing is searched for. A
-                            git repository is github.com/acme/org#COMMIT (a pin,
-                            which it must be and be trusted), or @TAG for
-                            `connect`, which pins it.
+    -t, --team <DIR|URL>    The helper team: the directory with config.yaml, its
+                            llm_backends and agents. Nothing is searched for. A
+                            git repository is github.com/acme/team#COMMIT (a
+                            pin, which it must be and be trusted), or @TAG for
+                            `connect`, which pins it. --org is its old name.
         --env-file <PATH>   A file of NAME=value lines read for variables the
                             environment does not set.
         --state <DIR>       Keep tasks, runs and worktrees here instead of in
@@ -130,23 +132,23 @@ fn main() -> ExitCode {
 struct Args {
     command: String,
     rest: Vec<String>,
-    org: Option<String>,
-    /// Where usage counters live, when the organization is remote.
+    team: Option<String>,
+    /// Where usage counters live, when the helper team is remote.
     usage: Option<PathBuf>,
     env_file: Option<PathBuf>,
     state: Option<PathBuf>,
     dir: Option<PathBuf>,
     context: Option<String>,
     /// The options that take a value and belong to one command: `--manager`,
-    /// `--adapter`, `--model`, `--backend`, `--starter`, `--only`, `--prompt`,
-    /// `--team-prompt`.
+    /// `--adapter`, `--model`, `--backend`, `--starter`, `--prompt`, and those
+    /// of `submit`.
     opts: std::collections::BTreeMap<String, String>,
 }
 
 fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
     let mut command: Option<String> = None;
     let mut rest = Vec::new();
-    let mut org = None;
+    let mut team = None;
     let mut env_file = None;
     let mut state = None;
     let mut dir = None;
@@ -167,15 +169,20 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
                 println!("ensemble {}", env!("CARGO_PKG_VERSION"));
                 return Ok(None);
             }
-            "-o" | "--org" => org = Some(value("--org")?),
+            "-t" | "--team" => team = Some(value("--team")?),
+            "-o" | "--org" => {
+                eprintln!(
+                    "ensemble: --org is now --team; --org stops working in the next release."
+                );
+                team = Some(value("--org")?);
+            }
             "--env-file" => env_file = Some(PathBuf::from(value("--env-file")?)),
             "--state" => state = Some(PathBuf::from(value("--state")?)),
             "-d" | "--dir" => dir = Some(PathBuf::from(value("--dir")?)),
             "--context" => context = Some(value("--context")?),
-            "--manager" | "--adapter" | "--model" | "--backend" | "--starter" | "--only"
-            | "--prompt" | "--team-prompt" | "--status" | "--text" | "--goal" | "--repo"
-            | "--gate" | "--team" | "--since" | "--after" | "--files" | "--constraints"
-            | "--done-when" | "--ref" => {
+            "--manager" | "--adapter" | "--model" | "--backend" | "--starter" | "--prompt"
+            | "--status" | "--text" | "--goal" | "--repo" | "--gate" | "--since" | "--after"
+            | "--files" | "--constraints" | "--done-when" | "--ref" => {
                 opts.insert(arg.clone(), value(&arg)?);
             }
             other if other.starts_with('-') && command.is_none() => {
@@ -194,7 +201,7 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
         Some(command) => Ok(Some(Args {
             command,
             rest,
-            org,
+            team,
             usage: None,
             env_file,
             state,
@@ -241,21 +248,15 @@ fn run() -> Result<ExitCode, String> {
         _ => {}
     }
 
-    if args.command == "org" {
-        return cmd_org(&args);
+    if args.command == "team" || args.command == "org" {
+        return cmd_team(&args);
     }
 
-    let resolved = resolve_org(&args, &args.command)?;
+    let resolved = resolve_team(&args, &args.command)?;
     args.usage = resolved.usage.clone();
     let config_path = config::config_path(&resolved.dir);
-    let mut config = config::load(&config_path, args.env_file.as_deref(), &SystemEnv)
+    let config = config::load(&config_path, args.env_file.as_deref(), &SystemEnv)
         .map_err(|e| e.to_string())?;
-    if let Some(only) = opt(&args, "--only") {
-        let only: Vec<String> = only.split(',').map(|t| t.trim().to_string()).collect();
-        config
-            .retain_teams(&only)
-            .map_err(|e| format!("--only: {e}"))?;
-    }
 
     match args.command.as_str() {
         "mcp" => cmd_mcp(config, dir, &args),
@@ -273,28 +274,28 @@ fn run() -> Result<ExitCode, String> {
     }
 }
 
-/// The organization directory, which every command but `init`, `migrate` and
+/// The helper team's directory, which every command but `init`, `migrate` and
 /// `schema` needs. It is named, never found.
-fn org_of(args: &Args, command: &str) -> Result<PathBuf, String> {
-    let spec = args.org.as_deref().ok_or_else(|| missing_org(command))?;
+fn team_of(args: &Args, command: &str) -> Result<PathBuf, String> {
+    let spec = args.team.as_deref().ok_or_else(|| missing_team(command))?;
     match remote::parse_source(spec)? {
         remote::Source::Local(dir) => Ok(dir),
         remote::Source::Remote { .. } => Err(format!(
-            "{command}: a remote organization is read-only. Clone it, edit your copy, and give {command} that directory."
+            "{command}: a remote helper team is read-only. Clone it, edit your copy, and give {command} that directory."
         )),
     }
 }
 
-fn missing_org(command: &str) -> String {
+fn missing_team(command: &str) -> String {
     format!(
-        "{command}: no organization given. Pass --org <dir>, the directory with config.yaml. `ensemble init --org <dir>` makes one."
+        "{command}: no helper team given. Pass --team <dir>, the directory with config.yaml. `ensemble init --team <dir>` makes one."
     )
 }
 
-/// The organization to run: a directory, or a remote one that is pinned,
+/// The helper team to run: a directory, or a remote one that is pinned,
 /// fetched and trusted.
-fn resolve_org(args: &Args, command: &str) -> Result<remote::Resolved, String> {
-    let spec = args.org.as_deref().ok_or_else(|| missing_org(command))?;
+fn resolve_team(args: &Args, command: &str) -> Result<remote::Resolved, String> {
+    let spec = args.team.as_deref().ok_or_else(|| missing_team(command))?;
     remote::use_source(&remote::parse_source(spec)?)
 }
 
@@ -333,7 +334,7 @@ fn state_for(dir: &Path, args: &Args) -> Result<PathBuf, String> {
     }
 }
 
-/// Write the sample organization, or print it.
+/// Write the sample helper team, or print it.
 fn cmd_init(args: &Args) -> Result<ExitCode, String> {
     let has = |flag: &str| args.rest.iter().any(|a| a == flag);
     if let Some(other) = args
@@ -347,39 +348,39 @@ fn cmd_init(args: &Args) -> Result<ExitCode, String> {
         print!("{}", config::SAMPLE);
         return Ok(ExitCode::SUCCESS);
     }
-    let org = org_of(args, "init")?;
-    let path = config::config_path(&org);
+    let team = team_of(args, "init")?;
+    let path = config::config_path(&team);
     if path.exists() && !has("--force") {
         return Err(format!(
             "{} already exists. Pass --force to overwrite it, or --stdout to print the sample.",
             path.display()
         ));
     }
-    std::fs::create_dir_all(&org).map_err(|e| format!("cannot create {}: {e}", org.display()))?;
+    std::fs::create_dir_all(&team).map_err(|e| format!("cannot create {}: {e}", team.display()))?;
     std::fs::write(&path, config::SAMPLE)
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     println!(
-        "wrote {}: a sample organization with every setting",
+        "wrote {}: a sample helper team with every setting",
         path.display()
     );
     println!(
-        "Edit the teams, then run `ensemble check --org {}`. API keys go in the\n\
+        "Edit the agents, then run `ensemble check --team {}`. API keys go in the\n\
          environment, or in a file you pass with --env-file; never in this directory.",
-        org.display()
+        team.display()
     );
     Ok(ExitCode::SUCCESS)
 }
 
-/// Rewrite a version 1 config as an organization in `--org`.
+/// Rewrite an older config as a version 3 helper team in `--team`.
 fn cmd_migrate(args: &Args) -> Result<ExitCode, String> {
     let source = args
         .rest
         .first()
-        .ok_or("migrate: needs the version 1 config file, e.g. `ensemble migrate .ensemble/config.yaml --org ~/my-org`")?;
-    let org = org_of(args, "migrate")?;
+        .ok_or("migrate: needs the old config file, e.g. `ensemble migrate ~/my-org/config.yaml --team ~/my-team`")?;
+    let team = team_of(args, "migrate")?;
     let text = std::fs::read_to_string(source).map_err(|e| format!("migrate: {source}: {e}"))?;
-    let v2 = config::migrate::to_v2(&text).map_err(|e| format!("migrate: {source}: {e}"))?;
-    let path = config::config_path(&org);
+    let v3 = config::migrate::to_v3(&text).map_err(|e| format!("migrate: {source}: {e}"))?;
+    let path = config::config_path(&team);
     if path.exists() && !args.rest.iter().any(|a| a == "--force") {
         return Err(format!(
             "{} already exists. Pass --force to overwrite it.",
@@ -387,14 +388,13 @@ fn cmd_migrate(args: &Args) -> Result<ExitCode, String> {
         ));
     }
     // Loading it now says what, if anything, the old file got wrong.
-    config::parse(&v2, &path, &SystemEnv)
+    config::parse(&v3, &path, &SystemEnv)
         .map_err(|e| format!("migrate: the result is not valid: {e}"))?;
-    std::fs::create_dir_all(&org).map_err(|e| format!("cannot create {}: {e}", org.display()))?;
-    std::fs::write(&path, v2).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    std::fs::create_dir_all(&team).map_err(|e| format!("cannot create {}: {e}", team.display()))?;
+    std::fs::write(&path, v3).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     println!(
-        "wrote {}: every agent is now `{}/<name>`. Comments were not kept. Give the team a real `prompt`.",
-        path.display(),
-        config::migrate::MIGRATED_TEAM
+        "wrote {}: one helper team with every agent. Comments were not kept; an agent or gate that two teams both had is now `<team>-<name>`.",
+        path.display()
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -441,14 +441,15 @@ fn cmd_check(config: Config, dir: &Path, args: &Args) -> Result<ExitCode, String
         );
     }
     println!();
-    println!("teams:");
-    for team in config.teams.values() {
+    println!("gates:");
+    for (name, g) in &config.gates {
         println!(
-            "  {}  -  {}  ({} agents)",
-            team.name,
-            team.summary(),
-            team.agents.len()
+            "  {name}  ->  {}  (timeout {}s)",
+            g.command, g.timeout_seconds
         );
+    }
+    if config.gates.is_empty() {
+        println!("  (none)");
     }
     println!();
     println!("agents:");
@@ -492,14 +493,12 @@ fn cmd_check(config: Config, dir: &Path, args: &Args) -> Result<ExitCode, String
                 t.id, t.agent
             )),
             tasks::Entry::Task(t, None)
-                if t.gate.as_ref().is_some_and(|g| {
-                    config
-                        .agent(&t.agent)
-                        .is_some_and(|a| config.gate(&a.team, &g.name).is_none())
-                }) =>
+                if t.gate
+                    .as_ref()
+                    .is_some_and(|g| config.gate(&g.name).is_none()) =>
             {
                 bad.push(format!(
-                    "{}: gate '{}' is not configured under the team's `gates`; it would fail at once",
+                    "{}: gate '{}' is not configured under `gates`; it would fail at once",
                     t.id,
                     t.gate.as_ref().map_or("", |g| g.name.as_str())
                 ))
@@ -630,16 +629,16 @@ fn cmd_show(config: &Config, args: &Args) -> Result<ExitCode, String> {
             let argv = ensemble::external::codex::arguments(agent, cx, TASK);
             println!("{}", command_line(&cx.command, &argv));
         }
-        Adapter::Llm(la) => {
+        Adapter::Direct(la) => {
             let (path, body) = match config.llm_backends.get(&la.backend) {
                 Some(backend) => {
                     let (path, body) =
-                        ensemble::external::llm::request_for(backend, agent, la, TASK, None);
+                        ensemble::external::direct::request_for(backend, agent, la, TASK, None);
                     (format!("{}{path}", backend.settings.base_url()), body)
                 }
                 None => (
                     format!("<undefined backend {}>", la.backend),
-                    ensemble::external::llm::request(agent, la, TASK, None),
+                    ensemble::external::direct::request(agent, la, TASK, None),
                 ),
             };
             println!("POST {path}");
@@ -763,8 +762,11 @@ fn cmd_connect(args: &Args) -> Result<ExitCode, String> {
         "connect: needs --manager, the agent you talk to: {}",
         setup::MANAGERS.join(" or ")
     ))?;
-    let spec = args.org.as_deref().ok_or_else(|| missing_org("connect"))?;
-    let org = match remote::parse_source(spec)? {
+    let spec = args
+        .team
+        .as_deref()
+        .ok_or_else(|| missing_team("connect"))?;
+    let team = match remote::parse_source(spec)? {
         remote::Source::Local(dir) => absolute(&dir)?,
         remote::Source::Remote { url, sha, git_ref } => {
             // Pin it to the commit it is now, show what it would run, and
@@ -781,9 +783,8 @@ fn cmd_connect(args: &Args) -> Result<ExitCode, String> {
     let reg = setup::registration(
         manager,
         &setup::ensemble_command(),
-        &org,
+        &team,
         env_file.as_deref(),
-        opt(args, "--only"),
         has(args, "--global"),
     )?;
     run_registration(&reg)?;
@@ -843,28 +844,28 @@ fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
             }
         }
     };
-    let org = match &args.org {
-        Some(org) => PathBuf::from(org),
+    let team = match &args.team {
+        Some(team) => PathBuf::from(team),
         None if interactive => {
             let home = setup::home().unwrap_or_else(|| dir.to_path_buf());
             PathBuf::from(ask(
-                "Where should the organization live?",
-                Some(&home.join("ensemble-org").display().to_string()),
+                "Where should the helper team live?",
+                Some(&home.join("ensemble-team").display().to_string()),
             )?)
         }
         None => {
-            return Err("setup: say where the organization lives with --org <dir>.".into());
+            return Err("setup: say where the helper team lives with --team <dir>.".into());
         }
     };
-    let org = absolute(&org)?;
-    let path = config::config_path(&org);
+    let team = absolute(&team)?;
+    let path = config::config_path(&team);
     if path.exists() {
         println!("{} exists; keeping it.", path.display());
     } else {
         let starter = setup::starter(opt(args, "--starter").unwrap_or("software"))?;
-        let text = setup::starter_org(starter, &found)?;
-        std::fs::create_dir_all(&org)
-            .map_err(|e| format!("cannot create {}: {e}", org.display()))?;
+        let text = setup::starter_team(starter, &found)?;
+        std::fs::create_dir_all(&team)
+            .map_err(|e| format!("cannot create {}: {e}", team.display()))?;
         std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         println!(
             "Wrote {}: the {} starter. Edit it, or change it with `ensemble add-agent` and `remove-agent`.",
@@ -876,9 +877,8 @@ fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
     let reg = setup::registration(
         &manager,
         &setup::ensemble_command(),
-        &org,
+        &team,
         env_file.as_deref(),
-        None,
         has(args, "--global"),
     )?;
     let registered = run_registration(&reg);
@@ -888,25 +888,25 @@ fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
     println!();
     let config =
         config::load(&path, args.env_file.as_deref(), &SystemEnv).map_err(|e| e.to_string())?;
-    let healthy = report_doctor(&config, &org, dir, args)?;
+    let healthy = report_doctor(&config, &team, dir, args)?;
     println!();
     if registered.is_ok() && healthy {
         println!(
-            "Done. In {manager}, try: \"have the team implement X\" (restart {manager} first if it was running)."
+            "Done. In {manager}, try: \"have the helper team implement X\" (restart {manager} first if it was running)."
         );
         Ok(ExitCode::SUCCESS)
     } else {
         println!(
-            "Setup is not finished: fix what is listed above, then run `ensemble doctor --org {}`.",
-            org.display()
+            "Setup is not finished: fix what is listed above, then run `ensemble doctor --team {}`.",
+            team.display()
         );
         Ok(ExitCode::FAILURE)
     }
 }
 
 fn cmd_doctor(config: Config, dir: &Path, args: &Args) -> Result<ExitCode, String> {
-    let org = absolute(&org_of(args, "doctor")?)?;
-    Ok(if report_doctor(&config, &org, dir, args)? {
+    let team = absolute(&team_of(args, "doctor")?)?;
+    Ok(if report_doctor(&config, &team, dir, args)? {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -914,11 +914,11 @@ fn cmd_doctor(config: Config, dir: &Path, args: &Args) -> Result<ExitCode, Strin
 }
 
 /// Print what is wrong, each with its fix, and say whether nothing was.
-fn report_doctor(config: &Config, org: &Path, dir: &Path, args: &Args) -> Result<bool, String> {
-    let mut findings = setup::structure(config, org, dir);
+fn report_doctor(config: &Config, team: &Path, dir: &Path, args: &Args) -> Result<bool, String> {
+    let mut findings = setup::structure(config, team, dir);
     let ensemble = ensemble_for(config.clone(), dir.to_path_buf(), args);
     for (name, result) in ensemble.health() {
-        findings.push(setup::health_finding(&name, &result, config, org));
+        findings.push(setup::health_finding(&name, &result, config, team));
     }
     let mut all_ok = true;
     for f in &findings {
@@ -939,16 +939,15 @@ fn report_doctor(config: &Config, org: &Path, dir: &Path, args: &Args) -> Result
 }
 
 fn cmd_add_agent(args: &Args) -> Result<ExitCode, String> {
-    let (team, name) = args
+    let name = args
         .rest
         .iter()
         .find(|a| !a.starts_with("--"))
-        .and_then(|a| a.split_once('/'))
-        .ok_or("add-agent: needs TEAM/NAME, such as software/coder")?;
+        .ok_or("add-agent: needs the agent's NAME, such as coder")?;
     let adapter = opt(args, "--adapter")
-        .ok_or("add-agent: needs --adapter claude-code, opencode, codex or llm")?;
-    let org = org_of(args, "add-agent")?;
-    let path = config::config_path(&org);
+        .ok_or("add-agent: needs --adapter claude-code, opencode, codex or direct")?;
+    let team = team_of(args, "add-agent")?;
+    let path = config::config_path(&team);
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("add-agent: cannot read {}: {e}", path.display()))?;
     let block = config::edit::agent_block(
@@ -962,40 +961,33 @@ fn cmd_add_agent(args: &Args) -> Result<ExitCode, String> {
         },
     )
     .map_err(|e| format!("add-agent: {e}"))?;
-    let edited = config::edit::add_agent(
-        &text,
-        team,
-        name,
-        &block,
-        opt(args, "--team-prompt").unwrap_or("Describe what this team is for."),
-    )
-    .map_err(|e| format!("add-agent: {e}"))?;
+    let edited =
+        config::edit::add_agent(&text, name, &block).map_err(|e| format!("add-agent: {e}"))?;
     config::parse(&edited, &path, &std::collections::BTreeMap::new()).map_err(|e| {
         format!("add-agent: the result would not load, so nothing was written: {e}")
     })?;
     std::fs::write(&path, edited).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    println!("added {team}/{name} to {}", path.display());
+    println!("added {name} to {}", path.display());
     Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_remove_agent(args: &Args) -> Result<ExitCode, String> {
-    let (team, name) = args
+    let name = args
         .rest
         .iter()
         .find(|a| !a.starts_with("--"))
-        .and_then(|a| a.split_once('/'))
-        .ok_or("remove-agent: needs TEAM/NAME, such as software/coder")?;
-    let org = org_of(args, "remove-agent")?;
-    let path = config::config_path(&org);
+        .ok_or("remove-agent: needs the agent's NAME, such as coder")?;
+    let team = team_of(args, "remove-agent")?;
+    let path = config::config_path(&team);
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("remove-agent: cannot read {}: {e}", path.display()))?;
     let edited =
-        config::edit::remove_agent(&text, team, name).map_err(|e| format!("remove-agent: {e}"))?;
+        config::edit::remove_agent(&text, name).map_err(|e| format!("remove-agent: {e}"))?;
     config::parse(&edited, &path, &std::collections::BTreeMap::new()).map_err(|e| {
         format!("remove-agent: the result would not load, so nothing was written: {e}")
     })?;
     std::fs::write(&path, edited).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    println!("removed {team}/{name} from {}", path.display());
+    println!("removed {name} from {}", path.display());
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1027,33 +1019,37 @@ fn approve(url: &str, sha: &str, args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-/// `ensemble org trust <url>#<sha>` and `ensemble org update <url>#<sha>`.
-fn cmd_org(args: &Args) -> Result<ExitCode, String> {
+/// `ensemble team trust <url>#<sha>` and `ensemble team update <url>#<sha>`.
+/// `org` is the command's old name.
+fn cmd_team(args: &Args) -> Result<ExitCode, String> {
+    if args.command == "org" {
+        eprintln!("ensemble: `org` is now `team`; `org` stops working in the next release.");
+    }
     let what = args
         .rest
         .first()
         .map(String::as_str)
-        .ok_or("org: needs trust or update. Try --help.")?;
+        .ok_or("team: needs trust or update. Try --help.")?;
     let spec = args
         .rest
         .iter()
         .skip(1)
         .find(|a| !a.starts_with("--"))
         .ok_or(format!(
-            "org {what}: needs the organization, such as github.com/acme/org#<commit>"
+            "team {what}: needs the helper team, such as github.com/acme/team#<commit>"
         ))?;
     let (url, sha, git_ref) = match remote::parse_source(spec)? {
         remote::Source::Remote { url, sha, git_ref } => (url, sha, git_ref),
         remote::Source::Local(_) => {
             return Err(format!(
-                "org {what}: a directory needs no trust; this is for git repositories"
+                "team {what}: a directory needs no trust; this is for git repositories"
             ));
         }
     };
     match what {
         "trust" => {
             let sha = sha.ok_or(format!(
-                "org trust: pin the commit: {spec}#<commit>. `ensemble connect` pins and trusts in one step."
+                "team trust: pin the commit: {spec}#<commit>. `ensemble connect` pins and trusts in one step."
             ))?;
             approve(&url, &sha, args)?;
             Ok(ExitCode::SUCCESS)
@@ -1078,14 +1074,14 @@ fn cmd_org(args: &Args) -> Result<ExitCode, String> {
                 None => println!("Nothing to compare with: no commit was given to update from."),
             }
             println!(
-                "\nThe new pin is {}.\nRead the changes above, then: ensemble org trust {}\nand register it again with ensemble connect --org {}",
+                "\nThe new pin is {}.\nRead the changes above, then: ensemble team trust {}\nand register it again with ensemble connect --team {}",
                 remote::pinned(&url, &new),
                 remote::pinned(&url, &new),
                 remote::pinned(&url, &new)
             );
             Ok(ExitCode::SUCCESS)
         }
-        other => Err(format!("org: unknown '{other}'. Use trust or update.")),
+        other => Err(format!("team: unknown '{other}'. Use trust or update.")),
     }
 }
 
@@ -1190,13 +1186,13 @@ fn list_opt(args: &Args, name: &str) -> Vec<String> {
 }
 
 fn cmd_submit(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, String> {
-    // An agent and a title, or a title and `--team`, which is the backlog.
+    // An agent and a title, or a title and `--backlog`.
     let positional: Vec<&String> = args.rest.iter().filter(|a| !a.starts_with("--")).collect();
-    let (agent, title): (String, &String) = match (opt(args, "--team"), positional.as_slice()) {
-        (None, [agent, title, ..]) => ((*agent).clone(), *title),
-        (Some(_), [title, ..]) => (String::new(), *title),
+    let (agent, title): (String, &String) = match (has(args, "--backlog"), positional.as_slice()) {
+        (false, [agent, title, ..]) => ((*agent).clone(), *title),
+        (true, [title, ..]) => (String::new(), *title),
         _ => {
-            return Err("submit: needs an agent and a title: `ensemble submit software/coder \"Add retry\" --text ...`, or a title and --team for the backlog".into());
+            return Err("submit: needs an agent and a title: `ensemble submit coder \"Add retry\" --text ...`, or a title and --backlog".into());
         }
     };
     let mut text = opt(args, "--text").map(str::to_string);
@@ -1215,21 +1211,12 @@ fn cmd_submit(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, Stri
     if title.trim().is_empty() || title.contains('\n') {
         return Err("submit: the title is one non-empty line".into());
     }
-    let (qualified, team) = if agent.is_empty() {
-        let team = opt(args, "--team").unwrap_or_default();
-        if !config.teams.contains_key(team) {
-            let known: Vec<&str> = config.teams.keys().map(String::as_str).collect();
-            return Err(format!(
-                "submit: no team '{team}'. Teams: {}.",
-                known.join(", ")
-            ));
-        }
-        (String::new(), team.to_string())
-    } else {
-        let qualified = config.qualify(&agent).map_err(|e| format!("submit: {e}"))?;
-        let team = config.agents[&qualified].team.clone();
-        (qualified, team)
-    };
+    if !agent.is_empty() && config.agent(&agent).is_none() {
+        return Err(format!(
+            "submit: no agent '{agent}'. Agents: {}.",
+            config.agent_names().join(", ")
+        ));
+    }
     let gate = match opt(args, "--gate") {
         None => None,
         Some(spec) => {
@@ -1239,8 +1226,8 @@ fn cmd_submit(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, Stri
                 .ok()
                 .filter(|n| *n >= 1)
                 .ok_or("submit: --gate is name:attempts, with attempts at least 1")?;
-            if config.gate(&team, name).is_none() {
-                return Err(format!("submit: no gate '{name}' for team '{team}'"));
+            if config.gate(name).is_none() {
+                return Err(format!("submit: no gate '{name}' under `gates`"));
             }
             Some(tasks::GateRef {
                 name: name.to_string(),
@@ -1254,8 +1241,7 @@ fn cmd_submit(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, Stri
     }
     let ticket = tasks::Ticket {
         title: title.trim().to_string(),
-        agent: qualified,
-        team: team.clone(),
+        agent,
         context: args.context.clone(),
         goal: opt(args, "--goal").map(str::to_string),
         constraints: list_opt(args, "--constraints"),
@@ -1328,21 +1314,26 @@ fn cmd_stats(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, Stri
 }
 
 fn cmd_assign(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, String> {
-    let (id, agent) =
-        match args.rest.as_slice() {
-            [id, agent, ..] => (id, agent),
-            _ => return Err(
-                "assign: needs a task id and an agent: `ensemble assign 0003-fix software/coder`"
-                    .into(),
-            ),
-        };
+    let (id, agent) = match args.rest.as_slice() {
+        [id, agent, ..] => (id, agent),
+        _ => {
+            return Err(
+                "assign: needs a task id and an agent: `ensemble assign 0003-fix coder`".into(),
+            );
+        }
+    };
     let store = store_for(dir, args)?;
     if !store.exists(id) {
         return Err(format!(
             "assign: no task '{id}'. `ensemble tasks` lists them."
         ));
     }
-    let to = config.qualify(agent).map_err(|e| format!("assign: {e}"))?;
+    let to = config.agent(agent).map(|a| a.name.clone()).ok_or_else(|| {
+        format!(
+            "assign: no agent '{agent}'. Agents: {}.",
+            config.agent_names().join(", ")
+        )
+    })?;
     if store.outcome(id).is_some() {
         return Err(format!("assign: {id} has ended; submit it again."));
     }

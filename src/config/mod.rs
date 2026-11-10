@@ -1,4 +1,4 @@
-//! `.ensemble/config.yaml`: load, resolve the environment, validate.
+//! `config.yaml`, the helper team: load, resolve the environment, validate.
 //!
 //! Validation is deliberately loud and early. Every check here corresponds to a
 //! failure that would otherwise surface much later and much less clearly — as a
@@ -17,7 +17,7 @@
 //! holds it (`api_key_env`), and the value is read from the environment at load
 //! time. There is no `api_key` field; a config that tries one is rejected by
 //! name so the mistake is caught before the file is committed. The values can
-//! also live in `.ensemble/.env`, beside the config and out of git.
+//! also come from a file passed with `--env-file`, out of git.
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -36,7 +36,7 @@ pub const SAMPLE: &str = include_str!("../sample.yaml");
 
 /// The first line of a config, which points an editor at the JSON Schema.
 pub const SCHEMA_URL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json";
-pub const SUPPORTED_VERSION: u32 = 2;
+pub const SUPPORTED_VERSION: u32 = 3;
 
 /// The LLM backend types that ship. Adding one is adding an adapter and a
 /// variant.
@@ -53,7 +53,10 @@ pub const CODEX_AGENT: &str = "codex";
 /// What Codex's sandbox lets a run do.
 pub const CODEX_SANDBOXES: [&str; 3] = ["read-only", "workspace-write", "danger-full-access"];
 /// The light adapter: one request to an LLM backend, no CLI and no tools.
-pub const LLM_AGENT: &str = "llm";
+pub const DIRECT_AGENT: &str = "direct";
+/// What `direct` was called before version 3. Named only to point someone
+/// whose config still uses it at the new name.
+const RENAMED_LLM_AGENT: &str = "llm";
 
 /// Where an OpenCode agent's model comes from.
 pub const PROVIDER_MODEL: &str = "provider";
@@ -112,13 +115,11 @@ impl LlmBackend {
     }
 }
 
-/// One member of the team, resolved.
+/// One member of the helper team, resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentConfig {
-    /// `team/agent`, the name the manager delegates by.
+    /// The name the calling agent delegates by.
     pub name: String,
-    /// The team it belongs to.
-    pub team: String,
     pub prompt: Option<String>,
     /// See [`RawAgent::max_seconds`].
     pub max_seconds: u32,
@@ -171,7 +172,7 @@ pub enum Adapter {
     ClaudeCode(ClaudeCodeAdapter),
     OpenCode(OpenCodeAdapter),
     Codex(CodexAdapter),
-    Llm(LlmAdapter),
+    Direct(DirectAdapter),
 }
 
 /// The Codex CLI, run headless in the project.
@@ -227,9 +228,10 @@ pub enum SystemPrompt {
     Replace,
 }
 
-/// One chat request to an LLM backend: a light agent with no tools.
+/// One chat request to an LLM backend, with no CLI in between: a light agent
+/// with no tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LlmAdapter {
+pub struct DirectAdapter {
     pub backend: String,
     pub model: String,
     pub max_tokens: u32,
@@ -277,17 +279,12 @@ impl OpenCodeAdapter {
 }
 
 impl AgentConfig {
-    /// The name without its team.
-    pub fn short_name(&self) -> &str {
-        self.name.split_once('/').map_or(&self.name, |(_, n)| n)
-    }
-
     pub fn kind(&self) -> &'static str {
         match self.adapter {
             Adapter::ClaudeCode(_) => CLAUDE_CODE_AGENT,
             Adapter::OpenCode(_) => OPENCODE_AGENT,
             Adapter::Codex(_) => CODEX_AGENT,
-            Adapter::Llm(_) => LLM_AGENT,
+            Adapter::Direct(_) => DIRECT_AGENT,
         }
     }
 
@@ -296,7 +293,7 @@ impl AgentConfig {
             Adapter::ClaudeCode(c) => &c.model,
             Adapter::OpenCode(o) => o.model_id(),
             Adapter::Codex(c) => &c.model,
-            Adapter::Llm(l) => &l.model,
+            Adapter::Direct(d) => &d.model,
         }
     }
 
@@ -305,7 +302,7 @@ impl AgentConfig {
         match &self.adapter {
             Adapter::ClaudeCode(_) | Adapter::Codex(_) => None,
             Adapter::OpenCode(o) => o.llm_backend(),
-            Adapter::Llm(l) => Some(&l.backend),
+            Adapter::Direct(d) => Some(&d.backend),
         }
     }
 
@@ -313,7 +310,7 @@ impl AgentConfig {
     /// LLM backend.
     pub fn context_window(&self) -> Option<u32> {
         match &self.adapter {
-            Adapter::ClaudeCode(_) | Adapter::Codex(_) | Adapter::Llm(_) => None,
+            Adapter::ClaudeCode(_) | Adapter::Codex(_) | Adapter::Direct(_) => None,
             Adapter::OpenCode(o) => o.context_window(),
         }
     }
@@ -336,7 +333,7 @@ impl AgentConfig {
             Adapter::ClaudeCode(c) => c.tools.iter().any(|t| claude_tool_writes(t)),
             Adapter::OpenCode(o) => o.tools.iter().any(|t| opencode_tool_writes(t)),
             Adapter::Codex(c) => codex_sandbox_writes(&c.sandbox),
-            Adapter::Llm(_) => false,
+            Adapter::Direct(_) => false,
         }
     }
 
@@ -347,7 +344,7 @@ impl AgentConfig {
             Adapter::OpenCode(o) => o.tools.iter().map(String::as_str).collect(),
             // Its sandbox is what stands in for a list of tools.
             Adapter::Codex(c) => vec![c.sandbox.as_str()],
-            Adapter::Llm(_) => Vec::new(),
+            Adapter::Direct(_) => Vec::new(),
         }
     }
 }
@@ -374,74 +371,22 @@ pub struct Config {
     pub llm_backends: BTreeMap<String, LlmBackend>,
     /// Shared limits, by name.
     pub limits: BTreeMap<String, Limit>,
-    /// The organization's teams, by name. There is no manager in the file: the
-    /// agent that calls Ensemble is it.
-    pub teams: BTreeMap<String, Team>,
-    /// Every agent of every team, by its qualified name, `team/agent`.
-    pub agents: BTreeMap<String, AgentConfig>,
-    /// Every team's gates, by qualified name, `team/gate`.
+    /// Where the team's tasks come from.
+    pub tracker: Tracker,
+    /// The team's gates, by name.
     pub gates: BTreeMap<String, Gate>,
+    /// The helper team: every agent, by name. There is no leader in the file:
+    /// the agent that calls Ensemble is it.
+    pub agents: BTreeMap<String, AgentConfig>,
     /// Where it was loaded from, for error messages.
     pub source: PathBuf,
 }
 
-/// A team of the organization.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Team {
-    pub name: String,
-    /// What the team is for; the first line is what the manager sees.
-    pub prompt: String,
-    pub tracker: Tracker,
-    /// Its agents, by qualified name.
-    pub agents: Vec<String>,
-}
-
-impl Team {
-    /// The first line of its prompt.
-    pub fn summary(&self) -> &str {
-        self.prompt.lines().next().unwrap_or("").trim()
-    }
-}
-
-/// Where a team's tasks come from.
+/// Where the team's tasks come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tracker {
     /// Markdown files in Ensemble's state directory.
     LocalMarkdown,
-}
-
-/// The name an agent is looked up by was not enough to tell which one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NameError {
-    Unknown {
-        name: String,
-        known: Vec<String>,
-    },
-    Ambiguous {
-        name: String,
-        candidates: Vec<String>,
-    },
-}
-
-impl fmt::Display for NameError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            NameError::Unknown { name, known } => write!(
-                f,
-                "no agent '{name}'. Agents: {}.",
-                if known.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    known.join(", ")
-                }
-            ),
-            NameError::Ambiguous { name, candidates } => write!(
-                f,
-                "'{name}' is the name of more than one agent: {}. Use the full name, team/agent.",
-                candidates.join(", ")
-            ),
-        }
-    }
 }
 
 /// A command a task's work must pass.
@@ -452,61 +397,19 @@ pub struct Gate {
 }
 
 impl Config {
-    /// The agent called `name`: `team/agent`, or `agent` when only one team has
-    /// an agent of that name.
+    /// The agent called `name`.
     pub fn agent(&self, name: &str) -> Option<&AgentConfig> {
-        self.qualify(name).ok().and_then(|q| self.agents.get(&q))
+        self.agents.get(name)
     }
 
-    /// `name` as `team/agent`, or why it names no single agent.
-    pub fn qualify(&self, name: &str) -> Result<String, NameError> {
-        if self.agents.contains_key(name) {
-            return Ok(name.to_string());
-        }
-        let candidates: Vec<String> = self
-            .agents
-            .values()
-            .filter(|a| a.short_name() == name)
-            .map(|a| a.name.clone())
-            .collect();
-        match candidates.len() {
-            1 => Ok(candidates.into_iter().next().expect("one candidate")),
-            0 => Err(NameError::Unknown {
-                name: name.to_string(),
-                known: self.agent_names().into_iter().map(String::from).collect(),
-            }),
-            _ => Err(NameError::Ambiguous {
-                name: name.to_string(),
-                candidates,
-            }),
-        }
-    }
-
-    /// The agents' qualified names.
+    /// The agents' names.
     pub fn agent_names(&self) -> Vec<&str> {
         self.agents.keys().map(String::as_str).collect()
     }
 
-    /// Keep only the teams in `only`, with their agents and gates: a user's
-    /// choice of which teams to see, not a change to the organization. A name
-    /// that is no team is an error that lists the teams.
-    pub fn retain_teams(&mut self, only: &[String]) -> Result<(), String> {
-        if let Some(unknown) = only.iter().find(|t| !self.teams.contains_key(t.as_str())) {
-            let known: Vec<&str> = self.teams.keys().map(String::as_str).collect();
-            return Err(format!("no team '{unknown}'. Teams: {}.", known.join(", ")));
-        }
-        self.teams.retain(|name, _| only.contains(name));
-        self.agents.retain(|_, a| only.contains(&a.team));
-        self.gates.retain(|key, _| {
-            key.split_once('/')
-                .is_some_and(|(team, _)| only.contains(&team.to_string()))
-        });
-        Ok(())
-    }
-
-    /// The gate `name` of `team`.
-    pub fn gate(&self, team: &str, name: &str) -> Option<&Gate> {
-        self.gates.get(&format!("{team}/{name}"))
+    /// The gate called `name`.
+    pub fn gate(&self, name: &str) -> Option<&Gate> {
+        self.gates.get(name)
     }
 }
 
@@ -541,7 +444,7 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::NotFound { path } => write!(
                 f,
-                "no {CONFIG_FILENAME} at {}. Check the --org directory, or make one with `ensemble init --org <dir>`.",
+                "no {CONFIG_FILENAME} at {}. Check the --team directory, or make one with `ensemble init --team <dir>`.",
                 path.display()
             ),
             ConfigError::Unreadable { path, detail } => {

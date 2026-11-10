@@ -246,7 +246,7 @@ mod tests {
         let id = store
             .create(&Ticket {
                 title: "Edit".into(),
-                agent: "default/coder".into(),
+                agent: "coder".into(),
                 text: "edit".into(),
                 ..Ticket::default()
             })
@@ -270,7 +270,7 @@ mod tests {
         store
             .write_result(
                 &id,
-                "default/coder",
+                "coder",
                 status,
                 std::time::SystemTime::now(),
                 &[],
@@ -290,10 +290,7 @@ mod tests {
         let f = fixture(Status::Done, "two\n");
         let task = find(&f.store, &f.repo, "0001-edit").unwrap();
         let text = review(&task).unwrap();
-        assert!(
-            text.contains("task 0001-edit · default/coder · done"),
-            "{text}"
-        );
+        assert!(text.contains("task 0001-edit · coder · done"), "{text}");
         assert!(text.contains("branch ensemble/0001-edit"), "{text}");
         assert!(text.contains("a.txt | 2"), "{text}");
         assert!(
@@ -319,7 +316,7 @@ mod tests {
             .store
             .create(&Ticket {
                 title: "Plain".into(),
-                agent: "default/coder".into(),
+                agent: "coder".into(),
                 text: "t".into(),
                 ..Ticket::default()
             })
