@@ -1,0 +1,61 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/hub.schema.json
+
+# hub.yaml — the hub role, written by `ensemble hub init`. The hub is the people
+# layer beside your helper team: here it runs inside your own node and keeps your
+# knowledge. It is yours, apart from the helper team's config.yaml, which a
+# company may share. API keys never go here: they come from the environment, or
+# from a file passed with --env-file.
+#
+# Nothing has a default value: every setting is written here, and one that is
+# missing is refused by name. Only these may be left out, because leaving them
+# out means "not used": `knowledge`, and a backend's `api_key_env`. Check the
+# file with `ensemble hub check --hub <dir>`.
+#
+# Give the hub to the MCP server your agent starts, and it can share and recall:
+#   claude mcp add --scope local ensemble -- ensemble mcp --team <team> --hub <dir>
+
+version: 1
+
+# The person this hub works for. Every share names them.
+owner: Your Name
+
+# ---------------------------------------------------------------------------
+# LLM backends the hub itself uses, such as for distilling knowledge. The same
+# kinds as in config.yaml. `{}` when there are none.
+# ---------------------------------------------------------------------------
+llm_backends:
+  local:
+    type: openai-compatible-api
+    base_url: http://127.0.0.1:11434/v1
+    timeout_seconds: 300
+  central:                           # a model server your company runs
+    type: openai-compatible-api
+    base_url: https://llm.example.com/v1
+    api_key_env: CENTRAL_LLM_KEY     # the variable's name; the key is never written here
+    timeout_seconds: 300
+  claude:
+    type: anthropic-api
+    base_url: https://api.anthropic.com
+    api_key_env: ANTHROPIC_API_KEY
+    timeout_seconds: 120
+
+# ---------------------------------------------------------------------------
+# Knowledge: what your agents share becomes notes in a vault, and later work
+# recalls them. Only Ensemble writes notes; to correct one, share the correction.
+# Leave this block out for no knowledge.
+# ---------------------------------------------------------------------------
+knowledge:
+  vault: vault                 # a git repository, relative to this directory
+  distill:                     # the models that turn shares into notes; they get no tools
+    try:                       # in order; each share uses the first that works
+      - backend: local
+        model: qwen3.5:9b
+      - backend: central
+        model: qwen3.5-72b
+      - backend: claude
+        model: claude-haiku-5-5
+    when_none: wait            # or fail: the share goes to review/ with why
+    max_tokens: 4000           # most tokens of one answer
+  recall:
+    max_notes: 8               # most notes one recall returns
+    max_chars: 6000            # most characters, all notes together

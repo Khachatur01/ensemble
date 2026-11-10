@@ -1393,3 +1393,169 @@ fn an_anthropic_backend_loads_and_only_an_llm_agent_may_run_on_it() {
         "{joined}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// hub.yaml
+// ---------------------------------------------------------------------------
+
+fn hub_schema() -> serde_json::Value {
+    serde_json::from_str(hub::HUB_SCHEMA).expect("the hub schema is JSON")
+}
+
+const HUB: &str = "version: 1\nowner: Ana\nllm_backends:\n  local: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }\nknowledge:\n  vault: vault\n  distill:\n    try:\n      - { backend: local, model: small }\n    when_none: wait\n    max_tokens: 100\n  recall: { max_notes: 3, max_chars: 1000 }\n";
+
+fn hub_refusal(doc: &str) -> String {
+    parse_hub(doc, Path::new("/hubs/ana/hub.yaml"), &env(&[]))
+        .unwrap_err()
+        .to_string()
+}
+
+#[test]
+fn a_hub_names_its_owner_its_backends_and_its_knowledge() {
+    let hub = parse_hub(HUB, Path::new("/hubs/ana/hub.yaml"), &env(&[])).unwrap();
+    assert_eq!(hub.owner, "Ana");
+    let k = hub.knowledge.unwrap();
+    assert_eq!(
+        k.vault,
+        PathBuf::from("/hubs/ana/vault"),
+        "relative to the hub"
+    );
+    assert_eq!(k.distill.backend(), "local");
+    assert_eq!(k.distill.fallback.when_none, WhenNone::Wait);
+    assert_eq!(k.recall.max_notes, 3);
+
+    let without = HUB.split("knowledge:").next().unwrap();
+    let hub = parse_hub(without, Path::new("hub.yaml"), &env(&[])).unwrap();
+    assert!(hub.knowledge.is_none(), "no block, no knowledge");
+}
+
+#[test]
+fn a_hub_is_checked_like_a_team_and_every_problem_is_named() {
+    let said = hub_refusal(
+        &HUB.replace("owner: Ana", "owner: \" \"")
+            .replace("backend: local", "backend: nowhere")
+            .replace("max_notes: 3", "max_notes: 0")
+            .replace("version: 1", "version: 2"),
+    );
+    for expected in [
+        "owner: is empty",
+        "knowledge.distill.try[0]: LLM backend 'nowhere' is not defined",
+        "knowledge.recall: `max_notes` must be greater than 0",
+        "this build understands hub version 1",
+    ] {
+        assert!(said.contains(expected), "{expected} in {said}");
+    }
+    let said = hub_refusal(&HUB.replace("  recall:", "  recal:"));
+    assert!(said.contains("unknown field `recal`"), "{said}");
+    let said = hub_refusal(&HUB.replace("owner: Ana\n", ""));
+    assert!(said.contains("`owner` is required"), "{said}");
+}
+
+#[test]
+fn a_missing_hub_file_says_how_to_make_one() {
+    let err = load_hub(Path::new("/nonexistent/hub.yaml"), None, &env(&[]))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("ensemble hub init --hub <dir>"), "{err}");
+}
+
+#[test]
+fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
+    let schema = hub_schema();
+    let defs = &schema["definitions"];
+    assert_eq!(
+        schema_keys(&schema),
+        accepted_keys::<hub::RawHub>(),
+        "top level"
+    );
+    let mut top = accepted_keys::<hub::RawHub>();
+    top.retain(|k| k != "knowledge");
+    assert_eq!(
+        schema_required(&schema),
+        top,
+        "only knowledge may be left out"
+    );
+    for (def, keys, optional) in [
+        ("knowledge", accepted_keys::<hub::RawKnowledge>(), vec![]),
+        ("distill", accepted_keys::<hub::RawDistill>(), vec![]),
+        ("recall", accepted_keys::<hub::RawRecall>(), vec![]),
+        (
+            "direct_candidate",
+            accepted_keys::<RawDirectCandidate>(),
+            vec![],
+        ),
+        (
+            "openai_compatible_api_backend",
+            accepted_keys::<RawOpenAiBackend>(),
+            vec!["api_key_env"],
+        ),
+        (
+            "anthropic_api_backend",
+            accepted_keys::<RawAnthropicBackend>(),
+            vec!["api_key_env"],
+        ),
+    ] {
+        assert_eq!(schema_keys(&defs[def]), keys, "{def}");
+        let mut required = keys.clone();
+        required.retain(|k| !optional.contains(&k.as_str()));
+        assert_eq!(schema_required(&defs[def]), required, "{def} required");
+    }
+    assert_eq!(
+        schema["properties"]["version"]["const"],
+        hub::HUB_SUPPORTED_VERSION
+    );
+    assert!(
+        !hub::HUB_SCHEMA.contains("\"default\":"),
+        "the schema has a default"
+    );
+}
+
+#[test]
+fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
+    let hub = parse_hub(hub::HUB_SAMPLE, Path::new("hub.yaml"), &env(&[])).unwrap();
+    let k = hub.knowledge.expect("the sample keeps knowledge");
+    assert!(
+        k.distill.fallback.candidates.len() > 1,
+        "the sample shows a fallback"
+    );
+    let doc: serde_json::Value = serde_norway::from_str(hub::HUB_SAMPLE).unwrap();
+    let schema = hub_schema();
+    let defs = &schema["definitions"];
+    let backends: Vec<&serde_json::Value> =
+        doc["llm_backends"].as_object().unwrap().values().collect();
+    let of_type = |kind: &str| -> Vec<&serde_json::Value> {
+        backends
+            .iter()
+            .copied()
+            .filter(|b| b["type"] == kind)
+            .collect()
+    };
+    let knowledge = &doc["knowledge"];
+    for (def, objects) in [
+        ("knowledge", vec![knowledge]),
+        ("distill", vec![&knowledge["distill"]]),
+        ("recall", vec![&knowledge["recall"]]),
+        (
+            "direct_candidate",
+            knowledge["distill"]["try"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .collect(),
+        ),
+        (
+            "openai_compatible_api_backend",
+            of_type(OPENAI_COMPATIBLE_API),
+        ),
+        ("anthropic_api_backend", of_type(ANTHROPIC_API)),
+    ] {
+        assert!(!objects.is_empty(), "the sample has no {def}");
+        let missing: Vec<String> = schema_keys(&defs[def])
+            .into_iter()
+            .filter(|k| !objects.iter().any(|o| o.get(k).is_some()))
+            .collect();
+        assert_eq!(missing, Vec::<String>::new(), "{def}");
+    }
+    let id = schema["$id"].as_str().unwrap();
+    assert!(hub::HUB_SAMPLE.starts_with(&format!("# yaml-language-server: $schema={id}")));
+}

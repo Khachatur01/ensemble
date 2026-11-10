@@ -2214,3 +2214,66 @@ fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
         "{said}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The hub
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
+    let scratch = Scratch::new("hub-init");
+    let hub = scratch.0.with_extension("hub");
+    let out = ensemble(&scratch, &["hub", "check"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("no hub given"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    let out = command(&scratch)
+        .args(["hub", "init", "--hub"])
+        .arg(&hub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(hub.join("hub.yaml").exists());
+    assert!(
+        hub.join("vault/.git").exists(),
+        "the vault is a git repository"
+    );
+    let again = command(&scratch)
+        .args(["hub", "init", "--hub"])
+        .arg(&hub)
+        .output()
+        .unwrap();
+    assert!(
+        !again.status.success(),
+        "it does not overwrite without --force"
+    );
+
+    let url = models_stub(r#"{"data":[{"id":"small"}]}"#);
+    std::fs::write(
+        hub.join("hub.yaml"),
+        format!(
+            "version: 1\nowner: Ana\nllm_backends:\n  down: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}\n  up: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\nknowledge:\n  vault: vault\n  distill:\n    try:\n      - {{ backend: down, model: small }}\n      - {{ backend: up, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\n"
+        ),
+    )
+    .unwrap();
+    let out = command(&scratch)
+        .args(["hub", "check", "--hub"])
+        .arg(&hub)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        stdout_of(&out),
+        stderr_of(&out)
+    );
+    assert!(
+        stdout_of(&out).contains("distilled by small on up"),
+        "{}",
+        stdout_of(&out)
+    );
+}

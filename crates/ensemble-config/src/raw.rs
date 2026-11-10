@@ -184,7 +184,7 @@ pub(crate) struct RawDirectAdapter {
 }
 
 /// One model a `direct` agent may run on.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawDirectCandidate {
     /// Which of `llm_backends` serves the model.

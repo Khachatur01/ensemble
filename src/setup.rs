@@ -230,11 +230,12 @@ fn shell_word(s: &str) -> String {
 }
 
 /// How to register `ensemble mcp` with `manager`, serving the helper team at
-/// `team` (an absolute path).
+/// `team` and, when there is one, the hub at `hub` (absolute paths).
 pub fn registration(
     manager: &str,
     ensemble: &str,
     team: &Path,
+    hub: Option<&Path>,
     env_file: Option<&Path>,
     global: bool,
 ) -> Result<Registration, String> {
@@ -244,6 +245,10 @@ pub fn registration(
         "--team".into(),
         team.display().to_string(),
     ];
+    if let Some(hub) = hub {
+        serve.push("--hub".into());
+        serve.push(hub.display().to_string());
+    }
     if let Some(env_file) = env_file {
         serve.push("--env-file".into());
         serve.push(env_file.display().to_string());
@@ -546,7 +551,7 @@ mod tests {
     #[test]
     fn registrations_name_the_team_and_the_scope() {
         let org = Path::new("/home/me/org");
-        let r = registration("claude-code", "ensemble", org, None, false).unwrap();
+        let r = registration("claude-code", "ensemble", org, None, None, false).unwrap();
         assert_eq!(
             r.line(),
             "claude mcp add --scope local ensemble -- ensemble mcp --team /home/me/org"
@@ -555,28 +560,35 @@ mod tests {
             "claude-code",
             "ensemble",
             org,
+            Some(Path::new("/home/me/hub")),
             Some(Path::new("/k.env")),
             true,
         )
         .unwrap();
         assert!(
             r.line()
+                .contains("--team /home/me/org --hub /home/me/hub --env-file"),
+            "{}",
+            r.line()
+        );
+        assert!(
+            r.line()
                 .starts_with("claude mcp add --scope user ensemble -- ")
         );
         assert!(r.line().ends_with("--env-file /k.env"), "{}", r.line());
-        let r = registration("opencode", "ensemble", org, None, true).unwrap();
+        let r = registration("opencode", "ensemble", org, None, None, true).unwrap();
         assert_eq!(
             r.line(),
             "opencode mcp add --global ensemble -- ensemble mcp --team /home/me/org"
         );
-        let r = registration("opencode", "ensemble", Path::new("/a b"), None, false).unwrap();
+        let r = registration("opencode", "ensemble", Path::new("/a b"), None, None, false).unwrap();
         assert!(r.line().ends_with("--team '/a b'"), "{}", r.line());
-        let r = registration("codex", "ensemble", org, None, true).unwrap();
+        let r = registration("codex", "ensemble", org, None, None, true).unwrap();
         assert_eq!(
             r.line(),
             "codex mcp add ensemble -- ensemble mcp --team /home/me/org"
         );
-        assert!(registration("emacs", "ensemble", org, None, false).is_err());
+        assert!(registration("emacs", "ensemble", org, None, None, false).is_err());
     }
 
     #[test]

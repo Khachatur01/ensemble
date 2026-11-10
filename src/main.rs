@@ -37,10 +37,15 @@ COMMANDS:
                             Set everything up: find the agent CLIs, write a
                             starter helper team, register it with the agent you
                             talk to and check it. Asks what it needs.
-    connect --manager M --team DIR [--env-file F] [--global]
+    connect --manager M --team DIR [--hub DIR] [--env-file F] [--global]
                             Register Ensemble with the agent you talk to:
                             claude-code, opencode or codex. Prints the command
                             it runs.
+    hub init [--force]      Write a sample hub: hub.yaml in the --hub directory,
+                            with every setting, and make its knowledge vault a
+                            git repository.
+    hub check               Load and validate hub.yaml, and say which model
+                            would distill shares now.
     doctor                  Say what is wrong with the helper team and the
                             agents it needs, and how to fix each thing.
     add-agent NAME --adapter A [--model M] [--backend B] [--prompt P] [--writes]
@@ -99,6 +104,8 @@ OPTIONS:
                             git repository is github.com/acme/team#COMMIT (a
                             pin, which it must be and be trusted), or @TAG for
                             `connect`, which pins it. --org is its old name.
+        --hub <DIR>         The hub: the directory with hub.yaml, which keeps
+                            your knowledge. Without it there is no knowledge.
         --env-file <PATH>   A file of NAME=value lines read for variables the
                             environment does not set.
         --state <DIR>       Keep tasks, runs and worktrees here instead of in
@@ -135,6 +142,8 @@ struct Args {
     command: String,
     rest: Vec<String>,
     team: Option<String>,
+    /// The hub's directory, with `hub.yaml`. None: no hub, so no knowledge.
+    hub: Option<PathBuf>,
     /// Where usage counters live, when the helper team is remote.
     usage: Option<PathBuf>,
     env_file: Option<PathBuf>,
@@ -151,6 +160,7 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
     let mut command: Option<String> = None;
     let mut rest = Vec::new();
     let mut team = None;
+    let mut hub = None;
     let mut env_file = None;
     let mut state = None;
     let mut dir = None;
@@ -178,6 +188,7 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
                 );
                 team = Some(value("--org")?);
             }
+            "--hub" => hub = Some(PathBuf::from(value("--hub")?)),
             "--env-file" => env_file = Some(PathBuf::from(value("--env-file")?)),
             "--state" => state = Some(PathBuf::from(value("--state")?)),
             "-d" | "--dir" => dir = Some(PathBuf::from(value("--dir")?)),
@@ -204,6 +215,7 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             command,
             rest,
             team,
+            hub,
             usage: None,
             env_file,
             state,
@@ -253,6 +265,9 @@ fn run() -> Result<ExitCode, String> {
     if args.command == "team" || args.command == "org" {
         return cmd_team(&args);
     }
+    if args.command == "hub" {
+        return cmd_hub(&args);
+    }
 
     let resolved = resolve_team(&args, &args.command)?;
     args.usage = resolved.usage.clone();
@@ -299,6 +314,126 @@ fn missing_team(command: &str) -> String {
 fn resolve_team(args: &Args, command: &str) -> Result<remote::Resolved, String> {
     let spec = args.team.as_deref().ok_or_else(|| missing_team(command))?;
     remote::use_source(&remote::parse_source(spec)?)
+}
+
+/// The hub's directory, for a command that needs one.
+fn hub_of(args: &Args, command: &str) -> Result<PathBuf, String> {
+    args.hub.clone().ok_or_else(|| {
+        format!(
+            "{command}: no hub given. Pass --hub <dir>, the directory with hub.yaml. `ensemble hub init --hub <dir>` makes one."
+        )
+    })
+}
+
+/// `ensemble hub init` and `ensemble hub check`.
+fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
+    let what = args
+        .rest
+        .first()
+        .map(String::as_str)
+        .ok_or("hub: needs init or check. Try --help.")?;
+    match what {
+        "init" => {
+            let dir = hub_of(args, "hub init")?;
+            let path = config::hub_path(&dir);
+            if path.exists() && !has(args, "--force") {
+                return Err(format!(
+                    "{} already exists. Pass --force to overwrite it.",
+                    path.display()
+                ));
+            }
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+            std::fs::write(&path, config::hub::HUB_SAMPLE)
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            println!("wrote {}: a sample hub with every setting", path.display());
+            let hub = config::parse_hub(config::hub::HUB_SAMPLE, &path, &SystemEnv)
+                .map_err(|e| e.to_string())?;
+            if let Some(knowledge) = &hub.knowledge {
+                init_vault(&knowledge.vault)?;
+                println!(
+                    "made the knowledge vault, a git repository: {}",
+                    knowledge.vault.display()
+                );
+            }
+            println!(
+                "Name yourself as `owner`, choose the models that distill, then run `ensemble hub check --hub {}`.",
+                dir.display()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        "check" => {
+            let dir = hub_of(args, "hub check")?;
+            let hub = config::load_hub(
+                &config::hub_path(&dir),
+                args.env_file.as_deref(),
+                &SystemEnv,
+            )
+            .map_err(|e| e.to_string())?;
+            println!("{}: valid, for {}", hub.source.display(), hub.owner);
+            let Some(knowledge) = &hub.knowledge else {
+                println!("knowledge: not used (no `knowledge` block)");
+                return Ok(ExitCode::SUCCESS);
+            };
+            println!("knowledge vault: {}", knowledge.vault.display());
+            if !knowledge.vault.join(".git").exists() {
+                println!("  it is not a git repository yet; `ensemble hub init` makes it");
+                return Ok(ExitCode::FAILURE);
+            }
+            let candidates: Vec<(&config::LlmBackend, &str)> = knowledge
+                .distill
+                .fallback
+                .candidates
+                .iter()
+                .filter_map(|c| {
+                    hub.llm_backends
+                        .get(&c.backend)
+                        .map(|b| (b, c.model.as_str()))
+                })
+                .collect();
+            match ensemble::backends::resolve::Resolver::default().choose(&candidates) {
+                Ok(i) => {
+                    let c = &knowledge.distill.fallback.candidates[i];
+                    println!(
+                        "distill: shares would be distilled by {} on {}",
+                        c.model, c.backend
+                    );
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(refusals) => {
+                    println!("distill: no model can be used now:");
+                    for r in refusals {
+                        println!("  {} / {}: {}", r.backend, r.model, r.why);
+                    }
+                    Ok(ExitCode::FAILURE)
+                }
+            }
+        }
+        other => Err(format!("hub: unknown '{other}'. Use init or check.")),
+    }
+}
+
+/// Make `vault` a git repository, unless it is one already.
+fn init_vault(vault: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(vault)
+        .map_err(|e| format!("cannot create {}: {e}", vault.display()))?;
+    if vault.join(".git").exists() {
+        return Ok(());
+    }
+    let out = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(vault)
+        .output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "git init in {} failed: {}",
+            vault.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
 }
 
 /// Ask yes or no, or take `--yes` for the answer. Without a terminal and
@@ -816,10 +951,12 @@ fn cmd_connect(args: &Args) -> Result<ExitCode, String> {
         }
     };
     let env_file = args.env_file.as_deref().map(absolute).transpose()?;
+    let hub = args.hub.as_deref().map(absolute).transpose()?;
     let reg = setup::registration(
         manager,
         &setup::ensemble_command(),
         &team,
+        hub.as_deref(),
         env_file.as_deref(),
         has(args, "--global"),
     )?;
@@ -910,10 +1047,12 @@ fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
         );
     }
     let env_file = args.env_file.as_deref().map(absolute).transpose()?;
+    let hub = args.hub.as_deref().map(absolute).transpose()?;
     let reg = setup::registration(
         &manager,
         &setup::ensemble_command(),
         &team,
+        hub.as_deref(),
         env_file.as_deref(),
         has(args, "--global"),
     )?;

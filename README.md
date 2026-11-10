@@ -924,7 +924,9 @@ up and for debugging it.
 
 ```console
 $ ensemble setup                      # find the CLIs, write a starter, register it, check it
-$ ensemble connect --manager M --team <dir> [--global]  # register with claude-code, opencode or codex
+$ ensemble connect --manager M --team <dir> [--hub <dir>] [--global]  # register with claude-code, opencode or codex
+$ ensemble hub init --hub <dir>    # write a sample hub: <dir>/hub.yaml, and make its knowledge vault
+$ ensemble hub check --hub <dir>   # validate hub.yaml; which model would distill shares now
 $ ensemble doctor --team <dir>     # what is wrong, and how to fix each thing
 $ ensemble add-agent <name> --adapter A --team <dir>   # add an agent, every setting written
 $ ensemble remove-agent <name> --team <dir>
@@ -954,7 +956,7 @@ $ ensemble mcp --team <dir>        # serve the helper team over stdio
 ```
 
 `run` prints the answer on stdout and the provenance on stderr, so it pipes
-cleanly. Options: `--team <dir>` (`--org` is its old name), `--env-file <path>`, `--dir <path>` (the working
+cleanly. Options: `--team <dir>` (`--org` is its old name), `--hub <dir>` (the hub, which keeps your knowledge), `--env-file <path>`, `--dir <path>` (the working
 folder, default the current directory), `--state <dir>` (instead of the per-user
 state directory), `--context <text>` (for `run`).
 

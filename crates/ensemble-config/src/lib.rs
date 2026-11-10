@@ -513,6 +513,10 @@ pub enum ConfigError {
     NotFound {
         path: PathBuf,
     },
+    /// No `hub.yaml` where `--hub` points.
+    HubNotFound {
+        path: PathBuf,
+    },
     Unreadable {
         path: PathBuf,
         detail: String,
@@ -538,6 +542,11 @@ impl fmt::Display for ConfigError {
                 "no {CONFIG_FILENAME} at {}. Check the --team directory, or make one with `ensemble init --team <dir>`.",
                 path.display()
             ),
+            ConfigError::HubNotFound { path } => write!(
+                f,
+                "no {HUB_FILENAME} at {}. Check the --hub directory, or make one with `ensemble hub init --hub <dir>`.",
+                path.display()
+            ),
             ConfigError::Unreadable { path, detail } => {
                 write!(f, "cannot read {}: {detail}", path.display())
             }
@@ -559,11 +568,13 @@ impl std::error::Error for ConfigError {}
 
 pub mod edit;
 mod env;
+pub mod hub;
 pub mod migrate;
 mod raw;
 mod validate;
 
 pub use env::*;
+pub use hub::{HUB_FILENAME, Hub, Knowledge, Recall, hub_path, load_hub, parse_hub};
 pub use validate::{load, parse};
 
 #[cfg(test)]
