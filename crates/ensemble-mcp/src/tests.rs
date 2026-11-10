@@ -1,6 +1,6 @@
 use super::*;
-use crate::config;
-use crate::workspace::testing::{TempDir, executable};
+use ensemble_config as config;
+use ensemble_core::workspace::testing::{TempDir, executable};
 use std::collections::BTreeMap;
 
 /// One OpenCode JSON event per line, as `printf` commands.
@@ -975,7 +975,7 @@ fn a_queued_task_can_be_cancelled_and_an_ended_one_does_not_run_again() {
     let s = store(&tmp);
     assert_eq!(
         s.outcome("0002-b").unwrap().status,
-        crate::tasks::Status::Cancelled
+        ensemble_tasks::tasks::Status::Cancelled
     );
     assert_eq!(s.state("0002-b"), None, "it never started");
     assert_eq!(s.state("0003-c"), None, "it never ran again");
@@ -1096,7 +1096,7 @@ touch done.txt
 printf '{"type":"text","part":{"text":"edited"}}\n'
 "#;
     let (e, tmp) = team_with(&[("coder", "read, edit", writer)], 2, "worktree");
-    crate::worktree::testing::repo(&project(&tmp));
+    ensemble_agents::worktree::testing::repo(&project(&tmp));
     let dir = tasks(&tmp).join("0001-edit");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -1295,7 +1295,7 @@ fn a_session_runs_no_tasks_while_another_worker_holds_the_folder() {
     let (e, tmp) = team(&[("scout", "read", &emit(&step(vec![text("found it")])))]);
     // This very process stands in for the other worker.
     let state = project(&tmp).join(".ensemble");
-    let _other = crate::harness::lock::acquire(&state).unwrap();
+    let _other = ensemble_tasks::lock::acquire(&state).unwrap();
     session(&e, |ask| {
         let r = ask(
             "submit",
@@ -1316,11 +1316,11 @@ fn a_session_holds_the_lock_while_it_runs_and_frees_it_after() {
     session(&e, |ask| {
         let _ = ask("status", json!({}));
         assert_eq!(
-            crate::harness::lock::holder(&state),
+            ensemble_tasks::lock::holder(&state),
             Some(std::process::id())
         );
     });
-    assert_eq!(crate::harness::lock::holder(&state), None);
+    assert_eq!(ensemble_tasks::lock::holder(&state), None);
 }
 
 #[test]
@@ -1328,7 +1328,7 @@ fn a_delegation_leaves_a_record_of_the_run() {
     let (e, tmp) = scouting();
     let r = call(&e, "delegate", json!({"agent": "scout", "task": "look"}));
     assert_eq!(r["result"]["isError"], false, "{}", text_of(&r));
-    let records = crate::records::read(&project(&tmp).join(".ensemble"));
+    let records = ensemble_core::records::read(&project(&tmp).join(".ensemble"));
     assert_eq!(records.len(), 1, "{records:?}");
     let run = &records[0];
     assert_eq!(run.agent, "scout");
@@ -1528,7 +1528,7 @@ fn a_token_budget_counts_what_runs_reported_and_refuses_when_it_is_used() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let run = |started: u64, tokens: Option<(u64, u64)>| crate::records::Record {
+    let run = |started: u64, tokens: Option<(u64, u64)>| ensemble_core::records::Record {
         agent: "scout".into(),
         model: None,
         started,
@@ -1541,12 +1541,12 @@ fn a_token_budget_counts_what_runs_reported_and_refuses_when_it_is_used() {
         error: None,
     };
     // 60 tokens an hour ago-ish, and a run that reported none: under budget.
-    crate::records::append(&dir, &run(now - 600, Some((40, 20))));
-    crate::records::append(&dir, &run(now - 300, None));
+    ensemble_core::records::append(&dir, &run(now - 600, Some((40, 20))));
+    ensemble_core::records::append(&dir, &run(now - 300, None));
     let r = call(&e, "delegate", json!({"agent": "scout", "task": "look"}));
     assert_eq!(r["result"]["isError"], false, "{}", text_of(&r));
     // That run reported 5 + 2; now push it over.
-    crate::records::append(&dir, &run(now - 100, Some((30, 20))));
+    ensemble_core::records::append(&dir, &run(now - 100, Some((30, 20))));
     let r = call(&e, "delegate", json!({"agent": "scout", "task": "look"}));
     assert_eq!(r["result"]["isError"], true);
     assert!(
@@ -1560,7 +1560,7 @@ fn a_token_budget_counts_what_runs_reported_and_refuses_when_it_is_used() {
     config.agents.get_mut("scout").unwrap().budget = config::Budget::PerHourTokens { tokens: 100 };
     let e2 =
         Ensemble::new(config, Some(project(&tmp2))).with_state(project(&tmp2).join(".ensemble"));
-    crate::records::append(
+    ensemble_core::records::append(
         &project(&tmp2).join(".ensemble"),
         &run(now - 7200, Some((900, 900))),
     );

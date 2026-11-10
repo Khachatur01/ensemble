@@ -17,14 +17,15 @@
 //! decides what runs it — that is the whole point of the indirection, and a
 //! `model` parameter would quietly undo it at the first opportunity.
 //!
-//! The tools themselves live in `super::delegation`, kept apart from the
+//! The tools themselves live in `ensemble_tasks::delegation`, kept apart from the
 //! transport so what an agent is and what a failed delegation says do not depend
-//! on how it was asked. This module owns only the JSON-RPC envelope.
+//! on how it was asked. This crate owns only the JSON-RPC envelope, and `serve`,
+//! the worker that runs a folder's tasks with no session around it.
 
-use super::delegation;
-use super::queue::{Queue, Task};
-use crate::router::Ensemble;
-use crate::tasks::Store;
+use ensemble_agents::router::Ensemble;
+use ensemble_tasks::delegation;
+use ensemble_tasks::queue::{Queue, Task};
+use ensemble_tasks::tasks::Store;
 use serde_json::{Value, json};
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -34,6 +35,7 @@ use std::sync::{Arc, Mutex};
 
 mod notify;
 mod protocol;
+pub mod serve;
 
 use notify::*;
 use protocol::tool_definitions;
@@ -190,7 +192,7 @@ pub fn serve<W: Write + Send>(
     let state = ensemble.state_dir()?;
     // One worker per folder: when another process (`ensemble serve`, or another
     // session) has it, this one reads and writes the tasks and runs none.
-    let lock = super::lock::acquire(&state);
+    let lock = ensemble_tasks::lock::acquire(&state);
     if let Err(pid) = &lock {
         eprintln!(
             "ensemble: process {pid} is running this folder's tasks; this session only reads and writes them"

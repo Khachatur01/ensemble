@@ -1,10 +1,10 @@
 //! `ensemble serve`: run a working folder's tasks with no agent session around
 //! them, so a queue goes on after the manager has closed.
 
-use super::lock;
-use super::queue::{Queue, Task};
-use crate::router::Ensemble;
-use crate::tasks::Store;
+use ensemble_agents::router::Ensemble;
+use ensemble_tasks::lock;
+use ensemble_tasks::queue::{Queue, Task};
+use ensemble_tasks::tasks::Store;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 

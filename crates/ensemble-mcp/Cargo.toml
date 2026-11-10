@@ -1,0 +1,19 @@
+[package]
+name = "ensemble-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Ensemble's MCP server over stdio, and the worker that runs tasks with no session."
+
+[dependencies]
+ensemble-agents.workspace = true
+ensemble-config.workspace = true
+ensemble-core.workspace = true
+ensemble-tasks.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+ensemble-agents = { workspace = true, features = ["test-support"] }
+ensemble-core = { workspace = true, features = ["test-support"] }

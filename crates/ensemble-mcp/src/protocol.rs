@@ -1,6 +1,6 @@
 //! The protocol's fixed parts: its version, the server's name, and the tool catalogue.
 
-use super::super::delegation;
+use ensemble_tasks::delegation;
 use serde_json::{Value, json};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -27,7 +27,7 @@ pub(super) fn tool_definitions(agents: &[&str]) -> Value {
 /// What the server tells the calling agent about itself when it connects, so
 /// that it needs no paragraph in its own instructions file: the helper team,
 /// one agent per line, and how to hand work over.
-pub(super) fn instructions(config: &crate::config::Config) -> String {
+pub(super) fn instructions(config: &ensemble_config::Config) -> String {
     let mut out = String::from(
         "This server gives you a helper team of agents to delegate work to. Each agent is for one kind of work:\n",
     );
