@@ -21,6 +21,8 @@
           # stand in for the agent CLIs, and loopback sockets. All of that works
           # in the sandbox; none of it needs the network or a model server.
           doCheck = true;
+          # Every crate's tests, not only the root package's.
+          cargoTestFlags = [ "--workspace" ];
           # The worktree tests make real git repositories and worktrees.
           nativeCheckInputs = [ pkgs.git ];
 

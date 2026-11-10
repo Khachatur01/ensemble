@@ -928,32 +928,25 @@ state directory), `--context <text>` (for `run`).
 
 ## How it fits together
 
-| | |
+A Cargo workspace. Each crate depends only on the ones above it in this table
+(`tests/workspace.rs` checks it), so the parts still to come, such as memory
+and the hub, are added as crates on top.
+
+| crate | |
 | --- | --- |
-| `crates/ensemble-config/` | the helper team's `config.yaml`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), versions 1 and 2 to 3 (`migrate.rs`) |
-| `src/state.rs` | the per-user state and cache directories |
-| `src/remote.rs` | remote helper teams: parsing, pinning, the cache, trust, and describing what a config would run |
-| `src/setup.rs` | `setup`, `connect` and `doctor`: detecting CLIs and servers, starters, registrations, findings |
-| `crates/ensemble-config/src/edit.rs` | adding and removing an agent in `config.yaml` as text, comments kept |
-| `src/router.rs` | agents to adapters; the ensemble itself, and `health` |
-| `src/external/` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `direct` adapter (one chat request), and gates |
-| `src/workspace.rs` | the working folder, a `repo` inside it, and what a run changed |
-| `crates/ensemble-backends/` | one chat request to a model server in its own format (`chat.rs`), and asking it which models it serves, for `health` (`models.rs`) |
-| `src/port.rs` | the shared error type |
-| `src/review.rs` | `review`, `diff` and `merge` of a worktree task's branch |
-| `src/records.rs` | the record of every run, and the sums `ensemble stats` prints |
-| `src/tracker.rs` | the `Tracker` trait the queue works through, and `LocalMarkdown`, its one implementation |
-| `src/tasks.rs` | tasks as files: `task.md`, `result.md`, and the git-ignored `runs/` |
-| `src/worktree.rs` | a git worktree and branch per task, and committing its work there |
-| `src/harness/delegation.rs` | the tools your agent calls: delegate, submit, status, wait, cancel, agents, health |
-| `src/harness/serve.rs`, `src/harness/lock.rs` | `ensemble serve`, and the one-worker-per-folder lock |
-| `src/harness/queue.rs` | the worker that runs tasks, background delegations, agent slots (`max_concurrent`), wait and cancel |
-| `src/harness/mcp/` | the MCP server, over stdio: the loop (`mod.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`) |
-| `ensemble.schema.json` | the JSON Schema for `config.yaml` |
+| `ensemble-core` | the shared error type (`port.rs`), the per-user state and cache directories (`state.rs`), the working folder, a `repo` inside it and what a run changed (`workspace.rs`), and the record of every run with the sums `ensemble stats` prints (`records.rs`) |
+| `ensemble-config` | the helper team's `config.yaml`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), versions 1 and 2 to 3 (`migrate.rs`), and adding or removing an agent as text, comments kept (`edit.rs`) |
+| `ensemble-backends` | one chat request to a model server in its own format (`chat.rs`), and asking it which models it serves, for `health` (`models.rs`) |
+| `ensemble-agents` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `direct` adapter, and gates (`external/`); a git worktree and branch per task (`worktree.rs`); agents to adapters, slots, budgets and `health` (`router.rs`) |
+| `ensemble-tasks` | tasks as files (`tasks.rs`); the `Tracker` trait and `LocalMarkdown`, its one implementation (`tracker.rs`); the worker that runs tasks and background delegations within each agent's slots (`queue.rs`); the tools your agent calls (`delegation.rs`); the one-worker-per-folder lock (`lock.rs`); `review`, `diff` and `merge` of a worktree task's branch (`review.rs`) |
+| `ensemble-mcp` | the MCP server over stdio: the loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`); and `ensemble serve` (`serve.rs`) |
+| `ensemble` (the root) | the binary (`src/main.rs`); `setup`, `connect` and `doctor` (`src/setup.rs`); remote helper teams: parsing, pinning, the cache, trust (`src/remote.rs`) |
+
+`ensemble.schema.json`, at the root, is the JSON Schema for `config.yaml`.
 
 The MCP server knows the router; it does not know which CLIs exist. The router
-knows agents; only the adapters in `src/external/` know how a CLI is started
-and read.
+knows agents; only the adapters in `crates/ensemble-agents/src/external/` know
+how a CLI is started and read.
 
 ### Errors are one vocabulary
 
@@ -979,10 +972,11 @@ scripts stand in for the CLIs.
 | suite | what it covers |
 | --- | --- |
 | `crates/ensemble-config/src/tests.rs` | every validation rule, environment precedence, secrets, typos, the schema kept in step with the code |
-| `src/external/` | each CLI's command line, generated config and event stream, denials, limits, failures, the time limit killing the process tree |
-| `src/router.rs`, `src/llm_backend.rs` | routing, `health` and its model check |
-| `src/tasks.rs` | ticket files: reading, ids, results written once, run logs |
-| `src/harness/mcp/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session |
+| `crates/ensemble-agents/src/external/` | each CLI's command line, generated config and event stream, denials, limits, failures, the time limit killing the process tree |
+| `crates/ensemble-agents/src/router.rs`, `crates/ensemble-backends/` | routing, `health` and its model check, the chat request in both formats |
+| `crates/ensemble-tasks/` | ticket files: reading, ids, results written once, run logs; review and merge |
+| `crates/ensemble-mcp/src/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session |
+| `tests/workspace.rs` | the crates depend on each other in one direction only |
 | `tests/end_to_end.rs` | the real binary: CLI, `show`, `health` against a stub server, MCP over real pipes, an agent changing a file |
 | `crates/ensemble-agents/tests/fixtures/` | saved event streams per CLI version, replayed through each adapter's parser (see its README) |
 | `tests/real_cli.rs` | the real `claude`, `opencode` and `codex` CLIs: `health` and one trivial run. Ignored; run with `ENSEMBLE_REAL_CLI=1 cargo test --test real_cli -- --ignored`. |
