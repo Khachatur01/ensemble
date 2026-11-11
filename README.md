@@ -937,6 +937,62 @@ within `max_notes` and `max_chars`, marked as reference data.
 `ensemble recall --hub <dir> <topic>` prints the same. The search is by words
 (BM25, a title's words counting more), with no index to keep.
 
+## Tasks from a tracker
+
+Tasks live in a tracker and are assigned to **people**. When an issue is
+assigned to you and carries the hub's label, the hub's inbox makes it a task for
+your helper team and writes what happens back on the issue. Your helper team
+never touches the tracker itself. The first tracker is a folder of markdown
+files; GitLab, GitHub and Jira come later.
+
+```yaml
+# hub.yaml
+tasks:                         # leave it out for no inbox
+  tracker:
+    type: local_markdown
+    dir: issues                # a folder of <id>.md issues, often a git repo a team shares
+  user: ana                    # who you are in the tracker
+  label: ensemble              # the signal
+  poll_seconds: 30
+  projects:                    # an issue's project -> the folder its work happens in
+    shop: /home/ana/code/shop
+```
+
+An issue is a markdown file anyone can write:
+
+```markdown
+---
+title: Fix the login redirect
+assignee: ana
+labels: [ensemble, ensemble:coder]
+project: shop
+status: open
+---
+After logging in, it redirects to /home instead of back to where you were.
+```
+
+What the inbox does, every `poll_seconds`, while `ensemble mcp` or
+`ensemble serve` runs (`ensemble inbox --once --team <dir>` does one pass by
+hand):
+
+- **An open issue becomes a task** in the folder its `project` maps to: for
+  the agent a second label `ensemble:<agent>` names, or else in the backlog, for
+  your agent to assign. The issue gets a comment and goes to `in-progress`. An
+  issue whose project is unknown goes to `blocked`, with a comment saying why.
+- **A question** the task stops to ask is posted as a comment, and the issue
+  goes to `blocked`. Your next comment on the issue is the answer.
+- **The result** is posted as a comment, once. The issue goes to `review` when
+  the task is done, or to `blocked` when it failed. You close it: Ensemble
+  never sets `done`.
+- **An issue you close or take the label off** is forgotten; its task is left
+  alone.
+
+Ensemble changes only an issue's `status:` line and appends comments
+(`## Comment by ensemble at <time>`); everything else in the file stays as you
+wrote it. The task runs when a worker runs for its folder: an `ensemble mcp`
+session opened there, or `ensemble serve --dir <folder>`. `ensemble inbox --hub
+<dir>` lists your labelled issues, where each stands and the task it became.
+
 ## Installation
 
 Linux is where it is built and tested; the rest of Unix should work. Windows is not supported:
@@ -1139,3 +1195,6 @@ scripts stand in for the CLIs.
   Recall is a word search, so it finds notes that use your words, not ones that
   only mean the same. Your agent recalls when it decides to; delegated agents
   get no notes on their own.
+- **One tracker so far.** The inbox reads a folder of markdown issues; GitLab,
+  GitHub and Jira adapters are not built. It runs on your computer, so it
+  looks at the tracker only while `ensemble mcp` or `ensemble serve` runs.

@@ -56,7 +56,7 @@ port.
 
 **The hub is a role, not a place.** Its modules run inside the node process for a
 single developer, or in `ensemble hub` on a server for a team. The node calls the
-same Rust traits either way (`TaskInbox`, `VaultRead`, `ModelAccess`,
+same Rust traits either way (an inbox, `VaultRead`, `ModelAccess`,
 `Identity`); behind each is the local module or a client that forwards the call
 over the link. The node never checks whether a hub exists. A developer who wants
 access from elsewhere moves the hub's state and vault repository to a server.
@@ -135,10 +135,11 @@ limits. (Decided 2026-11-10.)
 Tasks live in a task tracker: Jira, GitLab, Anning, or markdown files. Ensemble
 never becomes the source of truth for tasks.
 
-The helper team never calls a tracker itself. The `tasks` module offers one
-trait, `TaskInbox`: the tasks assigned to this user that carry the delegation
-signal, a lease to claim one, and comments, transitions and attachments written
-back to the tracker. Behind it, tracker adapters do the tracker work: webhooks
+The helper team never calls a tracker itself. A tracker's item is an **issue**,
+assigned to a person; a **task** is an agent's ticket. Each tracker implements
+one trait, `IssueTracker`: the issues assigned to this user that carry the
+signal, and statuses and comments written back. The `Inbox` makes issues into
+tasks and reports the tasks back on the issues. Behind it, tracker adapters do the tracker work: webhooks
 where the tracker has them, polling where it does not, account mapping, the
 signal, deduplication. With a hub, the inbox runs there, with one set of
 credentials, a reachable address for webhooks, and on while nodes are off; a
@@ -289,7 +290,7 @@ in either process.
 | backends | endpoints, the chat client, format translation, health, quotas | core |
 | agents | CLI adapters, `direct`, workspace, worktrees, gates | backends |
 | team | the helper team, fallback resolver, personal agent | agents, identity |
-| tasks | `TaskInbox`, tracker adapters, leases, hand-off | identity, team |
+| tasks | the `Inbox`, `IssueTracker` adapters, leases, hand-off | identity, team |
 | vault | vault repositories, schema, index, visibility | identity |
 | pipeline | ingest, filter, extract, integrate, review | vault, backends |
 | recall | context packages | vault |
@@ -314,7 +315,13 @@ in either process.
    tools; `ensemble share`, `recall`, `knowledge status|distill|rebuild`. Not
    yet: the organization vault and visibility, the privacy gate beyond the
    secret check, recall handed to delegated agents, memory files and hooks.)
-5. Hub server, link, identity, tracker adapters.
+5. Hub server, link, identity, tracker adapters. (Started: the inbox, in the
+   embedded hub, with a local markdown tracker: issues become tasks in the
+   folder their project maps to, for the agent a `<label>:<agent>` label names
+   or in the backlog; questions and answers go through comments; a result is
+   posted once and the issue goes to `review` or `blocked`. Ensemble never sets
+   an issue to `done`. Not yet: GitLab, GitHub and Jira; the hub server, link
+   and identity; the inbox on the server.)
 
 ## Open questions
 
