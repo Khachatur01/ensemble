@@ -575,8 +575,8 @@ mod validate;
 
 pub use env::*;
 pub use hub::{
-    HUB_FILENAME, Hub, IssueTracker, Knowledge, Permission, Recall, Server, Tasks, hub_path,
-    load_hub, parse_hub,
+    HUB_FILENAME, Hub, IssueTracker, Knowledge, Permission, Recall, Registration, Server, Tasks,
+    hub_path, load_hub, parse_hub,
 };
 pub use validate::{load, parse};
 

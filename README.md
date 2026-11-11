@@ -1123,6 +1123,8 @@ $ ensemble hub init --hub <dir>    # write a sample hub: <dir>/hub.yaml, and mak
 $ ensemble hub check --hub <dir>   # validate hub.yaml; which model would distill shares now
 $ ensemble hub user add <name> --role <role> --hub <dir>   # a hub server's user; prints their token once
 $ ensemble hub user list|token <name>|revoke <name>|remove <name> --hub <dir>
+$ ensemble hub user approve <name> --role <role> --hub <dir>   # let in someone who signed up
+$ ensemble hub user role <name> --role <role> --hub <dir>      # give a user another role
 $ ensemble hub serve --hub <dir>   # run the hub for a team, until stopped
 $ ensemble login <wss://url> --token <token>   # sign in to a hub server; then --hub <url> works like --hub <dir>
 $ ensemble logout <wss://url>

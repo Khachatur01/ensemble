@@ -85,7 +85,11 @@ tasks:
 # yours alone, embedded in your node.
 # ---------------------------------------------------------------------------
 server:
-  listen: 127.0.0.1:7700
-roles:                           # names are yours; users are added with `ensemble hub user add`
+  listen: 127.0.0.1:7700         # nodes and the REST API under /api/v1/
+  registration:
+    type: approval               # anyone may sign up; an admin approves. Or: { type: closed }
+    max_pending: 20              # sign-ups waiting at once
+roles:                           # names are yours; the first admin: `ensemble hub user add`
+  admin: [admin, share, recall]
   member: [share, recall]
   reader: [recall]

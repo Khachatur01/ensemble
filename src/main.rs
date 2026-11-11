@@ -49,9 +49,11 @@ COMMANDS:
     hub serve               Run the --hub as a server for a team, until stopped
                             (Ctrl-C or SIGTERM): members' nodes connect, share
                             to and recall from its vault, as their roles allow.
-    hub user add NAME --role R | list | token NAME | revoke NAME | remove NAME
+    hub user add NAME --role R | list | approve NAME --role R | role NAME --role R
+             | token NAME | revoke NAME | remove NAME
                             A hub server's users. `add` and `token` print a new
-                            token once; only its hash is kept.
+                            token once; only its hash is kept. `approve` lets in
+                            someone who signed up; `remove` turns them down.
     share --title T [--text T]
                             Keep knowledge in the --hub vault, as an agent's
                             `share` tool does; the text is read from stdin
@@ -675,6 +677,20 @@ fn cmd_hub_user(args: &Args) -> Result<ExitCode, String> {
             users.save()?;
             show_token(name, &token);
         }
+        "approve" | "role" => {
+            let name = name()?;
+            let role = opt(args, "--role").ok_or(format!(
+                "hub user {what}: needs --role, one of the hub's roles"
+            ))?;
+            if what == "approve" {
+                users.approve(name, role, &hub.roles)?;
+                println!("approved {name} as {role}; their token works now");
+            } else {
+                users.set_role(name, role, &hub.roles)?;
+                println!("{name} is {role} now");
+            }
+            users.save()?;
+        }
         "revoke" => {
             let name = name()?;
             let n = users.revoke(name)?;
@@ -692,16 +708,21 @@ fn cmd_hub_user(args: &Args) -> Result<ExitCode, String> {
         "list" => {
             for user in users.list() {
                 println!(
-                    "{:<16} {:<12} {} token(s)",
+                    "{:<16} {:<8} {:<12} {} token(s)",
                     user.name,
-                    user.role,
+                    user.status.as_str(),
+                    if user.role.is_empty() {
+                        "-"
+                    } else {
+                        &user.role
+                    },
                     user.tokens.len()
                 );
             }
         }
         other => {
             return Err(format!(
-                "hub user: unknown '{other}'. Use add, list, token, revoke or remove."
+                "hub user: unknown '{other}'. Use add, list, approve, role, token, revoke or remove."
             ));
         }
     }

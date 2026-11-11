@@ -1486,10 +1486,28 @@ fn a_hub_inbox_names_its_tracker_user_label_and_projects() {
 #[test]
 fn a_hub_server_listens_somewhere_and_names_its_roles() {
     let doc = format!(
-        "{HUB}server: {{ listen: \"127.0.0.1:7700\" }}\nroles:\n  member: [share, recall]\n  reader: [recall]\n"
+        "{HUB}server: {{ listen: \"127.0.0.1:7700\", registration: {{ type: approval, max_pending: 2 }} }}\nroles:\n  member: [share, recall]\n  reader: [recall]\n"
     );
     let hub = parse_hub(&doc, Path::new("hub.yaml"), &env(&[])).unwrap();
-    assert_eq!(hub.server.unwrap().listen.port(), 7700);
+    let server = hub.server.unwrap();
+    assert_eq!(server.listen.port(), 7700);
+    assert_eq!(
+        server.registration,
+        Registration::Approval { max_pending: 2 }
+    );
+    let said = hub_refusal(&doc.replace("max_pending: 2", "max_pending: 0"));
+    assert!(
+        said.contains("`max_pending` must be greater than 0"),
+        "{said}"
+    );
+    let closed = doc.replace("{ type: approval, max_pending: 2 }", "{ type: closed }");
+    let hub_closed = parse_hub(&closed, Path::new("hub.yaml"), &env(&[])).unwrap();
+    assert_eq!(
+        hub_closed.server.unwrap().registration,
+        Registration::Closed
+    );
+    let said = hub_refusal(&doc.replace("{ type: approval, max_pending: 2 }", "{ type: open }"));
+    assert!(said.contains("unknown variant `open`"), "{said}");
     assert_eq!(hub.roles["reader"], vec![Permission::Recall]);
 
     let said = hub_refusal(&doc.replace("[recall]\n", "[recall, delete]\n"));
@@ -1498,9 +1516,12 @@ fn a_hub_server_listens_somewhere_and_names_its_roles() {
     assert!(said.contains("server.listen: 'localhost'"), "{said}");
     let no_roles = doc.split("roles:").next().unwrap().to_string();
     assert!(hub_refusal(&no_roles).contains("needs `roles`"));
-    let no_server = doc.replace("server: { listen: \"127.0.0.1:7700\" }\n", "");
+    let no_server = doc.replace(
+        "server: { listen: \"127.0.0.1:7700\", registration: { type: approval, max_pending: 2 } }\n",
+        "",
+    );
     assert!(hub_refusal(&no_server).contains("only a hub with a `server` has roles"));
-    let no_knowledge = "version: 1\nowner: Ana\nllm_backends: {}\nserver: { listen: \"127.0.0.1:7700\" }\nroles: { member: [share] }\n";
+    let no_knowledge = "version: 1\nowner: Ana\nllm_backends: {}\nserver: { listen: \"127.0.0.1:7700\", registration: { type: closed } }\nroles: { member: [share] }\n";
     assert!(hub_refusal(no_knowledge).contains("needs `knowledge`"));
 }
 
@@ -1544,6 +1565,11 @@ fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
     );
     for (def, keys, optional) in [
         ("server", accepted_keys::<hub::RawServer>(), vec![]),
+        (
+            "registration_approval",
+            accepted_keys::<hub::RawApproval>(),
+            vec![],
+        ),
         ("tasks", accepted_keys::<hub::RawTasks>(), vec![]),
         (
             "tracker_local_markdown",
@@ -1610,6 +1636,10 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
     for (def, objects) in [
         ("tasks", vec![&doc["tasks"]]),
         ("server", vec![&doc["server"]]),
+        (
+            "registration_approval",
+            vec![&doc["server"]["registration"]],
+        ),
         ("tracker_local_markdown", vec![&doc["tasks"]["tracker"]]),
         ("knowledge", vec![knowledge]),
         ("distill", vec![&knowledge["distill"]]),

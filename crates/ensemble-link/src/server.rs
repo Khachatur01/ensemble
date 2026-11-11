@@ -66,7 +66,7 @@ impl Server<'_> {
     }
 
     fn users(&self) -> Result<Users, String> {
-        Users::load(&self.users)
+        Users::load(&self.users).map_err(String::from)
     }
 
     // The handshake callback's error type is tungstenite's own response.
@@ -262,7 +262,7 @@ pub(crate) mod tests {
     pub(crate) fn start() -> Running {
         let tmp = TempDir::new();
         let yaml = format!(
-            "version: 1\nowner: Acme\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\" }}\nroles:\n  member: [share, recall]\n  reader: [recall]\n",
+            "version: 1\nowner: Acme\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: approval, max_pending: 2 }} }}\nroles:\n  member: [share, recall]\n  reader: [recall]\n",
             tmp.0.join("vault").display()
         );
         let hub =

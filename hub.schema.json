@@ -48,19 +48,53 @@
   "definitions": {
     "server": {
       "type": "object",
-      "required": ["listen"],
+      "required": ["listen", "registration"],
       "additionalProperties": false,
       "properties": {
         "listen": {
-          "description": "The address and port to listen on. Put a TLS reverse proxy such as Caddy in front for the internet, or listen on a LAN or VPN address.",
+          "description": "The address and port to listen on, for nodes (WebSocket) and the REST API under /api/v1/. Put a TLS reverse proxy such as Caddy in front for the internet, or listen on a LAN or VPN address.",
           "type": "string",
           "examples": ["127.0.0.1:7700", "0.0.0.0:7700"]
+        },
+        "registration": {
+          "description": "How people join. `type` decides which other settings there are.",
+          "oneOf": [
+            { "$ref": "#/definitions/registration_approval" },
+            { "$ref": "#/definitions/registration_closed" }
+          ]
+        }
+      }
+    },
+    "registration_approval": {
+      "type": "object",
+      "required": ["type", "max_pending"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "approval: anyone who reaches the hub may sign up (POST /api/v1/register) and gets a token at once; it works once an admin approves the sign-up and gives a role.",
+          "const": "approval"
+        },
+        "max_pending": {
+          "description": "Most sign-ups waiting for approval at once; more are refused until an admin handles some.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "registration_closed": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "closed: nobody signs up; an admin adds users.",
+          "const": "closed"
         }
       }
     },
     "permission": {
-      "description": "share: keep knowledge in the organization vault. recall: read its notes.",
-      "enum": ["share", "recall"]
+      "description": "share: keep knowledge in the organization vault. recall: read its notes. admin: manage users, approve sign-ups, give roles, revoke tokens.",
+      "enum": ["share", "recall", "admin"]
     },
     "tasks": {
       "type": "object",

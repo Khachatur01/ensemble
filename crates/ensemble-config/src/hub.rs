@@ -75,10 +75,21 @@ pub enum IssueTracker {
     LocalMarkdown { dir: PathBuf },
 }
 
-/// A hub server: where it listens for nodes.
+/// A hub server: where it listens for nodes, and how people join.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Server {
     pub listen: std::net::SocketAddr,
+    pub registration: Registration,
+}
+
+/// How people join a hub server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Registration {
+    /// Anyone who reaches the hub may sign up; an admin approves and gives a
+    /// role. At most `max_pending` sign-ups wait at once.
+    Approval { max_pending: u32 },
+    /// Only an admin adds users.
+    Closed,
 }
 
 /// What a role may let its users do on a hub server. Ensemble defines them;
@@ -90,6 +101,8 @@ pub enum Permission {
     Share,
     /// Read the organization vault's notes.
     Recall,
+    /// Manage users: approve sign-ups, give roles, revoke tokens.
+    Admin,
 }
 
 impl Permission {
@@ -97,6 +110,7 @@ impl Permission {
         match self {
             Permission::Share => "share",
             Permission::Recall => "recall",
+            Permission::Admin => "admin",
         }
     }
 }
@@ -134,7 +148,27 @@ pub(crate) struct RawHub {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawServer {
     pub(crate) listen: String,
+    pub(crate) registration: RawRegistration,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum RawRegistration {
+    #[serde(rename = "approval")]
+    Approval(RawApproval),
+    #[serde(rename = "closed")]
+    Closed(RawClosed),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawApproval {
+    pub(crate) max_pending: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawClosed {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -303,11 +337,24 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             projects,
         }
     });
-    let server = raw
-        .server
-        .as_ref()
-        .and_then(|s| match s.listen.trim().parse() {
-            Ok(listen) => Some(Server { listen }),
+    let server = raw.server.as_ref().and_then(|s| {
+        let registration = match &s.registration {
+            RawRegistration::Approval(a) => {
+                if a.max_pending == 0 {
+                    problems
+                        .push("server.registration: `max_pending` must be greater than 0".into());
+                }
+                Registration::Approval {
+                    max_pending: a.max_pending,
+                }
+            }
+            RawRegistration::Closed(_) => Registration::Closed,
+        };
+        match s.listen.trim().parse() {
+            Ok(listen) => Some(Server {
+                listen,
+                registration,
+            }),
             Err(_) => {
                 problems.push(format!(
                     "server.listen: '{}' must be an address and a port, such as 127.0.0.1:7700",
@@ -315,7 +362,8 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
                 ));
                 None
             }
-        });
+        }
+    });
     let roles = raw.roles.clone().unwrap_or_default();
     match (&raw.server, &raw.roles) {
         (Some(_), None) => problems.push(
