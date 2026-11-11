@@ -117,7 +117,7 @@ pub fn handle_reporting<'s>(
             }
             let mut instructions = protocol::instructions(ensemble.config());
             if let Some(memory) = memory {
-                instructions.push_str(memory.instructions());
+                instructions.push_str(&memory.instructions());
             }
             reply(json!({
                 "protocolVersion": version,

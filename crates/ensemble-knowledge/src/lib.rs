@@ -259,11 +259,8 @@ impl Memory {
     }
 
     /// What the server says about knowledge when an agent connects.
-    pub fn instructions(&self) -> &'static str {
-        "\n\nThe user keeps a knowledge vault. Before work where their earlier decisions or \
-         setup may matter, call `recall` with the topic. When they ask you to share or remember \
-         something from this conversation, call `share` with what is worth keeping, written so \
-         it stands on its own; never share unless they ask."
+    pub fn instructions(&self) -> String {
+        instructions_for(&[SHARE, RECALL])
     }
 
     /// The notes about `query`, best first, within the hub's limits, as text
@@ -355,6 +352,19 @@ impl Memory {
 
     /// Keep `text`, checked for secrets first.
     pub fn share(&self, client: Option<&str>, title: &str, text: &str) -> Result<Share, String> {
+        self.share_as(&self.owner, client, self.project.as_deref(), title, text)
+    }
+
+    /// Keep `text` as shared by `who`, from `client` while working in
+    /// `project`: what a hub server does for each of its members.
+    pub fn share_as(
+        &self,
+        who: &str,
+        client: Option<&str>,
+        project: Option<&str>,
+        title: &str,
+        text: &str,
+    ) -> Result<Share, String> {
         if let Some(kind) = secrets::find_secret(&format!("{title}\n{text}")) {
             return Err(format!(
                 "{SHARE}: refused: the text contains what looks like {kind}. The vault is a git \
@@ -369,8 +379,28 @@ impl Memory {
                 vault.root().display()
             ));
         }
-        vault.add_share(&self.owner, client, self.project.as_deref(), title, text)
+        vault.add_share(who, client, project, title, text)
     }
+}
+
+/// What the server says about knowledge when an agent connects, for the
+/// knowledge tools it is offered.
+pub fn instructions_for(tools: &[&str]) -> String {
+    let mut out = String::from("\n\nThe user keeps a knowledge vault.");
+    if tools.contains(&RECALL) {
+        out.push_str(
+            " Before work where their earlier decisions or setup may matter, call `recall` \
+             with the topic.",
+        );
+    }
+    if tools.contains(&SHARE) {
+        out.push_str(
+            " When they ask you to share or remember something from this conversation, call \
+             `share` with what is worth keeping, written so it stands on its own; never share \
+             unless they ask.",
+        );
+    }
+    out
 }
 
 #[cfg(test)]

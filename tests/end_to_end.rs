@@ -2599,3 +2599,77 @@ fn a_hub_servers_admin_adds_users_whose_tokens_are_shown_once() {
         stdout_of(&out)
     );
 }
+
+/// A hub server made by `hub init`, listening on a free loopback port, with
+/// `ana` a member. Returns the hub, its address and ana's token.
+fn hub_server(scratch: &Scratch) -> (PathBuf, String, String) {
+    let hub = hub_of(scratch);
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let address = format!("127.0.0.1:{port}");
+    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    std::fs::write(
+        hub.join("hub.yaml"),
+        text.replace("127.0.0.1:7700", &address),
+    )
+    .unwrap();
+    let out = command(scratch)
+        .args(["hub", "user", "add", "ana", "--role", "member", "--hub"])
+        .arg(&hub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    (hub, address, stdout_of(&out).trim().to_string())
+}
+
+/// `ensemble hub serve`, started and waited for until it listens.
+fn serve_hub(scratch: &Scratch, hub: &Path) -> Child {
+    let mut child = command(scratch)
+        .args(["hub", "serve", "--hub"])
+        .arg(hub)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = BufReader::new(child.stderr.take().unwrap());
+    let mut seen = String::new();
+    loop {
+        let mut line = String::new();
+        assert!(err.read_line(&mut line).unwrap() > 0, "it stopped: {seen}");
+        seen.push_str(&line);
+        if line.contains("listening on") {
+            break;
+        }
+    }
+    std::thread::spawn(move || {
+        let mut rest = String::new();
+        let _ = err.read_to_string(&mut rest);
+    });
+    child
+}
+
+#[test]
+fn a_hub_server_refuses_a_node_without_a_token_and_stops_on_sigterm() {
+    let s = Scratch::new("hub-serve");
+    let (hub, address, _) = hub_server(&s);
+    let mut child = serve_hub(&s, &hub);
+    let mut stream = std::net::TcpStream::connect(&address).unwrap();
+    write!(
+        stream,
+        "GET / HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    )
+    .unwrap();
+    let mut status = String::new();
+    BufReader::new(&stream).read_line(&mut status).unwrap();
+    assert!(status.contains("401"), "{status}");
+
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    #[cfg(not(unix))]
+    child.kill().unwrap();
+    let status = child.wait().unwrap();
+    assert!(status.success(), "{status}");
+}

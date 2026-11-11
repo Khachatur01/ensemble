@@ -46,6 +46,9 @@ COMMANDS:
                             git repository.
     hub check               Load and validate hub.yaml, and say which model
                             would distill shares now.
+    hub serve               Run the --hub as a server for a team, until stopped
+                            (Ctrl-C or SIGTERM): members' nodes connect, share
+                            to and recall from its vault, as their roles allow.
     hub user add NAME --role R | list | token NAME | revoke NAME | remove NAME
                             A hub server's users. `add` and `token` print a new
                             token once; only its hash is kept.
@@ -453,10 +456,58 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
             }
         }
         "user" => cmd_hub_user(args),
+        "serve" => cmd_hub_serve(args),
         other => Err(format!(
             "hub: unknown '{other}'. Use init, check, user or serve."
         )),
     }
+}
+
+/// `ensemble hub serve`: the hub as a server for a team, until stopped.
+fn cmd_hub_serve(args: &Args) -> Result<ExitCode, String> {
+    let dir = hub_of(args, "hub serve")?;
+    let hub = config::load_hub(
+        &config::hub_path(&dir),
+        args.env_file.as_deref(),
+        &SystemEnv,
+    )
+    .map_err(|e| e.to_string())?;
+    let server = hub
+        .server
+        .ok_or("hub serve: hub.yaml has no `server` block; add one with `listen` and `roles`")?;
+    let memory = ensemble::knowledge::Memory::new(&hub, None)
+        .ok_or("hub serve: a hub server needs `knowledge`")?;
+    if !memory.vault().exists() {
+        return Err(format!(
+            "hub serve: the knowledge vault {} is not a git repository yet; `ensemble hub init` makes it",
+            memory.vault().root().display()
+        ));
+    }
+    let users = state::hub_dir(&dir)?;
+    let listener = std::net::TcpListener::bind(server.listen)
+        .map_err(|e| format!("hub serve: cannot listen on {}: {e}", server.listen))?;
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+    }
+    let say = |line: &str| eprintln!("ensemble: {line}");
+    say(&format!(
+        "hub {} listening on {}",
+        hub.owner,
+        listener.local_addr().unwrap_or(server.listen)
+    ));
+    let server = ensemble::link::Server {
+        memory: &memory,
+        roles: &hub.roles,
+        users,
+    };
+    std::thread::scope(|scope| {
+        scope.spawn(|| memory.work(&STOP, &say));
+        server.run(listener, &STOP, &say);
+    });
+    say("stopped");
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `ensemble hub user add|list|token|revoke|remove`: a hub server's users,
