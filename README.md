@@ -1065,6 +1065,8 @@ $ ensemble setup                      # find the CLIs, write a starter, register
 $ ensemble connect --manager M --team <dir> [--hub <dir>] [--global]  # register with claude-code, opencode or codex
 $ ensemble hub init --hub <dir>    # write a sample hub: <dir>/hub.yaml, and make its knowledge vault
 $ ensemble hub check --hub <dir>   # validate hub.yaml; which model would distill shares now
+$ ensemble hub user add <name> --role <role> --hub <dir>   # a hub server's user; prints their token once
+$ ensemble hub user list|token <name>|revoke <name>|remove <name> --hub <dir>
 $ ensemble share --hub <dir> --title T [--text T]   # keep knowledge by hand; text from stdin without --text
 $ ensemble knowledge status --hub <dir>    # shares, pending, notes, what waits in review/
 $ ensemble knowledge distill --hub <dir>   # turn pending shares into notes now
@@ -1116,6 +1118,7 @@ server, are added as crates on top.
 | `ensemble-config` | the helper team's `config.yaml`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), versions 1 and 2 to 3 (`migrate.rs`), and adding or removing an agent as text, comments kept (`edit.rs`); the hub's `hub.yaml` (`hub.rs`) |
 | `ensemble-backends` | one chat request to a model server in its own format (`chat.rs`), asking it which models it serves, for `health` (`models.rs`), choosing the first usable model of a `try` list (`resolve.rs`), and a stand-in model server for tests (`testing.rs`) |
 | `ensemble-knowledge` | the hub's knowledge: the vault of shares and notes, a git repository (`vault.rs`), the secret check a share passes first (`secrets.rs`), the pipeline that turns shares into notes (`pipeline.rs`), finding notes by their words (`search.rs`), and the `share` and `recall` tools and the background worker (`lib.rs`) |
+| `ensemble-link` | a hub server's users and their tokens, kept as hashes (`users.rs`) |
 | `ensemble-agents` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `direct` adapter, and gates (`external/`); a git worktree and branch per task (`worktree.rs`); agents to adapters, slots, budgets and `health` (`router.rs`) |
 | `ensemble-tasks` | tasks as files (`tasks.rs`); the `Tracker` trait and `LocalMarkdown`, its one implementation (`tracker.rs`); the worker that runs tasks and background delegations within each agent's slots (`queue.rs`); the tools your agent calls (`delegation.rs`); `review`, `diff` and `merge` of a worktree task's branch (`review.rs`) |
 | `ensemble-inbox` | the task inbox: what it needs from a tracker (`tracker.rs`), a folder of markdown issues, the first tracker (`local_markdown.rs`), and the bridge that makes issues into tasks and reports them back (`bridge.rs`) |

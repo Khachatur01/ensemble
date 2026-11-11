@@ -1484,6 +1484,27 @@ fn a_hub_inbox_names_its_tracker_user_label_and_projects() {
 }
 
 #[test]
+fn a_hub_server_listens_somewhere_and_names_its_roles() {
+    let doc = format!(
+        "{HUB}server: {{ listen: \"127.0.0.1:7700\" }}\nroles:\n  member: [share, recall]\n  reader: [recall]\n"
+    );
+    let hub = parse_hub(&doc, Path::new("hub.yaml"), &env(&[])).unwrap();
+    assert_eq!(hub.server.unwrap().listen.port(), 7700);
+    assert_eq!(hub.roles["reader"], vec![Permission::Recall]);
+
+    let said = hub_refusal(&doc.replace("[recall]\n", "[recall, delete]\n"));
+    assert!(said.contains("unknown variant `delete`"), "{said}");
+    let said = hub_refusal(&doc.replace("127.0.0.1:7700", "localhost"));
+    assert!(said.contains("server.listen: 'localhost'"), "{said}");
+    let no_roles = doc.split("roles:").next().unwrap().to_string();
+    assert!(hub_refusal(&no_roles).contains("needs `roles`"));
+    let no_server = doc.replace("server: { listen: \"127.0.0.1:7700\" }\n", "");
+    assert!(hub_refusal(&no_server).contains("only a hub with a `server` has roles"));
+    let no_knowledge = "version: 1\nowner: Ana\nllm_backends: {}\nserver: { listen: \"127.0.0.1:7700\" }\nroles: { member: [share] }\n";
+    assert!(hub_refusal(no_knowledge).contains("needs `knowledge`"));
+}
+
+#[test]
 fn a_missing_hub_file_says_how_to_make_one() {
     let err = load_hub(Path::new("/nonexistent/hub.yaml"), None, &env(&[]))
         .unwrap_err()
@@ -1501,13 +1522,28 @@ fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
         "top level"
     );
     let mut top = accepted_keys::<hub::RawHub>();
-    top.retain(|k| k != "knowledge" && k != "tasks");
+    top.retain(|k| !["knowledge", "tasks", "server", "roles"].contains(&k.as_str()));
     assert_eq!(
         schema_required(&schema),
         top,
-        "only knowledge and tasks may be left out"
+        "only knowledge, tasks, server and roles may be left out"
+    );
+    let permissions: Vec<String> = defs["permission"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap().to_string())
+        .collect();
+    let parsed: Vec<&str> = permissions
+        .iter()
+        .map(|p| serde_norway::from_str::<Permission>(p).unwrap().as_str())
+        .collect();
+    assert_eq!(
+        permissions, parsed,
+        "the schema's permissions are the code's"
     );
     for (def, keys, optional) in [
+        ("server", accepted_keys::<hub::RawServer>(), vec![]),
         ("tasks", accepted_keys::<hub::RawTasks>(), vec![]),
         (
             "tracker_local_markdown",
@@ -1573,6 +1609,7 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
     assert_eq!(tasks.label, "ensemble");
     for (def, objects) in [
         ("tasks", vec![&doc["tasks"]]),
+        ("server", vec![&doc["server"]]),
         ("tracker_local_markdown", vec![&doc["tasks"]["tracker"]]),
         ("knowledge", vec![knowledge]),
         ("distill", vec![&knowledge["distill"]]),

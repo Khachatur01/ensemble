@@ -30,4 +30,5 @@ pub use ensemble_config as config;
 pub use ensemble_core::{port, records, state, workspace};
 pub use ensemble_inbox as inbox;
 pub use ensemble_knowledge as knowledge;
+pub use ensemble_link as link;
 pub use ensemble_tasks::{review, tasks, tracker};

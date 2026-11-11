@@ -46,6 +46,9 @@ COMMANDS:
                             git repository.
     hub check               Load and validate hub.yaml, and say which model
                             would distill shares now.
+    hub user add NAME --role R | list | token NAME | revoke NAME | remove NAME
+                            A hub server's users. `add` and `token` print a new
+                            token once; only its hash is kept.
     share --title T [--text T]
                             Keep knowledge in the --hub vault, as an agent's
                             `share` tool does; the text is read from stdin
@@ -213,7 +216,8 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             "--context" => context = Some(value("--context")?),
             "--manager" | "--adapter" | "--model" | "--backend" | "--starter" | "--prompt"
             | "--status" | "--text" | "--goal" | "--repo" | "--gate" | "--since" | "--after"
-            | "--files" | "--constraints" | "--done-when" | "--ref" | "--title" => {
+            | "--files" | "--constraints" | "--done-when" | "--ref" | "--title" | "--role"
+            | "--token" => {
                 opts.insert(arg.clone(), value(&arg)?);
             }
             other if other.starts_with('-') && command.is_none() => {
@@ -370,7 +374,7 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
         .rest
         .first()
         .map(String::as_str)
-        .ok_or("hub: needs init or check. Try --help.")?;
+        .ok_or("hub: needs init, check, user or serve. Try --help.")?;
     match what {
         "init" => {
             let dir = hub_of(args, "hub init")?;
@@ -448,8 +452,89 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
                 }
             }
         }
-        other => Err(format!("hub: unknown '{other}'. Use init or check.")),
+        "user" => cmd_hub_user(args),
+        other => Err(format!(
+            "hub: unknown '{other}'. Use init, check, user or serve."
+        )),
     }
+}
+
+/// `ensemble hub user add|list|token|revoke|remove`: a hub server's users,
+/// managed on the server by whoever can read the hub, which is its admin.
+fn cmd_hub_user(args: &Args) -> Result<ExitCode, String> {
+    let dir = hub_of(args, "hub user")?;
+    let hub = config::load_hub(
+        &config::hub_path(&dir),
+        args.env_file.as_deref(),
+        &SystemEnv,
+    )
+    .map_err(|e| e.to_string())?;
+    if hub.server.is_none() {
+        return Err(
+            "hub user: only a hub server has users; add `server` and `roles` to hub.yaml".into(),
+        );
+    }
+    let state = state::hub_dir(&dir)?;
+    let mut users = ensemble::link::Users::load(&state)?;
+    let what = args.rest.get(1).map(String::as_str).unwrap_or("");
+    let name = || {
+        args.rest
+            .get(2)
+            .map(String::as_str)
+            .ok_or(format!("hub user {what}: needs the user's name"))
+    };
+    let show_token = |name: &str, token: &str| {
+        println!("{token}");
+        eprintln!(
+            "This is {name}'s token, shown once. On their computer: ensemble login <hub-url> --token <token>"
+        );
+    };
+    match what {
+        "add" => {
+            let name = name()?;
+            let role =
+                opt(args, "--role").ok_or("hub user add: needs --role, one of the hub's roles")?;
+            let token = users.add(name, role, &hub.roles)?;
+            users.save()?;
+            show_token(name, &token);
+        }
+        "token" => {
+            let name = name()?;
+            let token = users.token(name)?;
+            users.save()?;
+            show_token(name, &token);
+        }
+        "revoke" => {
+            let name = name()?;
+            let n = users.revoke(name)?;
+            users.save()?;
+            println!(
+                "revoked {n} token(s) of {name}; their nodes are signed out at their next request"
+            );
+        }
+        "remove" => {
+            let name = name()?;
+            users.remove(name)?;
+            users.save()?;
+            println!("removed {name}");
+        }
+        "list" => {
+            for user in users.list() {
+                println!(
+                    "{:<16} {:<12} {} token(s)",
+                    user.name,
+                    user.role,
+                    user.tokens.len()
+                );
+            }
+        }
+        other => {
+            return Err(format!(
+                "hub user: unknown '{other}'. Use add, list, token, revoke or remove."
+            ));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Ask yes or no, or take `--yes` for the answer. Without a terminal and
@@ -619,12 +704,7 @@ fn inbox_for(args: &Args, agents: Vec<String>) -> Result<Option<ensemble::inbox:
     let Some(tasks) = &hub.tasks else {
         return Ok(None);
     };
-    let canonical = hub_dir
-        .canonicalize()
-        .map_err(|e| format!("--hub {}: {e}", hub_dir.display()))?;
-    let dir = state::root()?
-        .join("hubs")
-        .join(state::labelled_text(&canonical.display().to_string()));
+    let dir = state::hub_dir(hub_dir).map_err(|e| format!("--hub {e}"))?;
     Ok(Some(ensemble::inbox::Inbox::new(tasks, agents, dir)))
 }
 

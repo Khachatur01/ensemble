@@ -2569,3 +2569,33 @@ fn an_issue_assigned_to_you_becomes_a_task_in_its_projects_folder() {
         stdout_of(&out)
     );
 }
+
+#[test]
+fn a_hub_servers_admin_adds_users_whose_tokens_are_shown_once() {
+    let s = Scratch::new("hub-users");
+    let hub = hub_of(&s);
+    let run = |args: &[&str]| {
+        command(&s)
+            .args(args)
+            .arg("--hub")
+            .arg(&hub)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["hub", "user", "add", "ana", "--role", "member"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let token = stdout_of(&out).trim().to_string();
+    assert!(token.starts_with("ens_"), "{token}");
+    assert!(stderr_of(&out).contains("shown once"));
+    let out = run(&["hub", "user", "add", "bob", "--role", "owner"]);
+    assert!(!out.status.success() && stderr_of(&out).contains("no role 'owner'"));
+    let out = run(&["hub", "user", "list"]);
+    assert!(stdout_of(&out).contains("ana") && stdout_of(&out).contains("1 token(s)"));
+    assert!(!stdout_of(&out).contains(&token));
+    let out = run(&["hub", "user", "revoke", "ana"]);
+    assert!(
+        stdout_of(&out).contains("revoked 1 token(s)"),
+        "{}",
+        stdout_of(&out)
+    );
+}

@@ -30,9 +30,38 @@
     "tasks": {
       "description": "The task inbox: issues assigned to you in a tracker, with the label, become tasks for your helper team, and their progress, questions and results are written back. Leave it out for no inbox.",
       "$ref": "#/definitions/tasks"
+    },
+    "server": {
+      "description": "Run this hub as a server for a team: `ensemble hub serve` listens here for members' nodes, which share to and recall from its knowledge vault, the organization's. Needs `knowledge` and `roles`. Leave it out for a hub embedded in your own node.",
+      "$ref": "#/definitions/server"
+    },
+    "roles": {
+      "description": "A hub server's roles, named as you like, each a list of what its users may do. Users and their tokens are kept in the hub's state, not here: `ensemble hub user add NAME --role R`. Only with `server`.",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "array",
+        "items": { "$ref": "#/definitions/permission" }
+      }
     }
   },
   "definitions": {
+    "server": {
+      "type": "object",
+      "required": ["listen"],
+      "additionalProperties": false,
+      "properties": {
+        "listen": {
+          "description": "The address and port to listen on. Put a TLS reverse proxy such as Caddy in front for the internet, or listen on a LAN or VPN address.",
+          "type": "string",
+          "examples": ["127.0.0.1:7700", "0.0.0.0:7700"]
+        }
+      }
+    },
+    "permission": {
+      "description": "share: keep knowledge in the organization vault. recall: read its notes.",
+      "enum": ["share", "recall"]
+    },
     "tasks": {
       "type": "object",
       "required": ["tracker", "user", "label", "poll_seconds", "projects"],

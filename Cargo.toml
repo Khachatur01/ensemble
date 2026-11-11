@@ -23,10 +23,16 @@ ureq = "3"
 # down, and std can signal one pid. Already in the tree via ureq, so this costs
 # no extra compilation.
 libc = "0.2"
+# The link between a node and a hub server: one WebSocket, synchronous like
+# the rest, TLS through rustls, which ureq already brings.
+tungstenite = { version = "0.28", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+# Hashing hub tokens and making new ones; already in the tree through rustls.
+ring = "0.17"
 ensemble-core = { path = "crates/ensemble-core" }
 ensemble-config = { path = "crates/ensemble-config" }
 ensemble-backends = { path = "crates/ensemble-backends" }
 ensemble-knowledge = { path = "crates/ensemble-knowledge" }
+ensemble-link = { path = "crates/ensemble-link" }
 ensemble-agents = { path = "crates/ensemble-agents" }
 ensemble-tasks = { path = "crates/ensemble-tasks" }
 ensemble-inbox = { path = "crates/ensemble-inbox" }
@@ -55,6 +61,7 @@ ensemble-config.workspace = true
 ensemble-core.workspace = true
 ensemble-inbox.workspace = true
 ensemble-knowledge.workspace = true
+ensemble-link.workspace = true
 ensemble-mcp.workspace = true
 ensemble-tasks.workspace = true
 serde.workspace = true

@@ -54,6 +54,16 @@ pub fn team_dir(config: &Path) -> Result<PathBuf, String> {
     Ok(root()?.join("orgs").join(labelled(&canonical)))
 }
 
+/// What the hub in directory `hub` keeps while it runs: the inbox's record,
+/// a hub server's users. Never in the hub's directory, which may be a shared
+/// repository.
+pub fn hub_dir(hub: &Path) -> Result<PathBuf, String> {
+    let canonical = hub
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", hub.display()))?;
+    Ok(root()?.join("hubs").join(labelled(&canonical)))
+}
+
 pub fn labelled_text(text: &str) -> String {
     labelled(Path::new(text))
 }

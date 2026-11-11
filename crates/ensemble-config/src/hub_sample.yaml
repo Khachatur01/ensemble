@@ -8,7 +8,8 @@
 #
 # Nothing has a default value: every setting is written here, and one that is
 # missing is refused by name. Only these may be left out, because leaving them
-# out means "not used": `knowledge`, `tasks`, and a backend's `api_key_env`.
+# out means "not used": `knowledge`, `tasks`, `server` with `roles`, and a
+# backend's `api_key_env`.
 # Check the file with `ensemble hub check --hub <dir>`.
 #
 # Give the hub to the MCP server your agent starts, and it can share and recall:
@@ -75,3 +76,16 @@ tasks:
   poll_seconds: 30
   projects:                      # an issue's `project` -> the folder its work happens in
     shop: /home/you/code/shop
+
+# ---------------------------------------------------------------------------
+# Server: run this hub for a team with `ensemble hub serve`. Members' nodes
+# connect to it, and share to and recall from its knowledge vault, the
+# organization's. Put a TLS reverse proxy in front for the internet, or listen
+# on a LAN or VPN address. Leave `server` and `roles` out for a hub that is
+# yours alone, embedded in your node.
+# ---------------------------------------------------------------------------
+server:
+  listen: 127.0.0.1:7700
+roles:                           # names are yours; users are added with `ensemble hub user add`
+  member: [share, recall]
+  reader: [recall]

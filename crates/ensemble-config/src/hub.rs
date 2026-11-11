@@ -34,6 +34,10 @@ pub struct Hub {
     pub knowledge: Option<Knowledge>,
     /// Absent: no task inbox.
     pub tasks: Option<Tasks>,
+    /// Absent: the hub is embedded only, and nothing listens.
+    pub server: Option<Server>,
+    /// What each role may do, by the role's name. Empty without a server.
+    pub roles: BTreeMap<String, Vec<Permission>>,
     /// Where it was loaded from, for error messages.
     pub source: PathBuf,
 }
@@ -71,6 +75,32 @@ pub enum IssueTracker {
     LocalMarkdown { dir: PathBuf },
 }
 
+/// A hub server: where it listens for nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Server {
+    pub listen: std::net::SocketAddr,
+}
+
+/// What a role may let its users do on a hub server. Ensemble defines them;
+/// each hub names its own roles as sets of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Permission {
+    /// Keep knowledge in the organization vault.
+    Share,
+    /// Read the organization vault's notes.
+    Recall,
+}
+
+impl Permission {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Permission::Share => "share",
+            Permission::Recall => "recall",
+        }
+    }
+}
+
 /// The issue tracker types that ship.
 pub const LOCAL_MARKDOWN_TRACKER: &str = "local_markdown";
 
@@ -96,6 +126,14 @@ pub(crate) struct RawHub {
     pub(crate) llm_backends: BTreeMap<String, RawLlmBackend>,
     pub(crate) knowledge: Option<RawKnowledge>,
     pub(crate) tasks: Option<RawTasks>,
+    pub(crate) server: Option<RawServer>,
+    pub(crate) roles: Option<BTreeMap<String, Vec<Permission>>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawServer {
+    pub(crate) listen: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,6 +303,42 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             projects,
         }
     });
+    let server = raw
+        .server
+        .as_ref()
+        .and_then(|s| match s.listen.trim().parse() {
+            Ok(listen) => Some(Server { listen }),
+            Err(_) => {
+                problems.push(format!(
+                    "server.listen: '{}' must be an address and a port, such as 127.0.0.1:7700",
+                    s.listen
+                ));
+                None
+            }
+        });
+    let roles = raw.roles.clone().unwrap_or_default();
+    match (&raw.server, &raw.roles) {
+        (Some(_), None) => problems.push(
+            "roles: a hub with a `server` needs `roles`, saying what each role may do".into(),
+        ),
+        (None, Some(_)) => problems
+            .push("roles: only a hub with a `server` has roles; add one or remove them".into()),
+        (Some(_), Some(r)) if r.is_empty() => {
+            problems.push("roles: name at least one role, such as member: [share, recall]".into())
+        }
+        _ => {}
+    }
+    for name in roles.keys() {
+        if name.trim().is_empty() || name.contains(char::is_whitespace) {
+            problems.push(format!("roles: the role name '{name}' must be one word"));
+        }
+    }
+    if raw.server.is_some() && raw.knowledge.is_none() {
+        problems.push(
+            "server: a hub server keeps the organization's knowledge, so it needs `knowledge`"
+                .into(),
+        );
+    }
     for name in backends.keys() {
         let used = knowledge.as_ref().is_some_and(|k| {
             k.distill
@@ -286,6 +360,8 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             llm_backends: backends,
             knowledge,
             tasks,
+            server,
+            roles,
             source: path.to_path_buf(),
         })
     } else {
