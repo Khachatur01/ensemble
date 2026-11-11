@@ -2626,10 +2626,35 @@ fn hub_server(scratch: &Scratch) -> (PathBuf, String, String) {
 }
 
 /// `ensemble hub serve`, started and waited for until it listens.
-fn serve_hub(scratch: &Scratch, hub: &Path) -> Child {
+/// A running `ensemble hub serve`, stopped when the test ends, passed or
+/// failed: left running, it would keep the test runner's output open.
+struct Served(Child);
+
+impl std::ops::Deref for Served {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Served {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn serve_hub(scratch: &Scratch, hub: &Path) -> Served {
     let mut child = command(scratch)
         .args(["hub", "serve", "--hub"])
         .arg(hub)
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -2647,7 +2672,7 @@ fn serve_hub(scratch: &Scratch, hub: &Path) -> Child {
         let mut rest = String::new();
         let _ = err.read_to_string(&mut rest);
     });
-    child
+    Served(child)
 }
 
 #[test]
@@ -2791,23 +2816,33 @@ fn post_json(address: &str, path: &str, body: serde_json::Value) -> (u16, serde_
 }
 
 #[test]
-fn someone_signs_up_through_the_rest_api_and_the_admin_lets_them_in() {
+fn someone_signs_up_is_let_in_and_logs_in_from_a_node_with_a_password() {
     let s = Scratch::new("hub-register");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
     let (hub, address, _) = hub_server(&s);
-    let mut child = serve_hub(&s, &hub);
+    let child = serve_hub(&s, &hub);
+    let password = "correct horse battery";
     let (status, body) = post_json(
         &address,
         "/api/v1/register",
-        serde_json::json!({"name": "dana"}),
+        serde_json::json!({"name": "dana", "password": password}),
     );
     assert_eq!(status, 201, "{body}");
-    let token = body["token"].as_str().unwrap().to_string();
     let url = format!("ws://{address}");
-    let out = command(&s)
-        .args(["login", &url, "--token", &token])
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "a pending user cannot sign in yet");
+    let login = |user: &str| {
+        let mut child = command(&s)
+            .args(["login", &url, "--user", user])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(child.stdin.take().unwrap(), "{password}").unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let out = login("dana");
+    assert!(!out.status.success());
+    assert!(stderr_of(&out).contains("approval"), "{}", stderr_of(&out));
 
     let run = |args: &[&str]| {
         command(&s)
@@ -2818,25 +2853,22 @@ fn someone_signs_up_through_the_rest_api_and_the_admin_lets_them_in() {
             .unwrap()
     };
     let out = run(&["hub", "user", "list"]);
-    assert!(
-        stdout_of(&out).contains("dana") && stdout_of(&out).contains("pending"),
-        "{}",
-        stdout_of(&out)
-    );
+    assert!(stdout_of(&out).contains("dana") && stdout_of(&out).contains("pending"));
     let out = run(&["hub", "user", "approve", "dana", "--role", "member"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let out = command(&s)
-        .args(["login", &url, "--token", &token])
-        .output()
-        .unwrap();
+    let out = login("dana");
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).contains("as dana (member"),
         "{}",
         stdout_of(&out)
     );
-    let _ = child.kill();
-    let _ = child.wait();
+    let out = command(&s)
+        .args(["recall", "deploys", "--hub", &url])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    drop(child);
 
     // A closed hub takes no sign-ups.
     let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
@@ -2846,13 +2878,11 @@ fn someone_signs_up_through_the_rest_api_and_the_admin_lets_them_in() {
     );
     assert_ne!(closed, text);
     std::fs::write(hub.join("hub.yaml"), closed).unwrap();
-    let mut child = serve_hub(&s, &hub);
+    let _child = serve_hub(&s, &hub);
     let (status, _) = post_json(
         &address,
         "/api/v1/register",
-        serde_json::json!({"name": "eve"}),
+        serde_json::json!({"name": "eve", "password": password}),
     );
     assert_eq!(status, 403);
-    let _ = child.kill();
-    let _ = child.wait();
 }

@@ -13,16 +13,16 @@
 use crate::http::{self, Replay};
 use crate::protocol::{HELLO, RECALL, Reply, Request, SHARE};
 use crate::users::Users;
-use ensemble_config::{Permission, Registration};
+use ensemble_config::Permission;
 use ensemble_knowledge::Memory;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tungstenite::handshake::server::{ErrorResponse, Request as Upgrade, Response};
 use tungstenite::{Message, WebSocket};
 
@@ -34,12 +34,16 @@ const TICK: Duration = Duration::from_millis(200);
 pub struct Server<'a> {
     pub(crate) memory: &'a Memory,
     pub(crate) roles: &'a BTreeMap<String, Vec<Permission>>,
-    pub(crate) registration: Registration,
+    /// Where it listens, how people join, how long a login lasts, and when
+    /// failed logins lock a name.
+    pub(crate) settings: ensemble_config::Server,
     /// The hub's state directory, with `users.json`.
     users: PathBuf,
     /// Held while the users file is read, changed and written, so two
     /// requests at once cannot lose a change.
     pub(crate) changing: Mutex<()>,
+    /// Failed logins by name: how many, and until when the name is refused.
+    pub(crate) failures: Mutex<HashMap<String, (u32, Option<Instant>)>>,
 }
 
 /// Who a connection signed in as.
@@ -52,15 +56,16 @@ impl<'a> Server<'a> {
     pub fn new(
         memory: &'a Memory,
         roles: &'a BTreeMap<String, Vec<Permission>>,
-        registration: Registration,
+        settings: ensemble_config::Server,
         users: PathBuf,
     ) -> Self {
         Server {
             memory,
             roles,
-            registration,
+            settings,
             users,
             changing: Mutex::new(()),
+            failures: Mutex::new(HashMap::new()),
         }
     }
 
@@ -174,19 +179,25 @@ impl<'a> Server<'a> {
             .strip_prefix("Bearer ")?
             .trim()
             .to_string();
-        let user = self.users().ok()?.authenticate(&token)?.name.clone();
+        let user = self
+            .users()
+            .ok()?
+            .authenticate(&token, self.roles)?
+            .user
+            .name;
         Some(Session { token, user })
     }
 
-    /// What the user may do, checked again for every request, so a revoked
-    /// token stops working at once.
+    /// What the token may do, its account's role narrowed by its scopes,
+    /// checked again for every request, so a revoked or expired token stops
+    /// working at once.
     fn permissions(&self, session: &Session) -> Result<Vec<Permission>, String> {
         let users = self.users()?;
-        let user = users
-            .authenticate(&session.token)
-            .filter(|u| u.name == session.user)
-            .ok_or("your token was revoked; ask the hub's admin for a new one")?;
-        Ok(self.roles.get(&user.role).cloned().unwrap_or_default())
+        let signed = users
+            .authenticate(&session.token, self.roles)
+            .filter(|s| s.user.name == session.user)
+            .ok_or("your token was revoked or expired; make a new one")?;
+        Ok(signed.permissions)
     }
 
     fn answer(&self, session: &Session, req: Request) -> Reply {
@@ -199,7 +210,7 @@ impl<'a> Server<'a> {
                 Ok(())
             } else {
                 Err(format!(
-                    "your role on this hub does not allow `{}`",
+                    "your role or this token's scopes do not allow `{}`",
                     p.as_str()
                 ))
             }
@@ -276,13 +287,17 @@ pub(crate) mod tests {
     use ensemble_core::workspace::testing::TempDir;
     use tungstenite::client::IntoClientRequest;
 
-    /// A hub server on loopback, with `ana` a member and `rex` a reader.
+    /// The password of every account of the test hub.
+    pub(crate) const PASSWORD: &str = "correct horse battery";
+
+    /// A hub server on loopback, with `ana` a member, `rex` a reader and
+    /// `root` an admin, each with a token and [`PASSWORD`]. It locks a name
+    /// after 3 failed logins, and takes 2 sign-ups at a time.
     pub(crate) struct Running {
         pub(crate) tmp: TempDir,
         pub(crate) url: String,
         pub(crate) ana: String,
         pub(crate) rex: String,
-        pub(crate) root: String,
         stop: std::sync::Arc<AtomicBool>,
     }
 
@@ -295,7 +310,7 @@ pub(crate) mod tests {
     pub(crate) fn start() -> Running {
         let tmp = TempDir::new();
         let yaml = format!(
-            "version: 1\nowner: Acme\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: approval, max_pending: 2 }} }}\nroles:\n  admin: [admin, recall]\n  member: [share, recall]\n  reader: [recall]\n",
+            "version: 1\nowner: Acme\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: approval, max_pending: 2 }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles:\n  admin: [admin, recall]\n  member: [share, recall]\n  reader: [recall]\n",
             tmp.0.join("vault").display()
         );
         let hub =
@@ -321,14 +336,17 @@ pub(crate) mod tests {
         let mut users = Users::load(&tmp.0.join("state")).unwrap();
         let ana = users.add("ana", "member", &hub.roles).unwrap();
         let rex = users.add("rex", "reader", &hub.roles).unwrap();
-        let root = users.add("root", "admin", &hub.roles).unwrap();
+        users.add("root", "admin", &hub.roles).unwrap();
+        for name in ["ana", "rex", "root"] {
+            users.set_password(name, PASSWORD).unwrap();
+        }
         users.save().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("ws://{}/", listener.local_addr().unwrap());
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let (state, flag) = (tmp.0.join("state"), stop.clone());
         std::thread::spawn(move || {
-            let server = Server::new(&memory, &hub.roles, hub.server.unwrap().registration, state);
+            let server = Server::new(&memory, &hub.roles, hub.server.unwrap(), state);
             server.run(listener, &flag, &|_| {});
         });
         Running {
@@ -336,7 +354,6 @@ pub(crate) mod tests {
             url,
             ana,
             rex,
-            root,
             stop,
         }
     }
@@ -411,7 +428,7 @@ pub(crate) mod tests {
         assert_eq!(tools, vec!["recall"]);
         assert!(!hello["instructions"].as_str().unwrap().contains("`share`"));
         let reply = ask(&mut rex, 2, SHARE, json!({"title": "x", "text": "y"}));
-        assert!(reply.error.unwrap().contains("does not allow `share`"));
+        assert!(reply.error.unwrap().contains("do not allow `share`"));
         let reply = ask(&mut rex, 3, RECALL, json!({"query": "deploy"}));
         let text = reply.result.unwrap()["text"].as_str().unwrap().to_string();
         assert!(

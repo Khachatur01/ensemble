@@ -49,17 +49,22 @@ COMMANDS:
     hub serve               Run the --hub as a server for a team, until stopped
                             (Ctrl-C or SIGTERM): members' nodes connect, share
                             to and recall from its vault, as their roles allow.
-    hub user add NAME --role R | list | approve NAME --role R | role NAME --role R
-             | token NAME | revoke NAME | remove NAME
+    hub user add NAME --role R | list | password NAME | approve NAME --role R
+             | role NAME --role R | token NAME | revoke NAME | remove NAME
                             A hub server's users. `add` and `token` print a new
-                            token once; only its hash is kept. `approve` lets in
-                            someone who signed up; `remove` turns them down.
+                            token once; only its hash is kept. `password` sets a
+                            password (typed without echo, or on stdin), ending
+                            the user's sessions. `approve` lets in someone who
+                            signed up; `remove` turns them down.
     share --title T [--text T]
                             Keep knowledge in the --hub vault, as an agent's
                             `share` tool does; the text is read from stdin
                             when --text is not given.
-    login URL [--token T]   Sign in to a hub server (ws:// or wss://) with the
-                            token its admin made, and keep the token in
+    login URL --user NAME | --token T
+                            Sign in to a hub server (ws:// or wss://): with your
+                            account (the password is asked, or read from stdin),
+                            which makes an access token for this computer, or
+                            with a token made elsewhere. The token is kept in
                             ~/.config/ensemble/hubs.json, readable only by you.
                             Then --hub URL works like --hub <dir>.
     logout URL              Forget a hub server's token.
@@ -229,7 +234,7 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             "--manager" | "--adapter" | "--model" | "--backend" | "--starter" | "--prompt"
             | "--status" | "--text" | "--goal" | "--repo" | "--gate" | "--since" | "--after"
             | "--files" | "--constraints" | "--done-when" | "--ref" | "--title" | "--role"
-            | "--token" => {
+            | "--token" | "--user" => {
                 opts.insert(arg.clone(), value(&arg)?);
             }
             other if other.starts_with('-') && command.is_none() => {
@@ -453,18 +458,15 @@ fn cmd_login(args: &Args) -> Result<ExitCode, String> {
         .first()
         .filter(|u| u.starts_with("ws://") || u.starts_with("wss://"))
         .ok_or("login: needs the hub's URL, such as wss://hub.example.com")?;
-    let token = match opt(args, "--token") {
-        Some(t) => t.to_string(),
-        None => {
-            let mut t = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)
-                .map_err(|e| format!("login: cannot read the token from stdin: {e}"))?;
-            t
+    let token = match (opt(args, "--user"), opt(args, "--token")) {
+        (Some(user), None) => token_from_account(url, user)?,
+        (None, Some(t)) => t.to_string(),
+        _ => {
+            return Err(
+                "login: give either --user NAME (your password is asked) or --token TOKEN".into(),
+            );
         }
     };
-    if token.trim().is_empty() {
-        return Err("login: give the token your hub's admin made, with --token or on stdin".into());
-    }
     let hello = ensemble::link::RemoteMemory::new(url, &token, None)
         .hello()
         .map_err(|e| format!("login: {e}"))?;
@@ -478,6 +480,72 @@ fn cmd_login(args: &Args) -> Result<ExitCode, String> {
         hello.permissions.join(", ")
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// Log in to the hub at `url` as `user`, with the password typed or on stdin,
+/// make an access token for this computer, and log out again.
+fn token_from_account(url: &str, user: &str) -> Result<String, String> {
+    let base = url
+        .replacen("wss://", "https://", 1)
+        .replacen("ws://", "http://", 1);
+    let base = base.trim_end_matches('/');
+    let password = read_secret(&format!("Password for {user} at {url}: "))?;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(std::time::Duration::from_secs(30)))
+        .build()
+        .into();
+    let call = |path: &str, bearer: Option<&str>, body: serde_json::Value| {
+        let mut req = agent
+            .post(format!("{base}{path}"))
+            .header("content-type", "application/json");
+        if let Some(b) = bearer {
+            req = req.header("authorization", &format!("Bearer {b}"));
+        }
+        let mut resp = req
+            .send(body.to_string())
+            .map_err(|e| format!("login: cannot reach {base}: {e}"))?;
+        let status = resp.status().as_u16();
+        let text = resp.body_mut().read_to_string().unwrap_or_default();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        if (200..300).contains(&status) {
+            Ok(value)
+        } else {
+            Err(format!(
+                "login: the hub said {status}: {}",
+                value["error"].as_str().unwrap_or(&text)
+            ))
+        }
+    };
+    let session = call(
+        "/api/v1/login",
+        None,
+        serde_json::json!({ "name": user, "password": password }),
+    )?;
+    let session = session["token"]
+        .as_str()
+        .ok_or("login: the hub sent no session")?
+        .to_string();
+    let made = call(
+        "/api/v1/me/tokens",
+        Some(&session),
+        serde_json::json!({ "name": format!("ensemble on {}", hostname()) }),
+    );
+    let _ = call("/api/v1/logout", Some(&session), serde_json::json!({}));
+    made?["token"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| "login: the hub sent no token".to_string())
+}
+
+/// This computer's name, for naming the tokens it holds.
+fn hostname() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "this computer".into())
 }
 
 /// `ensemble logout URL`: forget a hub server's token.
@@ -619,7 +687,7 @@ fn cmd_hub_serve(args: &Args) -> Result<ExitCode, String> {
         hub.owner,
         listener.local_addr().unwrap_or(server.listen)
     ));
-    let server = ensemble::link::Server::new(&memory, &hub.roles, server.registration, users);
+    let server = ensemble::link::Server::new(&memory, &hub.roles, server, users);
     std::thread::scope(|scope| {
         scope.spawn(|| memory.work(&STOP, &say));
         server.run(listener, &STOP, &say);
@@ -673,6 +741,16 @@ fn cmd_hub_user(args: &Args) -> Result<ExitCode, String> {
             users.save()?;
             show_token(name, &token);
         }
+        "password" => {
+            let name = name()?;
+            if users.get(name).is_none() {
+                return Err(format!("hub user password: no user called {name}"));
+            }
+            let password = read_secret(&format!("New password for {name}: "))?;
+            users.set_password(name, &password)?;
+            users.save()?;
+            println!("set {name}'s password; their sessions were ended");
+        }
         "approve" | "role" => {
             let name = name()?;
             let role = opt(args, "--role").ok_or(format!(
@@ -718,11 +796,47 @@ fn cmd_hub_user(args: &Args) -> Result<ExitCode, String> {
         }
         other => {
             return Err(format!(
-                "hub user: unknown '{other}'. Use add, list, approve, role, token, revoke or remove."
+                "hub user: unknown '{other}'. Use add, list, password, approve, role, token, revoke or remove."
             ));
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// A secret, such as a password: typed at the terminal without echo, or read
+/// from stdin when there is no terminal, without its line end.
+fn read_secret(prompt: &str) -> Result<String, String> {
+    let stdin = std::io::stdin();
+    if !stdin.is_terminal() {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut stdin.lock(), &mut text)
+            .map_err(|e| format!("cannot read from stdin: {e}"))?;
+        return Ok(text.trim_end_matches(['\n', '\r']).to_string());
+    }
+    eprint!("{prompt}");
+    #[cfg(unix)]
+    let restore = unsafe {
+        let mut term: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(libc::STDIN_FILENO, &mut term) == 0 {
+            let before = term;
+            term.c_lflag &= !libc::ECHO;
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &term);
+            Some(before)
+        } else {
+            None
+        }
+    };
+    let mut line = String::new();
+    let read = stdin.read_line(&mut line);
+    #[cfg(unix)]
+    if let Some(before) = restore {
+        unsafe {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &before);
+        }
+    }
+    eprintln!();
+    read.map_err(|e| format!("cannot read the terminal: {e}"))?;
+    Ok(line.trim_end_matches(['\n', '\r']).to_string())
 }
 
 /// Ask yes or no, or take `--yes` for the answer. Without a terminal and

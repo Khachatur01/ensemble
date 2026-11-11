@@ -48,7 +48,7 @@
   "definitions": {
     "server": {
       "type": "object",
-      "required": ["listen", "registration"],
+      "required": ["listen", "registration", "sessions", "lockout"],
       "additionalProperties": false,
       "properties": {
         "listen": {
@@ -62,6 +62,37 @@
             { "$ref": "#/definitions/registration_approval" },
             { "$ref": "#/definitions/registration_closed" }
           ]
+        },
+        "sessions": { "$ref": "#/definitions/sessions" },
+        "lockout": { "$ref": "#/definitions/lockout" }
+      }
+    },
+    "sessions": {
+      "type": "object",
+      "required": ["hours"],
+      "additionalProperties": false,
+      "properties": {
+        "hours": {
+          "description": "How long a login (POST /api/v1/login) lasts before its session token stops working.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "lockout": {
+      "type": "object",
+      "required": ["failures", "minutes"],
+      "additionalProperties": false,
+      "properties": {
+        "failures": {
+          "description": "Failed logins for one name before it is refused for a while.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "minutes": {
+          "description": "How long a name is refused after too many failed logins.",
+          "type": "integer",
+          "minimum": 1
         }
       }
     },

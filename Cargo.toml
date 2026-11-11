@@ -81,3 +81,8 @@ strip = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+# Password hashing runs 600 000 PBKDF2 rounds; unoptimized, the tests would
+# spend minutes in it.
+[profile.dev.package.ring]
+opt-level = 3

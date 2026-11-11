@@ -80,6 +80,11 @@ pub enum IssueTracker {
 pub struct Server {
     pub listen: std::net::SocketAddr,
     pub registration: Registration,
+    /// Hours a login lasts.
+    pub session_hours: u32,
+    /// Failed logins before a name is refused, and for how many minutes.
+    pub lockout_failures: u32,
+    pub lockout_minutes: u32,
 }
 
 /// How people join a hub server.
@@ -94,7 +99,7 @@ pub enum Registration {
 
 /// What a role may let its users do on a hub server. Ensemble defines them;
 /// each hub names its own roles as sets of them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Permission {
     /// Keep knowledge in the organization vault.
@@ -149,6 +154,21 @@ pub(crate) struct RawHub {
 pub(crate) struct RawServer {
     pub(crate) listen: String,
     pub(crate) registration: RawRegistration,
+    pub(crate) sessions: RawSessions,
+    pub(crate) lockout: RawLockout,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawSessions {
+    pub(crate) hours: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawLockout {
+    pub(crate) failures: u32,
+    pub(crate) minutes: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -350,10 +370,19 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             }
             RawRegistration::Closed(_) => Registration::Closed,
         };
+        if s.sessions.hours == 0 {
+            problems.push("server.sessions: `hours` must be greater than 0".into());
+        }
+        if s.lockout.failures == 0 || s.lockout.minutes == 0 {
+            problems.push("server.lockout: `failures` and `minutes` must be greater than 0".into());
+        }
         match s.listen.trim().parse() {
             Ok(listen) => Some(Server {
                 listen,
                 registration,
+                session_hours: s.sessions.hours,
+                lockout_failures: s.lockout.failures,
+                lockout_minutes: s.lockout.minutes,
             }),
             Err(_) => {
                 problems.push(format!(

@@ -1,26 +1,39 @@
 //! The hub server's REST API, under `/api/v1/`, for people and the UI to come:
-//! signing up, and an admin managing users. JSON in and out, a bearer token
-//! where one is needed. It exists only on a hub server; an embedded hub has one
-//! user and no registration.
+//! accounts with a password, sign-in sessions, access tokens, and an admin
+//! managing users. JSON in and out, a bearer token where one is needed. It
+//! exists only on a hub server; an embedded hub has one user and no accounts.
+//!
+//! A **session** comes from logging in with the password, and only a session
+//! may change the password or make and revoke access tokens, so a stolen access
+//! token cannot make more. An **access token** may be narrowed by scopes, and
+//! is what nodes and scripts use.
 //!
 //! | Method and path | Who |
 //! |---|---|
-//! | `POST /api/v1/register` `{name}` | anyone, when registration is `approval` |
-//! | `GET /api/v1/me` | any token, a pending one too |
-//! | `POST /api/v1/me/tokens` | an active user |
+//! | `POST /api/v1/register` `{name, password}` | anyone, when registration is `approval` |
+//! | `POST /api/v1/login` `{name, password}` | anyone |
+//! | `POST /api/v1/logout` | a session |
+//! | `GET /api/v1/me` | any token |
+//! | `PUT /api/v1/me/password` `{current, new}` | a session |
+//! | `GET /api/v1/me/tokens` | a session |
+//! | `POST /api/v1/me/tokens` `{name, expires_days?, scopes?}` | a session |
+//! | `DELETE /api/v1/me/tokens/{id}` | a session |
 //! | `GET /api/v1/users` | admin |
+//! | `POST /api/v1/users` `{name, role, password}` | admin |
+//! | `GET /api/v1/roles` | admin |
 //! | `POST /api/v1/users/{name}/approve` `{role}` | admin |
 //! | `PUT /api/v1/users/{name}` `{role}` | admin |
+//! | `PUT /api/v1/users/{name}/password` `{password}` | admin |
 //! | `DELETE /api/v1/users/{name}/tokens` | admin |
 //! | `DELETE /api/v1/users/{name}` | admin |
-//! | `GET /api/v1/roles` | admin |
 
 use crate::http::{self, Head};
 use crate::server::Server;
-use crate::users::{User, Users, UsersError};
+use crate::users::{Kind, Signed, Token, User, Users, UsersError};
 use ensemble_config::{Permission, Registration};
 use serde_json::{Value, json};
 use std::net::TcpStream;
+use std::time::{Duration, Instant};
 
 /// A refusal: the status, and why.
 struct Refusal(u16, String);
@@ -33,9 +46,24 @@ impl From<UsersError> for Refusal {
             UsersError::NotFound(_) => 404,
             UsersError::Conflict(_) => 409,
             UsersError::Invalid(_) => 400,
+            UsersError::Unauthorized(_) => 401,
+            UsersError::Forbidden(_) => 403,
             UsersError::Io(_) => 500,
         };
         Refusal(status, e.to_string())
+    }
+}
+
+/// The body's JSON, and its fields.
+struct Body(Value);
+
+impl Body {
+    fn text(&self, key: &str) -> Result<String, Refusal> {
+        self.0
+            .get(key)
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| Refusal(400, format!("`{key}` is required")))
     }
 }
 
@@ -79,17 +107,54 @@ impl Server<'_> {
             return Err(Refusal(404, format!("no such path: {}", head.path)));
         };
         let parts: Vec<&str> = rest.trim_end_matches('/').split('/').collect();
-        let json = || -> Result<Value, Refusal> {
+        let body = || -> Result<Body, Refusal> {
             if body.is_empty() {
-                return Ok(json!({}));
+                return Ok(Body(json!({})));
             }
             serde_json::from_slice(body)
+                .map(Body)
                 .map_err(|e| Refusal(400, format!("the body is not JSON: {e}")))
         };
         match (head.method.as_str(), parts.as_slice()) {
-            ("POST", ["register"]) => self.register(&json()?),
+            ("POST", ["register"]) => self.register(&body()?),
+            ("POST", ["login"]) => self.login(&body()?),
+            ("POST", ["logout"]) => {
+                let session = self.session(head)?;
+                self.change(|u| u.revoke_token(&session.user.name, &session.token_id))?;
+                Ok((200, json!({ "signed_out": true })))
+            }
             ("GET", ["me"]) => self.me(head),
-            ("POST", ["me", "tokens"]) => self.my_token(head),
+            ("PUT", ["me", "password"]) => {
+                let session = self.session(head)?;
+                let body = body()?;
+                let (current, new) = (body.text("current")?, body.text("new")?);
+                let name = session.user.name.clone();
+                self.change(|users| {
+                    users.login(&name, &current, 1).map_err(|_| {
+                        UsersError::Unauthorized("the current password is wrong".into())
+                    })?;
+                    users.set_password(&name, &new)
+                })?;
+                Ok((
+                    200,
+                    json!({ "changed": true, "note": "Every session was ended; log in again." }),
+                ))
+            }
+            ("GET", ["me", "tokens"]) => {
+                let session = self.session(head)?;
+                let users = self.users().map_err(|e| Refusal(500, e))?;
+                let tokens = users.tokens(&session.user.name)?;
+                Ok((
+                    200,
+                    json!({ "tokens": tokens.into_iter().map(token_view).collect::<Vec<_>>() }),
+                ))
+            }
+            ("POST", ["me", "tokens"]) => self.make_token(head, &body()?),
+            ("DELETE", ["me", "tokens", id]) => {
+                let session = self.session(head)?;
+                self.change(|u| u.revoke_token(&session.user.name, id))?;
+                Ok((200, json!({ "id": id, "revoked": true })))
+            }
             ("GET", ["users"]) => {
                 self.admin(head)?;
                 let users = self.users().map_err(|e| Refusal(500, e))?;
@@ -98,23 +163,32 @@ impl Server<'_> {
                     json!({ "users": users.list().map(view).collect::<Vec<_>>() }),
                 ))
             }
+            ("POST", ["users"]) => {
+                self.admin(head)?;
+                let body = body()?;
+                let (name, role, password) = (
+                    body.text("name")?,
+                    body.text("role")?,
+                    body.text("password")?,
+                );
+                self.change(|u| u.create(&name, &role, &password, self.roles))?;
+                Ok((
+                    201,
+                    json!({ "name": name, "role": role, "status": "active" }),
+                ))
+            }
             ("GET", ["roles"]) => {
                 self.admin(head)?;
                 let roles: serde_json::Map<String, Value> = self
                     .roles
                     .iter()
-                    .map(|(name, perms)| {
-                        (
-                            name.clone(),
-                            json!(perms.iter().map(|p| p.as_str()).collect::<Vec<_>>()),
-                        )
-                    })
+                    .map(|(name, perms)| (name.clone(), json!(names(perms))))
                     .collect();
                 Ok((200, json!({ "roles": roles })))
             }
             ("POST", ["users", name, "approve"]) => {
                 self.admin(head)?;
-                let role = role_in(&json()?)?;
+                let role = body()?.text("role")?;
                 self.change(|users| users.approve(name, &role, self.roles))?;
                 Ok((
                     200,
@@ -123,9 +197,15 @@ impl Server<'_> {
             }
             ("PUT", ["users", name]) => {
                 self.admin(head)?;
-                let role = role_in(&json()?)?;
+                let role = body()?.text("role")?;
                 self.change(|users| users.set_role(name, &role, self.roles))?;
                 Ok((200, json!({ "name": name, "role": role })))
+            }
+            ("PUT", ["users", name, "password"]) => {
+                self.admin(head)?;
+                let password = body()?.text("password")?;
+                self.change(|users| users.set_password(name, &password))?;
+                Ok((200, json!({ "name": name, "changed": true })))
             }
             ("DELETE", ["users", name, "tokens"]) => {
                 self.admin(head)?;
@@ -137,8 +217,11 @@ impl Server<'_> {
                 self.change(|users| users.remove(name))?;
                 Ok((200, json!({ "name": name, "removed": true })))
             }
-            (_, ["register"] | ["me"] | ["me", "tokens"] | ["users"] | ["roles"])
-            | (_, ["users", _] | ["users", _, "approve" | "tokens"]) => Err(Refusal(
+            (_, ["register" | "login" | "logout" | "me" | "users" | "roles"])
+            | (_, ["me", "password" | "tokens"])
+            | (_, ["me", "tokens", _])
+            | (_, ["users", _])
+            | (_, ["users", _, "approve" | "password" | "tokens"]) => Err(Refusal(
                 405,
                 format!("{} is not allowed on {}", head.method, head.path),
             )),
@@ -156,104 +239,185 @@ impl Server<'_> {
         Ok(out)
     }
 
-    fn register(&self, body: &Value) -> Answer {
-        let Registration::Approval { max_pending } = self.registration else {
+    fn register(&self, body: &Body) -> Answer {
+        let Registration::Approval { max_pending } = self.settings.registration else {
             return Err(Refusal(
                 403,
                 "this hub does not take sign-ups; ask its admin to add you".into(),
             ));
         };
-        let name = body
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Refusal(400, "`name` is required".into()))?
-            .to_string();
-        let token = self.change(|users| users.register(&name, max_pending))?;
+        let (name, password) = (body.text("name")?, body.text("password")?);
+        self.change(|users| users.register(&name, &password, max_pending))?;
         Ok((
             201,
-            json!({
-                "name": name,
-                "status": "pending",
-                "token": token,
-                "note": "Keep this token: it is shown once. It works once an admin approves you.",
-            }),
+            json!({ "name": name, "status": "pending", "note": "Log in once an admin approves you." }),
         ))
+    }
+
+    /// Check a name and password, minding the lockout, and start a session.
+    fn login(&self, body: &Body) -> Answer {
+        let (name, password) = (body.text("name")?, body.text("password")?);
+        {
+            let failures = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((_, Some(until))) = failures.get(&name)
+                && Instant::now() < *until
+            {
+                return Err(Refusal(
+                    429,
+                    "too many failed logins for this name; try again later".into(),
+                ));
+            }
+        }
+        let hours = self.settings.session_hours;
+        match self.change(|users| users.login(&name, &password, hours)) {
+            Ok((token, expires)) => {
+                self.failures
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&name);
+                Ok((
+                    200,
+                    json!({ "name": name, "token": token, "expires": expires }),
+                ))
+            }
+            Err(Refusal(401, why)) => {
+                let mut failures = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+                let entry = failures.entry(name).or_insert((0, None));
+                entry.0 += 1;
+                if entry.0 >= self.settings.lockout_failures {
+                    let minutes = u64::from(self.settings.lockout_minutes);
+                    *entry = (0, Some(Instant::now() + Duration::from_secs(minutes * 60)));
+                }
+                Err(Refusal(401, why))
+            }
+            Err(other) => Err(other),
+        }
     }
 
     fn me(&self, head: &Head) -> Answer {
         let users = self.users().map_err(|e| Refusal(500, e))?;
-        let user = head
+        let token = head
             .bearer()
-            .and_then(|t| users.identify(t))
+            .ok_or_else(|| Refusal(401, "a valid token is needed".into()))?;
+        if let Some(signed) = users.authenticate(token, self.roles) {
+            let mut out = view(&signed.user);
+            out["permissions"] = json!(names(&signed.permissions));
+            out["token"] = json!({ "id": signed.token_id, "kind": signed.kind.as_str() });
+            return Ok((200, out));
+        }
+        let user = users
+            .identify(token)
             .ok_or_else(|| Refusal(401, "a valid token is needed".into()))?;
         let mut out = view(user);
-        out["permissions"] = json!(self.permissions_of(user));
+        out["permissions"] = json!([]);
         Ok((200, out))
     }
 
-    fn my_token(&self, head: &Head) -> Answer {
-        let name = self.signed_in(head)?.name;
-        let token = self.change(|users| users.token(&name))?;
+    fn make_token(&self, head: &Head, body: &Body) -> Answer {
+        let session = self.session(head)?;
+        let label = body.text("name")?;
+        let expires_days =
+            match body.0.get("expires_days") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(v.as_u64().and_then(|d| u32::try_from(d).ok()).ok_or_else(
+                    || Refusal(400, "`expires_days` must be a whole number of days".into()),
+                )?),
+            };
+        let scopes = match body.0.get("scopes") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(
+                serde_json::from_value::<Vec<Permission>>(v.clone()).map_err(|_| {
+                    Refusal(
+                        400,
+                        "`scopes` must be a list of share, recall or admin".into(),
+                    )
+                })?,
+            ),
+        };
+        let name = session.user.name.clone();
+        let (id, token, expires) = self.change(|users| {
+            users.create_token(&name, &label, expires_days, scopes.clone(), self.roles)
+        })?;
         Ok((
             201,
-            json!({ "name": name, "token": token, "note": "Keep this token: it is shown once." }),
+            json!({
+                "id": id,
+                "name": label,
+                "token": token,
+                "scopes": scopes.as_deref().map(names),
+                "expires": expires,
+                "note": "Keep this token: it is shown once.",
+            }),
         ))
     }
 
-    /// The active user the request's token signs in as.
-    fn signed_in(&self, head: &Head) -> Result<User, Refusal> {
+    /// Who the request's token signs in as, when it is valid.
+    fn signed_in(&self, head: &Head) -> Result<Signed, Refusal> {
         let users = self.users().map_err(|e| Refusal(500, e))?;
         head.bearer()
-            .and_then(|t| users.authenticate(t))
-            .cloned()
+            .and_then(|t| users.authenticate(t, self.roles))
             .ok_or_else(|| Refusal(401, "a valid token of an approved user is needed".into()))
     }
 
-    /// Refuse unless the request comes from a user whose role has `admin`.
-    fn admin(&self, head: &Head) -> Result<User, Refusal> {
-        let user = self.signed_in(head)?;
-        if self
-            .permissions_of(&user)
-            .contains(&Permission::Admin.as_str())
-        {
-            Ok(user)
+    /// The request's session: refused for an access token, which may not
+    /// manage the account.
+    fn session(&self, head: &Head) -> Result<Signed, Refusal> {
+        let signed = self.signed_in(head)?;
+        if signed.kind == Kind::Session {
+            Ok(signed)
         } else {
             Err(Refusal(
                 403,
-                "this needs a role with the `admin` permission".into(),
+                "this needs a session from logging in with your password, not an access token"
+                    .into(),
             ))
         }
     }
 
-    fn permissions_of(&self, user: &User) -> Vec<&'static str> {
-        self.roles
-            .get(&user.role)
-            .map(|p| p.iter().map(|p| p.as_str()).collect())
-            .unwrap_or_default()
+    /// Refuse unless the request's token may `admin`.
+    fn admin(&self, head: &Head) -> Result<Signed, Refusal> {
+        let signed = self.signed_in(head)?;
+        if signed.permissions.contains(&Permission::Admin) {
+            Ok(signed)
+        } else {
+            Err(Refusal(
+                403,
+                "this needs a role, and a token, with the `admin` permission".into(),
+            ))
+        }
     }
 }
 
-/// A user as the API shows them: never a token or its hash.
+fn names(permissions: &[Permission]) -> Vec<&'static str> {
+    permissions.iter().map(|p| p.as_str()).collect()
+}
+
+/// An account as the API shows it: never a password, a token or a hash.
 fn view(user: &User) -> Value {
     json!({
         "name": user.name,
         "role": user.role,
         "status": user.status.as_str(),
         "registered": user.registered,
-        "tokens": user.tokens.len(),
+        "has_password": user.password.is_some(),
+        "tokens": user.tokens.iter().filter(|t| t.kind == Kind::Personal).count(),
     })
 }
 
-fn role_in(body: &Value) -> Result<String, Refusal> {
-    body.get("role")
-        .and_then(Value::as_str)
-        .map(String::from)
-        .ok_or_else(|| Refusal(400, "`role` is required".into()))
+/// An access token as the API lists it: never the token or its hash.
+fn token_view(token: &Token) -> Value {
+    json!({
+        "id": token.id,
+        "name": token.name,
+        "scopes": token.scopes.as_deref().map(names),
+        "made": token.made,
+        "expires": token.expires,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::server::tests::start;
+    use crate::server::tests::{PASSWORD, start};
     use serde_json::{Value, json};
 
     /// One REST call: the status and the JSON answer.
@@ -273,8 +437,8 @@ mod tests {
             base.replace("ws://", "http://").trim_end_matches('/')
         );
         let auth = token.map(|t| format!("Bearer {t}"));
-        let mut resp = match (method, body) {
-            ("GET" | "DELETE", _) => {
+        let mut resp = match method {
+            "GET" | "DELETE" => {
                 let mut req = if method == "GET" {
                     agent.get(&url)
                 } else {
@@ -285,7 +449,7 @@ mod tests {
                 }
                 req.call().unwrap()
             }
-            (_, body) => {
+            _ => {
                 let mut req = if method == "PUT" {
                     agent.put(&url)
                 } else {
@@ -304,148 +468,199 @@ mod tests {
         (status, serde_json::from_str(&text).unwrap_or(Value::Null))
     }
 
-    #[test]
-    fn someone_signs_up_waits_and_is_let_in_by_an_admin() {
-        let hub = start();
-        let (status, body) = call(
-            &hub.url,
+    fn login(base: &str, name: &str, password: &str) -> (u16, Value) {
+        call(
+            base,
             "POST",
-            "/api/v1/register",
+            "/api/v1/login",
             None,
-            Some(json!({"name": "dana"})),
-        );
-        assert_eq!(status, 201, "{body}");
-        let token = body["token"].as_str().unwrap().to_string();
-        let (_, me) = call(&hub.url, "GET", "/api/v1/me", Some(&token), None);
-        assert_eq!(me["status"], "pending");
-        assert_eq!(me["permissions"], json!([]));
-        let link = crate::RemoteMemory::new(&hub.url, &token, None);
-        assert!(link.hello().is_err(), "the link refuses a pending user");
-
-        let (status, _) = call(&hub.url, "GET", "/api/v1/users", Some(&hub.ana), None);
-        assert_eq!(status, 403, "a member is no admin");
-        let (status, users) = call(&hub.url, "GET", "/api/v1/users", Some(&hub.root), None);
-        assert_eq!(status, 200);
-        assert!(
-            !users.to_string().contains("sha256"),
-            "never a hash: {users}"
-        );
-        let pending: Vec<&Value> = users["users"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|u| u["status"] == "pending")
-            .collect();
-        assert_eq!(pending.len(), 1);
-        let (_, roles) = call(&hub.url, "GET", "/api/v1/roles", Some(&hub.root), None);
-        assert_eq!(roles["roles"]["reader"], json!(["recall"]));
-
-        let (status, body) = call(
-            &hub.url,
-            "POST",
-            "/api/v1/users/dana/approve",
-            Some(&hub.root),
-            Some(json!({"role": "member"})),
-        );
-        assert_eq!(status, 200, "{body}");
-        assert_eq!(
-            crate::RemoteMemory::new(&hub.url, &token, None)
-                .hello()
-                .unwrap()
-                .role,
-            "member"
-        );
-        let (status, body) = call(&hub.url, "POST", "/api/v1/me/tokens", Some(&token), None);
-        assert_eq!(status, 201);
-        assert!(body["token"].as_str().unwrap().starts_with("ens_"));
+            Some(json!({"name": name, "password": password})),
+        )
     }
 
     #[test]
-    fn admins_change_roles_revoke_tokens_and_turn_sign_ups_down() {
+    fn someone_signs_up_is_approved_logs_in_and_makes_a_scoped_token() {
         let hub = start();
-        let (status, _) = call(
-            &hub.url,
-            "PUT",
-            "/api/v1/users/ana",
-            Some(&hub.root),
-            Some(json!({"role": "reader"})),
-        );
-        assert_eq!(status, 200);
-        let (_, me) = call(&hub.url, "GET", "/api/v1/me", Some(&hub.ana), None);
-        assert_eq!(me["permissions"], json!(["recall"]));
         let (status, body) = call(
-            &hub.url,
-            "PUT",
-            "/api/v1/users/ana",
-            Some(&hub.root),
-            Some(json!({"role": "god"})),
-        );
-        assert_eq!(status, 400, "{body}");
-        let (status, body) = call(
-            &hub.url,
-            "DELETE",
-            "/api/v1/users/ana/tokens",
-            Some(&hub.root),
-            None,
-        );
-        assert_eq!((status, body["revoked"].as_u64()), (200, Some(1)));
-        let (status, _) = call(&hub.url, "GET", "/api/v1/me", Some(&hub.ana), None);
-        assert_eq!(status, 401);
-
-        call(
             &hub.url,
             "POST",
             "/api/v1/register",
             None,
-            Some(json!({"name": "eve"})),
+            Some(json!({"name": "dana", "password": PASSWORD})),
         );
+        assert_eq!(status, 201, "{body}");
+        assert!(body.get("token").is_none(), "no token before approval");
+        let (status, body) = login(&hub.url, "dana", PASSWORD);
+        assert_eq!(status, 403, "pending: {body}");
+
+        let (_, root) = login(&hub.url, "root", PASSWORD);
+        let root = root["token"].as_str().unwrap().to_string();
+        let (status, users) = call(&hub.url, "GET", "/api/v1/users", Some(&root), None);
+        assert_eq!(status, 200);
+        let text = users.to_string();
+        assert!(!text.contains("sha256") && !text.contains(PASSWORD) && !text.contains("salt"));
+        let (status, _) = call(
+            &hub.url,
+            "POST",
+            "/api/v1/users/dana/approve",
+            Some(&root),
+            Some(json!({"role": "member"})),
+        );
+        assert_eq!(status, 200);
+
+        let (status, session) = login(&hub.url, "dana", PASSWORD);
+        assert_eq!(status, 200, "{session}");
+        let session = session["token"].as_str().unwrap().to_string();
+        let (status, made) = call(
+            &hub.url,
+            "POST",
+            "/api/v1/me/tokens",
+            Some(&session),
+            Some(json!({"name": "laptop", "expires_days": 30, "scopes": ["recall"]})),
+        );
+        assert_eq!(status, 201, "{made}");
+        assert_eq!(made["scopes"], json!(["recall"]));
+        assert!(made["expires"].is_string());
+        let token = made["token"].as_str().unwrap().to_string();
+
+        let link = crate::RemoteMemory::new(&hub.url, &token, None);
+        let hello = link.hello().unwrap();
+        assert_eq!(hello.permissions, vec!["recall"]);
+        use ensemble_knowledge::KnowledgeAccess;
+        let share = link
+            .call("share", &json!({"title": "t", "text": "x"}))
+            .unwrap();
+        assert!(share.unwrap_err().contains("do not allow `share`"));
+
+        let (status, _) = call(
+            &hub.url,
+            "POST",
+            "/api/v1/me/tokens",
+            Some(&token),
+            Some(json!({"name": "more"})),
+        );
+        assert_eq!(status, 403, "an access token makes no tokens");
+        let (_, listed) = call(&hub.url, "GET", "/api/v1/me/tokens", Some(&session), None);
+        let listed = listed["tokens"].as_array().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(!listed[0].to_string().contains(&token[4..]));
+        let id = listed[0]["id"].as_str().unwrap().to_string();
         let (status, _) = call(
             &hub.url,
             "DELETE",
-            "/api/v1/users/eve",
-            Some(&hub.root),
+            &format!("/api/v1/me/tokens/{id}"),
+            Some(&session),
             None,
         );
         assert_eq!(status, 200);
+        assert!(
+            crate::RemoteMemory::new(&hub.url, &token, None)
+                .hello()
+                .is_err()
+        );
+
+        let (status, _) = call(&hub.url, "POST", "/api/v1/logout", Some(&session), None);
+        assert_eq!(status, 200);
+        let (status, _) = call(&hub.url, "GET", "/api/v1/me", Some(&session), None);
+        assert_eq!(status, 401, "logged out");
+    }
+
+    #[test]
+    fn a_password_change_ends_sessions_and_failed_logins_lock_the_name() {
+        let hub = start();
+        let (_, session) = login(&hub.url, "ana", PASSWORD);
+        let session = session["token"].as_str().unwrap().to_string();
         let (status, _) = call(
             &hub.url,
-            "DELETE",
-            "/api/v1/users/eve",
-            Some(&hub.root),
-            None,
+            "PUT",
+            "/api/v1/me/password",
+            Some(&session),
+            Some(json!({"current": "not the password", "new": "a brand new secret"})),
         );
-        assert_eq!(status, 404);
+        assert_eq!(status, 401);
+        let (status, _) = call(
+            &hub.url,
+            "PUT",
+            "/api/v1/me/password",
+            Some(&session),
+            Some(json!({"current": PASSWORD, "new": "a brand new secret"})),
+        );
+        assert_eq!(status, 200);
+        let (status, _) = call(&hub.url, "GET", "/api/v1/me", Some(&session), None);
+        assert_eq!(status, 401, "sessions end");
+        assert_eq!(login(&hub.url, "ana", "a brand new secret").0, 200);
+
+        // The test hub locks a name after 3 failures.
+        for _ in 0..3 {
+            assert_eq!(login(&hub.url, "rex", "wrong password!!").0, 401);
+        }
+        assert_eq!(
+            login(&hub.url, "rex", PASSWORD).0,
+            429,
+            "locked, even with the right one"
+        );
+    }
+
+    #[test]
+    fn admins_add_accounts_reset_passwords_change_roles_and_remove() {
+        let hub = start();
+        let (_, root) = login(&hub.url, "root", PASSWORD);
+        let root = root["token"].as_str().unwrap().to_string();
+        let (status, body) = call(
+            &hub.url,
+            "POST",
+            "/api/v1/users",
+            Some(&root),
+            Some(json!({"name": "eve", "role": "reader", "password": PASSWORD})),
+        );
+        assert_eq!(status, 201, "{body}");
+        assert_eq!(login(&hub.url, "eve", PASSWORD).0, 200);
+        let (status, _) = call(
+            &hub.url,
+            "PUT",
+            "/api/v1/users/eve/password",
+            Some(&root),
+            Some(json!({"password": "reset by the admin"})),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(login(&hub.url, "eve", "reset by the admin").0, 200);
+        let (status, _) = call(
+            &hub.url,
+            "PUT",
+            "/api/v1/users/eve",
+            Some(&root),
+            Some(json!({"role": "god"})),
+        );
+        assert_eq!(status, 400);
+        let (_, ana) = login(&hub.url, "ana", PASSWORD);
+        let ana = ana["token"].as_str().unwrap().to_string();
+        let (status, _) = call(&hub.url, "GET", "/api/v1/users", Some(&ana), None);
+        assert_eq!(status, 403, "a member is no admin");
+        let (status, _) = call(&hub.url, "DELETE", "/api/v1/users/eve", Some(&root), None);
+        assert_eq!(status, 200);
+        assert_eq!(login(&hub.url, "eve", "reset by the admin").0, 401);
+        let (_, roles) = call(&hub.url, "GET", "/api/v1/roles", Some(&root), None);
+        assert_eq!(roles["roles"]["reader"], json!(["recall"]));
     }
 
     #[test]
     fn sign_ups_are_limited_and_bad_requests_are_named() {
         let hub = start();
-        for name in ["a1", "a2"] {
-            let (status, _) = call(
+        let register = |name: &str, password: &str| {
+            call(
                 &hub.url,
                 "POST",
                 "/api/v1/register",
                 None,
-                Some(json!({"name": name})),
-            );
-            assert_eq!(status, 201);
-        }
-        let (status, body) = call(
-            &hub.url,
-            "POST",
-            "/api/v1/register",
-            None,
-            Some(json!({"name": "a3"})),
-        );
-        assert_eq!(status, 409, "max_pending is 2: {body}");
-        let (status, _) = call(
-            &hub.url,
-            "POST",
-            "/api/v1/register",
-            None,
-            Some(json!({"name": "ana"})),
-        );
-        assert_eq!(status, 409, "a taken name");
+                Some(json!({"name": name, "password": password})),
+            )
+            .0
+        };
+        assert_eq!(register("a1", PASSWORD), 201);
+        assert_eq!(register("a2", PASSWORD), 201);
+        assert_eq!(register("a3", PASSWORD), 409, "max_pending is 2");
+        assert_eq!(register("ana", PASSWORD), 409, "a taken name");
+        assert_eq!(register("b1", "short"), 400, "a short password");
         let (status, _) = call(&hub.url, "POST", "/api/v1/register", None, Some(json!({})));
         assert_eq!(status, 400);
         let (status, _) = call(&hub.url, "GET", "/api/v1/nothing", None, None);

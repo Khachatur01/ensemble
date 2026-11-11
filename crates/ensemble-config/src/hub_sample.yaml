@@ -89,6 +89,11 @@ server:
   registration:
     type: approval               # anyone may sign up; an admin approves. Or: { type: closed }
     max_pending: 20              # sign-ups waiting at once
+  sessions:
+    hours: 12                    # how long a login lasts
+  lockout:
+    failures: 5                  # failed logins before a name is refused
+    minutes: 15                  # and for how long
 roles:                           # names are yours; the first admin: `ensemble hub user add`
   admin: [admin, share, recall]
   member: [share, recall]
