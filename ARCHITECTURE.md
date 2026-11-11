@@ -325,8 +325,20 @@ in either process.
    folder their project maps to, for the agent a `<label>:<agent>` label names
    or in the backlog; questions and answers go through comments; a result is
    posted once and the issue goes to `review` or `blocked`. Ensemble never sets
-   an issue to `done`. Not yet: GitLab, GitHub and Jira; the hub server, link
-   and identity; the inbox on the server.)
+   an issue to `done`. Then the hub server and the link: `ensemble hub serve`
+   with `server` and `roles` in `hub.yaml`, users and hashed tokens in the
+   hub's state (`ensemble hub user`), `ensemble login` and `--hub wss://`, and
+   `share` and `recall` against the organization vault over one WebSocket. Not
+   yet: GitLab, GitHub and Jira; the inbox on the server and tasks pushed to
+   nodes; OIDC and the device flow; the chat API and the web UI.)
+
+The link, as built: the node opens one WebSocket and signs in with
+`Authorization: Bearer <token>` during the upgrade (401 without a valid one).
+Frames are JSON: requests `{id, method, params}` (`hello`, `share`, `recall`),
+replies `{id, result}` or `{id, error}`, and events `{event, data}`, which no
+event uses yet; they are how tasks will reach nodes. Every request is checked
+against the user's role, read again from the hub's state, so a revoked token
+stops at once. The permissions so far are `share` and `recall`.
 
 ## Open questions
 

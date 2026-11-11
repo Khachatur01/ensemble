@@ -993,6 +993,62 @@ wrote it. The task runs when a worker runs for its folder: an `ensemble mcp`
 session opened there, or `ensemble serve --dir <folder>`. `ensemble inbox --hub
 <dir>` lists your labelled issues, where each stands and the task it became.
 
+## Hub server
+
+A team runs one hub on a server. Each member's node connects to it, and their
+agents share to and recall from the **organization vault** there, as their role
+allows. Personal knowledge stays in each person's own embedded hub: one agent
+session talks to one hub, set per project when you register Ensemble.
+
+On the server:
+
+```console
+$ ensemble hub init --hub /srv/hub          # hub.yaml and the vault
+$ $EDITOR /srv/hub/hub.yaml                 # knowledge, server, roles
+$ ensemble hub user add ana --role member --hub /srv/hub   # prints ana's token, once
+$ ensemble hub serve --hub /srv/hub         # until Ctrl-C or SIGTERM
+```
+
+```yaml
+server:
+  listen: 127.0.0.1:7700
+roles:                     # yours to name; each a list of permissions
+  member: [share, recall]
+  reader: [recall]
+```
+
+The permissions are `share` (keep knowledge in the organization vault) and
+`recall` (read its notes); more come with the features that need them. Users
+are not in `hub.yaml`: `ensemble hub user add|list|token|revoke|remove` keeps
+them in the hub's state directory, readable only by whoever runs the hub, with
+only the SHA-256 of each token. A revoked token stops working at its next
+request, even on an open connection. A share is kept under the name of the user
+who signed in, never a name the node sends, and the hub distills shares itself,
+with its own `knowledge.distill` models.
+
+The hub speaks plain WebSocket. For the internet, put a TLS reverse proxy in
+front; with Caddy, which gets and renews the certificate itself:
+
+```text
+hub.example.com {
+    reverse_proxy 127.0.0.1:7700
+}
+```
+
+On a LAN or a VPN, listen on that address instead and connect with `ws://`.
+
+On each member's computer:
+
+```console
+$ ensemble login wss://hub.example.com --token ens_...   # checks it, keeps it in ~/.config/ensemble/hubs.json (0600)
+$ ensemble connect --manager claude-code --team ~/team --hub wss://hub.example.com
+$ ensemble recall --hub wss://hub.example.com deploys
+```
+
+`--hub <url>` works like `--hub <dir>`: the agent is offered the knowledge tools
+its role allows (a reader gets only `recall`), and `ensemble share` and
+`ensemble recall` go to the hub. `ensemble logout <url>` forgets the token.
+
 ## Installation
 
 Linux is where it is built and tested; the rest of Unix should work. Windows is not supported:
@@ -1196,12 +1252,14 @@ scripts stand in for the CLIs.
 - **The working folder is fixed when the server starts.** The working
   directory of the process (or `--dir`). A call can work in a folder inside it
   with `repo`, but not outside.
-- **Knowledge is personal and on this computer.** The hub runs inside your
-  node and keeps one person's vault; a hub server shared by a team, an
-  organization vault and connectors to chats and mail are not built yet.
-  Recall is a word search, so it finds notes that use your words, not ones that
-  only mean the same. Your agent recalls when it decides to; delegated agents
-  get no notes on their own.
+- **A hub server shares knowledge, not yet tasks.** It keeps the organization
+  vault that members share to and recall from; its task inbox, a chat API, a
+  web UI and single sign-on are not built, and users get tokens from the admin
+  (`ensemble hub user add`), not by signing in. Connectors to chats and mail
+  are not built either.
+- **Recall is a word search.** It finds notes that use your words, not ones
+  that only mean the same. Your agent recalls when it decides to; delegated
+  agents get no notes on their own.
 - **One tracker so far.** The inbox reads a folder of markdown issues; GitLab,
   GitHub and Jira adapters are not built. It runs on your computer, so it
   looks at the tracker only while `ensemble mcp` or `ensemble serve` runs.
