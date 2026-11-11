@@ -1005,7 +1005,8 @@ On the server:
 ```console
 $ ensemble hub init --hub /srv/hub          # hub.yaml and the vault
 $ $EDITOR /srv/hub/hub.yaml                 # knowledge, server, roles
-$ ensemble hub user add ana --role member --hub /srv/hub   # prints ana's token, once
+$ ensemble hub user add root --role admin --hub /srv/hub   # the first admin
+$ ensemble hub user password root --hub /srv/hub           # typed without echo
 $ ensemble hub serve --hub /srv/hub         # until Ctrl-C or SIGTERM
 ```
 
@@ -1015,6 +1016,11 @@ server:
   registration:
     type: approval         # anyone may sign up; an admin lets them in
     max_pending: 20        # or: registration: { type: closed }, only an admin adds users
+  sessions:
+    hours: 12              # how long a login lasts
+  lockout:
+    failures: 5            # failed logins before a name is refused
+    minutes: 15            # and for how long
 roles:                     # yours to name; each a list of permissions
   admin: [admin, share, recall]
   member: [share, recall]
@@ -1023,46 +1029,79 @@ roles:                     # yours to name; each a list of permissions
 
 The permissions are `share` (keep knowledge in the organization vault),
 `recall` (read its notes) and `admin` (manage users); more come with the
-features that need them. Users are not in `hub.yaml`: they are kept in the
-hub's state directory, readable only by whoever runs the hub, with only the
-SHA-256 of each token. Make the first admin on the server with
-`ensemble hub user add root --role admin`; after that, users can be managed
-there with `ensemble hub user` or by any admin through the REST API. A revoked
-token stops working at its next request, even on an open connection. A share is
-kept under the name of the user who signed in, never a name the node sends, and
+features that need them. Accounts are not in `hub.yaml`: they are kept in the
+hub's state directory, readable only by whoever runs the hub. A share is kept
+under the name of the account that signed in, never a name the node sends, and
 the hub distills shares itself, with its own `knowledge.distill` models.
 
+**Accounts.** An account has a name, a role and a password of at least 12
+characters, kept as a PBKDF2-HMAC-SHA256 hash. There are two kinds of token,
+both sent as `Authorization: Bearer <token>`, and only their SHA-256 is kept:
+
+- A **session** comes from logging in with the password and lasts
+  `sessions.hours`. It is what a UI holds. Only a session may change the
+  password or make and revoke access tokens, so a stolen access token cannot
+  make more. A password change ends every session.
+- An **access token** is made from a session, for a node or a script: named
+  (`laptop`), with an optional expiry, and optional **scopes** that narrow the
+  account's role, such as `["recall"]`. It is shown once, listed by id and
+  name, and revoked one by one. Scopes hold on the link as on REST.
+
+After `lockout.failures` failed logins, a name is refused for
+`lockout.minutes`, even with the right password. A revoked or expired token
+stops working at its next request, even on an open connection.
+
 **Signing up.** With `registration: approval`, anyone who reaches the hub signs
-up and gets a token at once; it signs in to nothing until an admin approves
-them with a role:
+up with a name and password; they can log in once an admin approves them:
 
 ```console
-$ curl -X POST https://hub.example.com/api/v1/register -d '{"name":"ana"}'
-{"name":"ana","status":"pending","token":"ens_...","note":"Keep this token: it is shown once. ..."}
+$ curl -X POST https://hub.example.com/api/v1/register -d '{"name":"ana","password":"..."}'
 $ ensemble hub user approve ana --role member --hub /srv/hub     # or the API, below
-$ ensemble login wss://hub.example.com --token ens_...
 ```
 
-The REST API lives on the hub's port, under `/api/v1/`, for the web UI to come
-and for scripts. JSON in and out; `Authorization: Bearer <token>` where needed.
+On each member's computer:
+
+```console
+$ ensemble login wss://hub.example.com --user ana    # asks the password; makes a token "ensemble on <host>"
+$ ensemble connect --manager claude-code --team ~/team --hub wss://hub.example.com
+$ ensemble recall --hub wss://hub.example.com deploys
+```
+
+`ensemble login` logs in, makes an access token for this computer, logs out,
+and keeps the token in `~/.config/ensemble/hubs.json`, readable only by you.
+`--token T` keeps a token made elsewhere instead. `--hub <url>` then works like
+`--hub <dir>`: the agent is offered the knowledge tools the token allows (a
+reader gets only `recall`), and `ensemble share` and `ensemble recall` go to
+the hub. `ensemble logout <url>` forgets the token.
+
+**The REST API** lives on the hub's port, under `/api/v1/`, for the web UI to
+come and for scripts. JSON in and out.
 
 | Method and path | Who | Does |
 | --- | --- | --- |
-| `POST /api/v1/register` `{name}` | anyone, with `approval` | a pending user; their token, once |
-| `GET /api/v1/me` | any token | your name, role, status and permissions |
-| `POST /api/v1/me/tokens` | an approved user | another token, for another device, once |
-| `GET /api/v1/users` | admin | every user, with status and how many tokens; never a token |
+| `POST /api/v1/register` `{name, password}` | anyone, with `approval` | a pending account |
+| `POST /api/v1/login` `{name, password}` | anyone | a session: `{token, expires}` |
+| `POST /api/v1/logout` | a session | ends it |
+| `GET /api/v1/me` | any token | your account, the token's permissions and kind |
+| `PUT /api/v1/me/password` `{current, new}` | a session | a new password; every session ends |
+| `GET /api/v1/me/tokens` | a session | your access tokens: id, name, scopes, made, expires |
+| `POST /api/v1/me/tokens` `{name, expires_days?, scopes?}` | a session | a new access token, shown once |
+| `DELETE /api/v1/me/tokens/{id}` | a session | revokes one |
+| `GET /api/v1/users` | admin | every account; never a password, token or hash |
+| `POST /api/v1/users` `{name, role, password}` | admin | an account, active |
 | `GET /api/v1/roles` | admin | the roles and their permissions |
-| `POST /api/v1/users/{name}/approve` `{role}` | admin | lets a pending user in |
+| `POST /api/v1/users/{name}/approve` `{role}` | admin | lets a pending account in |
 | `PUT /api/v1/users/{name}` `{role}` | admin | another role |
+| `PUT /api/v1/users/{name}/password` `{password}` | admin | resets it; the account's sessions end |
 | `DELETE /api/v1/users/{name}/tokens` | admin | revokes every token |
-| `DELETE /api/v1/users/{name}` | admin | removes a user, or turns a sign-up down |
+| `DELETE /api/v1/users/{name}` | admin | removes an account, or turns a sign-up down |
 
-Errors are `{"error": "..."}` with 400, 401, 403, 404, 405 or 409. An embedded
-hub has none of this: it has one user, you, and listens on nothing.
+Errors are `{"error": "..."}` with 400, 401, 403, 404, 405, 409 or 429. An
+embedded hub has none of this: it has one user, you, and listens on nothing.
 
-The hub speaks plain HTTP and WebSocket. For the internet, put a TLS reverse proxy in
-front; with Caddy, which gets and renews the certificate itself:
+The hub speaks plain HTTP and WebSocket. For the internet, put a TLS reverse
+proxy in front, so passwords and tokens never cross the network in the clear;
+with Caddy, which gets and renews the certificate itself:
 
 ```text
 hub.example.com {
@@ -1071,18 +1110,6 @@ hub.example.com {
 ```
 
 On a LAN or a VPN, listen on that address instead and connect with `ws://`.
-
-On each member's computer:
-
-```console
-$ ensemble login wss://hub.example.com --token ens_...   # checks it, keeps it in ~/.config/ensemble/hubs.json (0600)
-$ ensemble connect --manager claude-code --team ~/team --hub wss://hub.example.com
-$ ensemble recall --hub wss://hub.example.com deploys
-```
-
-`--hub <url>` works like `--hub <dir>`: the agent is offered the knowledge tools
-its role allows (a reader gets only `recall`), and `ensemble share` and
-`ensemble recall` go to the hub. `ensemble logout <url>` forgets the token.
 
 ## Installation
 
@@ -1158,10 +1185,12 @@ $ ensemble hub init --hub <dir>    # write a sample hub: <dir>/hub.yaml, and mak
 $ ensemble hub check --hub <dir>   # validate hub.yaml; which model would distill shares now
 $ ensemble hub user add <name> --role <role> --hub <dir>   # a hub server's user; prints their token once
 $ ensemble hub user list|token <name>|revoke <name>|remove <name> --hub <dir>
+$ ensemble hub user password <name> --hub <dir>               # set a password, typed without echo
 $ ensemble hub user approve <name> --role <role> --hub <dir>   # let in someone who signed up
 $ ensemble hub user role <name> --role <role> --hub <dir>      # give a user another role
 $ ensemble hub serve --hub <dir>   # run the hub for a team, until stopped
-$ ensemble login <wss://url> --token <token>   # sign in to a hub server; then --hub <url> works like --hub <dir>
+$ ensemble login <wss://url> --user <name>     # sign in to a hub server with your account; then --hub <url> works like --hub <dir>
+$ ensemble login <wss://url> --token <token>   # or with a token made elsewhere
 $ ensemble logout <wss://url>
 $ ensemble share --hub <dir> --title T [--text T]   # keep knowledge by hand; text from stdin without --text
 $ ensemble knowledge status --hub <dir>    # shares, pending, notes, what waits in review/
@@ -1292,8 +1321,9 @@ scripts stand in for the CLIs.
 - **A hub server shares knowledge, not yet tasks.** It keeps the organization
   vault that members share to and recall from; its task inbox, a chat API, a
   web UI and single sign-on are not built. People sign up through the REST API
-  and wait for an admin; the API sends no CORS headers, so a UI is served from
-  the hub's own origin. Connectors to chats and mail are not built either.
+  and wait for an admin; there is no password reset by mail, and no second
+  factor. The API sends no CORS headers, so a UI is served from the hub's own
+  origin. Connectors to chats and mail are not built either.
 - **Recall is a word search.** It finds notes that use your words, not ones
   that only mean the same. Your agent recalls when it decides to; delegated
   agents get no notes on their own.

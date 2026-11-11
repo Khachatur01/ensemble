@@ -255,8 +255,15 @@ stays with the organization.
 
 One identity per person, one credential per client or device, each revocable
 alone. Sign-in through the organization's OIDC provider, or local accounts for a
-personal setup. CLIs and nodes enroll with `ensemble login <hub>` (the OAuth
-device flow later). A node keeps its token in a file only its user can read,
+personal setup. On a hub server built so far, an account has a name and a
+password (PBKDF2-HMAC-SHA256); logging in gives a session, which lasts a set
+number of hours and is what a UI holds, and from a session a person makes
+access tokens for nodes and scripts, each named, with an optional expiry and
+optional scopes that narrow the account's role. Only a session may manage
+tokens or the password; failed logins lock a name for a while. (Decided
+2026-11-11.) CLIs and nodes enroll with `ensemble login <hub> --user NAME`,
+which makes an access token for that computer (the OAuth device flow and
+OIDC later). A node keeps its token in a file only its user can read,
 under `~/.config/ensemble`, like an SSH key; the OS keyring may come later as
 an option. The hub stores tokens hashed. (Decided 2026-11-11.) Nodes,
 connectors and agents are identities too, and an agent acts on behalf of a
