@@ -17,4 +17,5 @@ serde_json.workspace = true
 tungstenite.workspace = true
 
 [dev-dependencies]
+ureq.workspace = true
 ensemble-core = { workspace = true, features = ["test-support"] }

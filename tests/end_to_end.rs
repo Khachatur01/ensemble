@@ -2770,3 +2770,89 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// POST JSON to a hub server's REST API: the status and the answer.
+fn post_json(address: &str, path: &str, body: serde_json::Value) -> (u16, serde_json::Value) {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut resp = agent
+        .post(format!("http://{address}{path}"))
+        .header("content-type", "application/json")
+        .send(body.to_string())
+        .unwrap();
+    let status = resp.status().as_u16();
+    let text = resp.body_mut().read_to_string().unwrap();
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+#[test]
+fn someone_signs_up_through_the_rest_api_and_the_admin_lets_them_in() {
+    let s = Scratch::new("hub-register");
+    let (hub, address, _) = hub_server(&s);
+    let mut child = serve_hub(&s, &hub);
+    let (status, body) = post_json(
+        &address,
+        "/api/v1/register",
+        serde_json::json!({"name": "dana"}),
+    );
+    assert_eq!(status, 201, "{body}");
+    let token = body["token"].as_str().unwrap().to_string();
+    let url = format!("ws://{address}");
+    let out = command(&s)
+        .args(["login", &url, "--token", &token])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a pending user cannot sign in yet");
+
+    let run = |args: &[&str]| {
+        command(&s)
+            .args(args)
+            .arg("--hub")
+            .arg(&hub)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["hub", "user", "list"]);
+    assert!(
+        stdout_of(&out).contains("dana") && stdout_of(&out).contains("pending"),
+        "{}",
+        stdout_of(&out)
+    );
+    let out = run(&["hub", "user", "approve", "dana", "--role", "member"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let out = command(&s)
+        .args(["login", &url, "--token", &token])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("as dana (member"),
+        "{}",
+        stdout_of(&out)
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // A closed hub takes no sign-ups.
+    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    let closed = text.replace(
+        "    type: approval               # anyone may sign up; an admin approves. Or: { type: closed }\n    max_pending: 20              # sign-ups waiting at once\n",
+        "    type: closed\n",
+    );
+    assert_ne!(closed, text);
+    std::fs::write(hub.join("hub.yaml"), closed).unwrap();
+    let mut child = serve_hub(&s, &hub);
+    let (status, _) = post_json(
+        &address,
+        "/api/v1/register",
+        serde_json::json!({"name": "eve"}),
+    );
+    assert_eq!(status, 403);
+    let _ = child.kill();
+    let _ = child.wait();
+}

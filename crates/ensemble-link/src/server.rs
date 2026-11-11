@@ -3,18 +3,24 @@
 //! allows. Shares go into the organization vault under the signed-in user's
 //! name, never a name the node sends.
 //!
-//! The server speaks plain WebSocket. For the internet, a TLS reverse proxy in
-//! front (such as Caddy) turns `wss://` into it; on a LAN or a VPN it can be
-//! reached directly.
+//! The same port serves the REST API under `/api/v1/` (`api`): a request that
+//! asks for a WebSocket upgrade is the link, anything else is REST.
+//!
+//! The server speaks plain HTTP. For the internet, a TLS reverse proxy in front
+//! (such as Caddy) turns `https://` and `wss://` into it; on a LAN or a VPN it
+//! can be reached directly.
 
+use crate::http::{self, Replay};
 use crate::protocol::{HELLO, RECALL, Reply, Request, SHARE};
 use crate::users::Users;
-use ensemble_config::Permission;
+use ensemble_config::{Permission, Registration};
 use ensemble_knowledge::Memory;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tungstenite::handshake::server::{ErrorResponse, Request as Upgrade, Response};
@@ -23,12 +29,17 @@ use tungstenite::{Message, WebSocket};
 /// How often a waiting connection looks at the stop flag.
 const TICK: Duration = Duration::from_millis(200);
 
-/// A hub server: its knowledge, its roles, and where its users are kept.
+/// A hub server: its knowledge, its roles, how people join, and where its
+/// users are kept.
 pub struct Server<'a> {
-    pub memory: &'a Memory,
-    pub roles: &'a BTreeMap<String, Vec<Permission>>,
+    pub(crate) memory: &'a Memory,
+    pub(crate) roles: &'a BTreeMap<String, Vec<Permission>>,
+    pub(crate) registration: Registration,
     /// The hub's state directory, with `users.json`.
-    pub users: PathBuf,
+    users: PathBuf,
+    /// Held while the users file is read, changed and written, so two
+    /// requests at once cannot lose a change.
+    pub(crate) changing: Mutex<()>,
 }
 
 /// Who a connection signed in as.
@@ -37,7 +48,22 @@ struct Session {
     user: String,
 }
 
-impl Server<'_> {
+impl<'a> Server<'a> {
+    pub fn new(
+        memory: &'a Memory,
+        roles: &'a BTreeMap<String, Vec<Permission>>,
+        registration: Registration,
+        users: PathBuf,
+    ) -> Self {
+        Server {
+            memory,
+            roles,
+            registration,
+            users,
+            changing: Mutex::new(()),
+        }
+    }
+
     /// Accept nodes on `listener` until `stop` is set, each on its own thread.
     /// `say` gets one line per connection and per request, never what was
     /// shared.
@@ -65,7 +91,7 @@ impl Server<'_> {
         });
     }
 
-    fn users(&self) -> Result<Users, String> {
+    pub(crate) fn users(&self) -> Result<Users, String> {
         Users::load(&self.users).map_err(String::from)
     }
 
@@ -81,7 +107,12 @@ impl Server<'_> {
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .map_err(|e| e.to_string())?;
+        let (head, read, end) = http::read_head(&mut &stream)?;
+        if !head.is_upgrade() {
+            return self.rest(stream, &head, &read[end..], say);
+        }
         let mut session = None;
+        let stream = Replay::new(read, stream);
         let mut ws = tungstenite::accept_hdr(stream, |req: &Upgrade, resp: Response| {
             match self.sign_in(req) {
                 Some(s) => {
@@ -95,6 +126,7 @@ impl Server<'_> {
         let session = session.ok_or("no session after the handshake")?;
         say(&format!("{} connected", session.user));
         ws.get_ref()
+            .inner
             .set_read_timeout(Some(TICK))
             .map_err(|e| e.to_string())?;
         while !stop.load(Ordering::Relaxed) {
@@ -233,7 +265,7 @@ fn refused() -> ErrorResponse {
     resp
 }
 
-fn send(ws: &mut WebSocket<TcpStream>, reply: &Reply) -> Result<(), String> {
+fn send<S: Read + Write>(ws: &mut WebSocket<S>, reply: &Reply) -> Result<(), String> {
     let json = serde_json::to_string(reply).map_err(|e| e.to_string())?;
     ws.send(Message::text(json)).map_err(|e| e.to_string())
 }
@@ -250,6 +282,7 @@ pub(crate) mod tests {
         pub(crate) url: String,
         pub(crate) ana: String,
         pub(crate) rex: String,
+        pub(crate) root: String,
         stop: std::sync::Arc<AtomicBool>,
     }
 
@@ -262,7 +295,7 @@ pub(crate) mod tests {
     pub(crate) fn start() -> Running {
         let tmp = TempDir::new();
         let yaml = format!(
-            "version: 1\nowner: Acme\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: approval, max_pending: 2 }} }}\nroles:\n  member: [share, recall]\n  reader: [recall]\n",
+            "version: 1\nowner: Acme\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: approval, max_pending: 2 }} }}\nroles:\n  admin: [admin, recall]\n  member: [share, recall]\n  reader: [recall]\n",
             tmp.0.join("vault").display()
         );
         let hub =
@@ -288,17 +321,14 @@ pub(crate) mod tests {
         let mut users = Users::load(&tmp.0.join("state")).unwrap();
         let ana = users.add("ana", "member", &hub.roles).unwrap();
         let rex = users.add("rex", "reader", &hub.roles).unwrap();
+        let root = users.add("root", "admin", &hub.roles).unwrap();
         users.save().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("ws://{}/", listener.local_addr().unwrap());
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let (state, flag) = (tmp.0.join("state"), stop.clone());
         std::thread::spawn(move || {
-            let server = Server {
-                memory: &memory,
-                roles: &hub.roles,
-                users: state,
-            };
+            let server = Server::new(&memory, &hub.roles, hub.server.unwrap().registration, state);
             server.run(listener, &flag, &|_| {});
         });
         Running {
@@ -306,6 +336,7 @@ pub(crate) mod tests {
             url,
             ana,
             rex,
+            root,
             stop,
         }
     }

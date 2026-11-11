@@ -4,9 +4,13 @@
 //!
 //! The hub's users and their tokens are kept in `users`: state, not config.
 //! What node and hub say is in `protocol`; `server` is the hub's side, and
-//! `client` the node's, which keeps its tokens in `tokens`.
+//! `client` the node's, which keeps its tokens in `tokens`. The same port
+//! serves a REST API (`api`, over a little `http`) for signing up and for
+//! admins.
 
+mod api;
 pub mod client;
+mod http;
 pub mod protocol;
 pub mod server;
 pub mod tokens;

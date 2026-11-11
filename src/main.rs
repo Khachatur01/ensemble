@@ -619,11 +619,7 @@ fn cmd_hub_serve(args: &Args) -> Result<ExitCode, String> {
         hub.owner,
         listener.local_addr().unwrap_or(server.listen)
     ));
-    let server = ensemble::link::Server {
-        memory: &memory,
-        roles: &hub.roles,
-        users,
-    };
+    let server = ensemble::link::Server::new(&memory, &hub.roles, server.registration, users);
     std::thread::scope(|scope| {
         scope.spawn(|| memory.work(&STOP, &say));
         server.run(listener, &STOP, &say);
