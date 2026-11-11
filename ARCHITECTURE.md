@@ -266,7 +266,14 @@ There are no teams of people in the hub, only roles. Ensemble defines a fixed
 set of permissions (such as managing users, managing the hub's backends,
 sharing, recalling, receiving tasks), and each hub's config names its own roles
 as sets of them, so an organization decides what roles it has. (Decided
-2026-11-10.)
+2026-11-10.) Built so far: `share`, `recall` and `admin`, which manages users.
+
+People join a hub server by signing up through its REST API (`/api/v1/`, on
+the hub's own port, for a web UI and scripts): they get a token at once, and it
+signs in to nothing until an admin approves them with a role. A hub may instead
+be `closed`, where only an admin adds users. The first admin is made on the
+server with the CLI. An embedded hub has one user and no registration and no
+API. (Decided 2026-11-11.)
 
 ## Clients
 
@@ -328,7 +335,8 @@ in either process.
    an issue to `done`. Then the hub server and the link: `ensemble hub serve`
    with `server` and `roles` in `hub.yaml`, users and hashed tokens in the
    hub's state (`ensemble hub user`), `ensemble login` and `--hub wss://`, and
-   `share` and `recall` against the organization vault over one WebSocket. Not
+   `share` and `recall` against the organization vault over one WebSocket;
+   sign-up with approval and a REST API for users. Not
    yet: GitLab, GitHub and Jira; the inbox on the server and tasks pushed to
    nodes; OIDC and the device flow; the chat API and the web UI.)
 

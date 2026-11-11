@@ -1012,21 +1012,56 @@ $ ensemble hub serve --hub /srv/hub         # until Ctrl-C or SIGTERM
 ```yaml
 server:
   listen: 127.0.0.1:7700
+  registration:
+    type: approval         # anyone may sign up; an admin lets them in
+    max_pending: 20        # or: registration: { type: closed }, only an admin adds users
 roles:                     # yours to name; each a list of permissions
+  admin: [admin, share, recall]
   member: [share, recall]
   reader: [recall]
 ```
 
-The permissions are `share` (keep knowledge in the organization vault) and
-`recall` (read its notes); more come with the features that need them. Users
-are not in `hub.yaml`: `ensemble hub user add|list|token|revoke|remove` keeps
-them in the hub's state directory, readable only by whoever runs the hub, with
-only the SHA-256 of each token. A revoked token stops working at its next
-request, even on an open connection. A share is kept under the name of the user
-who signed in, never a name the node sends, and the hub distills shares itself,
-with its own `knowledge.distill` models.
+The permissions are `share` (keep knowledge in the organization vault),
+`recall` (read its notes) and `admin` (manage users); more come with the
+features that need them. Users are not in `hub.yaml`: they are kept in the
+hub's state directory, readable only by whoever runs the hub, with only the
+SHA-256 of each token. Make the first admin on the server with
+`ensemble hub user add root --role admin`; after that, users can be managed
+there with `ensemble hub user` or by any admin through the REST API. A revoked
+token stops working at its next request, even on an open connection. A share is
+kept under the name of the user who signed in, never a name the node sends, and
+the hub distills shares itself, with its own `knowledge.distill` models.
 
-The hub speaks plain WebSocket. For the internet, put a TLS reverse proxy in
+**Signing up.** With `registration: approval`, anyone who reaches the hub signs
+up and gets a token at once; it signs in to nothing until an admin approves
+them with a role:
+
+```console
+$ curl -X POST https://hub.example.com/api/v1/register -d '{"name":"ana"}'
+{"name":"ana","status":"pending","token":"ens_...","note":"Keep this token: it is shown once. ..."}
+$ ensemble hub user approve ana --role member --hub /srv/hub     # or the API, below
+$ ensemble login wss://hub.example.com --token ens_...
+```
+
+The REST API lives on the hub's port, under `/api/v1/`, for the web UI to come
+and for scripts. JSON in and out; `Authorization: Bearer <token>` where needed.
+
+| Method and path | Who | Does |
+| --- | --- | --- |
+| `POST /api/v1/register` `{name}` | anyone, with `approval` | a pending user; their token, once |
+| `GET /api/v1/me` | any token | your name, role, status and permissions |
+| `POST /api/v1/me/tokens` | an approved user | another token, for another device, once |
+| `GET /api/v1/users` | admin | every user, with status and how many tokens; never a token |
+| `GET /api/v1/roles` | admin | the roles and their permissions |
+| `POST /api/v1/users/{name}/approve` `{role}` | admin | lets a pending user in |
+| `PUT /api/v1/users/{name}` `{role}` | admin | another role |
+| `DELETE /api/v1/users/{name}/tokens` | admin | revokes every token |
+| `DELETE /api/v1/users/{name}` | admin | removes a user, or turns a sign-up down |
+
+Errors are `{"error": "..."}` with 400, 401, 403, 404, 405 or 409. An embedded
+hub has none of this: it has one user, you, and listens on nothing.
+
+The hub speaks plain HTTP and WebSocket. For the internet, put a TLS reverse proxy in
 front; with Caddy, which gets and renews the certificate itself:
 
 ```text
@@ -1179,7 +1214,7 @@ server, are added as crates on top.
 | `ensemble-config` | the helper team's `config.yaml`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), versions 1 and 2 to 3 (`migrate.rs`), and adding or removing an agent as text, comments kept (`edit.rs`); the hub's `hub.yaml` (`hub.rs`) |
 | `ensemble-backends` | one chat request to a model server in its own format (`chat.rs`), asking it which models it serves, for `health` (`models.rs`), choosing the first usable model of a `try` list (`resolve.rs`), and a stand-in model server for tests (`testing.rs`) |
 | `ensemble-knowledge` | the hub's knowledge: the vault of shares and notes, a git repository (`vault.rs`), the secret check a share passes first (`secrets.rs`), the pipeline that turns shares into notes (`pipeline.rs`), finding notes by their words (`search.rs`), and the `share` and `recall` tools and the background worker (`lib.rs`) |
-| `ensemble-link` | a hub server's users and their tokens, kept as hashes (`users.rs`), what a node and the hub say over their WebSocket (`protocol.rs`), the hub's side (`server.rs`), and the node's: a hub server's knowledge over the link (`client.rs`) and the token file (`tokens.rs`) |
+| `ensemble-link` | a hub server's users, sign-ups and their tokens, kept as hashes (`users.rs`), the REST API (`api.rs`) over a little HTTP reader (`http.rs`), what a node and the hub say over their WebSocket (`protocol.rs`), the hub's side (`server.rs`), and the node's: a hub server's knowledge over the link (`client.rs`) and the token file (`tokens.rs`) |
 | `ensemble-agents` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `direct` adapter, and gates (`external/`); a git worktree and branch per task (`worktree.rs`); agents to adapters, slots, budgets and `health` (`router.rs`) |
 | `ensemble-tasks` | tasks as files (`tasks.rs`); the `Tracker` trait and `LocalMarkdown`, its one implementation (`tracker.rs`); the worker that runs tasks and background delegations within each agent's slots (`queue.rs`); the tools your agent calls (`delegation.rs`); `review`, `diff` and `merge` of a worktree task's branch (`review.rs`) |
 | `ensemble-inbox` | the task inbox: what it needs from a tracker (`tracker.rs`), a folder of markdown issues, the first tracker (`local_markdown.rs`), and the bridge that makes issues into tasks and reports them back (`bridge.rs`) |
@@ -1220,7 +1255,7 @@ scripts stand in for the CLIs.
 | `crates/ensemble-agents/src/external/` | each CLI's command line, generated config and event stream, denials, limits, failures, the time limit killing the process tree |
 | `crates/ensemble-agents/src/router.rs`, `crates/ensemble-backends/` | routing, `health` and its model check, the chat request in both formats |
 | `crates/ensemble-knowledge/` | shares kept as they arrived, notes and the log, commits by the lock holder, the secret check; the pipeline against a stub model: new notes, merges, chatter skipped, unusable answers to review, waiting for a model, rebuild |
-| `crates/ensemble-link/` | tokens kept as hashes and revoked at once, roles checked per request, shares under the signed-in name, a reader offered only `recall`, the token file 0600, the link opened again when it breaks |
+| `crates/ensemble-link/` | sign-up, approval and the REST API's codes, tokens kept as hashes and revoked at once, roles checked per request, shares under the signed-in name, a reader offered only `recall`, the token file 0600, the link opened again when it breaks |
 | `crates/ensemble-inbox/` | markdown issues read and written with only the status line changed; issues to tasks, questions and answers through comments, results posted once, one inbox per hub |
 | `crates/ensemble-tasks/` | ticket files: reading, ids, results written once, run logs; review and merge |
 | `crates/ensemble-mcp/src/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session |
@@ -1256,9 +1291,9 @@ scripts stand in for the CLIs.
   with `repo`, but not outside.
 - **A hub server shares knowledge, not yet tasks.** It keeps the organization
   vault that members share to and recall from; its task inbox, a chat API, a
-  web UI and single sign-on are not built, and users get tokens from the admin
-  (`ensemble hub user add`), not by signing in. Connectors to chats and mail
-  are not built either.
+  web UI and single sign-on are not built. People sign up through the REST API
+  and wait for an admin; the API sends no CORS headers, so a UI is served from
+  the hub's own origin. Connectors to chats and mail are not built either.
 - **Recall is a word search.** It finds notes that use your words, not ones
   that only mean the same. Your agent recalls when it decides to; delegated
   agents get no notes on their own.
