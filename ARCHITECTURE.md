@@ -52,7 +52,9 @@ user, a usage log).
 **Node** (`ensemble node`): one person's machine. It runs that person's helper
 team and personal agent, wires the local agent CLIs (MCP, memory files, session
 hooks), and connects outbound to the hub over one WebSocket, so it needs no open
-port.
+port. (The WebSocket was confirmed on 2026-11-11, over plain HTTP with
+long-polling.) Tracker adapters beyond local markdown wait until after the hub
+server.
 
 **The hub is a role, not a place.** Its modules run inside the node process for a
 single developer, or in `ensemble hub` on a server for a team. The node calls the
@@ -181,9 +183,10 @@ topic per note, linked with `[[...]]`. Git history is the audit trail, and a
 search index is built from the notes. (Decided 2026-11-10.) A recording
 transcript is kept briefly; audio is never kept.
 
-Scopes are separate repositories, because Git cannot hide single files: one
-organization vault, and one personal vault per user. Recall merges them,
-checking visibility.
+Scopes are separate repositories, because Git cannot hide single files. A hub
+server keeps one organization vault, and every member's share goes there;
+personal knowledge lives in the person's own embedded hub, which is a
+different hub and a different session. (Decided 2026-11-11.)
 
 ### What feeds it
 
@@ -252,8 +255,10 @@ stays with the organization.
 
 One identity per person, one credential per client or device, each revocable
 alone. Sign-in through the organization's OIDC provider, or local accounts for a
-personal setup. CLIs and nodes enroll with the OAuth device flow (`ensemble
-login <hub>`), tokens in the OS keyring, stored hashed by the hub. Nodes,
+personal setup. CLIs and nodes enroll with `ensemble login <hub>` (the OAuth
+device flow later). A node keeps its token in a file only its user can read,
+under `~/.config/ensemble`, like an SSH key; the OS keyring may come later as
+an option. The hub stores tokens hashed. (Decided 2026-11-11.) Nodes,
 connectors and agents are identities too, and an agent acts on behalf of a
 person.
 
