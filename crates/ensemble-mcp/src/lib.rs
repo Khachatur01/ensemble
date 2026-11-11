@@ -24,7 +24,7 @@
 
 use ensemble_agents::router::Ensemble;
 use ensemble_inbox::Inbox;
-use ensemble_knowledge::Memory;
+use ensemble_knowledge::{KnowledgeAccess, Memory};
 use ensemble_tasks::delegation;
 use ensemble_tasks::queue::{Queue, Task};
 use ensemble_tasks::tasks::Store;
@@ -43,12 +43,14 @@ use notify::*;
 use protocol::tool_definitions;
 pub use protocol::{PROTOCOL_VERSION, SERVER_NAME};
 
-/// What a hub adds to a session: its knowledge, whose tools are offered and
-/// whose shares are distilled in the background, and its task inbox, which
-/// turns issues into tasks in the background.
+/// What a hub adds to a session: its knowledge, whose tools are offered,
+/// embedded or on a hub server; for an embedded hub, the knowledge whose shares
+/// are distilled in the background; and its task inbox, which turns issues into
+/// tasks in the background.
 #[derive(Clone, Copy, Default)]
 pub struct Hub<'a> {
-    pub memory: Option<&'a Memory>,
+    pub knowledge: Option<&'a dyn KnowledgeAccess>,
+    pub distill: Option<&'a Memory>,
     pub inbox: Option<&'a Inbox>,
 }
 
@@ -66,7 +68,11 @@ pub fn handle(ensemble: &Ensemble, request: &Value) -> Option<Value> {
 }
 
 /// [`handle`], with the knowledge of a hub when there is one.
-pub fn handle_with(ensemble: &Ensemble, memory: Option<&Memory>, request: &Value) -> Option<Value> {
+pub fn handle_with(
+    ensemble: &Ensemble,
+    memory: Option<&dyn KnowledgeAccess>,
+    request: &Value,
+) -> Option<Value> {
     handle_reporting(
         ensemble,
         memory,
@@ -85,7 +91,7 @@ pub fn handle_with(ensemble: &Ensemble, memory: Option<&Memory>, request: &Value
 /// `memory`, the knowledge tools are offered too.
 pub fn handle_reporting<'s>(
     ensemble: &'s Ensemble,
-    memory: Option<&Memory>,
+    memory: Option<&dyn KnowledgeAccess>,
     request: &Value,
     notify: &dyn Fn(Value),
     cancel: &AtomicBool,
@@ -222,7 +228,7 @@ pub fn serve_with<W: Write + Send>(
     input: impl BufRead,
     output: W,
 ) -> std::io::Result<()> {
-    let memory = hub.memory;
+    let memory = hub.knowledge;
     let output = Mutex::new(output);
     let min_level = AtomicUsize::new(rank(PROGRESS_LEVEL).unwrap_or(0));
     // Running calls by request id, so a cancellation can find its call.
@@ -266,7 +272,7 @@ pub fn serve_with<W: Write + Send>(
             scope.spawn(move || queue.work(&spawner(scope)));
         }
         // Shares become notes alongside, unless another process does that.
-        if let Some(memory) = memory {
+        if let Some(memory) = hub.distill {
             scope.spawn(move || memory.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
         }
         // So do issues from the tracker.

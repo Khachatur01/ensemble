@@ -56,6 +56,11 @@ COMMANDS:
                             Keep knowledge in the --hub vault, as an agent's
                             `share` tool does; the text is read from stdin
                             when --text is not given.
+    login URL [--token T]   Sign in to a hub server (ws:// or wss://) with the
+                            token its admin made, and keep the token in
+                            ~/.config/ensemble/hubs.json, readable only by you.
+                            Then --hub URL works like --hub <dir>.
+    logout URL              Forget a hub server's token.
     inbox [--once]          The issues assigned to you in the --hub tracker
                             with its label, where each stands and the task it
                             became. --once (needs --team) first makes new
@@ -128,8 +133,10 @@ OPTIONS:
                             git repository is github.com/acme/team#COMMIT (a
                             pin, which it must be and be trusted), or @TAG for
                             `connect`, which pins it. --org is its old name.
-        --hub <DIR>         The hub: the directory with hub.yaml, which keeps
-                            your knowledge. Without it there is no knowledge.
+        --hub <DIR|URL>     The hub: the directory with hub.yaml, which keeps
+                            your knowledge, or a hub server's ws:// or wss://
+                            URL after `ensemble login`. Without it there is no
+                            knowledge.
         --env-file <PATH>   A file of NAME=value lines read for variables the
                             environment does not set.
         --state <DIR>       Keep tasks, runs and worktrees here instead of in
@@ -303,16 +310,31 @@ fn run() -> Result<ExitCode, String> {
         return cmd_inbox(&args);
     }
     if args.command == "recall" {
-        hub_of(&args, "recall")?;
-        let memory = memory_for(&args, &dir)?.ok_or("recall: the hub keeps no knowledge")?;
+        if args.hub.is_none() {
+            hub_of(&args, "recall")?;
+        }
+        let knowledge = knowledge_for(&args, &dir)?.ok_or("recall: the hub keeps no knowledge")?;
         let query = args.rest.join(" ");
         if query.trim().is_empty() {
             return Err(
                 "recall: needs a topic, such as `ensemble recall --hub <dir> deploys`".into(),
             );
         }
-        println!("{}", memory.recall(&query));
+        let notes = knowledge
+            .access()
+            .call(
+                ensemble::knowledge::RECALL,
+                &serde_json::json!({ "query": query }),
+            )
+            .expect("recall is a knowledge tool")?;
+        println!("{notes}");
         return Ok(ExitCode::SUCCESS);
+    }
+    if args.command == "login" {
+        return cmd_login(&args);
+    }
+    if args.command == "logout" {
+        return cmd_logout(&args);
     }
 
     let resolved = resolve_team(&args, &args.command)?;
@@ -364,11 +386,109 @@ fn resolve_team(args: &Args, command: &str) -> Result<remote::Resolved, String> 
 
 /// The hub's directory, for a command that needs one.
 fn hub_of(args: &Args, command: &str) -> Result<PathBuf, String> {
+    if let Some(url) = hub_url(args) {
+        return Err(format!(
+            "{command}: needs the hub's directory, with hub.yaml; {url} is a hub server, and this runs on the server itself"
+        ));
+    }
     args.hub.clone().ok_or_else(|| {
         format!(
             "{command}: no hub given. Pass --hub <dir>, the directory with hub.yaml. `ensemble hub init --hub <dir>` makes one."
         )
     })
+}
+
+/// The hub server `--hub` names, when it is a `ws://` or `wss://` URL rather
+/// than a directory.
+fn hub_url(args: &Args) -> Option<String> {
+    let hub = args.hub.as_ref()?.to_str()?;
+    (hub.starts_with("ws://") || hub.starts_with("wss://")).then(|| hub.to_string())
+}
+
+/// A hub's knowledge: embedded in this node, or on a hub server.
+enum Knowledge {
+    Local(Box<ensemble::knowledge::Memory>),
+    Remote(Box<ensemble::link::RemoteMemory>),
+}
+
+impl Knowledge {
+    fn access(&self) -> &dyn ensemble::knowledge::KnowledgeAccess {
+        match self {
+            Knowledge::Local(m) => m.as_ref(),
+            Knowledge::Remote(r) => r.as_ref(),
+        }
+    }
+
+    /// The knowledge this process distills, which only an embedded hub has.
+    fn local(&self) -> Option<&ensemble::knowledge::Memory> {
+        match self {
+            Knowledge::Local(m) => Some(m.as_ref()),
+            Knowledge::Remote(_) => None,
+        }
+    }
+}
+
+/// The knowledge of the hub `--hub` names, embedded or on a server, for work
+/// in `dir`.
+fn knowledge_for(args: &Args, dir: &Path) -> Result<Option<Knowledge>, String> {
+    let Some(url) = hub_url(args) else {
+        return Ok(memory_for(args, dir)?.map(|m| Knowledge::Local(Box::new(m))));
+    };
+    let tokens = ensemble::link::Tokens::load()?;
+    let token = tokens.get(&url).ok_or_else(|| {
+        format!("no token for the hub {url}. Sign in first: ensemble login {url} --token <token>")
+    })?;
+    let project = dir.file_name().map(|n| n.to_string_lossy().into_owned());
+    Ok(Some(Knowledge::Remote(Box::new(
+        ensemble::link::RemoteMemory::new(&url, token, project),
+    ))))
+}
+
+/// `ensemble login URL [--token T]`: check a hub server's token and keep it.
+fn cmd_login(args: &Args) -> Result<ExitCode, String> {
+    let url = args
+        .rest
+        .first()
+        .filter(|u| u.starts_with("ws://") || u.starts_with("wss://"))
+        .ok_or("login: needs the hub's URL, such as wss://hub.example.com")?;
+    let token = match opt(args, "--token") {
+        Some(t) => t.to_string(),
+        None => {
+            let mut t = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)
+                .map_err(|e| format!("login: cannot read the token from stdin: {e}"))?;
+            t
+        }
+    };
+    if token.trim().is_empty() {
+        return Err("login: give the token your hub's admin made, with --token or on stdin".into());
+    }
+    let hello = ensemble::link::RemoteMemory::new(url, &token, None)
+        .hello()
+        .map_err(|e| format!("login: {e}"))?;
+    let mut tokens = ensemble::link::Tokens::load()?;
+    tokens.set(url, &token);
+    tokens.save()?;
+    println!(
+        "signed in to {url} as {} ({}: {})",
+        hello.user,
+        hello.role,
+        hello.permissions.join(", ")
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `ensemble logout URL`: forget a hub server's token.
+fn cmd_logout(args: &Args) -> Result<ExitCode, String> {
+    let url = args.rest.first().ok_or("logout: needs the hub's URL")?;
+    let mut tokens = ensemble::link::Tokens::load()?;
+    if tokens.remove(url) {
+        tokens.save()?;
+        println!("signed out of {url}");
+    } else {
+        println!("no token kept for {url}");
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `ensemble hub init` and `ensemble hub check`.
@@ -696,7 +816,7 @@ fn cmd_mcp(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
              ensemble: a harness spawns this; for a one-off try `ensemble run <agent> <task>`."
         );
     }
-    let memory = memory_for(args, &dir)?;
+    let knowledge = knowledge_for(args, &dir)?;
     let inbox = inbox_for(
         args,
         config.agent_names().into_iter().map(String::from).collect(),
@@ -707,7 +827,8 @@ fn cmd_mcp(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
     mcp::serve_with(
         &ensemble,
         mcp::Hub {
-            memory: memory.as_ref(),
+            knowledge: knowledge.as_ref().map(Knowledge::access),
+            distill: knowledge.as_ref().and_then(Knowledge::local),
             inbox: inbox.as_ref(),
         },
         stdin.lock(),
@@ -743,6 +864,10 @@ fn memory_for(args: &Args, dir: &Path) -> Result<Option<ensemble::knowledge::Mem
 /// The inbox of the hub `--hub` names, for a helper team with `agents`. None
 /// without a hub, or with one that has no `tasks` block.
 fn inbox_for(args: &Args, agents: Vec<String>) -> Result<Option<ensemble::inbox::Inbox>, String> {
+    // A hub server's inbox is not built yet; it would run on the server.
+    if hub_url(args).is_some() {
+        return Ok(None);
+    }
     let Some(hub_dir) = &args.hub else {
         return Ok(None);
     };
@@ -888,8 +1013,10 @@ fn cmd_knowledge(args: &Args, dir: &Path) -> Result<ExitCode, String> {
 /// `ensemble share`: keep knowledge in the hub's vault by hand, as the `share`
 /// tool does for an agent.
 fn cmd_share(args: &Args, dir: &Path) -> Result<ExitCode, String> {
-    hub_of(args, "share")?;
-    let memory = memory_for(args, dir)?.ok_or("share: the hub keeps no knowledge")?;
+    if args.hub.is_none() {
+        hub_of(args, "share")?;
+    }
+    let knowledge = knowledge_for(args, dir)?.ok_or("share: the hub keeps no knowledge")?;
     let title = opt(args, "--title").ok_or("share: needs --title, what it is about")?;
     let text = match opt(args, "--text") {
         Some(text) => text.to_string(),
@@ -903,8 +1030,15 @@ fn cmd_share(args: &Args, dir: &Path) -> Result<ExitCode, String> {
     if text.trim().is_empty() {
         return Err("share: the text is empty; give it with --text or on stdin".into());
     }
-    let share = memory.share(Some("ensemble-cli"), title, &text)?;
-    println!("shared as {}", share.id);
+    let knowledge = knowledge.access();
+    knowledge.set_client("ensemble-cli");
+    let said = knowledge
+        .call(
+            ensemble::knowledge::SHARE,
+            &serde_json::json!({ "title": title, "text": text }),
+        )
+        .expect("share is a knowledge tool")?;
+    println!("{said}");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1266,6 +1400,16 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
 
 /// Run a registration, saying first what it is. The manager's own words come
 /// through, and so does its exit status.
+/// The `--hub` to register: a directory made absolute, or a hub server's URL
+/// as it is.
+fn hub_for_registration(args: &Args) -> Result<Option<PathBuf>, String> {
+    match (&args.hub, hub_url(args)) {
+        (_, Some(url)) => Ok(Some(PathBuf::from(url))),
+        (Some(dir), None) => absolute(dir).map(Some),
+        (None, None) => Ok(None),
+    }
+}
+
 fn run_registration(reg: &setup::Registration) -> Result<(), String> {
     println!("$ {}", reg.line());
     match std::process::Command::new(reg.program)
@@ -1308,7 +1452,7 @@ fn cmd_connect(args: &Args) -> Result<ExitCode, String> {
         }
     };
     let env_file = args.env_file.as_deref().map(absolute).transpose()?;
-    let hub = args.hub.as_deref().map(absolute).transpose()?;
+    let hub = hub_for_registration(args)?;
     let reg = setup::registration(
         manager,
         &setup::ensemble_command(),
@@ -1404,7 +1548,7 @@ fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
         );
     }
     let env_file = args.env_file.as_deref().map(absolute).transpose()?;
-    let hub = args.hub.as_deref().map(absolute).transpose()?;
+    let hub = hub_for_registration(args)?;
     let reg = setup::registration(
         &manager,
         &setup::ensemble_command(),
@@ -1810,7 +1954,7 @@ fn cmd_serve(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, Stri
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
     }
-    let memory = memory_for(args, &dir)?;
+    let knowledge = knowledge_for(args, &dir)?;
     let inbox = inbox_for(
         args,
         config.agent_names().into_iter().map(String::from).collect(),
@@ -1819,7 +1963,8 @@ fn cmd_serve(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, Stri
     ensemble::harness::serve::run(
         &ensemble,
         mcp::Hub {
-            memory: memory.as_ref(),
+            knowledge: knowledge.as_ref().map(Knowledge::access),
+            distill: knowledge.as_ref().and_then(Knowledge::local),
             inbox: inbox.as_ref(),
         },
         &STOP,

@@ -179,6 +179,7 @@ fn command(scratch: &Scratch) -> Command {
     c.current_dir(scratch.path())
         .env("XDG_STATE_HOME", scratch.0.with_extension("xdg-state"))
         .env("XDG_CACHE_HOME", scratch.0.with_extension("xdg-cache"))
+        .env("XDG_CONFIG_HOME", scratch.0.with_extension("xdg-config"))
         .arg("--team")
         .arg(scratch.org())
         .arg("--state")
@@ -2333,7 +2334,7 @@ fn knowledge_is_shared_by_hand_or_by_the_agent_through_mcp() {
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stdout_of(&out).starts_with("shared as "),
+        stdout_of(&out).starts_with("Shared as "),
         "{}",
         stdout_of(&out)
     );
@@ -2672,4 +2673,100 @@ fn a_hub_server_refuses_a_node_without_a_token_and_stops_on_sigterm() {
     child.kill().unwrap();
     let status = child.wait().unwrap();
     assert!(status.success(), "{status}");
+}
+
+#[test]
+fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
+    let s = Scratch::new("hub-remote");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    let (hub, address, token) = hub_server(&s);
+    let mut child = serve_hub(&s, &hub);
+    let url = format!("ws://{address}");
+
+    let out = command(&s)
+        .args(["login", &url, "--token", "ens_wrong"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("did not accept the token"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = command(&s)
+        .args(["share", "--title", "x", "--text", "y", "--hub", &url])
+        .output()
+        .unwrap();
+    assert!(
+        stderr_of(&out).contains("ensemble login"),
+        "nothing was saved: {}",
+        stderr_of(&out)
+    );
+
+    let out = command(&s)
+        .args(["login", &url, "--token", &token])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("as ana (member: share, recall)"),
+        "{}",
+        stdout_of(&out)
+    );
+    let tokens = s.0.with_extension("xdg-config").join("ensemble/hubs.json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&tokens).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    let out = command(&s)
+        .args([
+            "share",
+            "--title",
+            "Deploys",
+            "--text",
+            "Deploys go out on Tuesdays.",
+            "--hub",
+            &url,
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("on the hub"),
+        "{}",
+        stdout_of(&out)
+    );
+
+    let mut session = McpSession::start_with(&s, &["--hub".as_ref(), url.as_ref()]);
+    session.request(
+        "initialize",
+        serde_json::json!({"protocolVersion": "2025-06-18", "clientInfo": {"name": "claude-code", "version": "2"}}),
+    );
+    let list = session.request("tools/list", serde_json::json!({}));
+    assert!(list.to_string().contains("\"recall\"") && list.to_string().contains("\"share\""));
+    let reply = session.request(
+        "tools/call",
+        serde_json::json!({"name": "share", "arguments": {"title": "Reviews", "text": "Every change gets one review."}}),
+    );
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let shares = share_files(&hub);
+    assert_eq!(shares.len(), 2);
+    assert!(
+        shares.iter().all(|f| f.contains("shared_by: ana")),
+        "{shares:?}"
+    );
+    assert!(
+        shares.iter().any(|f| f.contains("client: claude-code")),
+        "{shares:?}"
+    );
+
+    let out = command(&s).args(["logout", &url]).output().unwrap();
+    assert!(stdout_of(&out).contains("signed out"));
+    let _ = child.kill();
+    let _ = child.wait();
 }

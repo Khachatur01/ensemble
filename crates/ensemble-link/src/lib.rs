@@ -3,11 +3,16 @@
 //! to and recalls from the organization's vault there.
 //!
 //! The hub's users and their tokens are kept in `users`: state, not config.
-//! What node and hub say is in `protocol`, and `server` is the hub's side.
+//! What node and hub say is in `protocol`; `server` is the hub's side, and
+//! `client` the node's, which keeps its tokens in `tokens`.
 
+pub mod client;
 pub mod protocol;
 pub mod server;
+pub mod tokens;
 pub mod users;
 
+pub use client::RemoteMemory;
 pub use server::Server;
+pub use tokens::Tokens;
 pub use users::{User, Users};

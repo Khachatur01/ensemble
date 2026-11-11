@@ -46,7 +46,7 @@ pub fn run(
                 scope.spawn(task);
             })
         });
-        if let Some(memory) = hub.memory {
+        if let Some(memory) = hub.distill {
             scope.spawn(move || memory.work(hub_stop, say));
         }
         if let Some(inbox) = hub.inbox {

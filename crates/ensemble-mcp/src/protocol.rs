@@ -1,6 +1,6 @@
 //! The protocol's fixed parts: its version, the server's name, and the tool catalogue.
 
-use ensemble_knowledge::Memory;
+use ensemble_knowledge::KnowledgeAccess;
 use ensemble_tasks::delegation;
 use serde_json::{Value, json};
 
@@ -11,12 +11,12 @@ pub const SERVER_NAME: &str = "ensemble";
 ///
 /// `agents` is the whole helper team; `memory`, a hub's knowledge, adds its
 /// tools.
-pub(super) fn tool_definitions(agents: &[&str], memory: Option<&Memory>) -> Value {
+pub(super) fn tool_definitions(agents: &[&str], memory: Option<&dyn KnowledgeAccess>) -> Value {
     let team = delegation::tools(agents)
         .into_iter()
         .map(|t| (t.name, t.description, t.parameters));
     let knowledge = memory
-        .map(Memory::tools)
+        .map(|m| m.tools())
         .unwrap_or_default()
         .into_iter()
         .map(|t| (t.name, t.description, t.parameters));

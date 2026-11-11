@@ -1068,6 +1068,8 @@ $ ensemble hub check --hub <dir>   # validate hub.yaml; which model would distil
 $ ensemble hub user add <name> --role <role> --hub <dir>   # a hub server's user; prints their token once
 $ ensemble hub user list|token <name>|revoke <name>|remove <name> --hub <dir>
 $ ensemble hub serve --hub <dir>   # run the hub for a team, until stopped
+$ ensemble login <wss://url> --token <token>   # sign in to a hub server; then --hub <url> works like --hub <dir>
+$ ensemble logout <wss://url>
 $ ensemble share --hub <dir> --title T [--text T]   # keep knowledge by hand; text from stdin without --text
 $ ensemble knowledge status --hub <dir>    # shares, pending, notes, what waits in review/
 $ ensemble knowledge distill --hub <dir>   # turn pending shares into notes now
@@ -1119,7 +1121,7 @@ server, are added as crates on top.
 | `ensemble-config` | the helper team's `config.yaml`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), versions 1 and 2 to 3 (`migrate.rs`), and adding or removing an agent as text, comments kept (`edit.rs`); the hub's `hub.yaml` (`hub.rs`) |
 | `ensemble-backends` | one chat request to a model server in its own format (`chat.rs`), asking it which models it serves, for `health` (`models.rs`), choosing the first usable model of a `try` list (`resolve.rs`), and a stand-in model server for tests (`testing.rs`) |
 | `ensemble-knowledge` | the hub's knowledge: the vault of shares and notes, a git repository (`vault.rs`), the secret check a share passes first (`secrets.rs`), the pipeline that turns shares into notes (`pipeline.rs`), finding notes by their words (`search.rs`), and the `share` and `recall` tools and the background worker (`lib.rs`) |
-| `ensemble-link` | a hub server's users and their tokens, kept as hashes (`users.rs`), what a node and the hub say over their WebSocket (`protocol.rs`), and the hub's side (`server.rs`) |
+| `ensemble-link` | a hub server's users and their tokens, kept as hashes (`users.rs`), what a node and the hub say over their WebSocket (`protocol.rs`), the hub's side (`server.rs`), and the node's: a hub server's knowledge over the link (`client.rs`) and the token file (`tokens.rs`) |
 | `ensemble-agents` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `direct` adapter, and gates (`external/`); a git worktree and branch per task (`worktree.rs`); agents to adapters, slots, budgets and `health` (`router.rs`) |
 | `ensemble-tasks` | tasks as files (`tasks.rs`); the `Tracker` trait and `LocalMarkdown`, its one implementation (`tracker.rs`); the worker that runs tasks and background delegations within each agent's slots (`queue.rs`); the tools your agent calls (`delegation.rs`); `review`, `diff` and `merge` of a worktree task's branch (`review.rs`) |
 | `ensemble-inbox` | the task inbox: what it needs from a tracker (`tracker.rs`), a folder of markdown issues, the first tracker (`local_markdown.rs`), and the bridge that makes issues into tasks and reports them back (`bridge.rs`) |
@@ -1160,6 +1162,7 @@ scripts stand in for the CLIs.
 | `crates/ensemble-agents/src/external/` | each CLI's command line, generated config and event stream, denials, limits, failures, the time limit killing the process tree |
 | `crates/ensemble-agents/src/router.rs`, `crates/ensemble-backends/` | routing, `health` and its model check, the chat request in both formats |
 | `crates/ensemble-knowledge/` | shares kept as they arrived, notes and the log, commits by the lock holder, the secret check; the pipeline against a stub model: new notes, merges, chatter skipped, unusable answers to review, waiting for a model, rebuild |
+| `crates/ensemble-link/` | tokens kept as hashes and revoked at once, roles checked per request, shares under the signed-in name, a reader offered only `recall`, the token file 0600, the link opened again when it breaks |
 | `crates/ensemble-inbox/` | markdown issues read and written with only the status line changed; issues to tasks, questions and answers through comments, results posted once, one inbox per hub |
 | `crates/ensemble-tasks/` | ticket files: reading, ids, results written once, run logs; review and merge |
 | `crates/ensemble-mcp/src/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session |
