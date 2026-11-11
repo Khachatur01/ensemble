@@ -256,6 +256,13 @@ pub struct Outcome {
     pub text: String,
 }
 
+impl Outcome {
+    /// The reply, without the front matter.
+    pub fn reply(&self) -> &str {
+        front_matter(&self.text).map_or(self.text.as_str(), |(_, reply)| reply)
+    }
+}
+
 /// A task directory, as found on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {

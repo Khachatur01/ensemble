@@ -23,6 +23,7 @@
 //! the worker that runs a folder's tasks with no session around it.
 
 use ensemble_agents::router::Ensemble;
+use ensemble_inbox::Inbox;
 use ensemble_knowledge::Memory;
 use ensemble_tasks::delegation;
 use ensemble_tasks::queue::{Queue, Task};
@@ -41,6 +42,15 @@ pub mod serve;
 use notify::*;
 use protocol::tool_definitions;
 pub use protocol::{PROTOCOL_VERSION, SERVER_NAME};
+
+/// What a hub adds to a session: its knowledge, whose tools are offered and
+/// whose shares are distilled in the background, and its task inbox, which
+/// turns issues into tasks in the background.
+#[derive(Clone, Copy, Default)]
+pub struct Hub<'a> {
+    pub memory: Option<&'a Memory>,
+    pub inbox: Option<&'a Inbox>,
+}
 
 /// Handle one JSON-RPC message.
 ///
@@ -193,7 +203,7 @@ pub fn handle_reporting<'s>(
 /// and it gets no reply: the client has stopped waiting for one.
 ///
 /// Alongside, a worker runs the tasks in the state directory's `tasks/`, and,
-/// with a hub's knowledge, another turns shares into notes.
+/// with a hub, others turn shares into notes and issues into tasks.
 /// When stdin closes, running tasks and background delegations are stopped
 /// (tasks that had not started stay queued for the next session), and blocking
 /// calls still running are finished before this returns.
@@ -202,17 +212,17 @@ pub fn serve<W: Write + Send>(
     input: impl BufRead,
     output: W,
 ) -> std::io::Result<()> {
-    serve_with(ensemble, None, input, output)
+    serve_with(ensemble, Hub::default(), input, output)
 }
 
-/// [`serve`], with the knowledge of a hub when there is one: its tools are
-/// offered.
+/// [`serve`], with what a hub adds when there is one.
 pub fn serve_with<W: Write + Send>(
     ensemble: &Ensemble,
-    memory: Option<&Memory>,
+    hub: Hub<'_>,
     input: impl BufRead,
     output: W,
 ) -> std::io::Result<()> {
+    let memory = hub.memory;
     let output = Mutex::new(output);
     let min_level = AtomicUsize::new(rank(PROGRESS_LEVEL).unwrap_or(0));
     // Running calls by request id, so a cancellation can find its call.
@@ -250,14 +260,18 @@ pub fn serve_with<W: Write + Send>(
     let queue = Queue::new(ensemble, Some(store));
     let (send, notify, running, queue) = (&send, &notify, &running, &queue);
 
-    let knowledge_stop = &AtomicBool::new(false);
+    let hub_stop = &AtomicBool::new(false);
     std::thread::scope(|scope| {
         if worker {
             scope.spawn(move || queue.work(&spawner(scope)));
         }
         // Shares become notes alongside, unless another process does that.
         if let Some(memory) = memory {
-            scope.spawn(move || memory.work(knowledge_stop, &|line| eprintln!("ensemble: {line}")));
+            scope.spawn(move || memory.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
+        }
+        // So do issues from the tracker.
+        if let Some(inbox) = hub.inbox {
+            scope.spawn(move || inbox.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
         }
         let result = (|| -> std::io::Result<()> {
             for line in input.lines() {
@@ -340,7 +354,7 @@ pub fn serve_with<W: Write + Send>(
         // The caller is gone, so nobody will ask for what background work
         // produces: stop it, or this would wait out its time limits.
         queue.close();
-        knowledge_stop.store(true, Ordering::Relaxed);
+        hub_stop.store(true, Ordering::Relaxed);
         result
     })
 }

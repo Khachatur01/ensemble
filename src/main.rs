@@ -50,8 +50,11 @@ COMMANDS:
                             Keep knowledge in the --hub vault, as an agent's
                             `share` tool does; the text is read from stdin
                             when --text is not given.
-    inbox                   The issues assigned to you in the --hub tracker
-                            with its label, and where each stands.
+    inbox [--once]          The issues assigned to you in the --hub tracker
+                            with its label, where each stands and the task it
+                            became. --once (needs --team) first makes new
+                            issues into tasks and reports tasks back, as a
+                            running `ensemble mcp` or `serve` does.
     recall TOPIC            Print the notes of the --hub vault about TOPIC, as
                             an agent's `recall` tool gets them.
     knowledge status        Shares, those not yet distilled, notes, and what
@@ -558,11 +561,23 @@ fn cmd_mcp(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
         );
     }
     let memory = memory_for(args, &dir)?;
+    let inbox = inbox_for(
+        args,
+        config.agent_names().into_iter().map(String::from).collect(),
+    )?;
     let ensemble = ensemble_for(config, dir, args);
     let stdin = std::io::stdin();
     // Not locked: delegations reply from their own threads.
-    mcp::serve_with(&ensemble, memory.as_ref(), stdin.lock(), std::io::stdout())
-        .map_err(|e| format!("mcp: {e}"))?;
+    mcp::serve_with(
+        &ensemble,
+        mcp::Hub {
+            memory: memory.as_ref(),
+            inbox: inbox.as_ref(),
+        },
+        stdin.lock(),
+        std::io::stdout(),
+    )
+    .map_err(|e| format!("mcp: {e}"))?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -589,21 +604,59 @@ fn memory_for(args: &Args, dir: &Path) -> Result<Option<ensemble::knowledge::Mem
     Ok(memory)
 }
 
-/// `ensemble inbox`: the issues the hub's inbox sees, and where each stands.
-fn cmd_inbox(args: &Args) -> Result<ExitCode, String> {
-    let dir = hub_of(args, "inbox")?;
+/// The inbox of the hub `--hub` names, for a helper team with `agents`. None
+/// without a hub, or with one that has no `tasks` block.
+fn inbox_for(args: &Args, agents: Vec<String>) -> Result<Option<ensemble::inbox::Inbox>, String> {
+    let Some(hub_dir) = &args.hub else {
+        return Ok(None);
+    };
     let hub = config::load_hub(
-        &config::hub_path(&dir),
+        &config::hub_path(hub_dir),
         args.env_file.as_deref(),
         &SystemEnv,
     )
     .map_err(|e| e.to_string())?;
-    let tasks = hub
-        .tasks
-        .as_ref()
-        .ok_or("inbox: the hub has no `tasks` block, so no inbox")?;
-    let tracker = ensemble::inbox::tracker_for(tasks);
-    let issues = tracker.assigned(&tasks.user, &tasks.label);
+    let Some(tasks) = &hub.tasks else {
+        return Ok(None);
+    };
+    let canonical = hub_dir
+        .canonicalize()
+        .map_err(|e| format!("--hub {}: {e}", hub_dir.display()))?;
+    let dir = state::root()?
+        .join("hubs")
+        .join(state::labelled_text(&canonical.display().to_string()));
+    Ok(Some(ensemble::inbox::Inbox::new(tasks, agents, dir)))
+}
+
+/// `ensemble inbox [--once]`: the issues the hub's inbox sees and the task each
+/// became; with `--once`, one pass over the tracker first.
+fn cmd_inbox(args: &Args) -> Result<ExitCode, String> {
+    hub_of(args, "inbox")?;
+    let once = has(args, "--once");
+    // `<label>:<agent>` names an agent of the helper team, so a pass needs it.
+    let agents = if once {
+        let resolved = resolve_team(args, "inbox --once")?;
+        let config = config::load(
+            &config::config_path(&resolved.dir),
+            args.env_file.as_deref(),
+            &SystemEnv,
+        )
+        .map_err(|e| e.to_string())?;
+        config.agent_names().into_iter().map(String::from).collect()
+    } else {
+        Vec::new()
+    };
+    let inbox =
+        inbox_for(args, agents)?.ok_or("inbox: the hub has no `tasks` block, so no inbox")?;
+    if once {
+        let _lock = inbox.lock()?;
+        for line in inbox.pass()? {
+            println!("{line}");
+        }
+    }
+    let tasks = inbox.settings();
+    let issues = inbox.tracker().assigned(&tasks.user, &tasks.label);
+    let seen = inbox.seen();
     println!(
         "issues assigned to {} with the label {}: {}",
         tasks.user,
@@ -611,8 +664,13 @@ fn cmd_inbox(args: &Args) -> Result<ExitCode, String> {
         issues.len()
     );
     for issue in &issues {
+        let task = seen
+            .get(&issue.id)
+            .and_then(|s| s.task.as_deref())
+            .map(|t| format!("  -> task {t}"))
+            .unwrap_or_default();
         println!(
-            "  {:<12} {:<12} {}{}",
+            "  {:<12} {:<12} {}{}{task}",
             issue.id,
             issue.status.as_str(),
             issue.title,
@@ -623,7 +681,7 @@ fn cmd_inbox(args: &Args) -> Result<ExitCode, String> {
                 .unwrap_or_default()
         );
     }
-    let bad = tracker.unreadable();
+    let bad = inbox.tracker().unreadable();
     if !bad.is_empty() {
         println!("issues that cannot be read:");
         for (id, why) in &bad {
@@ -1622,10 +1680,17 @@ fn cmd_serve(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, Stri
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
     }
     let memory = memory_for(args, &dir)?;
+    let inbox = inbox_for(
+        args,
+        config.agent_names().into_iter().map(String::from).collect(),
+    )?;
     let ensemble = ensemble_for(config, dir, args);
     ensemble::harness::serve::run(
         &ensemble,
-        memory.as_ref(),
+        mcp::Hub {
+            memory: memory.as_ref(),
+            inbox: inbox.as_ref(),
+        },
         &STOP,
         &|line| eprintln!("ensemble: {line}"),
         has(args, "--exit-when-idle"),

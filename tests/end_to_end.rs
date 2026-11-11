@@ -2514,3 +2514,58 @@ fn the_inbox_lists_the_issues_assigned_to_you_with_the_label() {
         "{said}"
     );
 }
+
+#[test]
+fn an_issue_assigned_to_you_becomes_a_task_in_its_projects_folder() {
+    let s = Scratch::new("hub-inbox-once");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    let hub = hub_of(&s);
+    let project = s.0.with_extension("shop");
+    std::fs::create_dir_all(&project).unwrap();
+    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    std::fs::write(
+        hub.join("hub.yaml"),
+        text.replace("user: you", "user: ana")
+            .replace("/home/you/code/shop", &project.display().to_string()),
+    )
+    .unwrap();
+    std::fs::create_dir_all(hub.join("issues")).unwrap();
+    std::fs::write(
+        hub.join("issues/7.md"),
+        "---\ntitle: Fix the login redirect\nassignee: ana\nlabels: [ensemble]\nproject: shop\nstatus: open\n---\nIt redirects to /home.\n",
+    )
+    .unwrap();
+
+    let out = command(&s)
+        .args(["inbox", "--once", "--hub"])
+        .arg(&hub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("issue 7 -> task"),
+        "{}",
+        stdout_of(&out)
+    );
+    assert!(
+        stdout_of(&out).contains("in-progress"),
+        "{}",
+        stdout_of(&out)
+    );
+    let issue = std::fs::read_to_string(hub.join("issues/7.md")).unwrap();
+    assert!(issue.contains("status: in-progress") && issue.contains("## Comment by ensemble"));
+
+    // The task waits in the project's own state, in the backlog.
+    let out = Command::new(BIN)
+        .env("XDG_STATE_HOME", s.0.with_extension("xdg-state"))
+        .args(["tasks", "--dir"])
+        .arg(&project)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("Fix the login redirect"),
+        "{}",
+        stdout_of(&out)
+    );
+}

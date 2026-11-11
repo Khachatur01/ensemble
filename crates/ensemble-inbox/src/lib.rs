@@ -7,11 +7,14 @@
 //! An **issue** is a tracker's item, assigned to a person; a **task** is an
 //! agent's ticket in a folder's state directory (`ensemble_tasks`). What the
 //! inbox needs from a tracker is the `IssueTracker` trait (`tracker`); local
-//! markdown files are the one implementation so far (`local_markdown`).
+//! markdown files are the one implementation so far (`local_markdown`). The bridge
+//! (`bridge`) turns issues into tasks and reports them back.
 
+pub mod bridge;
 pub mod local_markdown;
 pub mod tracker;
 
+pub use bridge::Inbox;
 pub use local_markdown::LocalMarkdown;
 pub use tracker::{Comment, Issue, IssueTracker, Status};
 

@@ -1014,7 +1014,7 @@ $ ensemble knowledge status --hub <dir>    # shares, pending, notes, what waits 
 $ ensemble knowledge distill --hub <dir>   # turn pending shares into notes now
 $ ensemble knowledge rebuild --hub <dir> [--yes]   # delete the notes and make them again from every share
 $ ensemble recall --hub <dir> <topic>      # the notes about a topic, as an agent's `recall` gets them
-$ ensemble inbox --hub <dir>       # the issues assigned to you in the tracker with the label
+$ ensemble inbox --hub <dir> [--once --team <dir>]   # your labelled issues and their tasks; --once: one pass now
 $ ensemble doctor --team <dir>     # what is wrong, and how to fix each thing
 $ ensemble add-agent <name> --adapter A --team <dir>   # add an agent, every setting written
 $ ensemble remove-agent <name> --team <dir>
@@ -1062,7 +1062,7 @@ server, are added as crates on top.
 | `ensemble-knowledge` | the hub's knowledge: the vault of shares and notes, a git repository (`vault.rs`), the secret check a share passes first (`secrets.rs`), the pipeline that turns shares into notes (`pipeline.rs`), finding notes by their words (`search.rs`), and the `share` and `recall` tools and the background worker (`lib.rs`) |
 | `ensemble-agents` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `direct` adapter, and gates (`external/`); a git worktree and branch per task (`worktree.rs`); agents to adapters, slots, budgets and `health` (`router.rs`) |
 | `ensemble-tasks` | tasks as files (`tasks.rs`); the `Tracker` trait and `LocalMarkdown`, its one implementation (`tracker.rs`); the worker that runs tasks and background delegations within each agent's slots (`queue.rs`); the tools your agent calls (`delegation.rs`); `review`, `diff` and `merge` of a worktree task's branch (`review.rs`) |
-| `ensemble-inbox` | the task inbox: what it needs from a tracker (`tracker.rs`), and a folder of markdown issues, the first tracker (`local_markdown.rs`) |
+| `ensemble-inbox` | the task inbox: what it needs from a tracker (`tracker.rs`), a folder of markdown issues, the first tracker (`local_markdown.rs`), and the bridge that makes issues into tasks and reports them back (`bridge.rs`) |
 | `ensemble-mcp` | the MCP server over stdio: the loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`); and `ensemble serve` (`serve.rs`) |
 | `ensemble` (the root) | the binary (`src/main.rs`); `setup`, `connect` and `doctor` (`src/setup.rs`); remote helper teams: parsing, pinning, the cache, trust (`src/remote.rs`) |
 
@@ -1100,6 +1100,7 @@ scripts stand in for the CLIs.
 | `crates/ensemble-agents/src/external/` | each CLI's command line, generated config and event stream, denials, limits, failures, the time limit killing the process tree |
 | `crates/ensemble-agents/src/router.rs`, `crates/ensemble-backends/` | routing, `health` and its model check, the chat request in both formats |
 | `crates/ensemble-knowledge/` | shares kept as they arrived, notes and the log, commits by the lock holder, the secret check; the pipeline against a stub model: new notes, merges, chatter skipped, unusable answers to review, waiting for a model, rebuild |
+| `crates/ensemble-inbox/` | markdown issues read and written with only the status line changed; issues to tasks, questions and answers through comments, results posted once, one inbox per hub |
 | `crates/ensemble-tasks/` | ticket files: reading, ids, results written once, run logs; review and merge |
 | `crates/ensemble-mcp/src/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session |
 | `tests/workspace.rs` | the crates depend on each other in one direction only |
