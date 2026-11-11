@@ -1452,6 +1452,38 @@ fn a_hub_is_checked_like_a_team_and_every_problem_is_named() {
 }
 
 #[test]
+fn a_hub_inbox_names_its_tracker_user_label_and_projects() {
+    let doc = format!(
+        "{HUB}tasks:\n  tracker: {{ type: local_markdown, dir: issues }}\n  user: ana\n  label: ensemble\n  poll_seconds: 30\n  projects:\n    shop: /code/shop\n    docs: docs\n"
+    );
+    let hub = parse_hub(&doc, Path::new("/hubs/ana/hub.yaml"), &env(&[])).unwrap();
+    let tasks = hub.tasks.unwrap();
+    assert_eq!(
+        tasks.tracker,
+        IssueTracker::LocalMarkdown {
+            dir: PathBuf::from("/hubs/ana/issues")
+        }
+    );
+    assert_eq!(tasks.projects["shop"], PathBuf::from("/code/shop"));
+    assert_eq!(tasks.projects["docs"], PathBuf::from("/hubs/ana/docs"));
+
+    let said = hub_refusal(
+        &doc.replace("label: ensemble", "label: \"ens:x\"")
+            .replace("poll_seconds: 30", "poll_seconds: 0")
+            .replace("user: ana", "user: \"\""),
+    );
+    for expected in [
+        "tasks.label: 'ens:x' must be one word",
+        "tasks: `poll_seconds` must be greater than 0",
+        "tasks.user: is empty",
+    ] {
+        assert!(said.contains(expected), "{expected} in {said}");
+    }
+    let said = hub_refusal(&doc.replace("type: local_markdown", "type: jira"));
+    assert!(said.contains("unknown variant `jira`"), "{said}");
+}
+
+#[test]
 fn a_missing_hub_file_says_how_to_make_one() {
     let err = load_hub(Path::new("/nonexistent/hub.yaml"), None, &env(&[]))
         .unwrap_err()
@@ -1469,13 +1501,19 @@ fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
         "top level"
     );
     let mut top = accepted_keys::<hub::RawHub>();
-    top.retain(|k| k != "knowledge");
+    top.retain(|k| k != "knowledge" && k != "tasks");
     assert_eq!(
         schema_required(&schema),
         top,
-        "only knowledge may be left out"
+        "only knowledge and tasks may be left out"
     );
     for (def, keys, optional) in [
+        ("tasks", accepted_keys::<hub::RawTasks>(), vec![]),
+        (
+            "tracker_local_markdown",
+            accepted_keys::<hub::RawLocalMarkdownIssues>(),
+            vec![],
+        ),
         ("knowledge", accepted_keys::<hub::RawKnowledge>(), vec![]),
         ("distill", accepted_keys::<hub::RawDistill>(), vec![]),
         ("recall", accepted_keys::<hub::RawRecall>(), vec![]),
@@ -1531,7 +1569,11 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
             .collect()
     };
     let knowledge = &doc["knowledge"];
+    let tasks = hub.tasks.expect("the sample has an inbox");
+    assert_eq!(tasks.label, "ensemble");
     for (def, objects) in [
+        ("tasks", vec![&doc["tasks"]]),
+        ("tracker_local_markdown", vec![&doc["tasks"]["tracker"]]),
         ("knowledge", vec![knowledge]),
         ("distill", vec![&knowledge["distill"]]),
         ("recall", vec![&knowledge["recall"]]),

@@ -28,5 +28,6 @@ pub use ensemble_agents::{external, router, worktree};
 pub use ensemble_backends as backends;
 pub use ensemble_config as config;
 pub use ensemble_core::{port, records, state, workspace};
+pub use ensemble_inbox as inbox;
 pub use ensemble_knowledge as knowledge;
 pub use ensemble_tasks::{review, tasks, tracker};

@@ -53,6 +53,7 @@ dependencies = [
  "ensemble-backends",
  "ensemble-config",
  "ensemble-core",
+ "ensemble-inbox",
  "ensemble-knowledge",
  "ensemble-mcp",
  "ensemble-tasks",
@@ -104,6 +105,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ensemble-inbox"
+version = "0.1.0"
+dependencies = [
+ "ensemble-config",
+ "ensemble-core",
+ "ensemble-tasks",
+ "serde",
+ "serde_json",
+ "serde_norway",
+]
+
+[[package]]
 name = "ensemble-knowledge"
 version = "0.1.0"
 dependencies = [
@@ -122,6 +135,7 @@ dependencies = [
  "ensemble-agents",
  "ensemble-config",
  "ensemble-core",
+ "ensemble-inbox",
  "ensemble-knowledge",
  "ensemble-tasks",
  "serde_json",

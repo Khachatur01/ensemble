@@ -8,8 +8,8 @@
 #
 # Nothing has a default value: every setting is written here, and one that is
 # missing is refused by name. Only these may be left out, because leaving them
-# out means "not used": `knowledge`, and a backend's `api_key_env`. Check the
-# file with `ensemble hub check --hub <dir>`.
+# out means "not used": `knowledge`, `tasks`, and a backend's `api_key_env`.
+# Check the file with `ensemble hub check --hub <dir>`.
 #
 # Give the hub to the MCP server your agent starts, and it can share and recall:
 #   claude mcp add --scope local ensemble -- ensemble mcp --team <team> --hub <dir>
@@ -59,3 +59,19 @@ knowledge:
   recall:
     max_notes: 8               # most notes one recall returns
     max_chars: 6000            # most characters, all notes together
+
+# ---------------------------------------------------------------------------
+# Tasks: issues assigned to you in a tracker, with the label, become tasks for
+# your helper team; Ensemble writes progress, questions and results back as
+# comments, and sets an issue to review when its task is done. It never closes
+# one. Leave this block out for no inbox.
+# ---------------------------------------------------------------------------
+tasks:
+  tracker:
+    type: local_markdown         # a folder of <id>.md issues
+    dir: issues                  # relative to this directory; often a git repo a team shares
+  user: you                      # who you are in the tracker
+  label: ensemble                # the signal; `ensemble:<agent>` gives an issue to that agent
+  poll_seconds: 30
+  projects:                      # an issue's `project` -> the folder its work happens in
+    shop: /home/you/code/shop

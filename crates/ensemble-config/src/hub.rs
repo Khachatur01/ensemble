@@ -32,6 +32,8 @@ pub struct Hub {
     pub llm_backends: BTreeMap<String, LlmBackend>,
     /// Absent: the hub keeps no knowledge.
     pub knowledge: Option<Knowledge>,
+    /// Absent: no task inbox.
+    pub tasks: Option<Tasks>,
     /// Where it was loaded from, for error messages.
     pub source: PathBuf,
 }
@@ -45,6 +47,32 @@ pub struct Knowledge {
     pub distill: DirectAdapter,
     pub recall: Recall,
 }
+
+/// The task inbox: issues assigned to the person in a tracker, with the label,
+/// become tasks for the helper team.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tasks {
+    pub tracker: IssueTracker,
+    /// Who the person is in the tracker.
+    pub user: String,
+    /// The signal: an issue assigned to `user` with this label is for the
+    /// helper team; `<label>:<agent>` gives it to that agent.
+    pub label: String,
+    pub poll_seconds: u32,
+    /// An issue's `project`, and the folder its work happens in, made absolute
+    /// against the hub's directory.
+    pub projects: BTreeMap<String, PathBuf>,
+}
+
+/// Where issues are kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueTracker {
+    /// A folder of `<id>.md` issues, made absolute against the hub's directory.
+    LocalMarkdown { dir: PathBuf },
+}
+
+/// The issue tracker types that ship.
+pub const LOCAL_MARKDOWN_TRACKER: &str = "local_markdown";
 
 /// How much one recall returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +95,30 @@ pub(crate) struct RawHub {
     pub(crate) owner: String,
     pub(crate) llm_backends: BTreeMap<String, RawLlmBackend>,
     pub(crate) knowledge: Option<RawKnowledge>,
+    pub(crate) tasks: Option<RawTasks>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawTasks {
+    pub(crate) tracker: RawIssueTracker,
+    pub(crate) user: String,
+    pub(crate) label: String,
+    pub(crate) poll_seconds: u32,
+    pub(crate) projects: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum RawIssueTracker {
+    #[serde(rename = "local_markdown")]
+    LocalMarkdown(RawLocalMarkdownIssues),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawLocalMarkdownIssues {
+    pub(crate) dir: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,6 +224,47 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             },
         }
     });
+    let base = path.parent().unwrap_or(Path::new("."));
+    let tasks = raw.tasks.as_ref().map(|t| {
+        let tracker = match &t.tracker {
+            RawIssueTracker::LocalMarkdown(m) => {
+                if m.dir.trim().is_empty() {
+                    problems.push("tasks.tracker.dir: is empty".into());
+                }
+                IssueTracker::LocalMarkdown {
+                    dir: base.join(m.dir.trim()),
+                }
+            }
+        };
+        if t.user.trim().is_empty() {
+            problems.push("tasks.user: is empty; name yourself as the tracker knows you".into());
+        }
+        let label = t.label.trim();
+        if label.is_empty() || label.contains(char::is_whitespace) || label.contains(':') {
+            problems.push(format!(
+                "tasks.label: '{label}' must be one word with no ':', such as ensemble"
+            ));
+        }
+        if t.poll_seconds == 0 {
+            problems.push("tasks: `poll_seconds` must be greater than 0".into());
+        }
+        let mut projects = BTreeMap::new();
+        for (name, dir) in &t.projects {
+            if name.trim().is_empty() || dir.trim().is_empty() {
+                problems.push(format!(
+                    "tasks.projects: '{name}' needs a name and a folder"
+                ));
+            }
+            projects.insert(name.trim().to_string(), base.join(dir.trim()));
+        }
+        Tasks {
+            tracker,
+            user: t.user.trim().to_string(),
+            label: label.to_string(),
+            poll_seconds: t.poll_seconds,
+            projects,
+        }
+    });
     for name in backends.keys() {
         let used = knowledge.as_ref().is_some_and(|k| {
             k.distill
@@ -192,6 +285,7 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             owner: raw.owner.trim().to_string(),
             llm_backends: backends,
             knowledge,
+            tasks,
             source: path.to_path_buf(),
         })
     } else {

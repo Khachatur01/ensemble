@@ -2481,3 +2481,36 @@ fn shares_become_notes_by_hand_and_in_the_background_of_a_session() {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
+
+#[test]
+fn the_inbox_lists_the_issues_assigned_to_you_with_the_label() {
+    let s = Scratch::new("hub-inbox");
+    let hub = hub_of(&s);
+    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    std::fs::write(hub.join("hub.yaml"), text.replace("user: you", "user: ana")).unwrap();
+    std::fs::create_dir_all(hub.join("issues")).unwrap();
+    let issue = "---\ntitle: Fix the login redirect\nassignee: ana\nlabels: [ensemble]\nproject: shop\nstatus: open\n---\nIt redirects to /home.\n";
+    std::fs::write(hub.join("issues/7.md"), issue).unwrap();
+    std::fs::write(
+        hub.join("issues/8.md"),
+        issue.replace("assignee: ana", "assignee: bob"),
+    )
+    .unwrap();
+    std::fs::write(hub.join("issues/9.md"), "no front matter\n").unwrap();
+    let out = command(&s)
+        .args(["inbox", "--hub"])
+        .arg(&hub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let said = stdout_of(&out);
+    assert!(said.contains("with the label ensemble: 1"), "{said}");
+    assert!(
+        said.contains("7") && said.contains("Fix the login redirect  [shop]"),
+        "{said}"
+    );
+    assert!(
+        said.contains("cannot be read") && said.contains("9:"),
+        "{said}"
+    );
+}

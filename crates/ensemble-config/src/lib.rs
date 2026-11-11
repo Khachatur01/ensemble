@@ -574,7 +574,9 @@ mod raw;
 mod validate;
 
 pub use env::*;
-pub use hub::{HUB_FILENAME, Hub, Knowledge, Recall, hub_path, load_hub, parse_hub};
+pub use hub::{
+    HUB_FILENAME, Hub, IssueTracker, Knowledge, Recall, Tasks, hub_path, load_hub, parse_hub,
+};
 pub use validate::{load, parse};
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/hub.schema.json",
   "title": "Ensemble hub: hub.yaml",
-  "description": "The hub role: the people layer beside a helper team. Embedded in one person's node, it keeps that person's knowledge vault and the models that distill it. Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (`knowledge`, and a backend's `api_key_env`).",
+  "description": "The hub role: the people layer beside a helper team. Embedded in one person's node, it keeps that person's knowledge vault and the models that distill it, and brings the issues assigned to them in a tracker to their helper team. Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (`knowledge`, `tasks`, and a backend's `api_key_env`).",
   "type": "object",
   "required": ["version", "owner", "llm_backends"],
   "additionalProperties": false,
@@ -26,9 +26,62 @@
     "knowledge": {
       "description": "The knowledge vault, and how shares become notes. Leave it out for no knowledge.",
       "$ref": "#/definitions/knowledge"
+    },
+    "tasks": {
+      "description": "The task inbox: issues assigned to you in a tracker, with the label, become tasks for your helper team, and their progress, questions and results are written back. Leave it out for no inbox.",
+      "$ref": "#/definitions/tasks"
     }
   },
   "definitions": {
+    "tasks": {
+      "type": "object",
+      "required": ["tracker", "user", "label", "poll_seconds", "projects"],
+      "additionalProperties": false,
+      "properties": {
+        "tracker": {
+          "description": "Where the issues are kept. `type` decides which other settings there are.",
+          "oneOf": [
+            { "$ref": "#/definitions/tracker_local_markdown" }
+          ]
+        },
+        "user": {
+          "description": "Who you are in the tracker: issues assigned to this name are yours.",
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "description": "The signal: an issue assigned to you with this label is for your helper team. A second label `<label>:<agent>` gives it to that agent; without one it goes to the backlog.",
+          "type": "string",
+          "pattern": "^[^\\s:]+$"
+        },
+        "poll_seconds": {
+          "description": "Seconds between two looks at the tracker.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "projects": {
+          "description": "An issue's `project`, and the folder its work happens in, relative to the hub's directory or absolute. An issue whose project is not here is set to blocked, with a comment saying why. `{}` when there are none.",
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "tracker_local_markdown": {
+      "type": "object",
+      "required": ["type", "dir"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "local_markdown: a folder of `<id>.md` issues, each with title, assignee, labels, project and status in its front matter. People write them; Ensemble changes only `status` and appends comments.",
+          "const": "local_markdown"
+        },
+        "dir": {
+          "description": "The folder, relative to the hub's directory or absolute. Often a git repository a team shares.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
     "knowledge": {
       "type": "object",
       "required": ["vault", "distill", "recall"],

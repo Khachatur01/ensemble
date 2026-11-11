@@ -50,6 +50,8 @@ COMMANDS:
                             Keep knowledge in the --hub vault, as an agent's
                             `share` tool does; the text is read from stdin
                             when --text is not given.
+    inbox                   The issues assigned to you in the --hub tracker
+                            with its label, and where each stands.
     recall TOPIC            Print the notes of the --hub vault about TOPIC, as
                             an agent's `recall` tool gets them.
     knowledge status        Shares, those not yet distilled, notes, and what
@@ -286,6 +288,9 @@ fn run() -> Result<ExitCode, String> {
     }
     if args.command == "knowledge" {
         return cmd_knowledge(&args, &dir);
+    }
+    if args.command == "inbox" {
+        return cmd_inbox(&args);
     }
     if args.command == "recall" {
         hub_of(&args, "recall")?;
@@ -582,6 +587,50 @@ fn memory_for(args: &Args, dir: &Path) -> Result<Option<ensemble::knowledge::Mem
         );
     }
     Ok(memory)
+}
+
+/// `ensemble inbox`: the issues the hub's inbox sees, and where each stands.
+fn cmd_inbox(args: &Args) -> Result<ExitCode, String> {
+    let dir = hub_of(args, "inbox")?;
+    let hub = config::load_hub(
+        &config::hub_path(&dir),
+        args.env_file.as_deref(),
+        &SystemEnv,
+    )
+    .map_err(|e| e.to_string())?;
+    let tasks = hub
+        .tasks
+        .as_ref()
+        .ok_or("inbox: the hub has no `tasks` block, so no inbox")?;
+    let tracker = ensemble::inbox::tracker_for(tasks);
+    let issues = tracker.assigned(&tasks.user, &tasks.label);
+    println!(
+        "issues assigned to {} with the label {}: {}",
+        tasks.user,
+        tasks.label,
+        issues.len()
+    );
+    for issue in &issues {
+        println!(
+            "  {:<12} {:<12} {}{}",
+            issue.id,
+            issue.status.as_str(),
+            issue.title,
+            issue
+                .project
+                .as_deref()
+                .map(|p| format!("  [{p}]"))
+                .unwrap_or_default()
+        );
+    }
+    let bad = tracker.unreadable();
+    if !bad.is_empty() {
+        println!("issues that cannot be read:");
+        for (id, why) in &bad {
+            println!("  {id}: {why}");
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `ensemble knowledge status|distill|rebuild`.

@@ -11,6 +11,7 @@ description = "Ensemble's MCP server over stdio, and the worker that runs tasks 
 ensemble-agents.workspace = true
 ensemble-config.workspace = true
 ensemble-core.workspace = true
+ensemble-inbox.workspace = true
 ensemble-knowledge.workspace = true
 ensemble-tasks.workspace = true
 serde_json.workspace = true
