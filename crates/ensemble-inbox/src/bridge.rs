@@ -16,8 +16,9 @@
 //! the lock that keeps one inbox per hub.
 
 use crate::tracker::{Issue, IssueTracker, Status};
+use crate::work;
 use ensemble_config::{Personal, Tasks};
-use ensemble_tasks::tasks::{Status as TaskStatus, Store, Ticket};
+use ensemble_tasks::tasks::Store;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -179,54 +180,15 @@ impl Inbox {
                 return Ok(Some(format!("issue {} blocked: {why}", issue.id)));
             }
         };
-        let prefix = format!("{}:", self.tasks.label);
-        let named: Vec<&str> = issue
-            .labels
-            .iter()
-            .filter_map(|l| l.strip_prefix(&prefix))
-            .collect();
-        let agent = named
-            .iter()
-            .find(|a| self.agents.iter().any(|known| known == *a))
-            .map(|a| a.to_string())
-            .unwrap_or_default();
-        let unknown: Vec<&str> = named
-            .into_iter()
-            .filter(|a| !self.agents.iter().any(|known| known == a))
-            .collect();
-        let ticket = Ticket {
-            title: issue.title.clone(),
-            agent: agent.clone(),
-            context: Some(format!(
-                "Issue {} in the tracker, assigned to {}. Report what you did; Ensemble posts it on the issue.",
-                issue.id, self.personal.user
-            )),
-            text: if issue.body.is_empty() {
-                issue.title.clone()
-            } else {
-                issue.body.clone()
-            },
-            ..Ticket::default()
-        };
         let store = Store::new(&(self.state_for)(&folder)?);
-        let task = store
-            .create(&ticket)
-            .map_err(|e| format!("cannot write the task: {e}"))?;
-        let mut comment = format!(
-            "Picked up as task {task} in {}, {}.",
-            folder.display(),
-            if agent.is_empty() {
-                "in the backlog, for the helper team to assign".to_string()
-            } else {
-                format!("for {agent}")
-            }
-        );
-        if !unknown.is_empty() {
-            comment.push_str(&format!(
-                " The helper team has no agent called {}.",
-                unknown.join(" or ")
-            ));
-        }
+        let (task, comment) = work::make_task(
+            &store,
+            issue,
+            &self.tasks.label,
+            &self.agents,
+            &self.personal.user,
+            &format!("in {}", folder.display()),
+        )?;
         entry.folder = Some(folder);
         entry.task = Some(task.clone());
         self.say(issue, &comment, Status::InProgress, entry)?;
@@ -248,47 +210,30 @@ impl Inbox {
             .clone()
             .ok_or("the inbox lost the task's folder")?;
         let store = Store::new(&(self.state_for)(&folder)?);
-        if let Some(outcome) = store.outcome(task) {
-            let (word, status) = match outcome.status {
-                TaskStatus::Done => ("is done", Status::Review),
-                TaskStatus::Failed => ("failed", Status::Blocked),
-                TaskStatus::Cancelled => ("was cancelled", Status::Blocked),
-            };
-            entry.question = None;
-            entry.reported = true;
-            self.say(
-                issue,
-                &format!("Task {task} {word}:\n\n{}", outcome.reply().trim()),
-                status,
-                entry,
-            )?;
-            return Ok(Some(format!("issue {} -> {}", issue.id, status.as_str())));
-        }
-        let Some(question) = store.open_question(task) else {
-            return Ok(None);
-        };
-        if entry.question.as_deref() != Some(question.as_str()) {
-            self.say(
-                issue,
-                &format!(
-                    "The helper team asks:\n\n{}\n\nAnswer with a comment here.",
-                    question.trim()
-                ),
-                Status::Blocked,
-                entry,
-            )?;
-            entry.question = Some(question);
-            return Ok(Some(format!("issue {}: asked a question", issue.id)));
+        match work::follow(&store, task, entry.question.as_deref()) {
+            Some(update) => {
+                let (comment, status) = work::on_issue(task, &update);
+                self.say(issue, &comment, status, entry)?;
+                return Ok(Some(match update {
+                    work::Update::Result { .. } => {
+                        entry.question = None;
+                        entry.reported = true;
+                        format!("issue {} -> {}", issue.id, status.as_str())
+                    }
+                    work::Update::Question(q) => {
+                        entry.question = Some(q);
+                        format!("issue {}: asked a question", issue.id)
+                    }
+                }));
+            }
+            None if entry.question.is_none() => return Ok(None),
+            None => {}
         }
         let comments = self.tracker.comments(&issue.id)?;
-        let Some(answer) = comments
-            .iter()
-            .skip(entry.comments)
-            .find(|c| c.author == self.personal.user)
-        else {
+        let Some(answer) = reply_after(&comments, entry.comments, &self.personal.user) else {
             return Ok(None);
         };
-        store.answer(task, &answer.text)?;
+        work::answer(&store, task, &answer)?;
         entry.question = None;
         self.tracker.set_status(&issue.id, Status::InProgress)?;
         entry.comments = comments.len();
@@ -329,11 +274,26 @@ impl Inbox {
     }
 }
 
+/// The first comment by `person` after the first `seen` comments: their reply
+/// to a question.
+pub fn reply_after(
+    comments: &[crate::tracker::Comment],
+    seen: usize,
+    person: &str,
+) -> Option<String> {
+    comments
+        .iter()
+        .skip(seen)
+        .find(|c| c.author == person)
+        .map(|c| c.text.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ensemble_config::IssueTracker as Kind;
     use ensemble_core::workspace::testing::TempDir;
+    use ensemble_tasks::tasks::{Status as TaskStatus, Ticket};
     use std::time::SystemTime;
 
     struct World {

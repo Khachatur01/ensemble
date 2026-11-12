@@ -13,6 +13,7 @@
 pub mod bridge;
 pub mod local_markdown;
 pub mod tracker;
+pub mod work;
 
 pub use bridge::Inbox;
 pub use local_markdown::LocalMarkdown;
