@@ -155,6 +155,7 @@ version = "0.1.0"
 dependencies = [
  "ensemble-config",
  "ensemble-core",
+ "ensemble-link",
  "ensemble-tasks",
  "serde",
  "serde_json",

@@ -730,9 +730,19 @@ fn cmd_hub_serve(args: &Args) -> Result<ExitCode, String> {
         hub.owner,
         listener.local_addr().unwrap_or(server.listen)
     ));
-    let server = ensemble::link::Server::new(&memory, &hub.roles, server, users);
+    let inbox = hub
+        .tasks
+        .as_ref()
+        .map(|tasks| ensemble::inbox::ServerInbox::new(tasks, &hub.roles, users.clone()));
+    let mut server = ensemble::link::Server::new(&memory, &hub.roles, server, users);
+    if let Some(inbox) = &inbox {
+        server = server.with_relay(inbox);
+    }
     std::thread::scope(|scope| {
         scope.spawn(|| memory.work(&STOP, &say));
+        if let Some(inbox) = &inbox {
+            scope.spawn(|| inbox.work(&STOP, &say));
+        }
         server.run(listener, &STOP, &say);
     });
     say("stopped");
@@ -1001,10 +1011,9 @@ fn cmd_mcp(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
         );
     }
     let knowledge = knowledge_for(args, &dir)?;
-    let inbox = inbox_for(
-        args,
-        config.agent_names().into_iter().map(String::from).collect(),
-    )?;
+    let agents: Vec<String> = config.agent_names().into_iter().map(String::from).collect();
+    let inbox = inbox_for(args, agents.clone())?;
+    let node = node_inbox_for(args, agents)?;
     let ensemble = ensemble_for(config, dir, args);
     let stdin = std::io::stdin();
     // Not locked: delegations reply from their own threads.
@@ -1014,6 +1023,7 @@ fn cmd_mcp(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
             knowledge: knowledge.as_ref().map(Knowledge::access),
             distill: knowledge.as_ref().and_then(Knowledge::local),
             inbox: inbox.as_ref(),
+            node: node.as_ref(),
         },
         stdin.lock(),
         std::io::stdout(),
@@ -1067,6 +1077,33 @@ fn inbox_for(args: &Args, agents: Vec<String>) -> Result<Option<ensemble::inbox:
     };
     let dir = state::hub_dir(hub_dir).map_err(|e| format!("--hub {e}"))?;
     ensemble::inbox::Inbox::new(tasks, agents, dir).map(Some)
+}
+
+/// This computer's part in the task inbox of the hub server `--hub` names: when
+/// `--hub` is a URL with a saved token, and `node.yaml` maps projects to
+/// folders. None otherwise.
+fn node_inbox_for(
+    args: &Args,
+    agents: Vec<String>,
+) -> Result<Option<ensemble::inbox::NodeInbox>, String> {
+    let Some(url) = hub_url(args) else {
+        return Ok(None);
+    };
+    let Some(node) =
+        config::load_node(&config::node_path(&state::config_root()?)).map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    let tokens = ensemble::link::Tokens::load()?;
+    let Some(token) = tokens.get(&url) else {
+        return Ok(None);
+    };
+    let dir = state::root()?
+        .join("nodes")
+        .join(state::labelled_text(&ensemble::link::tokens::normal(&url)));
+    Ok(Some(ensemble::inbox::NodeInbox::new(
+        &url, token, node, agents, dir,
+    )))
 }
 
 /// `ensemble inbox [--once]`: the issues the hub's inbox sees and the task each
@@ -2141,10 +2178,9 @@ fn cmd_serve(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, Stri
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
     }
     let knowledge = knowledge_for(args, &dir)?;
-    let inbox = inbox_for(
-        args,
-        config.agent_names().into_iter().map(String::from).collect(),
-    )?;
+    let agents: Vec<String> = config.agent_names().into_iter().map(String::from).collect();
+    let inbox = inbox_for(args, agents.clone())?;
+    let node = node_inbox_for(args, agents)?;
     let ensemble = ensemble_for(config, dir, args);
     ensemble::harness::serve::run(
         &ensemble,
@@ -2152,6 +2188,7 @@ fn cmd_serve(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, Stri
             knowledge: knowledge.as_ref().map(Knowledge::access),
             distill: knowledge.as_ref().and_then(Knowledge::local),
             inbox: inbox.as_ref(),
+            node: node.as_ref(),
         },
         &STOP,
         &|line| eprintln!("ensemble: {line}"),

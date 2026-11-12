@@ -61,6 +61,8 @@ pub struct Comment {
 pub trait IssueTracker: Sync {
     /// The issues assigned to `user` that carry `label`.
     fn assigned(&self, user: &str, label: &str) -> Vec<Issue>;
+    /// Every issue that carries `label`, whoever it is assigned to.
+    fn labelled(&self, label: &str) -> Vec<Issue>;
     fn issue(&self, id: &str) -> Result<Issue, String>;
     fn set_status(&self, id: &str, status: Status) -> Result<(), String>;
     fn comment(&self, id: &str, author: &str, text: &str) -> Result<(), String>;

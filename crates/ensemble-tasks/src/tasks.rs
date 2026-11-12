@@ -238,7 +238,7 @@ impl Status {
         }
     }
 
-    fn parse(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "done" => Some(Status::Done),
             "failed" => Some(Status::Failed),

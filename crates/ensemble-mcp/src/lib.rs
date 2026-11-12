@@ -23,7 +23,7 @@
 //! the worker that runs a folder's tasks with no session around it.
 
 use ensemble_agents::router::Ensemble;
-use ensemble_inbox::Inbox;
+use ensemble_inbox::{Inbox, NodeInbox};
 use ensemble_knowledge::{KnowledgeAccess, Memory};
 use ensemble_tasks::delegation;
 use ensemble_tasks::queue::{Queue, Task};
@@ -52,6 +52,9 @@ pub struct Hub<'a> {
     pub knowledge: Option<&'a dyn KnowledgeAccess>,
     pub distill: Option<&'a Memory>,
     pub inbox: Option<&'a Inbox>,
+    /// This computer's part in a hub server's task inbox, when `--hub` is a
+    /// hub server and node.yaml maps projects to folders.
+    pub node: Option<&'a NodeInbox>,
 }
 
 /// Handle one JSON-RPC message.
@@ -275,9 +278,12 @@ pub fn serve_with<W: Write + Send>(
         if let Some(memory) = hub.distill {
             scope.spawn(move || memory.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
         }
-        // So do issues from the tracker.
+        // So do issues from the tracker, and tasks from a hub server.
         if let Some(inbox) = hub.inbox {
             scope.spawn(move || inbox.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
+        }
+        if let Some(node) = hub.node {
+            scope.spawn(move || node.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
         }
         let result = (|| -> std::io::Result<()> {
             for line in input.lines() {

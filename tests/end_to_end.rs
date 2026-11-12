@@ -2943,3 +2943,84 @@ fn a_node_file_is_written_once_and_an_account_names_itself_in_the_tracker() {
         stdout_of(&out)
     );
 }
+
+#[test]
+fn an_issue_on_the_hub_server_is_worked_on_a_members_computer_and_reported_back() {
+    let s = Scratch::new("hub-tasks");
+    let cli = s.opencode("renamed it", "echo bar > a.txt");
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("a.txt", "foo\n");
+    let (hub, address, token) = hub_server(&s);
+    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    std::fs::write(
+        hub.join("hub.yaml"),
+        text.replace("  poll_seconds: 30\n", "  poll_seconds: 1\n"),
+    )
+    .unwrap();
+    let out = command(&s)
+        .args(["hub", "user", "tracker", "ana", "ana.p", "--hub"])
+        .arg(&hub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    std::fs::create_dir_all(hub.join("issues")).unwrap();
+    let issue = hub.join("issues/7.md");
+    std::fs::write(
+        &issue,
+        "---\ntitle: Rename foo\nassignee: ana.p\nlabels: [ensemble, \"ensemble:coder\"]\nproject: shop\nstatus: open\n---\nRename foo to bar in a.txt.\n",
+    )
+    .unwrap();
+    let _hub = serve_hub(&s, &hub);
+
+    // Ana's computer: signed in, and the project mapped to this folder.
+    let url = format!("ws://{address}");
+    let out = command(&s)
+        .args(["login", &url, "--token", &token])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let config = s.0.with_extension("xdg-config").join("ensemble");
+    std::fs::write(
+        config.join("node.yaml"),
+        format!(
+            "version: 1\nprojects:\n  shop: \"{}\"\n",
+            s.path().display()
+        ),
+    )
+    .unwrap();
+    let serve = Command::new(BIN)
+        .current_dir(s.path())
+        .env("XDG_STATE_HOME", s.0.with_extension("xdg-state"))
+        .env("XDG_CACHE_HOME", s.0.with_extension("xdg-cache"))
+        .env("XDG_CONFIG_HOME", s.0.with_extension("xdg-config"))
+        .arg("serve")
+        .arg("--team")
+        .arg(s.org())
+        .args(["--hub", &url])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _serve = Served(serve);
+
+    assert!(
+        wait_for(60, || std::fs::read_to_string(&issue)
+            .unwrap_or_default()
+            .contains("status: review")),
+        "the issue was not reported back: {}",
+        std::fs::read_to_string(&issue).unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(s.path().join("a.txt")).unwrap(),
+        "bar\n"
+    );
+    let said = std::fs::read_to_string(&issue).unwrap();
+    for expected in [
+        "Waiting for ana's computer",
+        "on ana's computer",
+        "is done:",
+    ] {
+        assert!(said.contains(expected), "{expected} in {said}");
+    }
+}

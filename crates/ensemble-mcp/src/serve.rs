@@ -52,6 +52,9 @@ pub fn run(
         if let Some(inbox) = hub.inbox {
             scope.spawn(move || inbox.work(hub_stop, say));
         }
+        if let Some(node) = hub.node {
+            scope.spawn(move || node.work(hub_stop, say));
+        }
         let mut idle = false;
         let mut checked = std::time::Instant::now() - Duration::from_secs(60);
         while !stop.load(Ordering::Relaxed) {

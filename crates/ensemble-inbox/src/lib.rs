@@ -12,11 +12,15 @@
 
 pub mod bridge;
 pub mod local_markdown;
+pub mod node;
+pub mod relay;
 pub mod tracker;
 pub mod work;
 
 pub use bridge::Inbox;
 pub use local_markdown::LocalMarkdown;
+pub use node::NodeInbox;
+pub use relay::ServerInbox;
 pub use tracker::{Comment, Issue, IssueTracker, Status};
 
 /// The tracker a hub's `tasks` block names.

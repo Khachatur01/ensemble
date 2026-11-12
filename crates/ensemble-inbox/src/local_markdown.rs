@@ -112,6 +112,14 @@ impl IssueTracker for LocalMarkdown {
             .collect()
     }
 
+    fn labelled(&self, label: &str) -> Vec<Issue> {
+        self.all()
+            .0
+            .into_iter()
+            .filter(|i| i.labels.iter().any(|l| l == label))
+            .collect()
+    }
+
     fn issue(&self, id: &str) -> Result<Issue, String> {
         parse(id, &self.read(id)?)
     }
