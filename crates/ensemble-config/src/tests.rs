@@ -1464,8 +1464,14 @@ fn a_hub_inbox_names_its_tracker_user_label_and_projects() {
             dir: PathBuf::from("/hubs/ana/issues")
         }
     );
-    assert_eq!(tasks.projects["shop"], PathBuf::from("/code/shop"));
-    assert_eq!(tasks.projects["docs"], PathBuf::from("/hubs/ana/docs"));
+    assert_eq!(
+        tasks.personal.as_ref().unwrap().projects["shop"],
+        PathBuf::from("/code/shop")
+    );
+    assert_eq!(
+        tasks.personal.as_ref().unwrap().projects["docs"],
+        PathBuf::from("/hubs/ana/docs")
+    );
 
     let said = hub_refusal(
         &doc.replace("label: ensemble", "label: \"ens:x\"")
@@ -1586,7 +1592,11 @@ fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
         ),
         ("sessions", accepted_keys::<hub::RawSessions>(), vec![]),
         ("lockout", accepted_keys::<hub::RawLockout>(), vec![]),
-        ("tasks", accepted_keys::<hub::RawTasks>(), vec![]),
+        (
+            "tasks",
+            accepted_keys::<hub::RawTasks>(),
+            vec!["user", "projects"],
+        ),
         (
             "tracker_local_markdown",
             accepted_keys::<hub::RawLocalMarkdownIssues>(),
@@ -1634,7 +1644,12 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
         k.distill.fallback.candidates.len() > 1,
         "the sample shows a fallback"
     );
+    let server = parse_hub(hub::HUB_SERVER_SAMPLE, Path::new("hub.yaml"), &env(&[]))
+        .expect("the server sample is a valid hub");
+    assert!(server.server.is_some() && server.tasks.as_ref().unwrap().personal.is_none());
+    assert!(server.roles["member"].contains(&Permission::Tasks));
     let doc: serde_json::Value = serde_norway::from_str(hub::HUB_SAMPLE).unwrap();
+    let served: serde_json::Value = serde_norway::from_str(hub::HUB_SERVER_SAMPLE).unwrap();
     let schema = hub_schema();
     let defs = &schema["definitions"];
     let backends: Vec<&serde_json::Value> =
@@ -1649,15 +1664,16 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
     let knowledge = &doc["knowledge"];
     let tasks = hub.tasks.expect("the sample has an inbox");
     assert_eq!(tasks.label, "ensemble");
+    assert!(tasks.personal.is_some(), "the sample is a personal hub");
     for (def, objects) in [
         ("tasks", vec![&doc["tasks"]]),
-        ("server", vec![&doc["server"]]),
+        ("server", vec![&served["server"]]),
         (
             "registration_approval",
-            vec![&doc["server"]["registration"]],
+            vec![&served["server"]["registration"]],
         ),
-        ("sessions", vec![&doc["server"]["sessions"]]),
-        ("lockout", vec![&doc["server"]["lockout"]]),
+        ("sessions", vec![&served["server"]["sessions"]]),
+        ("lockout", vec![&served["server"]["lockout"]]),
         ("tracker_local_markdown", vec![&doc["tasks"]["tracker"]]),
         ("knowledge", vec![knowledge]),
         ("distill", vec![&knowledge["distill"]]),
@@ -1684,5 +1700,52 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
         assert_eq!(missing, Vec::<String>::new(), "{def}");
     }
     let id = schema["$id"].as_str().unwrap();
-    assert!(hub::HUB_SAMPLE.starts_with(&format!("# yaml-language-server: $schema={id}")));
+    for sample in [hub::HUB_SAMPLE, hub::HUB_SERVER_SAMPLE] {
+        assert!(sample.starts_with(&format!("# yaml-language-server: $schema={id}")));
+    }
+}
+
+#[test]
+fn a_hub_servers_inbox_takes_no_person_and_an_embedded_one_needs_one() {
+    let server =
+        hub::HUB_SERVER_SAMPLE.replace("  poll_seconds: 30\n", "  poll_seconds: 30\n  user: ana\n");
+    let said = hub_refusal(&server);
+    assert!(
+        said.contains("a hub server takes no `user` or `projects`"),
+        "{said}"
+    );
+    let embedded = hub::HUB_SAMPLE.replace(
+        "  user: you                      # who you are in the tracker\n",
+        "",
+    );
+    assert_ne!(embedded, hub::HUB_SAMPLE);
+    let said = hub_refusal(&embedded);
+    assert!(said.contains("an embedded hub needs `user`"), "{said}");
+}
+
+// ---------------------------------------------------------------------------
+// node.yaml
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_node_maps_projects_to_absolute_folders_and_its_sample_and_schema_agree() {
+    let node = parse_node(node::NODE_SAMPLE, Path::new("node.yaml")).unwrap();
+    assert_eq!(node.projects["shop"], PathBuf::from("/home/you/code/shop"));
+    let said = parse_node(
+        "version: 1\nprojects: { shop: code/shop }\n",
+        Path::new("node.yaml"),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(said.contains("absolute folder"), "{said}");
+    assert!(
+        load_node(Path::new("/nonexistent/node.yaml"))
+            .unwrap()
+            .is_none()
+    );
+    let schema: serde_json::Value = serde_json::from_str(node::NODE_SCHEMA).unwrap();
+    assert_eq!(schema_keys(&schema), accepted_keys::<node::RawNode>());
+    assert_eq!(schema_required(&schema), accepted_keys::<node::RawNode>());
+    let id = schema["$id"].as_str().unwrap();
+    assert!(node::NODE_SAMPLE.starts_with(&format!("# yaml-language-server: $schema={id}")));
 }

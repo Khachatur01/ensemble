@@ -124,12 +124,12 @@
       }
     },
     "permission": {
-      "description": "share: keep knowledge in the organization vault. recall: read its notes. admin: manage users, approve sign-ups, give roles, revoke tokens.",
-      "enum": ["share", "recall", "admin"]
+      "description": "share: keep knowledge in the organization vault. recall: read its notes. tasks: receive the tasks the hub's inbox finds assigned to you. admin: manage users, approve sign-ups, give roles, revoke tokens.",
+      "enum": ["share", "recall", "tasks", "admin"]
     },
     "tasks": {
       "type": "object",
-      "required": ["tracker", "user", "label", "poll_seconds", "projects"],
+      "required": ["tracker", "label", "poll_seconds"],
       "additionalProperties": false,
       "properties": {
         "tracker": {
@@ -139,7 +139,7 @@
           ]
         },
         "user": {
-          "description": "Who you are in the tracker: issues assigned to this name are yours.",
+          "description": "Embedded hub only, and required there: who you are in the tracker; issues assigned to this name are yours. A hub server takes none: each account names itself with `tracker_user`.",
           "type": "string",
           "minLength": 1
         },
@@ -154,7 +154,7 @@
           "minimum": 1
         },
         "projects": {
-          "description": "An issue's `project`, and the folder its work happens in, relative to the hub's directory or absolute. An issue whose project is not here is set to blocked, with a comment saying why. `{}` when there are none.",
+          "description": "Embedded hub only, and required there: an issue's `project`, and the folder its work happens in, relative to the hub's directory or absolute. An issue whose project is not here is set to blocked, with a comment saying why. `{}` when there are none. On a hub server each member's computer maps projects in its own node.yaml.",
           "type": "object",
           "additionalProperties": { "type": "string", "minLength": 1 }
         }

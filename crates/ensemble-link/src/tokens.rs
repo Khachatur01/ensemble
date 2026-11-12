@@ -13,20 +13,6 @@ pub struct Tokens {
     tokens: BTreeMap<String, String>,
 }
 
-/// `$XDG_CONFIG_HOME/ensemble`, or `~/.config/ensemble`.
-pub fn config_dir() -> Result<PathBuf, String> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => {
-            let home = std::env::var_os("HOME")
-                .filter(|v| !v.is_empty())
-                .ok_or("cannot find a config directory: neither XDG_CONFIG_HOME nor HOME is set")?;
-            PathBuf::from(home).join(".config")
-        }
-    };
-    Ok(base.join("ensemble"))
-}
-
 /// A hub URL as tokens are kept by: without a trailing `/`.
 pub fn normal(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
@@ -35,7 +21,7 @@ pub fn normal(url: &str) -> String {
 impl Tokens {
     /// The token file in the user's config directory.
     pub fn load() -> Result<Tokens, String> {
-        Tokens::load_from(&config_dir()?)
+        Tokens::load_from(&ensemble_core::state::config_root()?)
     }
 
     /// The token file in `dir`.

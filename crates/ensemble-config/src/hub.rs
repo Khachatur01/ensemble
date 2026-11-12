@@ -22,6 +22,9 @@ pub const HUB_SCHEMA: &str = include_str!("../../../hub.schema.json");
 /// The hub file `ensemble hub init` writes, with what each setting does.
 pub const HUB_SAMPLE: &str = include_str!("hub_sample.yaml");
 
+/// The hub file `ensemble hub init --server` writes: a hub server for a team.
+pub const HUB_SERVER_SAMPLE: &str = include_str!("hub_server_sample.yaml");
+
 /// The hub's settings, resolved.
 #[derive(Debug, Clone)]
 pub struct Hub {
@@ -52,17 +55,26 @@ pub struct Knowledge {
     pub recall: Recall,
 }
 
-/// The task inbox: issues assigned to the person in a tracker, with the label,
-/// become tasks for the helper team.
+/// The task inbox: issues in a tracker that carry the label become tasks for
+/// the helper team of the person they are assigned to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tasks {
     pub tracker: IssueTracker,
-    /// Who the person is in the tracker.
-    pub user: String,
-    /// The signal: an issue assigned to `user` with this label is for the
-    /// helper team; `<label>:<agent>` gives it to that agent.
+    /// The signal: an issue with this label is for a helper team;
+    /// `<label>:<agent>` gives it to that agent.
     pub label: String,
     pub poll_seconds: u32,
+    /// On an embedded hub, the one person and their folders. None on a hub
+    /// server, where each account names itself in the tracker and each
+    /// member's computer maps projects to folders in its `node.yaml`.
+    pub personal: Option<Personal>,
+}
+
+/// The person an embedded hub works for, as its inbox needs them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Personal {
+    /// Who the person is in the tracker.
+    pub user: String,
     /// An issue's `project`, and the folder its work happens in, made absolute
     /// against the hub's directory.
     pub projects: BTreeMap<String, PathBuf>,
@@ -106,6 +118,8 @@ pub enum Permission {
     Share,
     /// Read the organization vault's notes.
     Recall,
+    /// Receive the tasks the hub's inbox finds assigned to you.
+    Tasks,
     /// Manage users: approve sign-ups, give roles, revoke tokens.
     Admin,
 }
@@ -115,6 +129,7 @@ impl Permission {
         match self {
             Permission::Share => "share",
             Permission::Recall => "recall",
+            Permission::Tasks => "tasks",
             Permission::Admin => "admin",
         }
     }
@@ -194,10 +209,10 @@ pub(crate) struct RawClosed {}
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawTasks {
     pub(crate) tracker: RawIssueTracker,
-    pub(crate) user: String,
+    pub(crate) user: Option<String>,
     pub(crate) label: String,
     pub(crate) poll_seconds: u32,
-    pub(crate) projects: BTreeMap<String, String>,
+    pub(crate) projects: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,9 +343,6 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
                 }
             }
         };
-        if t.user.trim().is_empty() {
-            problems.push("tasks.user: is empty; name yourself as the tracker knows you".into());
-        }
         let label = t.label.trim();
         if label.is_empty() || label.contains(char::is_whitespace) || label.contains(':') {
             problems.push(format!(
@@ -340,21 +352,48 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
         if t.poll_seconds == 0 {
             problems.push("tasks: `poll_seconds` must be greater than 0".into());
         }
-        let mut projects = BTreeMap::new();
-        for (name, dir) in &t.projects {
-            if name.trim().is_empty() || dir.trim().is_empty() {
-                problems.push(format!(
-                    "tasks.projects: '{name}' needs a name and a folder"
-                ));
+        let personal = match (raw.server.is_some(), &t.user, &t.projects) {
+            (true, None, None) => None,
+            (true, _, _) => {
+                problems.push(
+                    "tasks: a hub server takes no `user` or `projects`: each account names itself in the tracker, and each member's computer maps projects to folders in its node.yaml"
+                        .into(),
+                );
+                None
             }
-            projects.insert(name.trim().to_string(), base.join(dir.trim()));
-        }
+            (false, Some(user), Some(raw_projects)) => {
+                if user.trim().is_empty() {
+                    problems.push(
+                        "tasks.user: is empty; name yourself as the tracker knows you".into(),
+                    );
+                }
+                let mut projects = BTreeMap::new();
+                for (name, dir) in raw_projects {
+                    if name.trim().is_empty() || dir.trim().is_empty() {
+                        problems.push(format!(
+                            "tasks.projects: '{name}' needs a name and a folder"
+                        ));
+                    }
+                    projects.insert(name.trim().to_string(), base.join(dir.trim()));
+                }
+                Some(Personal {
+                    user: user.trim().to_string(),
+                    projects,
+                })
+            }
+            (false, _, _) => {
+                problems.push(
+                    "tasks: an embedded hub needs `user`, who you are in the tracker, and `projects`, each project's folder"
+                        .into(),
+                );
+                None
+            }
+        };
         Tasks {
             tracker,
-            user: t.user.trim().to_string(),
             label: label.to_string(),
             poll_seconds: t.poll_seconds,
-            projects,
+            personal,
         }
     });
     let server = raw.server.as_ref().and_then(|s| {

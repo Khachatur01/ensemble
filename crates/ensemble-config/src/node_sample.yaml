@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/node.schema.json
+
+# node.yaml — this computer, as a hub server sees it; written by
+# `ensemble node init` in ~/.config/ensemble. When a hub you signed in to
+# (`ensemble login`) sends you a task, it lands in the folder its project maps
+# to here. A project not listed here is refused, and the issue says so; your
+# other computers may still take it. Without this file, this computer takes no
+# tasks from a hub.
+
+version: 1
+
+projects:                        # an issue's `project` -> its folder on this computer
+  shop: /home/you/code/shop

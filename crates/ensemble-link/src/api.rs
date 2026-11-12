@@ -14,6 +14,7 @@
 //! | `POST /api/v1/login` `{name, password}` | anyone |
 //! | `POST /api/v1/logout` | a session |
 //! | `GET /api/v1/me` | any token |
+//! | `PUT /api/v1/me` `{tracker_user}` | a session |
 //! | `PUT /api/v1/me/password` `{current, new}` | a session |
 //! | `GET /api/v1/me/tokens` | a session |
 //! | `POST /api/v1/me/tokens` `{name, expires_days?, scopes?}` | a session |
@@ -22,7 +23,7 @@
 //! | `POST /api/v1/users` `{name, role, password}` | admin |
 //! | `GET /api/v1/roles` | admin |
 //! | `POST /api/v1/users/{name}/approve` `{role}` | admin |
-//! | `PUT /api/v1/users/{name}` `{role}` | admin |
+//! | `PUT /api/v1/users/{name}` `{role?, tracker_user?}` | admin |
 //! | `PUT /api/v1/users/{name}/password` `{password}` | admin |
 //! | `DELETE /api/v1/users/{name}/tokens` | admin |
 //! | `DELETE /api/v1/users/{name}` | admin |
@@ -124,6 +125,22 @@ impl Server<'_> {
                 Ok((200, json!({ "signed_out": true })))
             }
             ("GET", ["me"]) => self.me(head),
+            ("PUT", ["me"]) => {
+                let session = self.session(head)?;
+                let body = body()?;
+                let tracker_user = body.0.get("tracker_user").and_then(Value::as_str);
+                if body.0.get("tracker_user").is_none() {
+                    return Err(Refusal(
+                        400,
+                        "`tracker_user` is required; empty clears it".into(),
+                    ));
+                }
+                self.change(|u| u.set_tracker_user(&session.user.name, tracker_user))?;
+                Ok((
+                    200,
+                    json!({ "name": session.user.name, "tracker_user": tracker_user }),
+                ))
+            }
             ("PUT", ["me", "password"]) => {
                 let session = self.session(head)?;
                 let body = body()?;
@@ -197,9 +214,26 @@ impl Server<'_> {
             }
             ("PUT", ["users", name]) => {
                 self.admin(head)?;
-                let role = body()?.text("role")?;
-                self.change(|users| users.set_role(name, &role, self.roles))?;
-                Ok((200, json!({ "name": name, "role": role })))
+                let body = body()?;
+                let role = body.0.get("role").and_then(Value::as_str);
+                let tracker = body.0.get("tracker_user");
+                if role.is_none() && tracker.is_none() {
+                    return Err(Refusal(400, "give `role`, `tracker_user`, or both".into()));
+                }
+                self.change(|users| {
+                    if let Some(role) = role {
+                        users.set_role(name, role, self.roles)?;
+                    }
+                    if let Some(tracker) = tracker {
+                        users.set_tracker_user(name, tracker.as_str())?;
+                    }
+                    Ok(())
+                })?;
+                let users = self.users().map_err(|e| Refusal(500, e))?;
+                let user = users
+                    .get(name)
+                    .ok_or_else(|| Refusal(404, format!("no user called {name}")))?;
+                Ok((200, view(user)))
             }
             ("PUT", ["users", name, "password"]) => {
                 self.admin(head)?;
@@ -400,6 +434,8 @@ fn view(user: &User) -> Value {
         "status": user.status.as_str(),
         "registered": user.registered,
         "has_password": user.password.is_some(),
+        "tracker_user": user.tracker_user,
+        "tracker_name": user.tracker_name(),
         "tokens": user.tokens.iter().filter(|t| t.kind == Kind::Personal).count(),
     })
 }
@@ -641,6 +677,37 @@ mod tests {
         assert_eq!(login(&hub.url, "eve", "reset by the admin").0, 401);
         let (_, roles) = call(&hub.url, "GET", "/api/v1/roles", Some(&root), None);
         assert_eq!(roles["roles"]["reader"], json!(["recall"]));
+
+        let (status, body) = call(
+            &hub.url,
+            "PUT",
+            "/api/v1/users/rex",
+            Some(&root),
+            Some(json!({"tracker_user": "rex.g"})),
+        );
+        assert_eq!(
+            (status, body["tracker_name"].as_str()),
+            (200, Some("rex.g")),
+            "{body}"
+        );
+        let (status, body) = call(
+            &hub.url,
+            "PUT",
+            "/api/v1/me",
+            Some(&ana),
+            Some(json!({"tracker_user": "rex.g"})),
+        );
+        assert_eq!(status, 409, "taken by rex: {body}");
+        let (status, _) = call(
+            &hub.url,
+            "PUT",
+            "/api/v1/me",
+            Some(&ana),
+            Some(json!({"tracker_user": "ana.p"})),
+        );
+        assert_eq!(status, 200);
+        let (_, me) = call(&hub.url, "GET", "/api/v1/me", Some(&ana), None);
+        assert_eq!(me["tracker_name"], "ana.p");
     }
 
     #[test]

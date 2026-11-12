@@ -2574,7 +2574,7 @@ fn an_issue_assigned_to_you_becomes_a_task_in_its_projects_folder() {
 #[test]
 fn a_hub_servers_admin_adds_users_whose_tokens_are_shown_once() {
     let s = Scratch::new("hub-users");
-    let hub = hub_of(&s);
+    let hub = hub_server_of(&s);
     let run = |args: &[&str]| {
         command(&s)
             .args(args)
@@ -2603,8 +2603,20 @@ fn a_hub_servers_admin_adds_users_whose_tokens_are_shown_once() {
 
 /// A hub server made by `hub init`, listening on a free loopback port, with
 /// `ana` a member. Returns the hub, its address and ana's token.
+/// A hub server made by `hub init --server`, beside the project.
+fn hub_server_of(scratch: &Scratch) -> PathBuf {
+    let hub = scratch.0.with_extension("hub");
+    let out = command(scratch)
+        .args(["hub", "init", "--server", "--hub"])
+        .arg(&hub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    hub
+}
+
 fn hub_server(scratch: &Scratch) -> (PathBuf, String, String) {
-    let hub = hub_of(scratch);
+    let hub = hub_server_of(scratch);
     let port = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
@@ -2734,7 +2746,7 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stdout_of(&out).contains("as ana (member: share, recall)"),
+        stdout_of(&out).contains("as ana (member: share, recall, tasks)"),
         "{}",
         stdout_of(&out)
     );
@@ -2885,4 +2897,49 @@ fn someone_signs_up_is_let_in_and_logs_in_from_a_node_with_a_password() {
         serde_json::json!({"name": "eve", "password": password}),
     );
     assert_eq!(status, 403);
+}
+
+#[test]
+fn a_node_file_is_written_once_and_an_account_names_itself_in_the_tracker() {
+    let s = Scratch::new("node-init");
+    let out = command(&s).args(["node", "init"]).output().unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let node = s.0.with_extension("xdg-config").join("ensemble/node.yaml");
+    assert!(
+        std::fs::read_to_string(&node)
+            .unwrap()
+            .contains("projects:")
+    );
+    let again = command(&s).args(["node", "init"]).output().unwrap();
+    assert!(
+        !again.status.success(),
+        "it does not overwrite without --force"
+    );
+
+    let hub = hub_server_of(&s);
+    let run = |args: &[&str]| {
+        command(&s)
+            .args(args)
+            .arg("--hub")
+            .arg(&hub)
+            .output()
+            .unwrap()
+    };
+    assert!(
+        run(&["hub", "user", "add", "ana", "--role", "member"])
+            .status
+            .success()
+    );
+    let out = run(&["hub", "user", "tracker", "ana", "ana.petrosyan"]);
+    assert!(
+        stdout_of(&out).contains("ana is ana.petrosyan in the tracker"),
+        "{}",
+        stdout_of(&out)
+    );
+    let out = run(&["hub", "user", "tracker", "ana"]);
+    assert!(
+        stdout_of(&out).contains("the account's own name"),
+        "{}",
+        stdout_of(&out)
+    );
 }

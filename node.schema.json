@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/node.schema.json",
+  "title": "Ensemble node: node.yaml",
+  "description": "One person's computer, as a hub server sees it: which folder each project's work happens in. In ~/.config/ensemble/node.yaml. Nothing has a default value.",
+  "type": "object",
+  "required": ["version", "projects"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "description": "Node file format version. Always 1.",
+      "const": 1
+    },
+    "projects": {
+      "description": "An issue's `project`, and the absolute folder on this computer its work happens in. A task whose project is not here is refused, and the issue says so. `{}` when there are none.",
+      "type": "object",
+      "additionalProperties": { "type": "string", "pattern": "^/" }
+    }
+  }
+}

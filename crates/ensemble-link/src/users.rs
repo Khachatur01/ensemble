@@ -91,7 +91,18 @@ pub struct User {
     /// None until a password is set.
     #[serde(default)]
     pub password: Option<Password>,
+    /// Who the account is in the task tracker, when that differs from its
+    /// name.
+    #[serde(default)]
+    pub tracker_user: Option<String>,
     pub tokens: Vec<Token>,
+}
+
+impl User {
+    /// Who the account is in the task tracker: its `tracker_user`, or its name.
+    pub fn tracker_name(&self) -> &str {
+        self.tracker_user.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// A token, as kept: its hash and what it may do. Never the token itself.
@@ -321,6 +332,43 @@ impl Users {
         Ok(())
     }
 
+    /// Say who an account is in the task tracker; none makes it its name.
+    pub fn set_tracker_user(
+        &mut self,
+        name: &str,
+        tracker_user: Option<&str>,
+    ) -> Result<(), UsersError> {
+        let tracker_user = match tracker_user.map(str::trim) {
+            None | Some("") => None,
+            Some(t) if t.len() > 128 || t.contains(char::is_control) => {
+                return Err(UsersError::Invalid(
+                    "`tracker_user` must be a name of at most 128 characters".into(),
+                ));
+            }
+            Some(t) => Some(t.to_string()),
+        };
+        if let Some(t) = &tracker_user
+            && let Some(other) = self
+                .users
+                .values()
+                .find(|u| u.name != name && u.tracker_name() == t)
+        {
+            return Err(UsersError::Conflict(format!(
+                "{} is {t} in the tracker already",
+                other.name
+            )));
+        }
+        self.user_mut(name)?.tracker_user = tracker_user;
+        Ok(())
+    }
+
+    /// The active account that is `tracker_name` in the task tracker.
+    pub fn assigned_to(&self, tracker_name: &str) -> Option<&User> {
+        self.users
+            .values()
+            .find(|u| u.status == Status::Active && u.tracker_name() == tracker_name)
+    }
+
     /// Give an active account another role.
     pub fn set_role(&mut self, name: &str, role: &str, roles: &Roles) -> Result<(), UsersError> {
         known_role(role, roles)?;
@@ -494,6 +542,7 @@ impl Users {
                 status,
                 registered: now(),
                 password,
+                tracker_user: None,
                 tokens: Vec::new(),
             },
         );
@@ -804,6 +853,31 @@ mod tests {
         assert!(users.authenticate(&token, &roles()).is_none());
         users.save().unwrap();
         assert!(users.get("ana").unwrap().tokens.is_empty());
+    }
+
+    #[test]
+    fn an_account_is_found_by_its_tracker_name_or_its_own() {
+        let tmp = TempDir::new();
+        let mut users = Users::load(&tmp.0).unwrap();
+        users.add("ana", "member", &roles()).unwrap();
+        users.add("bob", "member", &roles()).unwrap();
+        assert_eq!(users.assigned_to("ana").unwrap().name, "ana");
+        users
+            .set_tracker_user("ana", Some("ana.petrosyan"))
+            .unwrap();
+        assert_eq!(users.assigned_to("ana.petrosyan").unwrap().name, "ana");
+        assert!(users.assigned_to("ana").is_none());
+        assert!(matches!(
+            users.set_tracker_user("bob", Some("ana.petrosyan")),
+            Err(UsersError::Conflict(_))
+        ));
+        users.set_tracker_user("ana", None).unwrap();
+        assert_eq!(users.assigned_to("ana").unwrap().name, "ana");
+        users.register("carol", PASSWORD, 5).unwrap();
+        assert!(
+            users.assigned_to("carol").is_none(),
+            "a pending account gets no tasks"
+        );
     }
 
     #[test]

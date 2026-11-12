@@ -41,16 +41,21 @@ COMMANDS:
                             Register Ensemble with the agent you talk to:
                             claude-code, opencode or codex. Prints the command
                             it runs.
-    hub init [--force]      Write a sample hub: hub.yaml in the --hub directory,
+    hub init [--server] [--force]
+                            Write a sample hub: hub.yaml in the --hub directory,
                             with every setting, and make its knowledge vault a
-                            git repository.
+                            git repository. --server writes a hub server for a
+                            team instead of a hub for you alone.
+    node init [--force]     Write ~/.config/ensemble/node.yaml, which maps the
+                            projects of a hub server's tasks to folders here.
     hub check               Load and validate hub.yaml, and say which model
                             would distill shares now.
     hub serve               Run the --hub as a server for a team, until stopped
                             (Ctrl-C or SIGTERM): members' nodes connect, share
                             to and recall from its vault, as their roles allow.
-    hub user add NAME --role R | list | password NAME | approve NAME --role R
-             | role NAME --role R | token NAME | revoke NAME | remove NAME
+    hub user add NAME --role R | list | password NAME | tracker NAME [TRACKER_NAME]
+             | approve NAME --role R | role NAME --role R | token NAME
+             | revoke NAME | remove NAME
                             A hub server's users. `add` and `token` print a new
                             token once; only its hash is kept. `password` sets a
                             password (typed without echo, or on stdin), ending
@@ -306,6 +311,9 @@ fn run() -> Result<ExitCode, String> {
     }
     if args.command == "hub" {
         return cmd_hub(&args);
+    }
+    if args.command == "node" {
+        return cmd_node(&args);
     }
     if args.command == "share" {
         return cmd_share(&args, &dir);
@@ -578,13 +586,20 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
                     path.display()
                 ));
             }
+            let (sample, what) = if has(args, "--server") {
+                (
+                    config::hub::HUB_SERVER_SAMPLE,
+                    "a sample hub server for a team",
+                )
+            } else {
+                (config::hub::HUB_SAMPLE, "a sample hub for you alone")
+            };
             std::fs::create_dir_all(&dir)
                 .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-            std::fs::write(&path, config::hub::HUB_SAMPLE)
+            std::fs::write(&path, sample)
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-            println!("wrote {}: a sample hub with every setting", path.display());
-            let hub = config::parse_hub(config::hub::HUB_SAMPLE, &path, &SystemEnv)
-                .map_err(|e| e.to_string())?;
+            println!("wrote {}: {what}, with every setting", path.display());
+            let hub = config::parse_hub(sample, &path, &SystemEnv).map_err(|e| e.to_string())?;
             if let Some(knowledge) = &hub.knowledge {
                 ensemble::knowledge::Vault::new(&knowledge.vault).init()?;
                 println!(
@@ -650,6 +665,34 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
         other => Err(format!(
             "hub: unknown '{other}'. Use init, check, user or serve."
         )),
+    }
+}
+
+/// `ensemble node init`: write `~/.config/ensemble/node.yaml`, which maps the
+/// projects of a hub server's tasks to folders on this computer.
+fn cmd_node(args: &Args) -> Result<ExitCode, String> {
+    match args.rest.first().map(String::as_str) {
+        Some("init") => {
+            let path = config::node_path(&state::config_root()?);
+            if path.exists() && !has(args, "--force") {
+                return Err(format!(
+                    "{} already exists. Pass --force to overwrite it.",
+                    path.display()
+                ));
+            }
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+            }
+            std::fs::write(&path, config::node::NODE_SAMPLE)
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            println!(
+                "wrote {}: map each project to its folder on this computer",
+                path.display()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        _ => Err("node: needs init. Try --help.".into()),
     }
 }
 
@@ -741,6 +784,16 @@ fn cmd_hub_user(args: &Args) -> Result<ExitCode, String> {
             users.save()?;
             show_token(name, &token);
         }
+        "tracker" => {
+            let name = name()?;
+            let tracker = args.rest.get(3).map(String::as_str);
+            users.set_tracker_user(name, tracker)?;
+            users.save()?;
+            match tracker {
+                Some(t) => println!("{name} is {t} in the tracker"),
+                None => println!("{name} is {name} in the tracker, the account's own name"),
+            }
+        }
         "password" => {
             let name = name()?;
             if users.get(name).is_none() {
@@ -796,7 +849,7 @@ fn cmd_hub_user(args: &Args) -> Result<ExitCode, String> {
         }
         other => {
             return Err(format!(
-                "hub user: unknown '{other}'. Use add, list, password, approve, role, token, revoke or remove."
+                "hub user: unknown '{other}'. Use add, list, password, tracker, approve, role, token, revoke or remove."
             ));
         }
     }
@@ -1008,11 +1061,12 @@ fn inbox_for(args: &Args, agents: Vec<String>) -> Result<Option<ensemble::inbox:
         &SystemEnv,
     )
     .map_err(|e| e.to_string())?;
-    let Some(tasks) = &hub.tasks else {
+    // A hub server's inbox runs in `ensemble hub serve`, not here.
+    let Some(tasks) = hub.tasks.as_ref().filter(|t| t.personal.is_some()) else {
         return Ok(None);
     };
     let dir = state::hub_dir(hub_dir).map_err(|e| format!("--hub {e}"))?;
-    Ok(Some(ensemble::inbox::Inbox::new(tasks, agents, dir)))
+    ensemble::inbox::Inbox::new(tasks, agents, dir).map(Some)
 }
 
 /// `ensemble inbox [--once]`: the issues the hub's inbox sees and the task each
@@ -1034,19 +1088,20 @@ fn cmd_inbox(args: &Args) -> Result<ExitCode, String> {
         Vec::new()
     };
     let inbox =
-        inbox_for(args, agents)?.ok_or("inbox: the hub has no `tasks` block, so no inbox")?;
+        inbox_for(args, agents)?.ok_or(
+            "inbox: the hub has no `tasks` block for one person; a hub server's inbox runs in `ensemble hub serve`",
+        )?;
     if once {
         let _lock = inbox.lock()?;
         for line in inbox.pass()? {
             println!("{line}");
         }
     }
-    let tasks = inbox.settings();
-    let issues = inbox.tracker().assigned(&tasks.user, &tasks.label);
+    let (tasks, user) = (inbox.settings(), &inbox.personal().user);
+    let issues = inbox.tracker().assigned(user, &tasks.label);
     let seen = inbox.seen();
     println!(
-        "issues assigned to {} with the label {}: {}",
-        tasks.user,
+        "issues assigned to {user} with the label {}: {}",
         tasks.label,
         issues.len()
     );

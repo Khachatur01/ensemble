@@ -34,6 +34,21 @@ pub fn cache_root() -> Result<PathBuf, String> {
     Ok(base.join("ensemble"))
 }
 
+/// `$XDG_CONFIG_HOME/ensemble`, or `~/.config/ensemble`: what a person sets
+/// up on this computer, such as hub tokens and `node.yaml`.
+pub fn config_root() -> Result<PathBuf, String> {
+    let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            let home = std::env::var_os("HOME")
+                .filter(|v| !v.is_empty())
+                .ok_or("cannot find a config directory: neither XDG_CONFIG_HOME nor HOME is set")?;
+            PathBuf::from(home).join(".config")
+        }
+    };
+    Ok(base.join("ensemble"))
+}
+
 /// The state of the work done in `workdir`: its tasks, runs and worktrees.
 /// Named for the folder, with a hash of its whole path so two folders of the
 /// same name do not share one.

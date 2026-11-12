@@ -16,7 +16,7 @@
 //! the lock that keeps one inbox per hub.
 
 use crate::tracker::{Issue, IssueTracker, Status};
-use ensemble_config::Tasks;
+use ensemble_config::{Personal, Tasks};
 use ensemble_tasks::tasks::{Status as TaskStatus, Store, Ticket};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -34,6 +34,8 @@ type StateFor = dyn Fn(&Path) -> Result<PathBuf, String> + Send + Sync;
 
 pub struct Inbox {
     tasks: Tasks,
+    /// The one person this embedded inbox works for, and their folders.
+    personal: Personal,
     tracker: Box<dyn IssueTracker + Send>,
     /// The helper team's agents, which `<label>:<agent>` may name.
     agents: Vec<String>,
@@ -60,14 +62,26 @@ pub struct Seen {
 impl Inbox {
     /// The inbox of a hub's `tasks`, for a helper team with `agents`, keeping
     /// what it has done in `dir`.
-    pub fn new(tasks: &Tasks, agents: Vec<String>, dir: PathBuf) -> Self {
-        Inbox {
+    ///
+    /// Only an embedded hub's `tasks` name a person; a hub server's inbox runs
+    /// in `ensemble hub serve`.
+    pub fn new(tasks: &Tasks, agents: Vec<String>, dir: PathBuf) -> Result<Self, String> {
+        let personal = tasks.personal.clone().ok_or(
+            "this is a hub server's inbox: it runs in `ensemble hub serve`, and members' computers get its tasks over the link",
+        )?;
+        Ok(Inbox {
             tracker: crate::tracker_for(tasks),
             tasks: tasks.clone(),
+            personal,
             agents,
             dir,
             state_for: Box::new(ensemble_core::state::dir_for),
-        }
+        })
+    }
+
+    /// The person this inbox works for.
+    pub fn personal(&self) -> &Personal {
+        &self.personal
     }
 
     /// Keep each folder's tasks where `state_for` says.
@@ -116,7 +130,9 @@ impl Inbox {
     pub fn pass(&self) -> Result<Vec<String>, String> {
         let mut seen = self.seen();
         let mut said = Vec::new();
-        let issues = self.tracker.assigned(&self.tasks.user, &self.tasks.label);
+        let issues = self
+            .tracker
+            .assigned(&self.personal.user, &self.tasks.label);
         for issue in &issues {
             let entry = seen.entry(issue.id.clone()).or_default();
             let result = match (&entry.task, issue.status) {
@@ -145,7 +161,7 @@ impl Inbox {
     fn pick_up(&self, issue: &Issue, entry: &mut Seen) -> Result<Option<String>, String> {
         let folder = match issue.project.as_deref() {
             None => Err("it names no `project`, so there is no folder to work in".to_string()),
-            Some(p) => match self.tasks.projects.get(p) {
+            Some(p) => match self.personal.projects.get(p) {
                 None => Err(format!(
                     "its project '{p}' is not in the hub's `tasks.projects`, so there is no folder to work in"
                 )),
@@ -183,7 +199,7 @@ impl Inbox {
             agent: agent.clone(),
             context: Some(format!(
                 "Issue {} in the tracker, assigned to {}. Report what you did; Ensemble posts it on the issue.",
-                issue.id, self.tasks.user
+                issue.id, self.personal.user
             )),
             text: if issue.body.is_empty() {
                 issue.title.clone()
@@ -268,7 +284,7 @@ impl Inbox {
         let Some(answer) = comments
             .iter()
             .skip(entry.comments)
-            .find(|c| c.author == self.tasks.user)
+            .find(|c| c.author == self.personal.user)
         else {
             return Ok(None);
         };
@@ -335,13 +351,16 @@ mod tests {
                 tracker: Kind::LocalMarkdown {
                     dir: tmp.0.join("issues"),
                 },
-                user: "ana".into(),
                 label: "ensemble".into(),
                 poll_seconds: 1,
-                projects: BTreeMap::from([("shop".to_string(), shop)]),
+                personal: Some(Personal {
+                    user: "ana".into(),
+                    projects: BTreeMap::from([("shop".to_string(), shop)]),
+                }),
             };
             let states = tmp.0.join("states");
             let inbox = Inbox::new(&tasks, vec!["coder".into()], tmp.0.join("inbox"))
+                .unwrap()
                 .with_state_for(move |folder| Ok(states.join(folder.file_name().unwrap())));
             World { tmp, inbox }
         }

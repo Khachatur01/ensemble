@@ -570,14 +570,16 @@ pub mod edit;
 mod env;
 pub mod hub;
 pub mod migrate;
+pub mod node;
 mod raw;
 mod validate;
 
 pub use env::*;
 pub use hub::{
-    HUB_FILENAME, Hub, IssueTracker, Knowledge, Permission, Recall, Registration, Server, Tasks,
-    hub_path, load_hub, parse_hub,
+    HUB_FILENAME, Hub, IssueTracker, Knowledge, Permission, Personal, Recall, Registration, Server,
+    Tasks, hub_path, load_hub, parse_hub,
 };
+pub use node::{NODE_FILENAME, Node, load_node, node_path, parse_node};
 pub use validate::{load, parse};
 
 #[cfg(test)]
