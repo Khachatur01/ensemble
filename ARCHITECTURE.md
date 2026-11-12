@@ -343,17 +343,26 @@ in either process.
    with `server` and `roles` in `hub.yaml`, users and hashed tokens in the
    hub's state (`ensemble hub user`), `ensemble login` and `--hub wss://`, and
    `share` and `recall` against the organization vault over one WebSocket;
-   sign-up with approval and a REST API for users. Not
-   yet: GitLab, GitHub and Jira; the inbox on the server and tasks pushed to
-   nodes; OIDC and the device flow; the chat API and the web UI.)
+   sign-up with approval and a REST API for users; accounts with passwords,
+   sessions and scoped access tokens. Then the inbox on the server: a labelled
+   issue goes to the account whose tracker name is its assignee, as a
+   delivery the hub keeps until one of that person's computers takes it over
+   the link, makes it a task in the folder its `node.yaml` maps the project
+   to, and reports back. Not yet: GitLab, GitHub and Jira; OIDC and the device
+   flow; the chat API and the web UI.)
 
 The link, as built: the node opens one WebSocket and signs in with
 `Authorization: Bearer <token>` during the upgrade (401 without a valid one).
-Frames are JSON: requests `{id, method, params}` (`hello`, `share`, `recall`),
-replies `{id, result}` or `{id, error}`, and events `{event, data}`, which no
-event uses yet; they are how tasks will reach nodes. Every request is checked
-against the user's role, read again from the hub's state, so a revoked token
-stops at once. The permissions so far are `share` and `recall`.
+Frames are JSON: requests `{id, method, params}`, replies `{id, result}` or
+`{id, error}`, and events `{event, data}` the hub sends unasked. Requests are
+`hello`, `share` and `recall`; for tasks, a node `subscribe`s, and then sends
+`task_accept`, `task_refuse`, `task_update` and `answer_taken`, while the hub
+pushes `task` and `answer` events, each once per connection and again after a
+reconnect. The link knows no tracker: a hub server's inbox fills a
+`TaskRelay`. Every request is checked against the token's permissions, its
+role narrowed by its scopes, read again from the hub's state, so a revoked
+token stops at once. The permissions so far are `share`, `recall`, `tasks`
+and `admin`.
 
 ## Open questions
 

@@ -993,6 +993,32 @@ wrote it. The task runs when a worker runs for its folder: an `ensemble mcp`
 session opened there, or `ensemble serve --dir <folder>`. `ensemble inbox --hub
 <dir>` lists your labelled issues, where each stands and the task it became.
 
+**For a team, on the hub server.** A hub server's `tasks` block names only the
+tracker, the label and `poll_seconds`; the rest belongs to each person:
+
+- **Who is who.** An issue goes to the account whose tracker name is its
+  assignee: the account's `tracker_user` when set (`PUT /api/v1/me`, an admin's
+  `PUT /api/v1/users/{name}`, or `ensemble hub user tracker ana ana.petrosyan`),
+  else the account's own name. Its role needs the `tasks` permission.
+- **Which folder.** Each member's computer maps projects to folders in
+  `~/.config/ensemble/node.yaml`, which `ensemble node init` writes:
+
+  ```yaml
+  version: 1
+  projects:
+    shop: /home/ana/code/shop
+  ```
+
+What a member sees on an issue: "waiting for ana's computer" until one of her
+computers connects (an `ensemble mcp` or `ensemble serve` with
+`--hub wss://…`, signed in, with `node.yaml`); then "picked up as task 3 on
+ana's computer" and `in-progress`; then the task's question or result, as on
+an embedded hub, and her next comment as the answer. The hub keeps a task
+waiting until one of her computers takes it; a computer with no folder for
+the project says so on the issue, once, and another may still take it. An
+issue whose assignee is nobody's tracker name, or whose account may not
+receive tasks, is blocked with a comment saying why.
+
 ## Hub server
 
 A team runs one hub on a server. Each member's node connects to it, and their
@@ -1003,7 +1029,7 @@ session talks to one hub, set per project when you register Ensemble.
 On the server:
 
 ```console
-$ ensemble hub init --hub /srv/hub          # hub.yaml and the vault
+$ ensemble hub init --server --hub /srv/hub # hub.yaml for a team, and the vault
 $ $EDITOR /srv/hub/hub.yaml                 # knowledge, server, roles
 $ ensemble hub user add root --role admin --hub /srv/hub   # the first admin
 $ ensemble hub user password root --hub /srv/hub           # typed without echo
@@ -1028,8 +1054,8 @@ roles:                     # yours to name; each a list of permissions
 ```
 
 The permissions are `share` (keep knowledge in the organization vault),
-`recall` (read its notes) and `admin` (manage users); more come with the
-features that need them. Accounts are not in `hub.yaml`: they are kept in the
+`recall` (read its notes), `tasks` (receive the issues assigned to you; see
+[Tasks from a tracker](#tasks-from-a-tracker)) and `admin` (manage users). Accounts are not in `hub.yaml`: they are kept in the
 hub's state directory, readable only by whoever runs the hub. A share is kept
 under the name of the account that signed in, never a name the node sends, and
 the hub distills shares itself, with its own `knowledge.distill` models.
@@ -1083,6 +1109,7 @@ come and for scripts. JSON in and out.
 | `POST /api/v1/login` `{name, password}` | anyone | a session: `{token, expires}` |
 | `POST /api/v1/logout` | a session | ends it |
 | `GET /api/v1/me` | any token | your account, the token's permissions and kind |
+| `PUT /api/v1/me` `{tracker_user}` | a session | who you are in the tracker; empty for your account name |
 | `PUT /api/v1/me/password` `{current, new}` | a session | a new password; every session ends |
 | `GET /api/v1/me/tokens` | a session | your access tokens: id, name, scopes, made, expires |
 | `POST /api/v1/me/tokens` `{name, expires_days?, scopes?}` | a session | a new access token, shown once |
@@ -1091,7 +1118,7 @@ come and for scripts. JSON in and out.
 | `POST /api/v1/users` `{name, role, password}` | admin | an account, active |
 | `GET /api/v1/roles` | admin | the roles and their permissions |
 | `POST /api/v1/users/{name}/approve` `{role}` | admin | lets a pending account in |
-| `PUT /api/v1/users/{name}` `{role}` | admin | another role |
+| `PUT /api/v1/users/{name}` `{role?, tracker_user?}` | admin | another role, or who they are in the tracker |
 | `PUT /api/v1/users/{name}/password` `{password}` | admin | resets it; the account's sessions end |
 | `DELETE /api/v1/users/{name}/tokens` | admin | revokes every token |
 | `DELETE /api/v1/users/{name}` | admin | removes an account, or turns a sign-up down |
@@ -1181,7 +1208,9 @@ up and for debugging it.
 ```console
 $ ensemble setup                      # find the CLIs, write a starter, register it, check it
 $ ensemble connect --manager M --team <dir> [--hub <dir>] [--global]  # register with claude-code, opencode or codex
-$ ensemble hub init --hub <dir>    # write a sample hub: <dir>/hub.yaml, and make its knowledge vault
+$ ensemble hub init --hub <dir> [--server]   # a sample hub (--server: for a team): <dir>/hub.yaml, and its knowledge vault
+$ ensemble node init               # ~/.config/ensemble/node.yaml: this computer's folder for each project
+$ ensemble hub user tracker <name> [<tracker name>] --hub <dir>   # who the account is in the tracker
 $ ensemble hub check --hub <dir>   # validate hub.yaml; which model would distill shares now
 $ ensemble hub user add <name> --role <role> --hub <dir>   # a hub server's user; prints their token once
 $ ensemble hub user list|token <name>|revoke <name>|remove <name> --hub <dir>
@@ -1246,7 +1275,7 @@ server, are added as crates on top.
 | `ensemble-link` | a hub server's users, sign-ups and their tokens, kept as hashes (`users.rs`), the REST API (`api.rs`) over a little HTTP reader (`http.rs`), what a node and the hub say over their WebSocket (`protocol.rs`), the hub's side (`server.rs`), and the node's: a hub server's knowledge over the link (`client.rs`) and the token file (`tokens.rs`) |
 | `ensemble-agents` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `direct` adapter, and gates (`external/`); a git worktree and branch per task (`worktree.rs`); agents to adapters, slots, budgets and `health` (`router.rs`) |
 | `ensemble-tasks` | tasks as files (`tasks.rs`); the `Tracker` trait and `LocalMarkdown`, its one implementation (`tracker.rs`); the worker that runs tasks and background delegations within each agent's slots (`queue.rs`); the tools your agent calls (`delegation.rs`); `review`, `diff` and `merge` of a worktree task's branch (`review.rs`) |
-| `ensemble-inbox` | the task inbox: what it needs from a tracker (`tracker.rs`), a folder of markdown issues, the first tracker (`local_markdown.rs`), and the bridge that makes issues into tasks and reports them back (`bridge.rs`) |
+| `ensemble-inbox` | the task inbox: what it needs from a tracker (`tracker.rs`), a folder of markdown issues, the first tracker (`local_markdown.rs`), making an issue into a task and saying what it reports (`work.rs`), the embedded hub's inbox (`bridge.rs`), a hub server's (`relay.rs`), and a member's computer's part in it (`node.rs`) |
 | `ensemble-mcp` | the MCP server over stdio: the loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`); and `ensemble serve` (`serve.rs`) |
 | `ensemble` (the root) | the binary (`src/main.rs`); `setup`, `connect` and `doctor` (`src/setup.rs`); remote helper teams: parsing, pinning, the cache, trust (`src/remote.rs`) |
 
@@ -1285,7 +1314,7 @@ scripts stand in for the CLIs.
 | `crates/ensemble-agents/src/router.rs`, `crates/ensemble-backends/` | routing, `health` and its model check, the chat request in both formats |
 | `crates/ensemble-knowledge/` | shares kept as they arrived, notes and the log, commits by the lock holder, the secret check; the pipeline against a stub model: new notes, merges, chatter skipped, unusable answers to review, waiting for a model, rebuild |
 | `crates/ensemble-link/` | sign-up, approval and the REST API's codes, tokens kept as hashes and revoked at once, roles checked per request, shares under the signed-in name, a reader offered only `recall`, the token file 0600, the link opened again when it breaks |
-| `crates/ensemble-inbox/` | markdown issues read and written with only the status line changed; issues to tasks, questions and answers through comments, results posted once, one inbox per hub |
+| `crates/ensemble-inbox/` | markdown issues read and written with only the status line changed; a hub server's deliveries: matched by tracker name, accepted once, refused, asked and answered, reported; issues to tasks, questions and answers through comments, results posted once, one inbox per hub |
 | `crates/ensemble-tasks/` | ticket files: reading, ids, results written once, run logs; review and merge |
 | `crates/ensemble-mcp/src/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session |
 | `tests/workspace.rs` | the crates depend on each other in one direction only |
@@ -1318,9 +1347,8 @@ scripts stand in for the CLIs.
 - **The working folder is fixed when the server starts.** The working
   directory of the process (or `--dir`). A call can work in a folder inside it
   with `repo`, but not outside.
-- **A hub server shares knowledge, not yet tasks.** It keeps the organization
-  vault that members share to and recall from; its task inbox, a chat API, a
-  web UI and single sign-on are not built. People sign up through the REST API
+- **A hub server shares knowledge and hands out tasks.** A chat API, a web UI
+  and single sign-on are not built. People sign up through the REST API
   and wait for an admin; there is no password reset by mail, and no second
   factor. The API sends no CORS headers, so a UI is served from the hub's own
   origin. Connectors to chats and mail are not built either.
@@ -1328,5 +1356,5 @@ scripts stand in for the CLIs.
   that only mean the same. Your agent recalls when it decides to; delegated
   agents get no notes on their own.
 - **One tracker so far.** The inbox reads a folder of markdown issues; GitLab,
-  GitHub and Jira adapters are not built. It runs on your computer, so it
-  looks at the tracker only while `ensemble mcp` or `ensemble serve` runs.
+  GitHub and Jira adapters are not built. A member's computer takes a hub
+  server's tasks only while `ensemble mcp` or `ensemble serve` runs on it.
