@@ -11,12 +11,15 @@
 //! can be reached directly.
 
 use crate::http::{self, Replay};
-use crate::protocol::{HELLO, RECALL, Reply, Request, SHARE};
+use crate::protocol::{
+    ANSWER_TAKEN, Event, HELLO, RECALL, Reply, Request, SHARE, SUBSCRIBE, TASK_ACCEPT, TASK_REFUSE,
+    TASK_UPDATE, TaskRelay,
+};
 use crate::users::Users;
 use ensemble_config::Permission;
 use ensemble_knowledge::Memory;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -44,6 +47,9 @@ pub struct Server<'a> {
     pub(crate) changing: Mutex<()>,
     /// Failed logins by name: how many, and until when the name is refused.
     pub(crate) failures: Mutex<HashMap<String, (u32, Option<Instant>)>>,
+    /// The task inbox, when the hub has one: what subscribed nodes are told,
+    /// and who hears what they say about their tasks.
+    relay: Option<&'a dyn TaskRelay>,
 }
 
 /// Who a connection signed in as.
@@ -66,7 +72,14 @@ impl<'a> Server<'a> {
             users,
             changing: Mutex::new(()),
             failures: Mutex::new(HashMap::new()),
+            relay: None,
         }
+    }
+
+    /// Carry the tasks of `relay` to subscribed nodes.
+    pub fn with_relay(mut self, relay: &'a dyn TaskRelay) -> Self {
+        self.relay = Some(relay);
+        self
     }
 
     /// Accept nodes on `listener` until `stop` is set, each on its own thread.
@@ -134,7 +147,25 @@ impl<'a> Server<'a> {
             .inner
             .set_read_timeout(Some(TICK))
             .map_err(|e| e.to_string())?;
+        // Once the node subscribes, the events waiting for its account, each
+        // sent once on this connection, looked for about once a second.
+        let mut subscribed = false;
+        let mut sent: HashSet<String> = HashSet::new();
+        let mut looked = Instant::now();
         while !stop.load(Ordering::Relaxed) {
+            if let (true, Some(relay)) = (subscribed, self.relay)
+                && looked.elapsed() >= Duration::from_secs(1)
+            {
+                looked = Instant::now();
+                if self.permissions(&session).is_err() {
+                    break;
+                }
+                for (id, event) in relay.pending(&session.user) {
+                    if sent.insert(id) {
+                        push(&mut ws, &event)?;
+                    }
+                }
+            }
             let message = match ws.read() {
                 Ok(m) => m,
                 Err(tungstenite::Error::Io(e))
@@ -158,7 +189,14 @@ impl<'a> Server<'a> {
             let reply = match serde_json::from_str::<Request>(&text) {
                 Ok(req) => {
                     say(&format!("{}: {}", session.user, req.method));
-                    self.answer(&session, req)
+                    let subscribing = req.method == SUBSCRIBE;
+                    let reply = self.answer(&session, req);
+                    if subscribing && reply.error.is_none() {
+                        subscribed = true;
+                        // The first look comes at once.
+                        looked = Instant::now() - Duration::from_secs(1);
+                    }
+                    reply
                 }
                 Err(e) => Reply::err(0, format!("not a request: {e}")),
             };
@@ -259,6 +297,15 @@ impl<'a> Server<'a> {
             }),
             RECALL => may(Permission::Recall)
                 .and_then(|()| Ok(json!({ "text": self.memory.recall(text("query")?) }))),
+            SUBSCRIBE => may(Permission::Tasks).and_then(|()| match self.relay {
+                Some(_) => Ok(json!({ "subscribed": true })),
+                None => Err("this hub has no task inbox".into()),
+            }),
+            TASK_ACCEPT | TASK_REFUSE | TASK_UPDATE | ANSWER_TAKEN => may(Permission::Tasks)
+                .and_then(|()| match self.relay {
+                    Some(relay) => relay.handle(&session.user, &req.method, &req.params),
+                    None => Err("this hub has no task inbox".into()),
+                }),
             other => Err(format!("no method `{other}`")),
         };
         match result {
@@ -274,6 +321,12 @@ fn refused() -> ErrorResponse {
     ));
     *resp.status_mut() = tungstenite::http::StatusCode::UNAUTHORIZED;
     resp
+}
+
+/// Tell the node something unasked.
+fn push<S: Read + Write>(ws: &mut WebSocket<S>, event: &Event) -> Result<(), String> {
+    let json = serde_json::to_string(event).map_err(|e| e.to_string())?;
+    ws.send(Message::text(json)).map_err(|e| e.to_string())
 }
 
 fn send<S: Read + Write>(ws: &mut WebSocket<S>, reply: &Reply) -> Result<(), String> {
@@ -308,9 +361,14 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn start() -> Running {
+        start_with(None)
+    }
+
+    /// The test hub, carrying the tasks of `relay` when given.
+    pub(crate) fn start_with(relay: Option<&'static dyn TaskRelay>) -> Running {
         let tmp = TempDir::new();
         let yaml = format!(
-            "version: 1\nowner: Acme\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: approval, max_pending: 2 }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles:\n  admin: [admin, recall]\n  member: [share, recall]\n  reader: [recall]\n",
+            "version: 1\nowner: Acme\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: approval, max_pending: 2 }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles:\n  admin: [admin, recall]\n  member: [share, recall, tasks]\n  reader: [recall]\n",
             tmp.0.join("vault").display()
         );
         let hub =
@@ -346,7 +404,10 @@ pub(crate) mod tests {
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let (state, flag) = (tmp.0.join("state"), stop.clone());
         std::thread::spawn(move || {
-            let server = Server::new(&memory, &hub.roles, hub.server.unwrap(), state);
+            let mut server = Server::new(&memory, &hub.roles, hub.server.unwrap(), state);
+            if let Some(relay) = relay {
+                server = server.with_relay(relay);
+            }
             server.run(listener, &flag, &|_| {});
         });
         Running {

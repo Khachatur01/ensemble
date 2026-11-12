@@ -1,13 +1,14 @@
-//! The node's side of the link: a hub server's knowledge, used by an agent
-//! session as if the hub were embedded. One WebSocket, opened when it is first
-//! needed and opened again once when it breaks.
+//! The node's side of the link: one WebSocket to a hub server ([`Connection`]),
+//! and a hub server's knowledge over it, used by an agent session as if the hub
+//! were embedded ([`RemoteMemory`]), opened when it is first needed and opened
+//! again once when it breaks.
 
-use crate::protocol::{HELLO, RECALL, Reply, Request, SHARE};
+use crate::protocol::{Event, HELLO, RECALL, Reply, Request, SHARE};
 use ensemble_knowledge::{KnowledgeAccess, Tool};
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::net::TcpStream;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::stream::MaybeTlsStream;
@@ -17,6 +18,150 @@ use tungstenite::{Message, WebSocket};
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
+
+/// Why a request got no result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    /// The hub answered with this error.
+    Hub(String),
+    /// The link broke, or the hub said nothing in time.
+    Broken(String),
+}
+
+impl Failure {
+    pub fn message(self) -> String {
+        match self {
+            Failure::Hub(m) | Failure::Broken(m) => m,
+        }
+    }
+}
+
+/// One open WebSocket to a hub server, signed in with a token.
+pub struct Connection {
+    url: String,
+    socket: Socket,
+    next: u64,
+    /// Events that arrived while a request waited for its reply.
+    events: VecDeque<Event>,
+}
+
+impl Connection {
+    pub fn open(url: &str, token: &str) -> Result<Connection, String> {
+        let url = crate::tokens::normal(url);
+        let mut req = url
+            .as_str()
+            .into_client_request()
+            .map_err(|e| format!("{url}: {e}"))?;
+        let bearer = format!("Bearer {}", token.trim())
+            .parse()
+            .map_err(|_| "the token has characters a header cannot carry")?;
+        req.headers_mut().insert("authorization", bearer);
+        let (socket, _) = tungstenite::connect(req).map_err(|e| match e {
+            tungstenite::Error::Http(resp) if resp.status() == 401 => format!(
+                "the hub {url} did not accept the token; `ensemble login {url}` with a new one"
+            ),
+            e => format!("cannot reach the hub {url}: {e}"),
+        })?;
+        Ok(Connection {
+            url,
+            socket,
+            next: 1,
+            events: VecDeque::new(),
+        })
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn wait(&self, how_long: Duration) -> Result<(), String> {
+        let tcp = match self.socket.get_ref() {
+            MaybeTlsStream::Plain(s) => s,
+            MaybeTlsStream::Rustls(s) => s.get_ref(),
+            _ => return Ok(()),
+        };
+        tcp.set_read_timeout(Some(how_long))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Ask the hub and wait for its answer. Events that come meanwhile are
+    /// kept for [`Connection::next_event`].
+    pub fn call(&mut self, method: &str, params: Value) -> Result<Value, Failure> {
+        let id = self.next;
+        self.next += 1;
+        let req = Request {
+            id,
+            method: method.into(),
+            params,
+        };
+        let json = serde_json::to_string(&req).map_err(|e| Failure::Broken(e.to_string()))?;
+        self.wait(TIMEOUT).map_err(Failure::Broken)?;
+        self.socket
+            .send(Message::text(json))
+            .map_err(|e| Failure::Broken(e.to_string()))?;
+        loop {
+            match self
+                .socket
+                .read()
+                .map_err(|e| Failure::Broken(e.to_string()))?
+            {
+                Message::Text(t) => {
+                    if let Ok(reply) = serde_json::from_str::<Reply>(&t)
+                        && reply.id == id
+                    {
+                        return match (reply.result, reply.error) {
+                            (_, Some(e)) => Err(Failure::Hub(e)),
+                            (Some(v), None) => Ok(v),
+                            (None, None) => Err(Failure::Hub(format!(
+                                "the hub answered `{method}` with nothing"
+                            ))),
+                        };
+                    }
+                    if let Ok(event) = serde_json::from_str::<Event>(&t) {
+                        self.events.push_back(event);
+                    }
+                }
+                Message::Close(_) => return Err(Failure::Broken("the hub closed the link".into())),
+                _ => {}
+            }
+        }
+    }
+
+    /// The next event from the hub, waiting at most `how_long`; none when
+    /// nothing came. An error means the link broke.
+    pub fn next_event(&mut self, how_long: Duration) -> Result<Option<Event>, String> {
+        if let Some(event) = self.events.pop_front() {
+            return Ok(Some(event));
+        }
+        self.wait(how_long)?;
+        loop {
+            match self.socket.read() {
+                Ok(Message::Text(t)) => {
+                    if let Ok(event) = serde_json::from_str::<Event>(&t) {
+                        return Ok(Some(event));
+                    }
+                }
+                Ok(Message::Close(_)) => return Err("the hub closed the link".into()),
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e))
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return Ok(None);
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    }
+
+    /// Close the link.
+    pub fn close(&mut self) {
+        let _ = self.socket.close(None);
+        let _ = self.socket.flush();
+    }
+}
 
 /// Who the node is on the hub, and what it may do there.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,9 +179,8 @@ pub struct RemoteMemory {
     /// The working folder's name, never its path.
     project: Option<String>,
     client: Mutex<Option<String>>,
-    socket: Mutex<Option<Socket>>,
+    socket: Mutex<Option<Connection>>,
     hello: Mutex<Option<Hello>>,
-    next: AtomicU64,
 }
 
 impl RemoteMemory {
@@ -48,7 +192,6 @@ impl RemoteMemory {
             client: Mutex::new(None),
             socket: Mutex::new(None),
             hello: Mutex::new(None),
-            next: AtomicU64::new(1),
         }
     }
 
@@ -62,50 +205,9 @@ impl RemoteMemory {
             return Ok(hello);
         }
         let v = self.request(HELLO, json!({}))?;
-        let text = |k: &str| v[k].as_str().unwrap_or("").to_string();
-        let hello = Hello {
-            user: text("user"),
-            role: text("role"),
-            permissions: v["permissions"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .map(String::from)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            instructions: text("instructions"),
-        };
+        let hello = hello_from(&v);
         *self.hello.lock().unwrap_or_else(|e| e.into_inner()) = Some(hello.clone());
         Ok(hello)
-    }
-
-    fn connect(&self) -> Result<Socket, String> {
-        let mut req = self
-            .url
-            .as_str()
-            .into_client_request()
-            .map_err(|e| format!("{}: {e}", self.url))?;
-        let bearer = format!("Bearer {}", self.token)
-            .parse()
-            .map_err(|_| "the token has characters a header cannot carry")?;
-        req.headers_mut().insert("authorization", bearer);
-        let (socket, _) = tungstenite::connect(req).map_err(|e| match e {
-            tungstenite::Error::Http(resp) if resp.status() == 401 => format!(
-                "the hub {} did not accept the token; `ensemble login {}` with a new one",
-                self.url, self.url
-            ),
-            e => format!("cannot reach the hub {}: {e}", self.url),
-        })?;
-        let tcp = match socket.get_ref() {
-            MaybeTlsStream::Plain(s) => s,
-            MaybeTlsStream::Rustls(s) => s.get_ref(),
-            _ => return Ok(socket),
-        };
-        tcp.set_read_timeout(Some(TIMEOUT))
-            .map_err(|e| e.to_string())?;
-        Ok(socket)
     }
 
     /// Ask the hub, opening the link when it is not open, and once more when
@@ -114,23 +216,13 @@ impl RemoteMemory {
         let mut socket = self.socket.lock().unwrap_or_else(|e| e.into_inner());
         for attempt in 0..2 {
             if socket.is_none() {
-                *socket = Some(self.connect()?);
+                *socket = Some(Connection::open(&self.url, &self.token)?);
             }
-            let ws = socket.as_mut().expect("just opened");
-            match exchange(
-                ws,
-                self.next.fetch_add(1, Ordering::Relaxed),
-                method,
-                &params,
-            ) {
-                Ok(reply) => {
-                    return match (reply.result, reply.error) {
-                        (_, Some(e)) => Err(e),
-                        (Some(v), None) => Ok(v),
-                        (None, None) => Err(format!("the hub answered `{method}` with nothing")),
-                    };
-                }
-                Err(e) => {
+            let link = socket.as_mut().expect("just opened");
+            match link.call(method, params.clone()) {
+                Ok(v) => return Ok(v),
+                Err(Failure::Hub(e)) => return Err(e),
+                Err(Failure::Broken(e)) => {
                     *socket = None;
                     if attempt == 1 {
                         return Err(format!("the link to {} broke: {e}", self.url));
@@ -150,27 +242,22 @@ impl RemoteMemory {
     }
 }
 
-/// Send one request and read its reply, skipping events and pings.
-fn exchange(ws: &mut Socket, id: u64, method: &str, params: &Value) -> Result<Reply, String> {
-    let req = Request {
-        id,
-        method: method.into(),
-        params: params.clone(),
-    };
-    let json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
-    ws.send(Message::text(json)).map_err(|e| e.to_string())?;
-    loop {
-        match ws.read().map_err(|e| e.to_string())? {
-            Message::Text(t) => {
-                if let Ok(reply) = serde_json::from_str::<Reply>(&t)
-                    && reply.id == id
-                {
-                    return Ok(reply);
-                }
-            }
-            Message::Close(_) => return Err("the hub closed the link".into()),
-            _ => {}
-        }
+/// A `hello` answer, read.
+pub fn hello_from(v: &Value) -> Hello {
+    let text = |k: &str| v[k].as_str().unwrap_or("").to_string();
+    Hello {
+        user: text("user"),
+        role: text("role"),
+        permissions: v["permissions"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        instructions: text("instructions"),
     }
 }
 
@@ -296,11 +383,117 @@ mod tests {
         let m = RemoteMemory::new(&hub.url, &hub.ana, None);
         m.hello().unwrap();
         // Break it from this side: the next request opens a new one.
-        if let Some(ws) = m.socket.lock().unwrap().as_mut() {
-            let _ = ws.close(None);
-            let _ = ws.flush();
+        if let Some(link) = m.socket.lock().unwrap().as_mut() {
+            link.close();
         }
         let notes = m.call("recall", &json!({"query": "deploy"})).unwrap();
         assert!(notes.is_ok(), "{notes:?}");
+    }
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::*;
+    use crate::protocol::{SUBSCRIBE, TASK_ACCEPT, TaskRelay};
+    use crate::server::tests::start_with;
+
+    /// Events for ana, and what nodes told it.
+    #[derive(Default)]
+    struct FakeRelay {
+        events: Mutex<Vec<(String, Event)>>,
+        heard: Mutex<Vec<(String, String, Value)>>,
+    }
+
+    impl TaskRelay for FakeRelay {
+        fn pending(&self, user: &str) -> Vec<(String, Event)> {
+            if user == "ana" {
+                self.events.lock().unwrap().clone()
+            } else {
+                Vec::new()
+            }
+        }
+        fn handle(&self, user: &str, method: &str, params: &Value) -> Result<Value, String> {
+            self.heard
+                .lock()
+                .unwrap()
+                .push((user.into(), method.into(), params.clone()));
+            Ok(json!({ "ok": true }))
+        }
+    }
+
+    fn event(id: &str) -> (String, Event) {
+        (
+            id.into(),
+            Event {
+                event: "task".into(),
+                data: json!({ "delivery": id }),
+            },
+        )
+    }
+
+    /// The deliveries of the events that come within `wait`.
+    fn deliveries(link: &mut Connection, wait: Duration) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Some(e) = link.next_event(wait).unwrap() {
+            out.push(e.data["delivery"].as_str().unwrap().to_string());
+        }
+        out
+    }
+
+    #[test]
+    fn a_subscribed_node_gets_each_event_once_and_again_after_reconnecting() {
+        let relay: &'static FakeRelay = Box::leak(Box::default());
+        relay.events.lock().unwrap().push(event("d1"));
+        let hub = start_with(Some(relay));
+        let mut link = Connection::open(&hub.url, &hub.ana).unwrap();
+        assert!(
+            link.next_event(Duration::from_millis(1500))
+                .unwrap()
+                .is_none(),
+            "nothing before subscribing"
+        );
+        link.call(SUBSCRIBE, json!({})).unwrap();
+        assert_eq!(
+            deliveries(&mut link, Duration::from_millis(1500)),
+            vec!["d1"]
+        );
+        relay.events.lock().unwrap().push(event("d2"));
+        assert_eq!(
+            deliveries(&mut link, Duration::from_millis(1500)),
+            vec!["d2"],
+            "d1 is not sent twice on one connection"
+        );
+        link.call(TASK_ACCEPT, json!({"delivery": "d1", "task": "3"}))
+            .unwrap();
+        let heard = relay.heard.lock().unwrap().clone();
+        assert_eq!(
+            heard,
+            vec![(
+                "ana".to_string(),
+                TASK_ACCEPT.to_string(),
+                json!({"delivery": "d1", "task": "3"})
+            )]
+        );
+
+        let mut again = Connection::open(&hub.url, &hub.ana).unwrap();
+        again.call(SUBSCRIBE, json!({})).unwrap();
+        let mut got = deliveries(&mut again, Duration::from_millis(1500));
+        got.sort();
+        assert_eq!(got, vec!["d1", "d2"], "a new connection hears them again");
+    }
+
+    #[test]
+    fn a_token_without_the_tasks_permission_cannot_subscribe() {
+        let relay: &'static FakeRelay = Box::leak(Box::default());
+        let hub = start_with(Some(relay));
+        let mut link = Connection::open(&hub.url, &hub.rex).unwrap();
+        let err = link.call(SUBSCRIBE, json!({})).unwrap_err().message();
+        assert!(err.contains("do not allow `tasks`"), "{err}");
+        let err = link
+            .call(TASK_ACCEPT, json!({"delivery": "d1", "task": "3"}))
+            .unwrap_err()
+            .message();
+        assert!(err.contains("do not allow `tasks`"), "{err}");
+        assert!(relay.heard.lock().unwrap().is_empty());
     }
 }
