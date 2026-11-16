@@ -1357,7 +1357,7 @@ fn memory_for(args: &Args, dir: &Path) -> Result<Option<ensemble::knowledge::Mem
 /// The inbox of the hub `--hub` names, for a helper team with `agents`. None
 /// without a hub, or with one that has no `tasks` block.
 fn inbox_for(args: &Args, agents: Vec<String>) -> Result<Option<ensemble::inbox::Inbox>, String> {
-    // A hub server's inbox is not built yet; it would run on the server.
+    // A hub server's inbox runs on the server; a node takes its tasks.
     if hub_url(args).is_some() {
         return Ok(None);
     }

@@ -3,7 +3,9 @@
 //! The agent that calls Ensemble (Claude Code, OpenCode, ...) spawns
 //! `ensemble mcp` with the project as its working directory and sees the helper
 //! team as tools: `agents`, `delegate`, `submit` and the tools that follow
-//! tasks, `health`. While it runs, agents work through the project's tasks.
+//! tasks, `health`. With `--team` the session runs the team itself, and agents
+//! work through the folder's tasks while it runs; without, it is a bridge to a
+//! node, which serves each session with [`serve_session`].
 //!
 //! Ensemble is a subprocess the harness spawns, speaking JSON-RPC 2.0 as
 //! newline-delimited JSON on stdin/stdout. **Nothing but protocol goes to
@@ -55,7 +57,7 @@ pub struct Hub<'a> {
     pub distill: Option<&'a Memory>,
     pub inbox: Option<&'a Inbox>,
     /// This computer's part in a hub server's task inbox, when `--hub` is a
-    /// hub server and node.yaml maps projects to folders.
+    /// hub server: its tasks go to the folders a node served, by project.
     pub node: Option<&'a NodeInbox>,
 }
 /// Handle one JSON-RPC message.

@@ -11,8 +11,10 @@ phase ends in a green `cargo fmt --check`, `cargo clippy -- -D warnings` and
 > landed: the "organization" with a `teams:` map below is now a flat **helper
 > team**, `--org` is `--team`, and the `llm` adapter is `direct`. The phases
 > below are the record of how level 0 was built; read "organization" and "team"
-> in them as "helper team". What comes next is the build order in
-> `ARCHITECTURE.md`.
+> in them as "helper team". What came after (the hub, knowledge, nodes, the
+> async runtime) and what comes next is the build order in `ARCHITECTURE.md`,
+> whose part one describes how the system works today. This file is a record:
+> where it and `ARCHITECTURE.md` or `README.md` disagree, they are right.
 
 ## Product model (decided with the owner; this replaces the old per-project model)
 

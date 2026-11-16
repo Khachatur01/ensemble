@@ -1,6 +1,6 @@
 //! Where the helper team's tasks come from.
 //!
-//! The queue (`harness::queue`) asks a [`Tracker`] for tickets and tells it how
+//! The queue (`crate::queue`) asks a [`Tracker`] for tickets and tells it how
 //! they went; it does not know where they are kept. One implementation exists,
 //! [`LocalMarkdown`]: a folder of markdown files in the state directory, one
 //! directory per task. Others (GitLab, Jira, a project

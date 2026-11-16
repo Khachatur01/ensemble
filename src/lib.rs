@@ -1,24 +1,25 @@
 //! Ensemble: a helper team of coding agents behind one MCP server.
 //!
 //! ```text
-//!        Your agent (Claude Code, OpenCode, ...)
-//!                       |  MCP over stdio          (src/harness/)
-//!                       v
-//!                   Ensemble                      (src/router.rs)
-//!                  /        \
-//!                 v          v
-//!       claude -p ...      opencode run ...       (src/external/)
-//!                           |  provider from an LLM backend
-//!                           v
-//!                 OpenAI-compatible endpoint      (config: llm_backends)
+//!   your agent (Claude Code, OpenCode, Codex, ...)
+//!         |  MCP over stdio                 (ensemble-mcp, as `harness::mcp`)
+//!         v
+//!   ensemble mcp --team, or a node         (src/main.rs, src/daemon.rs)
+//!         |  the tools: delegate, submit, ... (ensemble-tasks)
+//!         v
+//!   the router: agent -> adapter, model    (ensemble-agents: router)
+//!         v
+//!   claude -p, opencode run, codex exec, builtin, direct, node
+//!                                          (ensemble-agents: external)
 //! ```
 //!
-//! Ensemble runs no agent loop itself. Each agent is a CLI the user already has
-//! (or, for a light `direct` agent, one chat request to an LLM backend),
-//! started headless in the project with the task; Ensemble reads what it does
-//! as it works and reports what it changed. The harness knows the router and
-//! nothing about the CLIs; the router knows agents, and the adapters in
-//! `external` know how each CLI is started and read.
+//! Each agent is a CLI the user already has, started headless in the project
+//! with the task, or `builtin` (a loop in this binary), `direct` (one chat
+//! request), or `node` (a run on another computer through a hub server).
+//! Ensemble reads what the agent does as it works and reports what it
+//! changed. The MCP session knows the router and nothing about the CLIs; the
+//! router knows agents, and the adapters in `external` know how each CLI is
+//! started and read. `ARCHITECTURE.md` is the map of the whole.
 
 pub mod harness;
 pub mod hooks;

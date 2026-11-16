@@ -1,6 +1,8 @@
 //! A hub server and the link to it. A team runs one hub on a server; each
-//! member's node opens one WebSocket to it, signs in with a token, and shares
-//! to and recalls from the organization's vault there.
+//! member's node opens WebSockets to it, signed in with a token: to share to
+//! and recall from the organization's vault, to take the tasks the hub's inbox
+//! has for its account, and as a node, to run agents and serve models for
+//! others (`nodes`).
 //!
 //! The hub's users and their tokens are kept in `users`: state, not config.
 //! What node and hub say is in `protocol`; `server` is the hub's side, and

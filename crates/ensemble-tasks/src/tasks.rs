@@ -1,9 +1,10 @@
-//! Tasks as files: tickets the manager or a person writes, that agents work
-//! through while `ensemble mcp` runs.
+//! Tasks as files: tickets the calling agent, a person or an inbox writes,
+//! that agents work through while a worker runs for the folder (an
+//! `ensemble mcp --team` session, a node, or `ensemble serve`).
 //!
 //! A task is a directory under the state directory's `tasks/`, named by its id
-//! (`0007-add-retry`), holding two files that are meant to be committed, like
-//! a ticket and its resolution:
+//! (`0007-add-retry`), holding files a person can read, like a ticket and its
+//! resolution:
 //!
 //! - `task.md`: YAML front matter (`title`, `agent`, and optionally `context`,
 //!   `goal`, `constraints`, `files`, `done_when`, `after`, `gate`), then the
@@ -14,12 +15,12 @@
 //!
 //! An agent that cannot go on without a decision ends its reply with
 //! `NEEDS INPUT: <question>`. The question is added to `questions.md` beside
-//! the ticket (committed too), and the task waits until it is answered; then
+//! the ticket, and the task waits until it is answered; then
 //! it runs again with the questions and answers so far.
 //!
 //! What a run does while it runs (its activity log, whether it was
-//! interrupted) is not worth committing, and lives in `.ensemble/runs/<id>/`,
-//! which ignores itself.
+//! interrupted) lives in `runs/<id>/` beside `tasks/`, which ignores itself
+//! should the state directory be put in a repository.
 
 use serde::Deserialize;
 use serde_json::{Value, json};

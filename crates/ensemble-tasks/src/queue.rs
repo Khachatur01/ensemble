@@ -6,10 +6,11 @@
 //! Two things here avoid that:
 //!
 //! - A **task** is a ticket on disk ([`crate::tasks`]). The manager writes one
-//!   with `submit`, or a person writes one by hand. While the session runs, a
-//!   worker starts every task that has no result yet, oldest id first, as its
-//!   agent's slots allow, and writes `result.md` when it ends. A task the
-//!   session's end interrupts has no result, so it runs again next session.
+//!   with `submit`, or a person or an inbox writes one. While the folder's
+//!   worker runs ([`Queue::work`], in a session, a node or `ensemble serve`), it
+//!   starts every task that has no result yet, oldest id first, as its agent's
+//!   slots allow, and writes `result.md` when it ends. A task the worker's end
+//!   interrupts has no result, so it runs again next time.
 //! - A **background delegation** (`delegate` with `background`) is a one-off:
 //!   it answers at once with an id (`adhoc-N`), and what it did is kept in
 //!   memory and in the git-ignored `runs/` only.

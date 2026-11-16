@@ -1,6 +1,6 @@
 //! The tools an agent calls to use the ensemble: delegate, submit and follow
-//! tasks, list agents, check health. The schemas and the execution live here; `mcp.rs` wraps them in
-//! its JSON-RPC envelope (`inputSchema`).
+//! tasks, list agents, check health. The schemas and the execution live here;
+//! `ensemble-mcp` wraps them in its JSON-RPC envelope (`inputSchema`).
 //!
 //! No tool takes a backend or a model. The caller names an *agent* and Ensemble
 //! decides what runs it — that is the whole point of the indirection, and a

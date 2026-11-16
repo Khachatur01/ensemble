@@ -14,7 +14,7 @@ own tasks. Nothing of Ensemble lives in your projects.
 Ensemble mostly runs no agent loop of its own. It starts the agent's CLI
 headless in the project with the task, reads what it does as it works, and
 returns the answer with what it changed. When you would rather install no CLI,
-the `builtin` adapter is a loop in Ensemble itself. Five adapters ship:
+the `builtin` adapter is a loop in Ensemble itself. Six adapters ship:
 
 - **`claude-code`**, the Claude Code CLI, on your own subscription, with the
   tools you allow it.
@@ -28,6 +28,9 @@ the `builtin` adapter is a loop in Ensemble itself. Five adapters ship:
   nothing installed.
 - **`direct`**, a light agent: one chat request straight to a model server of
   yours, with no CLI and no tools, for cheap work that needs no files.
+- **`node`**, an agent that a node of a hub server offers: the task and your
+  files go to another computer, its owner's agent works on them, and the
+  changes come back.
 
 A team can mix them, and your agent delegates to any of them the same way.
 
@@ -35,19 +38,42 @@ With a hub (`--hub`), Ensemble also keeps your knowledge: what your agent
 shares when you ask becomes notes in a git vault, and later work recalls them.
 See [Knowledge](#knowledge).
 
-```
-   Your agent (Claude Code, OpenCode, ...)
-        |  MCP over stdio, project as cwd
+## How it works
+
+```text
+  your agent (Claude Code, OpenCode, Codex, ...)
+        |  MCP over stdio, in the folder you work in
         v
-     Ensemble                                   src/router.rs
-        |  agents, by adapter type
-        +-----------------------+
-        v                       v
-     claude-code: claude -p   opencode: opencode run      src/external/
-                                |  provider made from an LLM backend
-                                v
-                              your model server (llm_backends)
+  ensemble mcp --team <dir>        or   ensemble mcp  --->  ensemble node serve
+  (the session runs the team)           (a bridge)          (a long-running node)
+        |
+        v
+  the helper team (config.yaml): an agent -> its adapter -> a model
+        |
+        +--> claude -p / opencode run / codex exec   agent CLIs, headless
+        +--> builtin                                 a loop in Ensemble
+        +--> direct                                  one chat request
+        +--> node                                    a run on another computer
 ```
+
+- **Your agent sees the helper team as tools.** It calls `delegate` and gets
+  the work back, or `submit`s a task and follows it with `status` and `wait`.
+  It never names a model: the config decides what runs each agent.
+- **A session or a node runs the work.** `ensemble mcp --team <dir>` runs the
+  team inside the session your agent started, so its tasks stop with the
+  session. A **node** (`ensemble node serve`) is a process you keep running
+  that holds the team for every folder; `ensemble mcp` with no `--team` is a
+  bridge to it, and tasks go on after the session ends.
+- **Work is kept outside your projects**, in a per-user state directory: tasks
+  as markdown tickets, run logs, git worktrees, usage and run records.
+- **A hub adds the people layer.** Embedded (`--hub <dir>`), it keeps your
+  knowledge vault and turns tracker issues into tasks. On a server
+  (`ensemble hub serve`), it does that for a team, with accounts and tokens,
+  and connects nodes, which can lend agent runs and models to each other.
+
+[ARCHITECTURE.md](ARCHITECTURE.md) is the full map: the processes, the crates,
+where everything is kept, and the life of a delegation, a task, a share, an
+issue and a run on a node.
 
 ## Quick start
 
@@ -543,7 +569,8 @@ refused.
 
 ### What a delegation reports
 
-Both adapters read their CLI's JSON events as it works. A delegation's result
+The CLI adapters read their CLI's JSON events as it works, and `builtin` its
+loop's steps. A delegation's result
 ends with how many steps and tool calls the agent used, every file it added,
 modified or deleted, and the shell commands it ran:
 
@@ -605,11 +632,13 @@ tool call after about a minute, whatever progress notifications arrive). On a
 slow machine every delegation to a local model can hit that. Two ways around
 it both answer at once:
 
-- **`submit`** writes a **task**: a ticket in the state directory, `tasks/<id>/task.md`. Ids are numbered across the folder, so an id names one task. A ticket from before version 3 that names its agent as `team/agent` is read as `agent`. While `ensemble mcp` runs, agents work through the
-  tasks without a result, oldest id first, each agent at most
-  `max_concurrent` at a time, and write `result.md` beside the ticket when one
-  ends. You can write a `task.md` by hand too; it is picked up within a few
-  seconds.
+- **`submit`** writes a **task**: a ticket in the state directory, `tasks/<id>/task.md`. Ids are numbered across the folder, so an id names one task. A ticket from
+  before version 3 that names its agent as `team/agent` is read as `agent`.
+  While a worker runs for the folder (an `ensemble mcp --team` session, your
+  node, or `ensemble serve`), agents work through the tasks without a result,
+  oldest id first, each agent at most `max_concurrent` at a time, and write
+  `result.md` beside the ticket when one ends. You can write a `task.md` by
+  hand too; it is picked up within a few seconds.
 - **`delegate` with `background: true`** is a one-off: it returns an id such as
   `adhoc-3` and writes no ticket.
 
@@ -630,9 +659,9 @@ Then, for either:
 You can do the same from the terminal, with no agent in between: `ensemble
 tasks` and `ensemble task <id>` read the state directory and show what
 `status` and `wait` would, `ensemble submit` writes a ticket and `ensemble
-answer` answers a question. They start no worker: a running `ensemble mcp` for
-the same working folder runs the tasks, and the folder is the current directory
-or `--dir`.
+answer` answers a question. They start no worker: whatever worker runs for
+the same working folder runs the tasks, and the folder is the current
+directory or `--dir`.
 
 A task looks like this. Only `title` and `agent` are required; `submit` takes
 the same fields:
@@ -787,9 +816,11 @@ and `systemctl --user enable --now ensemble`. On macOS, a launchd agent
 </dict></plist>
 ```
 
-When the caller closes the pipe of an `ensemble mcp`, running tasks and background delegations are
-stopped. A task stopped that way gets no result, so it runs again in the next
-session; tasks that had not started stay queued. Tasks of a `shared` agent share the
+When the caller closes the pipe of an `ensemble mcp --team`, running tasks and
+background delegations are stopped. A task stopped that way gets no result, so
+it runs again in the next session; tasks that had not started stay queued.
+Through a node, the session's end stops nothing: the node's worker for the
+folder goes on. Tasks of a `shared` agent share the
 project like any other parallel delegations, so give two of them that change
 the same files to an agent with `max_concurrent: 1`, or `isolation: worktree`. A blocking
 `delegate` takes a slot of its agent too, waiting for one if needed; raising
@@ -953,8 +984,9 @@ is refused, so the agent shares again without it: the vault keeps everything it
 is given.
 
 **Only Ensemble writes notes.** Each share is kept as it arrived, and the
-pipeline turns it into notes in the background, while `ensemble mcp` or
-`ensemble serve` runs, or now with `ensemble knowledge distill`:
+pipeline turns it into notes in the background, while `ensemble mcp`,
+`ensemble serve` or a node runs with that hub, or now with
+`ensemble knowledge distill`:
 
 1. One chat request extracts typed items (decision, fact, how-to, lesson,
    commitment, preference, ownership); chatter gives none and is skipped.
@@ -1067,9 +1099,9 @@ status: open
 After logging in, it redirects to /home instead of back to where you were.
 ```
 
-What the inbox does, every `poll_seconds`, while `ensemble mcp` or
-`ensemble serve` runs (`ensemble inbox --once --team <dir>` does one pass by
-hand):
+What the inbox does, every `poll_seconds`, while `ensemble mcp`,
+`ensemble serve` or a node runs with that hub (`ensemble inbox --once --team
+<dir>` does one pass by hand):
 
 - **An open issue becomes a task** in the folder its `project` maps to: for
   the agent a second label `ensemble:<agent>` names, or else in the backlog, for
@@ -1086,7 +1118,8 @@ hand):
 Ensemble changes only an issue's `status:` line and appends comments
 (`## Comment by ensemble at <time>`); everything else in the file stays as you
 wrote it. The task runs when a worker runs for its folder: an `ensemble mcp`
-session opened there, or `ensemble serve --dir <folder>`. `ensemble inbox --hub
+session opened there, a node that served it, or `ensemble serve --dir
+<folder>`. `ensemble inbox --hub
 <dir>` lists your labelled issues, where each stands and the task it became.
 
 **For a team, on the hub server.** A hub server's `tasks` block names only the
@@ -1389,8 +1422,10 @@ This puts `ensemble` in `~/.cargo/bin`, which must be on `PATH`. Run the same
 command again to update. Ensemble is not published on crates.io.
 
 Besides Ensemble, you need the CLIs of the adapter types your team uses:
-`claude` for `claude-code`, `opencode` for `opencode`, `codex` for `codex`. There is no runtime
-service, no daemon and no port.
+`claude` for `claude-code`, `opencode` for `opencode`, `codex` for `codex`.
+Nothing runs in the background unless you start it: a node
+(`ensemble node serve`) is optional and listens only on a socket of yours, and
+only a hub server opens a port.
 
 ## Usage
 
@@ -1448,6 +1483,7 @@ $ ensemble team trust <url>#<commit>   # read what a remote helper team runs, an
 $ ensemble team update <url>#<commit>  # what changed since, and the new pin
 $ ensemble schema                  # print the JSON Schema for config.yaml
 $ ensemble mcp --team <dir>        # serve the helper team over stdio
+$ ensemble mcp                     # no --team: a session of your running node
 ```
 
 `run` prints the answer on stdout and the provenance on stderr, so it pipes
@@ -1457,23 +1493,16 @@ state directory), `--context <text>` (for `run`).
 
 ## How it fits together
 
-A Cargo workspace. Each crate depends only on the ones above it in this table
-(`tests/workspace.rs` checks it), so the parts still to come, such as the hub
-server, are added as crates on top.
-
-| crate | |
-| --- | --- |
-| `ensemble-core` | the shared error type (`port.rs`), the per-user state and cache directories (`state.rs`), the working folder, a `repo` inside it and what a run changed (`workspace.rs`), and the record of every run with the sums `ensemble stats` prints (`records.rs`), the one-worker-per-directory lock (`lock.rs`), dates in UTC (`time.rs`), the files a run on a node carries there and back (`snapshot.rs`), the async runtime and the bridges to code that blocks (`runtime.rs`) |
-| `ensemble-config` | the helper team's `config.yaml`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), versions 1 and 2 to 3 (`migrate.rs`), and adding or removing an agent as text, comments kept (`edit.rs`); the hub's `hub.yaml` (`hub.rs`); a node's `node.yaml` (`node.rs`) |
-| `ensemble-backends` | one chat request to a model server in its own format (`chat.rs`), asking it which models it serves, for `health` (`models.rs`), choosing the first usable model of a `try` list (`resolve.rs`), and a stand-in model server for tests (`testing.rs`) |
-| `ensemble-knowledge` | the hub's knowledge: the vault of shares and notes, a git repository (`vault.rs`), the secret check a share passes first (`secrets.rs`), the pipeline that turns shares into notes (`pipeline.rs`), finding notes by their words (`search.rs`), and the `share` and `recall` tools and the background worker (`lib.rs`) |
-| `ensemble-link` | a hub server's users, sign-ups and their tokens, kept as hashes (`users.rs`), the REST API (`api.rs`) over a little HTTP reader (`http.rs`), what a node and the hub say over their WebSocket (`protocol.rs`), the hub's side, a task per connection (`server.rs`), the connected nodes and the runs and model calls between them, with `/nodes/v1/` (`nodes.rs`), and the node's: a hub server's knowledge over the link (`client.rs`) and the token file (`tokens.rs`) |
-| `ensemble-agents` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess on tokio, its JSON events read as it goes), the `builtin` adapter (harness-rs's loop), the `direct` adapter, the `node` adapter that runs an agent a node offers, and gates (`external/`); a git worktree and branch per task (`worktree.rs`); agents to adapters, slots, budgets and `health` (`router.rs`) |
-| `ensemble-tasks` | tasks as files (`tasks.rs`); the `Tracker` trait and `LocalMarkdown`, its one implementation (`tracker.rs`); the worker that runs tasks and background delegations within each agent's slots (`queue.rs`); the tools your agent calls (`delegation.rs`); `review`, `diff` and `merge` of a worktree task's branch (`review.rs`) |
-| `ensemble-inbox` | the task inbox: what it needs from a tracker (`tracker.rs`), a folder of markdown issues, the first tracker (`local_markdown.rs`), making an issue into a task and saying what it reports (`work.rs`), the embedded hub's inbox (`bridge.rs`), a hub server's (`relay.rs`), and a member's computer's part in it (`node.rs`) |
-| `ensemble-node` | a node: `ensemble node serve`, running the agents and serving the models it offers to whom it works for |
-| `ensemble-mcp` | the MCP server over stdio: the loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`); and `ensemble serve` (`serve.rs`) |
-| `ensemble` (the root) | the binary (`src/main.rs`); a node, the process that serves sessions from any folder, and the bridge `ensemble mcp` is to it (`src/daemon.rs`); `setup`, `connect` and `doctor` (`src/setup.rs`); session hooks for Claude Code and Codex (`src/hooks.rs`); remote helper teams: parsing, pinning, the cache, trust (`src/remote.rs`) |
+A Cargo workspace of eleven crates, each depending only on the ones before it
+(`tests/workspace.rs` checks it): `ensemble-core` (shared types, state,
+runtime), `ensemble-config` (`config.yaml`, `hub.yaml`, `node.yaml`),
+`ensemble-backends` (model servers), `ensemble-knowledge` (the vault and its
+pipeline), `ensemble-link` (the hub server and the link to it),
+`ensemble-agents` (the adapters and the router), `ensemble-tasks` (tasks, the
+queue, the MCP tools), `ensemble-inbox` (issues into tasks), `ensemble-node`
+(a node's runs and models for others), `ensemble-mcp` (MCP over stdio), and
+the root crate, the binary. [ARCHITECTURE.md](ARCHITECTURE.md) says what each
+file does and how the pieces work together at run time.
 
 `ensemble.schema.json`, at the root, is the JSON Schema for `config.yaml`, and
 `hub.schema.json` and `node.schema.json` the ones for `hub.yaml` and
@@ -1512,6 +1541,7 @@ scripts stand in for the CLIs.
 | `crates/ensemble-knowledge/` | shares kept as they arrived, notes and the log, commits by the lock holder, the secret check; the pipeline against a stub model: new notes, merges, chatter skipped, unusable answers to review, waiting for a model, rebuild |
 | `crates/ensemble-link/` | sign-up, approval and the REST API's codes, tokens kept as hashes and revoked at once, roles checked per request, shares under the signed-in name, a reader offered only `recall`, the token file 0600, the link opened again when it breaks; runs sent to a node that may be used and offers the agent, each side told when the other goes away, model calls streamed from a node |
 | `crates/ensemble-inbox/` | markdown issues read and written with only the status line changed; a hub server's deliveries: matched by tracker name, accepted once, refused, asked and answered, reported; issues to tasks, questions and answers through comments, results posted once, one inbox per hub |
+| `crates/ensemble-core/` | the state directories and their hashes, the worker lock, run records, a snapshot of a folder and its changes written back |
 | `crates/ensemble-tasks/` | ticket files: reading, ids, results written once, run logs; review and merge |
 | `crates/ensemble-mcp/src/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session, notes recalled for agents with `recall` |
 | `tests/workspace.rs` | the crates depend on each other in one direction only |
@@ -1543,10 +1573,11 @@ scripts stand in for the CLIs.
   `ensemble mcp`, so tasks stop with the calling agent's session; a node, or
   `ensemble serve`, is a worker that goes on. One worker runs a folder's tasks at
   a time.
-- **The working folder is fixed when the server starts.** The working
-  directory of the process (or `--dir`). A call can work in a folder inside it
-  with `repo`, but not outside.
-- **A hub server shares knowledge and hands out tasks.** A chat API, a web UI
+- **A session's working folder is fixed.** With `--team`, it is the working
+  directory of the process (or `--dir`); through a node, the folder the bridge
+  was started in. A call can work in a folder inside it with `repo`, but not
+  outside.
+- **A hub server shares knowledge, hands out tasks and connects nodes.** A chat API, a web UI
   and single sign-on are not built. People sign up through the REST API
   and wait for an admin; there is no password reset by mail, and no second
   factor. The API sends no CORS headers, so a UI is served from the hub's own
