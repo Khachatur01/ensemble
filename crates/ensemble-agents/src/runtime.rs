@@ -35,3 +35,16 @@ pub fn shared() -> &'static tokio::runtime::Runtime {
             .expect("the async runtime starts")
     })
 }
+
+/// Run `f`, which blocks, from async code without holding up the runtime's
+/// other tasks: they move to other threads meanwhile. What the calling task
+/// runs alongside `f` waits for it, so `f` is something short, such as a
+/// file, a git command or one HTTP request.
+pub fn blocking<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
+}

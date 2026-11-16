@@ -372,7 +372,9 @@ dependencies = [
  "ensemble-inbox",
  "ensemble-knowledge",
  "ensemble-tasks",
+ "futures-util",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -394,9 +396,11 @@ dependencies = [
  "ensemble-agents",
  "ensemble-config",
  "ensemble-core",
+ "futures-util",
  "serde",
  "serde_json",
  "serde_norway",
+ "tokio",
 ]
 
 [[package]]

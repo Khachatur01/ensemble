@@ -1302,8 +1302,6 @@ fn cmd_mcp(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
     let agents: Vec<String> = config.agent_names().into_iter().map(String::from).collect();
     let inbox = inbox_for(args, agents)?;
     let ensemble = ensemble_for(config, dir, args);
-    let stdin = std::io::stdin();
-    // Not locked: delegations reply from their own threads.
     mcp::serve_with(
         &ensemble,
         mcp::Hub {
@@ -1312,8 +1310,8 @@ fn cmd_mcp(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
             inbox: inbox.as_ref(),
             node: None,
         },
-        stdin.lock(),
-        std::io::stdout(),
+        tokio::io::BufReader::new(tokio::io::stdin()),
+        tokio::io::stdout(),
     )
     .map_err(|e| format!("mcp: {e}"))?;
     Ok(ExitCode::SUCCESS)

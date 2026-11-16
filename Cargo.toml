@@ -33,6 +33,9 @@ ring = "0.17"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "net", "signal", "fs"] }
 tokio-util = "0.7"
 async-trait = "0.1"
+# Running many futures of one task at once, borrowing what the task holds:
+# the tool calls of a session, the runs of a queue.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # The `builtin` adapter: an agent loop, its tools and model clients, in this
 # binary, so an agent on an LLM backend needs no CLI installed. Pinned exactly:
 # it is young, and its API moves between releases.

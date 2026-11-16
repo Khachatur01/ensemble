@@ -557,7 +557,7 @@ Changed files are found by comparing the project before and after the run,
 when the agent has a tool that writes (`.git`, `target` and `node_modules` are
 not compared). `agents` marks each agent `[read-only]` or `[can change files]`.
 
-Each delegation runs on its own thread, so the caller can send several at
+Delegations run side by side, so the caller can send several at
 once. They share the project: two agents editing the same file will clash.
 When a delegation overlapped another, its result says some listed files may be
 the other run's changes. A cancel (`notifications/cancelled`) or `max_seconds`

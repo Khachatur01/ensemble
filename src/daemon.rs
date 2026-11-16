@@ -46,6 +46,8 @@ pub struct Daemon<'a> {
     team: Option<Config>,
     folders: Folders,
     open: Mutex<HashMap<PathBuf, Arc<Folder>>>,
+    /// The folders' workers, which stopping waits for.
+    workers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     say: &'a (dyn Fn(&str) + Sync),
 }
 
@@ -64,6 +66,7 @@ impl<'a> Daemon<'a> {
             team,
             folders: Folders::new(dir),
             open: Mutex::new(HashMap::new()),
+            workers: Mutex::new(Vec::new()),
             say,
         }
     }
@@ -95,18 +98,18 @@ impl<'a> Daemon<'a> {
             let Ok((stream, _)) = accepted else { continue };
             match self.hello(stream).await {
                 Ok((folder, stream)) => {
-                    // A session holds its thread while it runs; the folder
-                    // outlives it.
-                    tokio::task::spawn_blocking(move || {
-                        let input = std::io::BufReader::new(&stream);
+                    // The folder outlives the session.
+                    tokio::spawn(async move {
+                        let (input, output) = stream.into_split();
                         let _ = mcp::serve_session(
                             folder.ensemble,
                             folder.knowledge.map(Knowledge::access),
                             folder.queue,
-                            input,
-                            &stream,
+                            tokio::io::BufReader::new(input),
+                            output,
                             false,
-                        );
+                        )
+                        .await;
                     });
                 }
                 Err(e) => (self.say)(&format!("a session was refused: {e}")),
@@ -114,23 +117,22 @@ impl<'a> Daemon<'a> {
         }
         let _ = std::fs::remove_file(socket);
         (self.say)("stopping: running tasks are stopped and queued again");
-        let open: Vec<Arc<Folder>> = self.open.lock().unwrap().values().cloned().collect();
-        for folder in &open {
+        for folder in self.open.lock().unwrap().values() {
             folder.queue.close();
         }
-        let until = std::time::Instant::now() + STOP_GRACE;
-        while std::time::Instant::now() < until && open.iter().any(|f| f.queue.idle().is_none()) {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        let workers = std::mem::take(&mut *self.workers.lock().unwrap());
+        let stopped = async {
+            for worker in workers {
+                let _ = worker.await;
+            }
+        };
+        let _ = tokio::time::timeout(STOP_GRACE, stopped).await;
         Ok(())
     }
 
     /// Read a session's hello, `{"dir": "/abs/folder"}`, and answer it: the
     /// folder's worker, or why there is none.
-    async fn hello(
-        &self,
-        mut stream: UnixStream,
-    ) -> Result<(Arc<Folder>, std::os::unix::net::UnixStream), String> {
+    async fn hello(&self, mut stream: UnixStream) -> Result<(Arc<Folder>, UnixStream), String> {
         let line = read_line(&mut stream).await?;
         let answer = serde_json::from_str::<serde_json::Value>(&line)
             .map_err(|e| format!("the hello is not JSON: {e}"))
@@ -149,10 +151,7 @@ impl<'a> Daemon<'a> {
             .write_all(format!("{reply}\n").as_bytes())
             .await
             .map_err(|e| e.to_string())?;
-        let folder = answer?;
-        let stream = stream.into_std().map_err(|e| e.to_string())?;
-        stream.set_nonblocking(false).map_err(|e| e.to_string())?;
-        Ok((folder, stream))
+        Ok((answer?, stream))
     }
 
     /// The worker of `dir`, started the first time it is asked for.
@@ -186,21 +185,20 @@ impl<'a> Daemon<'a> {
         let queue: &'static Queue<'static> =
             Box::leak(Box::new(mcp::queue_for(ensemble, Some(store), memory)));
         // One worker per folder: when another process has it, sessions here
-        // only read and write its tasks.
-        match ensemble::lock::acquire(&state) {
-            Ok(lock) => {
-                std::thread::spawn(move || {
-                    let _lock = lock;
-                    queue.work(&|task| {
-                        std::thread::spawn(task);
-                    });
-                });
-            }
-            Err(pid) => (self.say)(&format!(
+        // only read and write its tasks, and run their background
+        // delegations.
+        let lock = ensemble::lock::acquire(&state);
+        if let Err(pid) = &lock {
+            (self.say)(&format!(
                 "{}: process {pid} runs this folder's tasks; sessions here only read and write them",
                 dir.display()
-            )),
+            ));
         }
+        let worker = tokio::spawn(async move {
+            let lock = lock.ok();
+            queue.work(lock.is_some()).await;
+        });
+        self.workers.lock().unwrap().push(worker);
         self.folders.remember(&dir)?;
         let folder = Arc::new(Folder {
             ensemble,

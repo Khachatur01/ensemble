@@ -3,8 +3,8 @@
 
 use crate::Hub;
 use ensemble_agents::router::Ensemble;
+use ensemble_agents::runtime;
 use ensemble_tasks::lock;
-use ensemble_tasks::queue::Task;
 use ensemble_tasks::tasks::Store;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -42,11 +42,6 @@ pub fn run(
     let hub_stop = &AtomicBool::new(false);
     std::thread::scope(|scope| {
         let queue = &queue;
-        scope.spawn(move || {
-            queue.work(&|task: Task<'_>| {
-                scope.spawn(task);
-            })
-        });
         if let Some(memory) = hub.distill {
             scope.spawn(move || memory.work(hub_stop, say));
         }
@@ -56,11 +51,12 @@ pub fn run(
         if let Some(node) = hub.node {
             scope.spawn(move || node.work(hub_stop, say));
         }
-        let mut idle = false;
-        let mut checked = std::time::Instant::now() - Duration::from_secs(60);
-        while !stop.load(Ordering::Relaxed) {
-            if checked.elapsed() >= Duration::from_secs(1) {
-                checked = std::time::Instant::now();
+        // Says when the worker runs out of work and when it has some again,
+        // and closes the queue when it is time to stop.
+        let watch = async {
+            let mut idle = false;
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            while !stop.load(Ordering::Relaxed) {
                 match queue.idle() {
                     Some(line) if !idle => {
                         idle = true;
@@ -75,11 +71,15 @@ pub fn run(
                     }
                     _ => {}
                 }
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    () = runtime::until_set(stop) => {}
+                }
             }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        say("stopping: running tasks are stopped and queued again");
-        queue.close();
+            say("stopping: running tasks are stopped and queued again");
+            queue.close();
+        };
+        runtime::block_on(async { tokio::join!(queue.work(true), watch) });
         hub_stop.store(true, Ordering::Relaxed);
     });
     Ok(())

@@ -198,7 +198,11 @@ Ensemble is async, on tokio. harness-rs is async, and so are a node that runs
 many agents and serves models at once, and the link. The switch goes from the
 agents outward: agent runs, CLI processes included, are async first; code that
 is not converted yet waits for them with `runtime::block_on`. (Decided
-2026-11-16; Ensemble was synchronous on purpose until then.)
+2026-11-16; Ensemble was synchronous on purpose until then.) A session's tool
+calls, and a queue's runs, are futures of one task each, so they borrow what
+the session holds instead of being `'static`; what still blocks there (a
+knowledge request, `health`, a git command) goes through `runtime::blocking`,
+and holds up the other futures of its task while it runs.
 
 An organization may later limit helper teams through policy, not structure:
 which backends its data may be sent to, gates its repositories require, budgets
@@ -436,9 +440,10 @@ in either process.
    node as the long-running MCP server on a socket, `ensemble mcp` without
    `--team` as a bridge to it, a worker per folder it served, `node.yaml`
    version 3 with `team` and without `projects`, the hub's tasks taken by the
-   node into the folder of the project's name. Not yet: the task queue, the
-   MCP session and the link on tokio, which still run on threads and wait
-   for agents with `runtime::block_on`.)
+   node into the folder of the project's name; the task queue and the MCP
+   session on tokio, a session's calls and a queue's runs side by side in
+   one task each. Not yet: the link on tokio, which still runs on threads
+   and waits for agents with `runtime::block_on`.)
 
 The link, as built: the node opens one WebSocket and signs in with
 `Authorization: Bearer <token>` during the upgrade (401 without a valid one).

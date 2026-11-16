@@ -6,9 +6,10 @@
 //! decides what runs it — that is the whole point of the indirection, and a
 //! `model` parameter would quietly undo it at the first opportunity.
 
-use super::queue::{Ask, Queue, Task};
+use super::queue::{Ask, Queue};
 use crate::tasks::question_in;
 use ensemble_agents::router::{Ensemble, RouteError};
+use ensemble_agents::runtime::blocking;
 use serde_json::{Value, json};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -328,17 +329,16 @@ impl ToolResult {
 /// is doing as it does it.
 /// Setting `cancel` stops a blocking delegation.
 ///
-/// A background delegation is registered in `queue` and handed to `spawn`,
-/// which runs it on a thread of the session so that this call can return at
-/// once. A blocking one waits for a slot of its agent first.
-pub fn call<'s>(
-    ensemble: &'s Ensemble,
+/// A background delegation is registered in `queue`, which runs it in
+/// [`Queue::work`], so that this call can return at once. A blocking one waits
+/// for a slot of its agent first.
+pub async fn call(
+    ensemble: &Ensemble,
     name: &str,
     args: &Value,
     progress: &(dyn Fn(&str) + Sync),
     cancel: &AtomicBool,
-    queue: &'s Queue<'s>,
-    spawn: &dyn Fn(Task<'s>),
+    queue: &Queue<'_>,
 ) -> ToolResult {
     match name {
         DELEGATE => {
@@ -426,20 +426,21 @@ pub fn call<'s>(
                     repo.as_deref(),
                     progress,
                     cancel,
-                );
+                )
+                .await;
             }
             if let Err(refused) = queue.spend(role) {
                 return ToolResult::err(format!("delegation refused: {refused}"));
             }
             if background {
-                let id = queue.start_adhoc(role, &prompt, context, repo, spawn);
+                let id = queue.start_adhoc(role, &prompt, context, repo);
                 return ToolResult::ok(format!(
                     "{id} started. `status` shows what it is doing; `wait` with task {id} \
                      returns its reply."
                 ));
             }
             let waiting = || progress(&format!("{role}: waiting for a free slot"));
-            let Some(_slot) = queue.slot(role, cancel, &waiting) else {
+            let Some(_slot) = queue.slot(role, cancel, &waiting).await else {
                 return ToolResult::err(format!(
                     "delegation cancelled while it waited for a free slot of '{role}'."
                 ));
@@ -452,7 +453,8 @@ pub fn call<'s>(
                 repo.as_deref(),
                 progress,
                 cancel,
-            );
+            )
+            .await;
             // An agent that stopped to ask is a question for the caller, with
             // somewhere to send the answer, not an answer that fell short.
             match (result.is_error, question_in(&result.text)) {
@@ -593,7 +595,7 @@ pub fn call<'s>(
                 .and_then(Value::as_u64)
                 .unwrap_or(DEFAULT_WAIT_SECONDS)
                 .clamp(1, MAX_WAIT_SECONDS);
-            queue.wait(id, Duration::from_secs(seconds))
+            queue.wait(id, Duration::from_secs(seconds)).await
         }
 
         CANCEL => match args.get("task").and_then(Value::as_str) {
@@ -618,9 +620,10 @@ pub fn call<'s>(
                 Err(e) => return ToolResult::err(format!("{REVIEW}: {e}")),
             };
             let store = crate::tasks::Store::new(&state);
-            match crate::review::find(&store, &workdir, id)
-                .and_then(|task| crate::review::review(&task))
-            {
+            match blocking(|| {
+                crate::review::find(&store, &workdir, id)
+                    .and_then(|task| crate::review::review(&task))
+            }) {
                 Ok(text) => ToolResult::ok(text),
                 Err(e) => ToolResult::err(format!("{REVIEW}: {e}")),
             }
@@ -672,7 +675,7 @@ pub fn call<'s>(
         HEALTH => {
             let mut lines = Vec::new();
             let mut any_bad = false;
-            for (backend, result) in ensemble.health() {
+            for (backend, result) in blocking(|| ensemble.health()) {
                 match result {
                     Ok(()) => lines.push(format!("{backend}: ok")),
                     Err(e) => {
@@ -719,7 +722,7 @@ fn repo_of(ensemble: &Ensemble, args: &Value) -> Result<Option<std::path::PathBu
 /// Delegate and turn the outcome into a tool result: the agent's work and a
 /// footer of what it did, or why it failed and whether another attempt could
 /// work. The agent works in `workdir`, or in the project without one.
-pub(super) fn run_delegation(
+pub(super) async fn run_delegation(
     ensemble: &Ensemble,
     role: &str,
     task: &str,
@@ -728,20 +731,18 @@ pub(super) fn run_delegation(
     progress: &(dyn Fn(&str) + Sync),
     cancel: &AtomicBool,
 ) -> ToolResult {
-    let outcome = ensemble_agents::runtime::block_on(async {
-        match workdir {
-            Some(dir) => {
-                ensemble
-                    .delegate_in(role, task, context, dir, progress, cancel)
-                    .await
-            }
-            None => {
-                ensemble
-                    .delegate_reporting(role, task, context, progress, cancel)
-                    .await
-            }
+    let outcome = match workdir {
+        Some(dir) => {
+            ensemble
+                .delegate_in(role, task, context, dir, progress, cancel)
+                .await
         }
-    });
+        None => {
+            ensemble
+                .delegate_reporting(role, task, context, progress, cancel)
+                .await
+        }
+    };
     match outcome {
         Ok(out) => ToolResult {
             text: format!("{}\n\n{}", out.text, agent_footer(role, &out.stats)),

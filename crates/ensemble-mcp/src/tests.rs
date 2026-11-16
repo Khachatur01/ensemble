@@ -554,22 +554,28 @@ fn a_malformed_line_is_a_parse_error_and_does_not_end_the_session() {
 /// Input that arrives line by line while the server runs, ending when the
 /// sender is dropped.
 struct Feed {
-    lines: std::sync::mpsc::Receiver<String>,
+    lines: tokio::sync::mpsc::UnboundedReceiver<String>,
     pending: Vec<u8>,
 }
 
-impl std::io::Read for Feed {
-    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+impl tokio::io::AsyncRead for Feed {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        out: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::task::Poll;
         if self.pending.is_empty() {
-            match self.lines.recv() {
-                Ok(line) => self.pending = line.into_bytes(),
-                Err(_) => return Ok(0),
+            match self.lines.poll_recv(cx) {
+                Poll::Ready(Some(line)) => self.pending = line.into_bytes(),
+                Poll::Ready(None) => return Poll::Ready(Ok(())),
+                Poll::Pending => return Poll::Pending,
             }
         }
-        let n = out.len().min(self.pending.len());
-        out[..n].copy_from_slice(&self.pending[..n]);
+        let n = out.remaining().min(self.pending.len());
+        out.put_slice(&self.pending[..n]);
         self.pending.drain(..n);
-        Ok(n)
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -577,13 +583,26 @@ impl std::io::Read for Feed {
 #[derive(Clone, Default)]
 struct Shared(Arc<Mutex<Vec<u8>>>);
 
-impl Write for Shared {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+impl tokio::io::AsyncWrite for Shared {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
         self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
+        std::task::Poll::Ready(Ok(buf.len()))
     }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
     }
 }
 
@@ -626,11 +645,11 @@ fn a_background_delegation_answers_at_once_and_is_followed_with_status_and_wait(
         emit(&step(vec![text("late answer")]))
     );
     let (e, _tmp) = team(&[("scout", "read", &body)]);
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let out = Shared::default();
     std::thread::scope(|s| {
         let server = s.spawn(|| {
-            let input = std::io::BufReader::new(Feed {
+            let input = tokio::io::BufReader::new(Feed {
                 lines: rx,
                 pending: Vec::new(),
             });
@@ -706,11 +725,11 @@ fn a_cancelled_background_job_is_reported_as_cancelled() {
         emit(&[json!({"type": "step_start", "part": {}})])
     );
     let (e, _tmp) = team(&[("scout", "read", &body)]);
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let out = Shared::default();
     std::thread::scope(|s| {
         let server = s.spawn(|| {
-            let input = std::io::BufReader::new(Feed {
+            let input = tokio::io::BufReader::new(Feed {
                 lines: rx,
                 pending: Vec::new(),
             });
@@ -777,12 +796,12 @@ fn session_with(
     hub: Hub<'_>,
     script: impl FnOnce(&mut dyn FnMut(&str, Value) -> String),
 ) {
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let out = Shared::default();
     std::thread::scope(|s| {
         let output = out.clone();
         let server = s.spawn(move || {
-            let input = std::io::BufReader::new(Feed {
+            let input = tokio::io::BufReader::new(Feed {
                 lines: rx,
                 pending: Vec::new(),
             });

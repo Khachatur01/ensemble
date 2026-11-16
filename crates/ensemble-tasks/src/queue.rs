@@ -30,16 +30,19 @@ use crate::tasks::{
 use crate::tracker::Tracker;
 use ensemble_agents::external::gate;
 use ensemble_agents::router::Ensemble;
+use ensemble_agents::runtime::blocking;
 use ensemble_agents::worktree;
 use ensemble_config::{Budget, Isolation};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
-
-/// Work to run on a thread of the session, so it may borrow the session's data.
-pub type Task<'s> = Box<dyn FnOnce() + Send + 's>;
+use tokio::sync::Notify;
+use tokio::sync::futures::Notified;
 
 /// Activity lines kept per run.
 const KEPT_LINES: usize = 8;
@@ -73,12 +76,27 @@ struct Ended {
     status: Status,
 }
 
+/// A background delegation, as `delegate` started it.
+struct Adhoc {
+    id: String,
+    agent: String,
+    task: String,
+    context: Option<String>,
+    repo: Option<PathBuf>,
+    cancel: Arc<AtomicBool>,
+}
+
+/// One run of [`Queue::work`]: a task or a background delegation.
+type Run<'q> = Pin<Box<dyn Future<Output = ()> + Send + 'q>>;
+
 #[derive(Default)]
 struct Inner {
     /// Set by `close`: the caller is gone, and nothing new starts.
     closed: bool,
     last_adhoc: u64,
     live: BTreeMap<String, Live>,
+    /// Background delegations started and not yet taken up by [`Queue::work`].
+    started: Vec<Adhoc>,
     /// Background delegations that ended in this session.
     ended: BTreeMap<String, Ended>,
     /// Slots in use, per agent.
@@ -142,13 +160,13 @@ pub struct Queue<'e> {
     inner: Mutex<Inner>,
     /// Signalled whenever something starts, ends, frees a slot or is
     /// submitted.
-    changed: Condvar,
+    changed: Notify,
 }
 
 /// One slot of an agent, given back when dropped.
 pub struct Slot<'q> {
     inner: &'q Mutex<Inner>,
-    changed: &'q Condvar,
+    changed: &'q Notify,
     agent: String,
 }
 
@@ -159,7 +177,7 @@ impl Drop for Slot<'_> {
             *n = n.saturating_sub(1);
         }
         drop(inner);
-        self.changed.notify_all();
+        self.changed.notify_waiters();
     }
 }
 
@@ -176,7 +194,7 @@ impl<'e> Queue<'e> {
                 usage,
                 ..Inner::default()
             }),
-            changed: Condvar::new(),
+            changed: Notify::new(),
         }
     }
 
@@ -209,7 +227,7 @@ impl<'e> Queue<'e> {
             return context;
         };
         let topic: String = topic.chars().take(MAX_TOPIC_CHARS).collect();
-        let notes = match recall(&topic, limits.max_chars as usize) {
+        let notes = match blocking(|| recall(&topic, limits.max_chars as usize)) {
             Ok(Some(notes)) => notes,
             Ok(None) => {
                 progress(&format!(
@@ -234,6 +252,14 @@ impl<'e> Queue<'e> {
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Resolves at the next change. Made before what it waits for is looked
+    /// at, so a change in between is not missed.
+    fn watch(&self) -> Pin<Box<Notified<'_>>> {
+        let mut changed = Box::pin(self.changed.notified());
+        changed.as_mut().enable();
+        changed
     }
 
     /// Keep a question that a delegation stopped to ask, and return the session
@@ -382,28 +408,30 @@ impl<'e> Queue<'e> {
     /// Wait for a slot of `agent`, calling `waiting` once if there is none
     /// free. `None` when `cancel` is set first. The session's end frees slots
     /// by stopping background work, so a blocking call still gets one.
-    pub fn slot(&self, agent: &str, cancel: &AtomicBool, waiting: &dyn Fn()) -> Option<Slot<'_>> {
+    pub async fn slot(
+        &self,
+        agent: &str,
+        cancel: &AtomicBool,
+        waiting: &(dyn Fn() + Sync),
+    ) -> Option<Slot<'_>> {
         let mut told = false;
-        let mut inner = self.lock();
         loop {
+            let changed = self.watch();
             if cancel.load(Ordering::Relaxed) {
                 return None;
             }
-            if let Some(slot) = self.take(&mut inner, agent) {
+            if let Some(slot) = self.take(&mut self.lock(), agent) {
                 return Some(slot);
             }
             if !told {
                 told = true;
-                drop(inner);
                 waiting();
-                inner = self.lock();
                 continue;
             }
-            inner = self
-                .changed
-                .wait_timeout(inner, SLOT_POLL)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
+            tokio::select! {
+                () = changed => {}
+                () = tokio::time::sleep(SLOT_POLL) => {}
+            }
         }
     }
 
@@ -432,94 +460,110 @@ impl<'e> Queue<'e> {
         }
     }
 
-    /// Start a background delegation on a thread `spawn` makes, and return
-    /// its id at once.
-    pub fn start_adhoc<'s>(
-        &'s self,
+    /// Start a background delegation, and return its id at once. It runs in
+    /// [`Self::work`].
+    pub fn start_adhoc(
+        &self,
         agent: &str,
         task: &str,
         context: Option<&str>,
-        repo: Option<std::path::PathBuf>,
-        spawn: &dyn Fn(Task<'s>),
-    ) -> String
-    where
-        'e: 's,
-    {
-        let (id, cancel) = {
-            let mut inner = self.lock();
-            inner.last_adhoc += 1;
-            let id = format!("adhoc-{}", inner.last_adhoc);
-            // One registered after the caller left starts out cancelled.
-            let cancel = Arc::new(AtomicBool::new(inner.closed));
-            inner
-                .live
-                .insert(id.clone(), Self::live(agent, task, cancel.clone(), true));
-            (id, cancel)
-        };
-        let (run, agent, task, context) = (
-            id.clone(),
-            agent.to_string(),
-            task.to_string(),
-            context.map(str::to_string),
-        );
-        spawn(Box::new(move || {
-            let result = match self.slot(&agent, &cancel, &|| {
-                self.note(&run, &format!("{agent}: waiting for a free slot"))
-            }) {
-                Some(_slot) => {
-                    if let Some(live) = self.lock().live.get_mut(&run) {
-                        live.waiting = false;
-                    }
-                    run_delegation(
-                        self.ensemble,
-                        &agent,
-                        &task,
-                        context.as_deref(),
-                        repo.as_deref(),
-                        &|line| self.note(&run, line),
-                        &cancel,
-                    )
-                }
-                None => ToolResult::err("it was cancelled before it started."),
-            };
-            let mut inner = self.lock();
-            if let Some(live) = inner.live.remove(&run) {
-                let status = if live.cancel.load(Ordering::Relaxed) {
-                    Status::Cancelled
-                } else if result.is_error {
-                    Status::Failed
-                } else {
-                    Status::Done
-                };
-                inner.ended.insert(
-                    run,
-                    Ended {
-                        agent: live.agent,
-                        title: live.title,
-                        seconds: live.started.elapsed().as_secs(),
-                        text: result.text,
-                        status,
-                    },
-                );
-            }
-            drop(inner);
-            self.changed.notify_all();
-        }));
+        repo: Option<PathBuf>,
+    ) -> String {
+        let mut inner = self.lock();
+        inner.last_adhoc += 1;
+        let id = format!("adhoc-{}", inner.last_adhoc);
+        // One registered after the caller left starts out cancelled.
+        let cancel = Arc::new(AtomicBool::new(inner.closed));
+        inner
+            .live
+            .insert(id.clone(), Self::live(agent, task, cancel.clone(), true));
+        inner.started.push(Adhoc {
+            id: id.clone(),
+            agent: agent.to_string(),
+            task: task.to_string(),
+            context: context.map(str::to_string),
+            repo,
+            cancel,
+        });
+        drop(inner);
+        self.changed.notify_waiters();
         id
     }
 
-    /// Run tasks until the session ends: every task without a result, oldest
-    /// id first, as its agent's slots allow. Tasks are looked for again every
-    /// few seconds, and at once when one is submitted or a run ends.
-    pub fn work<'s>(&'s self, spawn: &dyn Fn(Task<'s>))
-    where
-        'e: 's,
-    {
-        let Some(store) = &self.store else {
-            return;
+    async fn run_adhoc(&self, adhoc: Adhoc) {
+        let Adhoc {
+            id,
+            agent,
+            task,
+            context,
+            repo,
+            cancel,
+        } = adhoc;
+        let waiting = || self.note(&id, &format!("{agent}: waiting for a free slot"));
+        let result = match self.slot(&agent, &cancel, &waiting).await {
+            Some(_slot) => {
+                if let Some(live) = self.lock().live.get_mut(&id) {
+                    live.waiting = false;
+                }
+                run_delegation(
+                    self.ensemble,
+                    &agent,
+                    &task,
+                    context.as_deref(),
+                    repo.as_deref(),
+                    &|line| self.note(&id, line),
+                    &cancel,
+                )
+                .await
+            }
+            None => ToolResult::err("it was cancelled before it started."),
         };
+        let mut inner = self.lock();
+        if let Some(live) = inner.live.remove(&id) {
+            let status = if live.cancel.load(Ordering::Relaxed) {
+                Status::Cancelled
+            } else if result.is_error {
+                Status::Failed
+            } else {
+                Status::Done
+            };
+            inner.ended.insert(
+                id,
+                Ended {
+                    agent: live.agent,
+                    title: live.title,
+                    seconds: live.started.elapsed().as_secs(),
+                    text: result.text,
+                    status,
+                },
+            );
+        }
+        drop(inner);
+        self.changed.notify_waiters();
+    }
+
+    /// Run what this queue is given until it is closed and nothing it runs
+    /// is left: background delegations, and with `tasks`, every task without
+    /// a result, oldest id first, as its agent's slots allow. Tasks are
+    /// looked for again every few seconds, and at once when one is submitted
+    /// or a run ends. Only the one process that holds the folder's lock runs
+    /// its tasks.
+    pub async fn work(&self, tasks: bool) {
+        self.drive(tasks, false).await;
+    }
+
+    /// Run the background delegations started so far to their end, for a
+    /// request handled with no session around it.
+    pub async fn finish(&self) {
+        self.drive(false, true).await;
+    }
+
+    async fn drive(&self, tasks: bool, until_idle: bool) {
+        let mut runs: FuturesUnordered<Run<'_>> = FuturesUnordered::new();
         loop {
-            let entries = store.scan();
+            let changed = self.watch();
+            let store = self.store.as_ref().filter(|_| tasks);
+            let entries = store.map(Store::scan).unwrap_or_default();
             // Agents whose tasks wait for a backend (`when_none: wait` and no
             // usable model), found before the lock is taken: asking a backend
             // can take seconds. Each backend is asked at most once a minute.
@@ -529,63 +573,76 @@ impl<'e> Queue<'e> {
                     && !t.agent.is_empty()
                     && !blocked.contains_key(t.agent.as_str())
                 {
-                    blocked.insert(&t.agent, self.ensemble.backend_ready(&t.agent).err());
+                    let ready = blocking(|| self.ensemble.backend_ready(&t.agent));
+                    blocked.insert(&t.agent, ready.err());
                 }
             }
-            let mut inner = self.lock();
-            if inner.closed {
-                return;
-            }
-            for entry in &entries {
-                let Entry::Task(ticket, None) = entry else {
-                    continue;
-                };
-                // Ended since the scan: a result is written before its run
-                // leaves `live`, under this lock.
-                if inner.live.contains_key(&ticket.id)
-                    || ticket.agent.is_empty()
-                    || store.outcome(&ticket.id).is_some()
-                    || !waiting_for(ticket, &entries).is_empty()
-                    || store.open_question(&ticket.id).is_some()
-                {
-                    continue;
+            {
+                let mut inner = self.lock();
+                for adhoc in inner.started.drain(..) {
+                    runs.push(Box::pin(self.run_adhoc(adhoc)));
                 }
-                if let Some(Some(why)) = blocked.get(ticket.agent.as_str()) {
-                    if inner.backend_waits.insert(ticket.id.clone()) {
-                        store.log(&ticket.id, &format!("waiting for a backend: {why}"));
+                if runs.is_empty() && (inner.closed || until_idle) {
+                    return;
+                }
+                let open = !inner.closed;
+                for entry in entries.iter().filter(|_| open) {
+                    let (Some(store), Entry::Task(ticket, None)) = (store, entry) else {
+                        continue;
+                    };
+                    // Ended since the scan: a result is written before its run
+                    // leaves `live`, under this lock.
+                    if inner.live.contains_key(&ticket.id)
+                        || ticket.agent.is_empty()
+                        || store.outcome(&ticket.id).is_some()
+                        || !waiting_for(ticket, &entries).is_empty()
+                        || store.open_question(&ticket.id).is_some()
+                    {
+                        continue;
                     }
-                    continue;
+                    if let Some(Some(why)) = blocked.get(ticket.agent.as_str()) {
+                        if inner.backend_waits.insert(ticket.id.clone()) {
+                            store.log(&ticket.id, &format!("waiting for a backend: {why}"));
+                        }
+                        continue;
+                    }
+                    let ticket = ticket.clone();
+                    if self.over_budget(&inner, &ticket.agent).is_some() {
+                        continue;
+                    }
+                    let Some(slot) = self.take(&mut inner, &ticket.agent) else {
+                        continue;
+                    };
+                    // Cannot fail: the budget was checked under this same lock.
+                    let _ = self.spend_locked(&mut inner, &ticket.agent);
+                    inner.backend_waits.remove(&ticket.id);
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    inner.live.insert(
+                        ticket.id.clone(),
+                        Self::live(&ticket.agent, &ticket.title, cancel.clone(), false),
+                    );
+                    // The configured tracker keeps the tasks.
+                    let tracker = crate::tracker::for_config(self.ensemble.config().tracker, store);
+                    runs.push(Box::pin(async move {
+                        self.run_ticket(tracker, *ticket, slot, &cancel).await
+                    }));
                 }
-                let ticket = ticket.clone();
-                if self.over_budget(&inner, &ticket.agent).is_some() {
-                    continue;
-                }
-                let Some(slot) = self.take(&mut inner, &ticket.agent) else {
-                    continue;
-                };
-                // Cannot fail: the budget was checked under this same lock.
-                let _ = self.spend_locked(&mut inner, &ticket.agent);
-                inner.backend_waits.remove(&ticket.id);
-                let cancel = Arc::new(AtomicBool::new(false));
-                inner.live.insert(
-                    ticket.id.clone(),
-                    Self::live(&ticket.agent, &ticket.title, cancel.clone(), false),
-                );
-                // The configured tracker keeps the tasks.
-                let tracker = crate::tracker::for_config(self.ensemble.config().tracker, store);
-                spawn(Box::new(move || {
-                    self.run_ticket(tracker, *ticket, slot, &cancel)
-                }));
             }
-            drop(
-                self.changed
-                    .wait_timeout(inner, SCAN_EVERY)
-                    .unwrap_or_else(|e| e.into_inner()),
-            );
+            tokio::select! {
+                Some(()) = runs.next(), if !runs.is_empty() => {}
+                () = changed => {}
+                () = tokio::time::sleep(SCAN_EVERY) => {}
+            }
         }
     }
 
-    fn run_ticket(&self, store: &dyn Tracker, ticket: Ticket, slot: Slot<'_>, cancel: &AtomicBool) {
+    async fn run_ticket(
+        &self,
+        store: &dyn Tracker,
+        ticket: Ticket,
+        slot: Slot<'_>,
+        cancel: &AtomicBool,
+    ) {
         let since = SystemTime::now();
         store.set_state(&ticket.id, "running", since);
         let place = self
@@ -603,14 +660,14 @@ impl<'e> Queue<'e> {
                             &ticket.id,
                             &format!("{}: preparing a git worktree", ticket.agent),
                         );
-                        worktree::prepare(&project, store.root(), &ticket.id)
+                        blocking(|| worktree::prepare(&project, store.root(), &ticket.id))
                             .map(|wt| (wt.dir.clone(), Some(wt)))
                     }
                     _ => Ok((project, None)),
                 },
             );
         let (mut result, mut extra) = match &place {
-            Ok((dir, _)) => self.work_on(store, &ticket, dir, cancel),
+            Ok((dir, _)) => self.work_on(store, &ticket, dir, cancel).await,
             Err(e) => (ToolResult::err(e.clone()), Vec::new()),
         };
         drop(slot);
@@ -658,7 +715,8 @@ impl<'e> Queue<'e> {
             && handoff.is_none()
         {
             extra.push(("branch", wt.branch.clone()));
-            let note = match worktree::commit(wt, &format!("{}: {}", ticket.id, ticket.title)) {
+            let message = format!("{}: {}", ticket.id, ticket.title);
+            let note = match blocking(|| worktree::commit(wt, &message)) {
                 Ok(Some(sha)) => {
                     extra.push(("commit", sha.clone()));
                     format!(
@@ -733,13 +791,13 @@ impl<'e> Queue<'e> {
         }
         inner.live.remove(&ticket.id);
         drop(inner);
-        self.changed.notify_all();
+        self.changed.notify_waiters();
     }
 
     /// Run the agent on `ticket` in `dir`, then its gate if it has one. While
     /// the gate fails and attempts remain, the agent runs again with the
     /// gate's output. Returns the outcome and front matter for `result.md`.
-    fn work_on(
+    async fn work_on(
         &self,
         store: &dyn Tracker,
         ticket: &Ticket,
@@ -771,7 +829,7 @@ impl<'e> Queue<'e> {
             ticket.context.as_deref(),
             &note,
         );
-        let delegate = |prompt: &str| {
+        let delegate = async |prompt: &str| {
             run_delegation(
                 self.ensemble,
                 &ticket.agent,
@@ -781,9 +839,10 @@ impl<'e> Queue<'e> {
                 &note,
                 cancel,
             )
+            .await
         };
         let Some(gate) = &ticket.gate else {
-            return (delegate(&base), Vec::new());
+            return (delegate(&base).await, Vec::new());
         };
         let config = self.ensemble.config();
         let Some(check) = config.gate(&gate.name) else {
@@ -807,7 +866,7 @@ impl<'e> Queue<'e> {
                     ("attempts", attempt.to_string()),
                 ]
             };
-            let result = delegate(&prompt);
+            let result = delegate(&prompt).await;
             if result.is_error
                 || cancel.load(Ordering::Relaxed)
                 || question_in(&result.text).is_some()
@@ -815,7 +874,7 @@ impl<'e> Queue<'e> {
                 return (result, reported("not run"));
             }
             note(&format!("gate {}: running `{}`", gate.name, check.command));
-            let verdict = ensemble_agents::runtime::block_on(gate::run(check, dir, cancel));
+            let verdict = gate::run(check, dir, cancel).await;
             if verdict.passed {
                 let text = format!(
                     "{}\n\n[gate {}: passed on attempt {attempt} of {attempts}]",
@@ -862,7 +921,7 @@ impl<'e> Queue<'e> {
         }
         match store.create(ticket) {
             Ok(id) => {
-                self.changed.notify_all();
+                self.changed.notify_waiters();
                 ToolResult::ok(format!(
                     "task {id} queued. `status` shows where it is; `wait` with task {id} \
                      returns its result."
@@ -937,61 +996,68 @@ impl<'e> Queue<'e> {
     /// The result of a task or background delegation, waiting up to
     /// `timeout` for it to end. One still going at the end of that is
     /// reported, not failed: the caller asks again.
-    pub fn wait(&self, id: &str, timeout: Duration) -> ToolResult {
+    pub async fn wait(&self, id: &str, timeout: Duration) -> ToolResult {
         let exists = |inner: &Inner| {
             inner.live.contains_key(id)
                 || inner.ended.contains_key(id)
                 || self.store.as_ref().is_some_and(|s| s.exists(id))
         };
-        let deadline = Instant::now() + timeout;
-        let mut inner = self.lock();
-        if !exists(&inner) {
-            let entries = self.store.as_ref().map(Store::scan).unwrap_or_default();
-            return ToolResult::err(unknown(&inner, &entries, id));
+        let deadline = tokio::time::Instant::now() + timeout;
+        {
+            let inner = self.lock();
+            if !exists(&inner) {
+                let entries = self.store.as_ref().map(Store::scan).unwrap_or_default();
+                return ToolResult::err(unknown(&inner, &entries, id));
+            }
         }
         loop {
-            if let Some(ended) = inner.ended.get(id) {
-                return match ended.status {
-                    Status::Cancelled => ToolResult::err(format!(
-                        "{id} was cancelled before it finished.\n{}",
-                        ended.text
-                    )),
-                    status => ToolResult {
-                        text: ended.text.clone(),
-                        is_error: status == Status::Failed,
-                    },
-                };
-            }
-            if !inner.live.contains_key(id)
-                && let Some(q) = self.store.as_ref().and_then(|s| s.open_question(id))
+            let changed = self.watch();
             {
-                return ToolResult::ok(format!(
-                    "{id} needs input: {q}\nAnswer it with `answer`; the task then goes on."
-                ));
+                let inner = self.lock();
+                if let Some(ended) = inner.ended.get(id) {
+                    return match ended.status {
+                        Status::Cancelled => ToolResult::err(format!(
+                            "{id} was cancelled before it finished.\n{}",
+                            ended.text
+                        )),
+                        status => ToolResult {
+                            text: ended.text.clone(),
+                            is_error: status == Status::Failed,
+                        },
+                    };
+                }
+                if !inner.live.contains_key(id)
+                    && let Some(q) = self.store.as_ref().and_then(|s| s.open_question(id))
+                {
+                    return ToolResult::ok(format!(
+                        "{id} needs input: {q}\nAnswer it with `answer`; the task then goes on."
+                    ));
+                }
+                if let Some(outcome) = self.store.as_ref().and_then(|s| s.outcome(id)) {
+                    return ToolResult {
+                        text: outcome.text,
+                        is_error: outcome.status != Status::Done,
+                    };
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return ToolResult::ok(match inner.live.get(id) {
+                        Some(live) => format!(
+                            "{id} is still running; call `wait` again.\n{}",
+                            describe_live(id, live, KEPT_LINES)
+                        ),
+                        None => format!(
+                            "{id} is queued: it starts when a slot of its agent is free. Call `wait` again."
+                        ),
+                    });
+                }
             }
-            if let Some(outcome) = self.store.as_ref().and_then(|s| s.outcome(id)) {
-                return ToolResult {
-                    text: outcome.text,
-                    is_error: outcome.status != Status::Done,
-                };
+            // A task another process runs ends without a word to this one,
+            // so its result is looked for every few seconds too.
+            tokio::select! {
+                () = changed => {}
+                () = tokio::time::sleep(SCAN_EVERY) => {}
+                () = tokio::time::sleep_until(deadline) => {}
             }
-            let now = Instant::now();
-            if now >= deadline {
-                return ToolResult::ok(match inner.live.get(id) {
-                    Some(live) => format!(
-                        "{id} is still running; call `wait` again.\n{}",
-                        describe_live(id, live, KEPT_LINES)
-                    ),
-                    None => format!(
-                        "{id} is queued: it starts when a slot of its agent is free. Call `wait` again."
-                    ),
-                });
-            }
-            inner = self
-                .changed
-                .wait_timeout(inner, deadline - now)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
         }
     }
 
@@ -1024,7 +1090,7 @@ impl<'e> Queue<'e> {
             "Cancelled before it started.",
         );
         drop(inner);
-        self.changed.notify_all();
+        self.changed.notify_waiters();
         match written {
             Ok(()) => ToolResult::ok(format!("{id} is cancelled; it had not started.")),
             Err(e) => ToolResult::err(format!("cannot cancel {id}: {e}")),
@@ -1060,7 +1126,7 @@ impl<'e> Queue<'e> {
         }
         match store.assign(id, &to) {
             Ok(()) => {
-                self.changed.notify_all();
+                self.changed.notify_waiters();
                 ToolResult::ok(format!("{id} is assigned to {to}."))
             }
             Err(e) => ToolResult::err(format!("cannot assign {id}: {e}")),
@@ -1088,7 +1154,7 @@ impl<'e> Queue<'e> {
         }
         match store.answer(id, answer) {
             Ok(()) => {
-                self.changed.notify_all();
+                self.changed.notify_waiters();
                 ToolResult::ok(format!("{id} is answered and queued to go on."))
             }
             Err(e) => ToolResult::err(e),
@@ -1104,7 +1170,7 @@ impl<'e> Queue<'e> {
             live.cancel.store(true, Ordering::Relaxed);
         }
         drop(inner);
-        self.changed.notify_all();
+        self.changed.notify_waiters();
     }
 }
 

@@ -26,14 +26,16 @@ use ensemble_agents::router::Ensemble;
 use ensemble_inbox::{Inbox, NodeInbox};
 use ensemble_knowledge::{KnowledgeAccess, Memory, RECALL, RECALL_HEADER, recalled_within};
 use ensemble_tasks::delegation;
-use ensemble_tasks::queue::{Queue, Task};
+use ensemble_tasks::queue::Queue;
 use ensemble_tasks::tasks::Store;
 use serde_json::{Value, json};
 
+use ensemble_agents::runtime;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use std::collections::HashMap;
-use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 mod notify;
 mod protocol;
@@ -56,7 +58,6 @@ pub struct Hub<'a> {
     /// hub server and node.yaml maps projects to folders.
     pub node: Option<&'a NodeInbox>,
 }
-
 /// Handle one JSON-RPC message.
 ///
 /// `None` means "send nothing" — which is required, not merely allowed, for
@@ -65,7 +66,7 @@ pub struct Hub<'a> {
 ///
 /// With no session around it, a background delegation runs to its end before
 /// this returns and there are no tasks; [`serve`] is what runs them alongside
-/// the rest.
+/// the rest. This waits for the answer, so it is for code that is not async.
 pub fn handle(ensemble: &Ensemble, request: &Value) -> Option<Value> {
     handle_with(ensemble, None, request)
 }
@@ -76,30 +77,34 @@ pub fn handle_with(
     memory: Option<&dyn KnowledgeAccess>,
     request: &Value,
 ) -> Option<Value> {
-    handle_reporting(
-        ensemble,
-        memory,
-        request,
-        &|_| {},
-        &AtomicBool::new(false),
-        &queue_for(ensemble, None, memory),
-        &|task| task(),
-    )
+    let queue = queue_for(ensemble, None, memory);
+    runtime::block_on(async {
+        let reply = handle_reporting(
+            ensemble,
+            memory,
+            request,
+            &|_| {},
+            &AtomicBool::new(false),
+            &queue,
+        )
+        .await;
+        queue.finish().await;
+        reply
+    })
 }
 
 /// [`handle`], with `notify` called for each notification to send to the client
 /// before the reply, such as what a delegated agent is doing. Setting `cancel`
 /// stops a delegation at its next step. Tasks and background delegations are
-/// kept in `queue`, and background work is started with `spawn`. With
-/// `memory`, the knowledge tools are offered too.
-pub fn handle_reporting<'s>(
-    ensemble: &'s Ensemble,
+/// kept in `queue`, whose [`Queue::work`] runs them. With `memory`, the
+/// knowledge tools are offered too.
+pub async fn handle_reporting(
+    ensemble: &Ensemble,
     memory: Option<&dyn KnowledgeAccess>,
     request: &Value,
     notify: &(dyn Fn(Value) + Sync),
     cancel: &AtomicBool,
-    queue: &'s Queue<'s>,
-    spawn: &dyn Fn(Task<'s>),
+    queue: &Queue<'_>,
 ) -> Option<Value> {
     let id = request.get("id").cloned();
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
@@ -126,7 +131,7 @@ pub fn handle_reporting<'s>(
             }
             let mut instructions = protocol::instructions(ensemble.config());
             if let Some(memory) = memory {
-                instructions.push_str(&memory.instructions());
+                instructions.push_str(&runtime::blocking(|| memory.instructions()));
             }
             reply(json!({
                 "protocolVersion": version,
@@ -136,7 +141,10 @@ pub fn handle_reporting<'s>(
             }))
         }
 
-        "tools/list" => reply(json!({ "tools": tool_definitions(&ensemble.agents(), memory) })),
+        "tools/list" => {
+            let tools = runtime::blocking(|| tool_definitions(&ensemble.agents(), memory));
+            reply(json!({ "tools": tools }))
+        }
 
         "tools/call" => {
             let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -153,7 +161,7 @@ pub fn handle_reporting<'s>(
                 .cloned()
                 .or_else(|| id.clone())
                 .unwrap_or_else(|| json!("ensemble"));
-            if let Some(result) = memory.and_then(|m| m.call(name, &args)) {
+            if let Some(result) = memory.and_then(|m| runtime::blocking(|| m.call(name, &args))) {
                 let (text, is_error) = match result {
                     Ok(text) => (text, false),
                     Err(text) => (text, true),
@@ -175,8 +183,8 @@ pub fn handle_reporting<'s>(
                 },
                 cancel,
                 queue,
-                spawn,
-            );
+            )
+            .await;
             reply(json!({
                 "content": [{ "type": "text", "text": result.text }],
                 "isError": result.is_error
@@ -204,32 +212,33 @@ pub fn handle_reporting<'s>(
     }
 }
 
-/// Run the server until stdin closes.
+/// Run the server until `input` ends.
 ///
-/// Each `tools/call` runs on its own thread, so the caller can delegate to
+/// Each `tools/call` runs alongside the others, so the caller can delegate to
 /// several agents at once and still get `ping` and `tools/list` answered while
 /// they work. `notifications/cancelled` stops the named call at its next step,
 /// and it gets no reply: the client has stopped waiting for one.
 ///
 /// Alongside, a worker runs the tasks in the state directory's `tasks/`, and,
 /// with a hub, others turn shares into notes and issues into tasks.
-/// When stdin closes, running tasks and background delegations are stopped
+/// When `input` ends, running tasks and background delegations are stopped
 /// (tasks that had not started stay queued for the next session), and blocking
 /// calls still running are finished before this returns.
-pub fn serve<W: Write + Send>(
+pub fn serve(
     ensemble: &Ensemble,
-    input: impl BufRead,
-    output: W,
+    input: impl AsyncBufRead + Unpin + Send,
+    output: impl AsyncWrite + Unpin + Send,
 ) -> std::io::Result<()> {
     serve_with(ensemble, Hub::default(), input, output)
 }
 
-/// [`serve`], with what a hub adds when there is one.
-pub fn serve_with<W: Write + Send>(
+/// [`serve`], with what a hub adds when there is one. What a hub does in the
+/// background that is not async yet runs on threads of its own.
+pub fn serve_with(
     ensemble: &Ensemble,
     hub: Hub<'_>,
-    input: impl BufRead,
-    output: W,
+    input: impl AsyncBufRead + Unpin + Send,
+    output: impl AsyncWrite + Unpin + Send,
 ) -> std::io::Result<()> {
     let memory = hub.knowledge;
     let state = ensemble.state_dir()?;
@@ -253,9 +262,6 @@ pub fn serve_with<W: Write + Send>(
 
     let hub_stop = &AtomicBool::new(false);
     std::thread::scope(|scope| {
-        if worker {
-            scope.spawn(move || queue.work(&spawner(scope)));
-        }
         // Shares become notes alongside, unless another process does that.
         if let Some(memory) = hub.distill {
             scope.spawn(move || memory.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
@@ -267,133 +273,157 @@ pub fn serve_with<W: Write + Send>(
         if let Some(node) = hub.node {
             scope.spawn(move || node.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
         }
-        let result = serve_session(ensemble, memory, queue, input, output, true);
+        // The session closes the queue when it ends, and the worker returns
+        // once what it runs has stopped.
+        let (result, ()) = runtime::block_on(async {
+            tokio::join!(
+                serve_session(ensemble, memory, queue, input, output, true),
+                queue.work(worker),
+            )
+        });
         hub_stop.store(true, Ordering::Relaxed);
         result
     })
 }
 
 /// One session: JSON-RPC from `input`, answered on `output`, until `input`
-/// ends, with tasks and background delegations kept in `queue`. With
-/// `close_at_end` the queue is closed when the caller goes, which stops what
-/// runs in it; a node's queue is not, and its work goes on. Blocking calls
-/// still running are finished before this returns.
-pub fn serve_session<W: Write + Send>(
+/// ends, with tasks and background delegations kept in `queue`, which
+/// [`Queue::work`] runs alongside. With `close_at_end` the queue is closed when
+/// the caller goes, which stops what runs in it; a node's queue is not, and
+/// its work goes on. Blocking calls still running are finished before this
+/// returns.
+pub async fn serve_session(
     ensemble: &Ensemble,
     memory: Option<&dyn KnowledgeAccess>,
     queue: &Queue<'_>,
-    input: impl BufRead,
-    output: W,
+    input: impl AsyncBufRead + Unpin + Send,
+    mut output: impl AsyncWrite + Unpin + Send,
     close_at_end: bool,
 ) -> std::io::Result<()> {
-    let output = Mutex::new(output);
-    let min_level = AtomicUsize::new(rank(PROGRESS_LEVEL).unwrap_or(0));
-    // Running calls by request id, so a cancellation can find its call.
-    let running: Mutex<HashMap<String, Arc<AtomicBool>>> = Mutex::new(HashMap::new());
-    // Flush per message. A buffered reply is a reply the harness is still
-    // waiting for, and it looks exactly like a hung server.
-    let send = |message: &Value| -> std::io::Result<()> {
-        let mut out = output.lock().unwrap_or_else(|e| e.into_inner());
-        writeln!(out, "{message}")?;
-        out.flush()
-    };
-    let notify = |n: Value| {
-        // The level only filters log messages; progress is not one.
-        let wanted = n["params"]["level"].as_str().and_then(rank);
-        if wanted.is_none_or(|w| w >= min_level.load(Ordering::Relaxed)) {
-            // A write that fails here fails again on the next reply, which
-            // ends the session with the error.
-            let _ = send(&n);
-        }
-    };
-    let (send, notify, running) = (&send, &notify, &running);
-
-    std::thread::scope(|scope| {
-        let result = (|| -> std::io::Result<()> {
-            for line in input.lines() {
-                let line = line?;
-                if line.trim().is_empty() {
+    // Everything for the client goes through one writer, so messages never
+    // interleave, and a notification can be sent from code that is not async.
+    let (out, mut outgoing) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let read = async move {
+        let min_level = AtomicUsize::new(rank(PROGRESS_LEVEL).unwrap_or(0));
+        // Running calls by request id, so a cancellation can find its call.
+        let running: Mutex<HashMap<String, Arc<AtomicBool>>> = Mutex::new(HashMap::new());
+        let send = |message: Value| {
+            // Only fails once the writer has stopped, and then nobody reads.
+            let _ = out.send(message);
+        };
+        let notify = |n: Value| {
+            // The level only filters log messages; progress is not one.
+            let wanted = n["params"]["level"].as_str().and_then(rank);
+            if wanted.is_none_or(|w| w >= min_level.load(Ordering::Relaxed)) {
+                send(n);
+            }
+        };
+        let (send, notify, running) = (&send, &notify, &running);
+        let mut lines = input.lines();
+        let mut calls = FuturesUnordered::new();
+        let result = loop {
+            let line = tokio::select! {
+                line = lines.next_line() => line,
+                Some(()) = calls.next(), if !calls.is_empty() => continue,
+            };
+            let line = match line {
+                Ok(Some(line)) => line,
+                Ok(None) => break Ok(()),
+                Err(e) => break Err(e),
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let request = match serde_json::from_str::<Value>(&line) {
+                Ok(request) => request,
+                Err(e) => {
+                    send(json!({
+                        "jsonrpc": "2.0",
+                        "id": Value::Null,
+                        "error": { "code": -32700, "message": format!("parse error: {e}") }
+                    }));
                     continue;
                 }
-                let request = match serde_json::from_str::<Value>(&line) {
-                    Ok(request) => request,
-                    Err(e) => {
-                        send(&json!({
-                            "jsonrpc": "2.0",
-                            "id": Value::Null,
-                            "error": { "code": -32700, "message": format!("parse error: {e}") }
-                        }))?;
-                        continue;
+            };
+            let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+            let params = request.get("params");
+            match method {
+                "logging/setLevel" => {
+                    if let Some(level) = params
+                        .and_then(|p| p.get("level"))
+                        .and_then(Value::as_str)
+                        .and_then(rank)
+                    {
+                        min_level.store(level, Ordering::Relaxed);
                     }
-                };
-                let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-                let params = request.get("params");
-                match method {
-                    "logging/setLevel" => {
-                        if let Some(level) = params
-                            .and_then(|p| p.get("level"))
-                            .and_then(Value::as_str)
-                            .and_then(rank)
-                        {
-                            min_level.store(level, Ordering::Relaxed);
-                        }
-                    }
-                    "notifications/cancelled" => {
-                        if let Some(id) = params.and_then(|p| p.get("requestId"))
-                            && let Some(flag) = running.lock().unwrap().get(&id.to_string())
-                        {
-                            flag.store(true, Ordering::Relaxed);
-                        }
-                        continue;
-                    }
-                    "tools/call" if request.get("id").is_some_and(|id| !id.is_null()) => {
-                        let key = request["id"].to_string();
-                        let cancel = Arc::new(AtomicBool::new(false));
-                        running.lock().unwrap().insert(key.clone(), cancel.clone());
-                        scope.spawn(move || {
-                            let response = handle_reporting(
-                                ensemble,
-                                memory,
-                                &request,
-                                notify,
-                                &cancel,
-                                queue,
-                                &spawner(scope),
-                            );
-                            running.lock().unwrap().remove(&key);
-                            if !cancel.load(Ordering::Relaxed)
-                                && let Some(response) = response
-                            {
-                                // A failed write here means the client is gone;
-                                // the reading side finds out on its own.
-                                let _ = send(&response);
-                            }
-                        });
-                        continue;
-                    }
-                    _ => {}
                 }
-                if let Some(response) = handle_reporting(
-                    ensemble,
-                    memory,
-                    &request,
-                    notify,
-                    &AtomicBool::new(false),
-                    queue,
-                    &spawner(scope),
-                ) {
-                    send(&response)?;
+                "notifications/cancelled" => {
+                    if let Some(id) = params.and_then(|p| p.get("requestId"))
+                        && let Some(flag) = running.lock().unwrap().get(&id.to_string())
+                    {
+                        flag.store(true, Ordering::Relaxed);
+                    }
+                    continue;
                 }
+                "tools/call" if request.get("id").is_some_and(|id| !id.is_null()) => {
+                    let key = request["id"].to_string();
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    running.lock().unwrap().insert(key.clone(), cancel.clone());
+                    calls.push(async move {
+                        let response =
+                            handle_reporting(ensemble, memory, &request, notify, &cancel, queue)
+                                .await;
+                        running.lock().unwrap().remove(&key);
+                        if !cancel.load(Ordering::Relaxed)
+                            && let Some(response) = response
+                        {
+                            send(response);
+                        }
+                    });
+                    continue;
+                }
+                _ => {}
             }
-            Ok(())
-        })();
+            let response = handle_reporting(
+                ensemble,
+                memory,
+                &request,
+                notify,
+                &AtomicBool::new(false),
+                queue,
+            )
+            .await;
+            if let Some(response) = response {
+                send(response);
+            }
+        };
         // The caller is gone, so nobody will ask for what background work
         // produces: stop it, or this would wait out its time limits.
         if close_at_end {
             queue.close();
         }
+        while calls.next().await.is_some() {}
         result
-    })
+    };
+    // Flush per message. A buffered reply is a reply the harness is still
+    // waiting for, and it looks exactly like a hung server. Once a write
+    // fails, the rest is dropped: the client is gone.
+    let write = async {
+        let mut failed = None;
+        while let Some(message) = outgoing.recv().await {
+            if failed.is_none() {
+                let line = format!("{message}\n");
+                let written = match output.write_all(line.as_bytes()).await {
+                    Ok(()) => output.flush().await,
+                    Err(e) => Err(e),
+                };
+                failed = written.err();
+            }
+        }
+        failed.map_or(Ok(()), Err)
+    };
+    let (read, written) = tokio::join!(read, write);
+    read.and(written)
 }
 
 /// A queue of `ensemble` whose agents with `recall` are given notes from
@@ -434,15 +464,6 @@ pub fn note_recall_without_knowledge(ensemble: &Ensemble, memory: Option<&dyn Kn
             wanting.join(", "),
             if wanting.len() == 1 { "has" } else { "have" }
         );
-    }
-}
-
-/// Runs background work on a thread of `scope`.
-fn spawner<'scope, 'env>(
-    scope: &'scope std::thread::Scope<'scope, 'env>,
-) -> impl Fn(Task<'scope>) + 'scope {
-    move |task| {
-        scope.spawn(task);
     }
 }
 
