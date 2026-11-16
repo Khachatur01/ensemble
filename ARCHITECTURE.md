@@ -18,9 +18,14 @@ the end are open; everything else is decided unless marked otherwise.
 - **Hub**: the people layer: identities, the task inbox, knowledge vaults, the
   knowledge pipeline, model access. The word "organization" is not used for it,
   to keep it apart from the old agent config.
-- **Node**: one person's machine, running that person's helper team.
-- **Personal agent**: the agent that works for one person and leads their helper
-  team. The word "manager" is dropped.
+- **Node**: a worker: a process that gives computing resources to the hub's
+  users. A computer may run any number of nodes. A node is **private**, working
+  only for its owner, or **shared**, lending its machine's power to other users
+  of the hub. (Decided 2026-11-16; a node was one person's machine before.)
+- **Interface**: what a person talks to the system through: their own agent CLI
+  (Claude Code, Codex, OpenCode) with Ensemble's MCP tools, or later the hub's
+  chat API and web UI. There is no personal agent and no manager. (Decided
+  2026-11-16; see "No personal agent".)
 
 ## What it is
 
@@ -49,10 +54,10 @@ endpoint, a web UI), the task inbox and tracker adapters, the knowledge pipeline
 and vaults, and model access (hub API keys, a central LLM server, quotas per
 user, a usage log).
 
-**Node** (`ensemble node`): one person's machine. It runs that person's helper
-team and personal agent, wires the local agent CLIs (MCP, memory files, session
-hooks), and connects outbound to the hub over one WebSocket, so it needs no open
-port. (The WebSocket was confirmed on 2026-11-11, over plain HTTP with
+**Node** (`ensemble node`): a worker. It runs its owner's helper team, wires the
+local agent CLIs (MCP, memory files, session hooks), and connects outbound to
+the hub over one WebSocket, so it needs no open port. A computer may run several
+nodes, such as one per hub, or a private one beside a shared one. (The WebSocket was confirmed on 2026-11-11, over plain HTTP with
 long-polling.) Tracker adapters beyond local markdown wait until after the hub
 server.
 
@@ -74,12 +79,35 @@ personal ones the home hub, and a share always goes to the session's hub.
 A hub server may face the public internet behind TLS, or run on a local network
 or behind a VPN; nothing in Ensemble assumes either. (Decided 2026-11-10.)
 
+### Private and shared nodes
+
+(Decided 2026-11-16.) The hub connects nodes; a node is there to provide
+computing power. A **private** node works only for its owner. A **shared** node,
+typically on a powerful machine, also works for other users of the hub. Its
+config says what it offers, one or both:
+
+- **models**: the models its machine serves (its GPUs), reached through the hub
+  as a backend, so other people's agents run on their own nodes and use it;
+- **runs**: whole agent runs for other users' tasks, with the agent CLI and
+  gates on the shared machine.
+
+Who may use shared nodes is decided by hub roles, through a permission, like
+every other access in the hub. The helper team stays defined on its owner's
+node; a shared node lends power, not its owner's team.
+
+Limits that follow from the rules below: a shared node runs other users' work
+only on API keys or on models its machine serves, never on its owner's CLI
+subscription. A run on a shared node needs the code it works on and runs
+commands there, so the node's owner can see that code, and the user's gates run
+on someone else's machine; both sides must allow it.
+
 ### Rules that hold everywhere
 
-- Agents stay home. An agent runs on its owner's node, or on the hub on the
-  owner's behalf. Nodes share nothing with each other: no agents, tools, files,
-  models or subscriptions. (Sharing a node's model with colleagues was considered
-  and dropped on 2026-11-10.)
+- An agent runs on its owner's node, on a shared node its owner may use, or on
+  the hub on the owner's behalf. Nodes share only what a shared node offers
+  through the hub (models, runs); private nodes share nothing, and no node
+  shares tools, files or subscriptions. (Sharing a node's model was dropped on
+  2026-11-10 and brought back, through shared nodes, on 2026-11-16.)
 - An organization may run a central LLM server on its own GPUs. It is an
   OpenAI-compatible backend like any other: a standalone node lists it in
   `llm_backends`; through the hub it also gets quotas per user and a usage log.
@@ -93,23 +121,25 @@ or behind a VPN; nothing in Ensemble assumes either. (Decided 2026-11-10.)
   else's work: Anthropic's terms limit subscription OAuth to Claude Code and
   Claude.ai, and to individual use. API keys go through the hub.
 
-## Personal agent
+## No personal agent
 
-Its identity, definition, memory and inbox belong to the hub role; its execution
-runs on the node, where the subscriptions, repositories, files and GPU are.
-Standalone, all of it is on disk in the node's state directory.
+There is no agent that stands for a person. (Decided 2026-11-16; this replaces
+the personal agent of 2026-11-10, which was never built.) Each of its jobs has
+a home that exists anyway:
 
-When the node is offline, the hub may run the personal agent in a limited mode,
-only if the user enabled it and the organization allows hub backends to see that
-user's content: it answers from memory and the inbox and accepts tasks, but runs
-no helper team, tools or repositories. Work that needs the node waits for it.
+| Job | Where it is |
+|---|---|
+| Knowing the person: decisions, setup, preferences | The vault. Recall serves the person's CLI, and the helper agents whose `recall` asks for notes. |
+| Identity, tokens, being accountable | The person's hub account. Issues are assigned to the person. |
+| Talking to the helper team | The person's own CLI through Ensemble's MCP tools; later the hub's chat API, whose `model` names a helper agent, and the web UI. |
+| Turning an issue into work | The inbox: a `<label>:<agent>` label names the agent; without one the task waits in the backlog until someone assigns it. |
+| Planning and splitting work | A helper agent the person puts in their team for it, which hands parts on with `HAND OFF:`. A team design choice, not a concept of the system. |
+| Being reachable while the person's own node is off | A shared node the person may use runs the work; otherwise it waits. |
 
-A personal agent is separate per hub, because its identity, memory and inbox
-belong to that hub.
-
-The user's own CLI (Claude Code, Codex, OpenCode) is one interface to the
-system, not its brain: it reaches the helper team, the inbox and the knowledge
-base through Ensemble's MCP tools.
+So the system has three parts: the **hub** (people, knowledge, the inbox, and
+which node runs what), **nodes** (workers, private or shared), and each
+person's **helper team**, defined on their node. The person's CLI is the
+interface to all three, not one of them.
 
 ## Helper team
 
@@ -154,12 +184,13 @@ and the person stays accountable. A task carries an explicit signal that agents
 may take it: a label, such as `ensemble`, which every tracker has and which
 needs no extra account. (Decided 2026-11-10.) The flow:
 
-1. The inbox sees a task assigned to me with the signal and delivers it.
-2. My personal agent reads it with a context package from recall.
-3. If it is unclear, it asks in a tracker comment and notifies me.
-4. It plans, splits the work among my helper team's agents, runs it, checks
-   gates.
-5. It reports in the tracker; I remain the assignee.
+1. The inbox sees an issue assigned to me with the signal and makes it a task
+   for the helper agent its label names, or puts it in my backlog.
+2. The agent gets it with the vault's notes about it, if its `recall` asks.
+3. If it is unclear, the agent asks; the question goes to a tracker comment and
+   my answer comes back the same way.
+4. It works, checks gates, and may hand parts on to other agents of my team.
+5. The result is reported in the tracker; I remain the assignee.
 6. The outcome goes to the knowledge pipeline.
 
 Ensemble never merges on its own: a merge happens only when the user asks.
@@ -308,7 +339,7 @@ in either process.
 | identity | users, tokens, scopes; one implicit user standalone | core |
 | backends | endpoints, the chat client, format translation, health, quotas | core |
 | agents | CLI adapters, `direct`, workspace, worktrees, gates | backends |
-| team | the helper team, fallback resolver, personal agent | agents, identity |
+| team | the helper team, fallback resolver | agents, identity |
 | tasks | the `Inbox`, `IssueTracker` adapters, leases, hand-off | identity, team |
 | vault | vault repositories, schema, index, visibility | identity |
 | pipeline | ingest, filter, extract, integrate, review | vault, backends |
@@ -369,3 +400,9 @@ and `admin`.
 1. Export from workplace to home: who approves.
 2. Recording from a browser without sending audio to the hub.
 3. Telegram as a team chat source: keep it or drop it.
+4. Shared nodes: how a run gets its code (a clone and a pushed branch, or
+   something else); how the hub picks a node for a run; what the node's owner
+   and the user each consent to; the permission's name.
+5. Chat from anywhere: how the hub's chat API picks the node that runs the
+   helper agent a chat names, and what a chat gets when no such node is
+   connected.
