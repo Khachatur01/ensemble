@@ -101,6 +101,7 @@ dependencies = [
  "ensemble-knowledge",
  "ensemble-link",
  "ensemble-mcp",
+ "ensemble-node",
  "ensemble-tasks",
  "libc",
  "serde",
@@ -116,6 +117,7 @@ dependencies = [
  "ensemble-backends",
  "ensemble-config",
  "ensemble-core",
+ "ensemble-link",
  "libc",
  "serde_json",
 ]
@@ -199,6 +201,18 @@ dependencies = [
  "ensemble-knowledge",
  "ensemble-tasks",
  "serde_json",
+]
+
+[[package]]
+name = "ensemble-node"
+version = "0.1.0"
+dependencies = [
+ "ensemble-agents",
+ "ensemble-config",
+ "ensemble-core",
+ "ensemble-link",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

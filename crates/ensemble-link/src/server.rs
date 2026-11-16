@@ -11,9 +11,11 @@
 //! can be reached directly.
 
 use crate::http::{self, Replay};
+use crate::nodes::Routes;
 use crate::protocol::{
-    ANSWER_TAKEN, Event, HELLO, RECALL, Reply, Request, SHARE, SUBSCRIBE, TASK_ACCEPT, TASK_REFUSE,
-    TASK_UPDATE, TaskRelay,
+    ANSWER_TAKEN, Event, HELLO, MODEL_REPLY, NODE, NODES, RECALL, RUN, RUN_CANCEL, RUN_DONE,
+    RUN_PROGRESS, Reply, Request, SHARE, SUBSCRIBE, TASK_ACCEPT, TASK_REFUSE, TASK_UPDATE,
+    TaskRelay,
 };
 use crate::users::Users;
 use ensemble_config::Permission;
@@ -31,6 +33,9 @@ use tungstenite::{Message, WebSocket};
 
 /// How often a waiting connection looks at the stop flag.
 const TICK: Duration = Duration::from_millis(200);
+/// How long a link waits for a message before it looks at its outbox: what a
+/// streamed model answer or a run's progress may lag by.
+const LINK_TICK: Duration = Duration::from_millis(20);
 
 /// A hub server: its knowledge, its roles, how people join, and where its
 /// users are kept.
@@ -50,6 +55,8 @@ pub struct Server<'a> {
     /// The task inbox, when the hub has one: what subscribed nodes are told,
     /// and who hears what they say about their tasks.
     relay: Option<&'a dyn TaskRelay>,
+    /// The connected nodes, and the runs and model calls between them.
+    pub(crate) routes: Routes,
 }
 
 /// Who a connection signed in as.
@@ -73,6 +80,7 @@ impl<'a> Server<'a> {
             changing: Mutex::new(()),
             failures: Mutex::new(HashMap::new()),
             relay: None,
+            routes: Routes::default(),
         }
     }
 
@@ -127,42 +135,70 @@ impl<'a> Server<'a> {
             .map_err(|e| e.to_string())?;
         let (head, read, end) = http::read_head(&mut &stream)?;
         if !head.is_upgrade() {
+            if head.path.starts_with("/nodes/v1/") {
+                return self.model_request(stream, &head, &read[end..], say);
+            }
             return self.rest(stream, &head, &read[end..], say);
         }
         let mut session = None;
         let stream = Replay::new(read, stream);
-        let mut ws = tungstenite::accept_hdr(stream, |req: &Upgrade, resp: Response| {
-            match self.sign_in(req) {
+        let mut ws = tungstenite::accept_hdr_with_config(
+            stream,
+            |req: &Upgrade, resp: Response| match self.sign_in(req) {
                 Some(s) => {
                     session = Some(s);
                     Ok(resp)
                 }
                 None => Err(refused()),
-            }
-        })
+            },
+            Some(crate::protocol::socket_config()),
+        )
         .map_err(|e| format!("refused or broken handshake: {e}"))?;
         let session = session.ok_or("no session after the handshake")?;
         say(&format!("{} connected", session.user));
         ws.get_ref()
             .inner
-            .set_read_timeout(Some(TICK))
+            .set_read_timeout(Some(LINK_TICK))
             .map_err(|e| e.to_string())?;
+        let (conn, outbox) = self.routes.connect();
+        let ended = self.link(&mut ws, &session, conn, &outbox, stop, say);
+        self.routes.disconnect(conn);
+        say(&format!("{} disconnected", session.user));
+        let _ = ws.close(None);
+        ended
+    }
+
+    /// Serve one node's link until it closes or `stop` is set.
+    fn link<S: Read + Write>(
+        &self,
+        ws: &mut WebSocket<S>,
+        session: &Session,
+        conn: u64,
+        outbox: &std::sync::mpsc::Receiver<Event>,
+        stop: &AtomicBool,
+        say: &(dyn Fn(&str) + Sync),
+    ) -> Result<(), String> {
         // Once the node subscribes, the events waiting for its account, each
         // sent once on this connection, looked for about once a second.
         let mut subscribed = false;
         let mut sent: HashSet<String> = HashSet::new();
         let mut looked = Instant::now();
         while !stop.load(Ordering::Relaxed) {
+            // What other connections have for this one: runs, their progress,
+            // model calls.
+            while let Ok(event) = outbox.try_recv() {
+                push(ws, &event)?;
+            }
             if let (true, Some(relay)) = (subscribed, self.relay)
                 && looked.elapsed() >= Duration::from_secs(1)
             {
                 looked = Instant::now();
-                if self.permissions(&session).is_err() {
+                if self.permissions(session).is_err() {
                     break;
                 }
                 for (id, event) in relay.pending(&session.user) {
                     if sent.insert(id) {
-                        push(&mut ws, &event)?;
+                        push(ws, &event)?;
                     }
                 }
             }
@@ -188,9 +224,12 @@ impl<'a> Server<'a> {
             };
             let reply = match serde_json::from_str::<Request>(&text) {
                 Ok(req) => {
-                    say(&format!("{}: {}", session.user, req.method));
+                    // A run's progress and a model's chunks would drown the rest.
+                    if !matches!(req.method.as_str(), RUN_PROGRESS | MODEL_REPLY) {
+                        say(&format!("{}: {}", session.user, req.method));
+                    }
                     let subscribing = req.method == SUBSCRIBE;
-                    let reply = self.answer(&session, req);
+                    let reply = self.answer(session, conn, req);
                     if subscribing && reply.error.is_none() {
                         subscribed = true;
                         // The first look comes at once.
@@ -200,10 +239,8 @@ impl<'a> Server<'a> {
                 }
                 Err(e) => Reply::err(0, format!("not a request: {e}")),
             };
-            send(&mut ws, &reply)?;
+            send(ws, &reply)?;
         }
-        say(&format!("{} disconnected", session.user));
-        let _ = ws.close(None);
         Ok(())
     }
 
@@ -238,7 +275,7 @@ impl<'a> Server<'a> {
         Ok(signed.permissions)
     }
 
-    fn answer(&self, session: &Session, req: Request) -> Reply {
+    fn answer(&self, session: &Session, conn: u64, req: Request) -> Reply {
         let permissions = match self.permissions(session) {
             Ok(p) => p,
             Err(e) => return Reply::err(req.id, e),
@@ -306,6 +343,24 @@ impl<'a> Server<'a> {
                     Some(relay) => relay.handle(&session.user, &req.method, &req.params),
                     None => Err("this hub has no task inbox".into()),
                 }),
+            NODE => self.routes.register(
+                conn,
+                &session.user,
+                &req.params,
+                permissions.contains(&Permission::Host),
+            ),
+            NODES => Ok(self
+                .routes
+                .listed(&session.user, permissions.contains(&Permission::Compute))),
+            RUN => self.routes.start_run(
+                conn,
+                &session.user,
+                permissions.contains(&Permission::Compute),
+                &req.params,
+            ),
+            RUN_CANCEL => self.routes.cancel_run(conn, &req.params),
+            RUN_PROGRESS | RUN_DONE => self.routes.pass_on(conn, &req.method, &req.params),
+            MODEL_REPLY => self.routes.model_reply(conn, &req.params),
             other => Err(format!("no method `{other}`")),
         };
         match result {
@@ -351,6 +406,7 @@ pub(crate) mod tests {
         pub(crate) url: String,
         pub(crate) ana: String,
         pub(crate) rex: String,
+        pub(crate) root: String,
         stop: std::sync::Arc<AtomicBool>,
     }
 
@@ -368,7 +424,7 @@ pub(crate) mod tests {
     pub(crate) fn start_with(relay: Option<&'static dyn TaskRelay>) -> Running {
         let tmp = TempDir::new();
         let yaml = format!(
-            "version: 1\nowner: Acme\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: approval, max_pending: 2 }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles:\n  admin: [admin, recall]\n  member: [share, recall, tasks]\n  reader: [recall]\n",
+            "version: 1\nowner: Acme\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: approval, max_pending: 2 }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles:\n  admin: [admin, recall, host]\n  member: [share, recall, tasks, compute]\n  reader: [recall]\n",
             tmp.0.join("vault").display()
         );
         let hub =
@@ -394,7 +450,7 @@ pub(crate) mod tests {
         let mut users = Users::load(&tmp.0.join("state")).unwrap();
         let ana = users.add("ana", "member", &hub.roles).unwrap();
         let rex = users.add("rex", "reader", &hub.roles).unwrap();
-        users.add("root", "admin", &hub.roles).unwrap();
+        let root = users.add("root", "admin", &hub.roles).unwrap();
         for name in ["ana", "rex", "root"] {
             users.set_password(name, PASSWORD).unwrap();
         }
@@ -415,6 +471,7 @@ pub(crate) mod tests {
             url,
             ana,
             rex,
+            root,
             stop,
         }
     }

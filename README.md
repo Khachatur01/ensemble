@@ -1042,13 +1042,17 @@ tracker, the label and `poll_seconds`; the rest belongs to each person:
   assignee: the account's `tracker_user` when set (`PUT /api/v1/me`, an admin's
   `PUT /api/v1/users/{name}`, or `ensemble hub user tracker ana ana.petrosyan`),
   else the account's own name. Its role needs the `tasks` permission.
-- **Which folder.** Each member's computer maps projects to folders in
-  `~/.config/ensemble/node.yaml`, which `ensemble node init` writes:
+- **Which folder.** Each member's computer maps projects to folders in its
+  node file, `~/.config/ensemble/node.yaml`, which `ensemble node init` writes
+  (the rest of it is in [Nodes](#nodes)):
 
   ```yaml
-  version: 1
+  version: 2
+  name: laptop
+  access: private
   projects:
     shop: /home/ana/code/shop
+  offers: {}
   ```
 
 What a member sees on an issue: "waiting for ana's computer" until one of her
@@ -1090,14 +1094,16 @@ server:
     failures: 5            # failed logins before a name is refused
     minutes: 15            # and for how long
 roles:                     # yours to name; each a list of permissions
-  admin: [admin, share, recall]
-  member: [share, recall]
+  admin: [admin, share, recall, tasks, compute, host]
+  member: [share, recall, tasks, compute]
   reader: [recall]
 ```
 
 The permissions are `share` (keep knowledge in the organization vault),
 `recall` (read its notes), `tasks` (receive the issues assigned to you; see
-[Tasks from a tracker](#tasks-from-a-tracker)) and `admin` (manage users). Accounts are not in `hub.yaml`: they are kept in the
+[Tasks from a tracker](#tasks-from-a-tracker)), `admin` (manage users),
+`compute` (use other people's shared nodes) and `host` (connect a shared node;
+see [Nodes](#nodes)). Accounts are not in `hub.yaml`: they are kept in the
 hub's state directory, readable only by whoever runs the hub. A share is kept
 under the name of the account that signed in, never a name the node sends, and
 the hub distills shares itself, with its own `knowledge.distill` models.
@@ -1180,6 +1186,89 @@ hub.example.com {
 
 On a LAN or a VPN, listen on that address instead and connect with `ws://`.
 
+## Nodes
+
+A node is a worker that gives a computer's power to the people of a hub
+server. A computer may run any number of them. A node is **private**, working
+for its owner alone, or **shared**, working also for everyone whose role has
+`compute`; connecting a shared one needs `host`. The hub connects them, and
+keeps no node once it is gone.
+
+```yaml
+# node.yaml — `ensemble node init` writes it; `--node <file>` for another one
+version: 2
+name: gpu-box                    # the hub knows it as <you>/gpu-box
+access: shared                   # private: you alone
+projects: {}                     # your tasks from the hub: project -> folder here
+offers:                          # each block may be left out: not offered
+  runs:                          # agents others may run here
+    team: /srv/ensemble/team     # a helper team directory, with its config.yaml
+    agents: [coder]
+  models:                        # models a server here serves
+    base_url: http://127.0.0.1:11434/v1
+    timeout_seconds: 600
+    names: [qwen3.5:72b]
+```
+
+```console
+$ ensemble login wss://hub.example.com --user kim
+$ ensemble node serve --hub wss://hub.example.com              # until Ctrl-C or SIGTERM
+$ ensemble node serve --hub wss://hub.example.com --node ~/box2.yaml   # another node
+$ ensemble nodes --hub wss://hub.example.com                   # the nodes you may use now
+```
+
+**Running an agent on a node.** In your helper team, an agent of
+`type: node` names an agent a node offers:
+
+```yaml
+agents:
+  heavy-coder:
+    max_seconds: 3600
+    max_concurrent: 1
+    isolation: worktree
+    budget: { type: unlimited }
+    adapter:
+      type: node
+      hub: wss://hub.example.com
+      agent: coder               # as the node's team names it
+      nodes: [kim/gpu-box]       # tried in order: the first connected that offers it
+```
+
+A task for it sends the files git tracks or would track in the folder it works
+in (never what `.gitignore` leaves out, such as `.env`; at most 24 MiB) to the
+hub, which hands them to the node. The node's own agent works on them in a
+folder of its own, and what it changed (files written, added, deleted) comes
+back and is written here. So gates, worktrees, branches and commits all stay
+on your computer, and to the rest of Ensemble it is an agent that changed some
+files. Its progress lines come through as it works; a cancel or its
+`max_seconds` stops it there too. `ensemble health` says whether one of its
+nodes is connected and offers the agent.
+
+What runs is the node owner's agent, from their helper team: nothing of your
+agent's definition but the name goes there, so the owner decides what runs on
+their machine. They also see your files. A shared node offers only agents that
+run on models from `llm_backends` (`opencode` on `llm_backend`, or `direct`):
+an agent CLI's own login, such as a Claude Code subscription, belongs to its
+owner and is never lent; `node serve` refuses to start otherwise. A private
+node may offer any of its owner's agents, for the owner's own use from another
+computer.
+
+**Using a node's models.** A node that offers `models` serves them through the
+hub as an OpenAI-compatible endpoint at `https://<hub>/nodes/v1`, with an
+access token as the API key: `GET /nodes/v1/models` lists the models you may
+use, and `POST /nodes/v1/chat/completions` (and `/completions`) goes to the
+least busy node that serves the model, your own first, streamed as it comes.
+In a helper team it is a backend like any other:
+
+```yaml
+llm_backends:
+  gpu:
+    type: openai-compatible-api
+    base_url: https://hub.example.com/nodes/v1
+    api_key_env: HUB_TOKEN       # an access token with `compute`
+    timeout_seconds: 600
+```
+
 ## Installation
 
 Linux is where it is built and tested; the rest of Unix should work. Windows is not supported:
@@ -1251,7 +1340,10 @@ up and for debugging it.
 $ ensemble setup                      # find the CLIs, write a starter, register it, check it
 $ ensemble connect --manager M --team <dir> [--hub <dir>] [--global]  # register with claude-code, opencode or codex
 $ ensemble hub init --hub <dir> [--server]   # a sample hub (--server: for a team): <dir>/hub.yaml, and its knowledge vault
-$ ensemble node init               # ~/.config/ensemble/node.yaml: this computer's folder for each project
+$ ensemble node init [--node FILE]  # ~/.config/ensemble/node.yaml: a node, its folders and what it offers
+$ ensemble node serve --hub URL [--node FILE]   # run that node until stopped
+$ ensemble nodes --hub URL         # the nodes of a hub server you may use now
+$ ensemble hook --hub <hub>        # what a Claude Code or Codex session hook runs
 $ ensemble hub user tracker <name> [<tracker name>] --hub <dir>   # who the account is in the tracker
 $ ensemble hub check --hub <dir>   # validate hub.yaml; which model would distill shares now
 $ ensemble hub user add <name> --role <role> --hub <dir>   # a hub server's user; prints their token once
@@ -1310,19 +1402,21 @@ server, are added as crates on top.
 
 | crate | |
 | --- | --- |
-| `ensemble-core` | the shared error type (`port.rs`), the per-user state and cache directories (`state.rs`), the working folder, a `repo` inside it and what a run changed (`workspace.rs`), and the record of every run with the sums `ensemble stats` prints (`records.rs`), the one-worker-per-directory lock (`lock.rs`), dates in UTC (`time.rs`) |
-| `ensemble-config` | the helper team's `config.yaml`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), versions 1 and 2 to 3 (`migrate.rs`), and adding or removing an agent as text, comments kept (`edit.rs`); the hub's `hub.yaml` (`hub.rs`) |
+| `ensemble-core` | the shared error type (`port.rs`), the per-user state and cache directories (`state.rs`), the working folder, a `repo` inside it and what a run changed (`workspace.rs`), and the record of every run with the sums `ensemble stats` prints (`records.rs`), the one-worker-per-directory lock (`lock.rs`), dates in UTC (`time.rs`), the files a run on a node carries there and back (`snapshot.rs`) |
+| `ensemble-config` | the helper team's `config.yaml`: the document (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), versions 1 and 2 to 3 (`migrate.rs`), and adding or removing an agent as text, comments kept (`edit.rs`); the hub's `hub.yaml` (`hub.rs`); a node's `node.yaml` (`node.rs`) |
 | `ensemble-backends` | one chat request to a model server in its own format (`chat.rs`), asking it which models it serves, for `health` (`models.rs`), choosing the first usable model of a `try` list (`resolve.rs`), and a stand-in model server for tests (`testing.rs`) |
 | `ensemble-knowledge` | the hub's knowledge: the vault of shares and notes, a git repository (`vault.rs`), the secret check a share passes first (`secrets.rs`), the pipeline that turns shares into notes (`pipeline.rs`), finding notes by their words (`search.rs`), and the `share` and `recall` tools and the background worker (`lib.rs`) |
-| `ensemble-link` | a hub server's users, sign-ups and their tokens, kept as hashes (`users.rs`), the REST API (`api.rs`) over a little HTTP reader (`http.rs`), what a node and the hub say over their WebSocket (`protocol.rs`), the hub's side (`server.rs`), and the node's: a hub server's knowledge over the link (`client.rs`) and the token file (`tokens.rs`) |
-| `ensemble-agents` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `direct` adapter, and gates (`external/`); a git worktree and branch per task (`worktree.rs`); agents to adapters, slots, budgets and `health` (`router.rs`) |
+| `ensemble-link` | a hub server's users, sign-ups and their tokens, kept as hashes (`users.rs`), the REST API (`api.rs`) over a little HTTP reader (`http.rs`), what a node and the hub say over their WebSocket (`protocol.rs`), the hub's side (`server.rs`), the connected nodes and the runs and model calls between them, with `/nodes/v1/` (`nodes.rs`), and the node's: a hub server's knowledge over the link (`client.rs`) and the token file (`tokens.rs`) |
+| `ensemble-agents` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `direct` adapter, the `node` adapter that runs an agent a node offers, and gates (`external/`); a git worktree and branch per task (`worktree.rs`); agents to adapters, slots, budgets and `health` (`router.rs`) |
 | `ensemble-tasks` | tasks as files (`tasks.rs`); the `Tracker` trait and `LocalMarkdown`, its one implementation (`tracker.rs`); the worker that runs tasks and background delegations within each agent's slots (`queue.rs`); the tools your agent calls (`delegation.rs`); `review`, `diff` and `merge` of a worktree task's branch (`review.rs`) |
 | `ensemble-inbox` | the task inbox: what it needs from a tracker (`tracker.rs`), a folder of markdown issues, the first tracker (`local_markdown.rs`), making an issue into a task and saying what it reports (`work.rs`), the embedded hub's inbox (`bridge.rs`), a hub server's (`relay.rs`), and a member's computer's part in it (`node.rs`) |
+| `ensemble-node` | a node: `ensemble node serve`, running the agents and serving the models it offers to whom it works for |
 | `ensemble-mcp` | the MCP server over stdio: the loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`); and `ensemble serve` (`serve.rs`) |
-| `ensemble` (the root) | the binary (`src/main.rs`); `setup`, `connect` and `doctor` (`src/setup.rs`); remote helper teams: parsing, pinning, the cache, trust (`src/remote.rs`) |
+| `ensemble` (the root) | the binary (`src/main.rs`); `setup`, `connect` and `doctor` (`src/setup.rs`); session hooks for Claude Code and Codex (`src/hooks.rs`); remote helper teams: parsing, pinning, the cache, trust (`src/remote.rs`) |
 
 `ensemble.schema.json`, at the root, is the JSON Schema for `config.yaml`, and
-`hub.schema.json` the one for `hub.yaml`.
+`hub.schema.json` and `node.schema.json` the ones for `hub.yaml` and
+`node.yaml`.
 
 The MCP server knows the router; it does not know which CLIs exist. The router
 knows agents; only the adapters in `crates/ensemble-agents/src/external/` know
@@ -1355,18 +1449,19 @@ scripts stand in for the CLIs.
 | `crates/ensemble-agents/src/external/` | each CLI's command line, generated config and event stream, denials, limits, failures, the time limit killing the process tree |
 | `crates/ensemble-agents/src/router.rs`, `crates/ensemble-backends/` | routing, `health` and its model check, the chat request in both formats |
 | `crates/ensemble-knowledge/` | shares kept as they arrived, notes and the log, commits by the lock holder, the secret check; the pipeline against a stub model: new notes, merges, chatter skipped, unusable answers to review, waiting for a model, rebuild |
-| `crates/ensemble-link/` | sign-up, approval and the REST API's codes, tokens kept as hashes and revoked at once, roles checked per request, shares under the signed-in name, a reader offered only `recall`, the token file 0600, the link opened again when it breaks |
+| `crates/ensemble-link/` | sign-up, approval and the REST API's codes, tokens kept as hashes and revoked at once, roles checked per request, shares under the signed-in name, a reader offered only `recall`, the token file 0600, the link opened again when it breaks; runs sent to a node that may be used and offers the agent, each side told when the other goes away, model calls streamed from a node |
 | `crates/ensemble-inbox/` | markdown issues read and written with only the status line changed; a hub server's deliveries: matched by tracker name, accepted once, refused, asked and answered, reported; issues to tasks, questions and answers through comments, results posted once, one inbox per hub |
 | `crates/ensemble-tasks/` | ticket files: reading, ids, results written once, run logs; review and merge |
 | `crates/ensemble-mcp/src/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session, notes recalled for agents with `recall` |
 | `tests/workspace.rs` | the crates depend on each other in one direction only |
-| `tests/end_to_end.rs` | the real binary: CLI, `show`, `health` against a stub server, MCP over real pipes, an agent changing a file |
+| `tests/end_to_end.rs` | the real binary: CLI, `show`, `health` against a stub server, MCP over real pipes, an agent changing a file; session hooks; an agent run on a node and its changes back; a node's models through the hub |
 | `crates/ensemble-agents/tests/fixtures/` | saved event streams per CLI version, replayed through each adapter's parser (see its README) |
 | `tests/real_cli.rs` | the real `claude`, `opencode` and `codex` CLIs: `health` and one trivial run. Ignored; run with `ENSEMBLE_REAL_CLI=1 cargo test --test real_cli -- --ignored`. |
 
 ## Limitations
 
-- **Four adapters so far.** `claude-code`, `opencode`, `codex` and `direct`.
+- **Five adapters so far.** `claude-code`, `opencode`, `codex`, `direct`, and
+  `node`, which runs an agent a node of a hub server offers.
 - **Only `opencode` and `direct` agents run on an LLM backend**, and an Anthropic
   one only a `direct` agent. Claude Code and Codex use your own login.
 - **One flat team.** A helper team is a list of agents with no hierarchy, and a
@@ -1399,6 +1494,13 @@ scripts stand in for the CLIs.
   agent with `recall` gets the notes its task's words find, once, when the task
   starts. Session hooks recall on your prompt's words in Claude Code and
   Codex; OpenCode has none.
+- **Nodes are simple.** A run on a node carries at most 24 MiB of files and
+  needs a git repository; what comes back is written over the files here, so a
+  change made here meanwhile to the same file is lost (a `worktree` agent
+  avoids that). The hub picks the first of an agent's nodes that is
+  connected, not the least busy; a node's own `max_concurrent` makes a run
+  wait there. A node's models are reached at `/chat/completions` and
+  `/completions` only. The hub keeps nothing of a node once it disconnects.
 - **One tracker so far.** The inbox reads a folder of markdown issues; GitLab,
   GitHub and Jira adapters are not built. A member's computer takes a hub
   server's tasks only while `ensemble mcp` or `ensemble serve` runs on it.

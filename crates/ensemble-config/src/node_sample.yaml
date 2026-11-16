@@ -1,13 +1,37 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/node.schema.json
 
-# node.yaml — this computer, as a hub server sees it; written by
-# `ensemble node init` in ~/.config/ensemble. When a hub you signed in to
-# (`ensemble login`) sends you a task, it lands in the folder its project maps
-# to here. A project not listed here is refused, and the issue says so; your
-# other computers may still take it. Without this file, this computer takes no
-# tasks from a hub.
+# node.yaml — one node: a worker that gives this computer's power to the people
+# of a hub server you signed in to (`ensemble login`). Written by
+# `ensemble node init` in ~/.config/ensemble; a computer may run more nodes,
+# each from a file of its own (`ensemble node serve --node <file>`).
+#
+# Nothing has a default value. Each block under `offers` may be left out, which
+# means it is not offered; `offers: {}` offers nothing.
 
-version: 1
+version: 2
 
-projects:                        # an issue's `project` -> its folder on this computer
+name: laptop                     # its name on the hub, which knows it as <you>/laptop
+
+# private: it works for you alone. shared: also for everyone whose role on the
+# hub has `compute`. A shared node runs other people's work only on models from
+# llm_backends, never on your agent CLI's subscription.
+access: private
+
+projects:                        # your tasks from the hub: an issue's `project` -> its folder here
   shop: /home/you/code/shop
+
+offers:
+  # Agents of a helper team here, which others name with an agent of
+  # `type: node`. A task sent here gets a copy of the files git tracks, works
+  # in a folder of its own, and sends back what it changed; gates, branches and
+  # commits stay with whoever sent it.
+  runs:
+    team: /home/you/ensemble-team  # a helper team directory, with its config.yaml
+    agents: [coder]                # which of its agents may run here
+
+  # Models an OpenAI-compatible server here serves, reached through the hub at
+  # https://<hub>/nodes/v1 with an access token as the API key.
+  models:
+    base_url: http://127.0.0.1:11434/v1
+    timeout_seconds: 600           # the most one request may take
+    names: [qwen3.5:9b]            # the models offered, as the server names them

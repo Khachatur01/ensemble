@@ -1,14 +1,20 @@
-//! `node.yaml`: what one person's computer says about itself to a hub server,
-//! in `~/.config/ensemble/node.yaml`. For now, which folder each project's
-//! work happens in, so that the tasks the hub sends land in the right place.
-//! Without the file this computer takes no tasks from a hub.
+//! `node.yaml`: one node, a worker that gives this computer's power to the
+//! people of a hub server. The usual one is `~/.config/ensemble/node.yaml`; a
+//! computer may run more, each from a file of its own (`--node <file>`).
+//!
+//! A node says which folder each project's work happens in, so that the tasks
+//! the hub sends its owner land in the right place; who it works for (its
+//! owner alone, or also the others whose role has `compute`); and what it
+//! offers: agents of a helper team on this computer that run tasks sent to it,
+//! and the models a server here serves. Without the file this computer takes
+//! no tasks from a hub.
 
 use super::validate::explain;
 use super::*;
 use serde::Deserialize;
 
 pub const NODE_FILENAME: &str = "node.yaml";
-pub const NODE_SUPPORTED_VERSION: u32 = 1;
+pub const NODE_SUPPORTED_VERSION: u32 = 2;
 
 /// The JSON Schema for `node.yaml`.
 pub const NODE_SCHEMA: &str = include_str!("../../../node.schema.json");
@@ -16,21 +22,99 @@ pub const NODE_SCHEMA: &str = include_str!("../../../node.schema.json");
 /// The file `ensemble node init` writes.
 pub const NODE_SAMPLE: &str = include_str!("node_sample.yaml");
 
-/// This computer, as a hub's tasks need it.
+/// One node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Node {
     pub version: u32,
+    /// Its name on the hub, which knows it as `<owner>/<name>`.
+    pub name: String,
+    pub access: Access,
     /// An issue's `project`, and the folder on this computer its work happens
     /// in.
     pub projects: BTreeMap<String, PathBuf>,
+    pub offers: Offers,
     pub source: PathBuf,
+}
+
+/// Whom a node works for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Access {
+    /// Its owner alone.
+    Private,
+    /// Its owner, and everyone whose role on the hub has `compute`.
+    Shared,
+}
+
+impl Access {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Access::Private => "private",
+            Access::Shared => "shared",
+        }
+    }
+}
+
+/// What a node offers. Each block is there or not: absent, it is not offered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Offers {
+    pub runs: Option<OfferedRuns>,
+    pub models: Option<OfferedModels>,
+}
+
+/// Agents of a helper team on this computer, which run tasks sent to the node
+/// in a folder of their own and send back what they changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferedRuns {
+    /// The helper team's directory, with its `config.yaml`.
+    pub team: PathBuf,
+    /// Which of its agents others may run.
+    pub agents: Vec<String>,
+}
+
+/// Models an OpenAI-compatible server on this computer serves, reached
+/// through the hub at `/nodes/v1/`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferedModels {
+    pub base_url: String,
+    /// The variable holding the server's API key, when it needs one.
+    pub api_key_env: Option<String>,
+    pub timeout_seconds: u64,
+    /// The models offered, as the server names them.
+    pub names: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawNode {
     pub(crate) version: u32,
+    pub(crate) name: String,
+    pub(crate) access: Access,
     pub(crate) projects: BTreeMap<String, String>,
+    pub(crate) offers: RawOffers,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawOffers {
+    pub(crate) runs: Option<RawOfferedRuns>,
+    pub(crate) models: Option<RawOfferedModels>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawOfferedRuns {
+    pub(crate) team: String,
+    pub(crate) agents: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawOfferedModels {
+    pub(crate) base_url: String,
+    pub(crate) api_key_env: Option<String>,
+    pub(crate) timeout_seconds: u64,
+    pub(crate) names: Vec<String>,
 }
 
 /// The node file in `dir`, usually `~/.config/ensemble`.
@@ -54,6 +138,17 @@ pub fn load_node(path: &Path) -> Result<Option<Node>, ConfigError> {
 }
 
 pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
+    // Version 1 had projects only; say what to add rather than a missing key.
+    if let Ok(v) = serde_norway::from_str::<serde_norway::Value>(text)
+        && v.get("version").and_then(serde_norway::Value::as_u64) == Some(1)
+    {
+        return Err(ConfigError::Invalid {
+            path: path.to_path_buf(),
+            problems: vec![format!(
+                "version: 1 is no longer read. Make it `version: {NODE_SUPPORTED_VERSION}` and add `name:` (this node's name on the hub), `access: private` and `offers: {{}}`; `ensemble node init --stdout` prints every setting"
+            )],
+        });
+    }
     let raw: RawNode = serde_norway::from_str(text).map_err(|e| ConfigError::Syntax {
         path: path.to_path_buf(),
         detail: explain(&e),
@@ -65,20 +160,74 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
             raw.version
         ));
     }
+    let name = raw.name.trim().to_string();
+    if !valid_name(&name) {
+        problems.push(format!(
+            "name: '{name}' must be letters, digits, '-', '_' or '.', such as laptop or gpu-box"
+        ));
+    }
     let mut projects = BTreeMap::new();
-    for (name, dir) in &raw.projects {
+    for (project, dir) in &raw.projects {
         let folder = PathBuf::from(dir.trim());
-        if name.trim().is_empty() || !folder.is_absolute() {
+        if project.trim().is_empty() || !folder.is_absolute() {
             problems.push(format!(
-                "projects.{name}: needs a name and an absolute folder, such as /home/ana/code/shop"
+                "projects.{project}: needs a name and an absolute folder, such as /home/ana/code/shop"
             ));
         }
-        projects.insert(name.trim().to_string(), folder);
+        projects.insert(project.trim().to_string(), folder);
     }
+    let runs = raw.offers.runs.as_ref().map(|r| {
+        let team = PathBuf::from(r.team.trim());
+        if !team.is_absolute() {
+            problems.push(
+                "offers.runs.team: needs the absolute directory of a helper team, such as /srv/ensemble/team"
+                    .into(),
+            );
+        }
+        let agents: Vec<String> = r.agents.iter().map(|a| a.trim().to_string()).collect();
+        if agents.is_empty() {
+            problems.push("offers.runs.agents: name at least one agent of the team".into());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for a in &agents {
+            if a.is_empty() || !seen.insert(a) {
+                problems.push(format!(
+                    "offers.runs.agents: '{a}' is empty or listed twice"
+                ));
+            }
+        }
+        OfferedRuns { team, agents }
+    });
+    let models = raw.offers.models.as_ref().map(|m| {
+        let base_url = m.base_url.trim().trim_end_matches('/').to_string();
+        if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+            problems.push(format!(
+                "offers.models.base_url: '{base_url}' must start with http:// or https://, such as http://127.0.0.1:11434/v1"
+            ));
+        }
+        if m.timeout_seconds == 0 {
+            problems.push("offers.models: `timeout_seconds` must be greater than 0".into());
+        }
+        let names: Vec<String> = m.names.iter().map(|n| n.trim().to_string()).collect();
+        if names.is_empty() || names.iter().any(String::is_empty) {
+            problems.push(
+                "offers.models.names: name at least one model, as the server serves it".into(),
+            );
+        }
+        OfferedModels {
+            base_url,
+            api_key_env: m.api_key_env.as_ref().map(|e| e.trim().to_string()),
+            timeout_seconds: m.timeout_seconds,
+            names,
+        }
+    });
     if problems.is_empty() {
         Ok(Node {
             version: raw.version,
+            name,
+            access: raw.access,
             projects,
+            offers: Offers { runs, models },
             source: path.to_path_buf(),
         })
     } else {
@@ -87,4 +236,12 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
             problems,
         })
     }
+}
+
+/// A node's name: what a hub's users write after `<owner>/`.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
 }

@@ -388,6 +388,9 @@ impl Ensemble {
                     )
                 })
             }
+            Adapter::Node(na) => self.run_tracked(agent, workdir, |dir| {
+                crate::external::node::run(agent, na, task, context, dir, progress, cancel)
+            }),
         }
     }
 
@@ -496,6 +499,8 @@ impl Ensemble {
                 Adapter::Codex(cx) => commands.push((ensemble_config::CODEX_AGENT, &cx.command)),
                 // No program: its backend, checked below, is all it needs.
                 Adapter::Direct(_) => {}
+                // Checked below, against its hub.
+                Adapter::Node(_) => {}
             }
             for (b, model) in a.llm_backends() {
                 backends.entry(b).or_default().push(model);
@@ -529,6 +534,14 @@ impl Ensemble {
                 }),
             };
             out.push((name.to_string(), result));
+        }
+        for a in self.config.agents.values() {
+            if let Adapter::Node(na) = &a.adapter {
+                out.push((
+                    format!("{} ({})", a.runs_on(), na.agent),
+                    crate::external::node::health(na),
+                ));
+            }
         }
         out
     }

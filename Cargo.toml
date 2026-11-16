@@ -37,6 +37,7 @@ ensemble-agents = { path = "crates/ensemble-agents" }
 ensemble-tasks = { path = "crates/ensemble-tasks" }
 ensemble-inbox = { path = "crates/ensemble-inbox" }
 ensemble-mcp = { path = "crates/ensemble-mcp" }
+ensemble-node = { path = "crates/ensemble-node" }
 
 [package]
 name = "ensemble"
@@ -63,6 +64,7 @@ ensemble-inbox.workspace = true
 ensemble-knowledge.workspace = true
 ensemble-link.workspace = true
 ensemble-mcp.workspace = true
+ensemble-node.workspace = true
 ensemble-tasks.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -82,12 +82,22 @@ pub fn read_head(stream: &mut impl Read) -> Result<(Head, Vec<u8>, usize), Strin
 
 /// Read the body that follows a head: `already` holds what was read past it.
 pub fn read_body(stream: &mut impl Read, head: &Head, already: &[u8]) -> Result<Vec<u8>, String> {
+    read_body_up_to(stream, head, already, MAX_BODY)
+}
+
+/// [`read_body`], for a body of at most `max` bytes.
+pub fn read_body_up_to(
+    stream: &mut impl Read,
+    head: &Head,
+    already: &[u8],
+    max: usize,
+) -> Result<Vec<u8>, String> {
     let length: usize = match head.header("content-length") {
         None => 0,
         Some(v) => v.parse().map_err(|_| "Content-Length is not a number")?,
     };
-    if length > MAX_BODY {
-        return Err(format!("the body is larger than {MAX_BODY} bytes"));
+    if length > max {
+        return Err(format!("the body is larger than {max} bytes"));
     }
     let mut body = already[..already.len().min(length)].to_vec();
     let mut chunk = [0u8; 4096];
@@ -143,6 +153,8 @@ fn reason(status: u16) -> &'static str {
         405 => "Method Not Allowed",
         409 => "Conflict",
         429 => "Too Many Requests",
+        502 => "Bad Gateway",
+        504 => "Gateway Timeout",
         _ => "Internal Server Error",
     }
 }

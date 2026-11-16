@@ -412,6 +412,20 @@ pub fn describe(config: &Config) -> String {
                     .collect::<Vec<_>>()
                     .join(", else ")
             )),
+            Adapter::Node(n) => {
+                out.push_str(&format!(
+                    "  {}: sends its tasks, with the files git tracks in your working folder, to `{}` on {} through the hub {}, and writes back what it changed\n",
+                    a.name,
+                    n.agent,
+                    n.nodes.join(" or "),
+                    n.hub
+                ));
+                risks.push(format!(
+                    "{} sends your working folder's files to {}, whose owner can read them",
+                    a.name,
+                    n.nodes.join(" and ")
+                ));
+            }
         }
         if a.can_change_files() && a.isolation == Isolation::Shared {
             risks.push(format!(

@@ -205,6 +205,27 @@ agents:
       # Most tokens of answer; an answer cut off there is marked unfinished.
       max_tokens: 1000
 
+  # An agent a node of a hub server offers, such as a colleague's shared node
+  # on a machine with big GPUs. The task and a copy of the files git tracks go
+  # there; what the agent changed comes back and is written here, where gates,
+  # branches and commits stay. Needs `ensemble login <hub>`.
+  heavy-coder:
+    prompt: |
+      Implements large changes on a big model.
+    max_seconds: 3600
+    max_concurrent: 1
+    isolation: worktree
+    budget:
+      type: unlimited
+    adapter:
+      type: node
+      hub: wss://hub.example.com
+      # The agent the nodes offer, by its name in their helper team.
+      agent: coder
+      # The nodes that may run it, as <owner>/<name>, tried in order;
+      # `ensemble nodes --hub <url>` lists them.
+      nodes: [kim/gpu-box]
+
   # The Codex CLI, on your own login.
   fixer:
     prompt: |

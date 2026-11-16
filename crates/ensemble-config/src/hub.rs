@@ -122,6 +122,10 @@ pub enum Permission {
     Tasks,
     /// Manage users: approve sign-ups, give roles, revoke tokens.
     Admin,
+    /// Use other people's shared nodes: run agents they offer, and their models.
+    Compute,
+    /// Connect a shared node, which works for others whose role has `compute`.
+    Host,
 }
 
 impl Permission {
@@ -131,6 +135,8 @@ impl Permission {
             Permission::Recall => "recall",
             Permission::Tasks => "tasks",
             Permission::Admin => "admin",
+            Permission::Compute => "compute",
+            Permission::Host => "host",
         }
     }
 }

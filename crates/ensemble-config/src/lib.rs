@@ -54,6 +54,9 @@ pub const CODEX_AGENT: &str = "codex";
 pub const CODEX_SANDBOXES: [&str; 3] = ["read-only", "workspace-write", "danger-full-access"];
 /// The light adapter: one request to an LLM backend, no CLI and no tools.
 pub const DIRECT_AGENT: &str = "direct";
+/// An agent a node on a hub server offers: the task and a copy of the files go
+/// there, and what the agent changed comes back.
+pub const NODE_AGENT: &str = "node";
 /// What `direct` was called before version 3. Named only to point someone
 /// whose config still uses it at the new name.
 const RENAMED_LLM_AGENT: &str = "llm";
@@ -185,6 +188,21 @@ pub enum Adapter {
     OpenCode(OpenCodeAdapter),
     Codex(CodexAdapter),
     Direct(DirectAdapter),
+    Node(NodeAdapter),
+}
+
+/// An agent that runs on a node of a hub server: one the node offers, never a
+/// definition sent from here, so the node's owner decides what runs there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeAdapter {
+    /// The hub server, `ws://` or `wss://`, signed in to with `ensemble login`.
+    pub hub: String,
+    /// The agent the nodes offer.
+    pub agent: String,
+    /// The nodes that may run it, as `<owner>/<name>`, tried in order.
+    pub nodes: Vec<String>,
+    /// `<agent> on <node> or <node>`, for listings.
+    pub label: String,
 }
 
 /// The Codex CLI, run headless in the project.
@@ -351,6 +369,7 @@ impl AgentConfig {
             Adapter::OpenCode(_) => OPENCODE_AGENT,
             Adapter::Codex(_) => CODEX_AGENT,
             Adapter::Direct(_) => DIRECT_AGENT,
+            Adapter::Node(_) => NODE_AGENT,
         }
     }
 
@@ -360,13 +379,14 @@ impl AgentConfig {
             Adapter::OpenCode(o) => o.model_id(),
             Adapter::Codex(c) => &c.model,
             Adapter::Direct(d) => d.model(),
+            Adapter::Node(n) => &n.label,
         }
     }
 
     /// The LLM backend its first model runs on, when it runs on one.
     pub fn llm_backend(&self) -> Option<&str> {
         match &self.adapter {
-            Adapter::ClaudeCode(_) | Adapter::Codex(_) => None,
+            Adapter::ClaudeCode(_) | Adapter::Codex(_) | Adapter::Node(_) => None,
             Adapter::OpenCode(o) => o.llm_backend(),
             Adapter::Direct(d) => Some(d.backend()),
         }
@@ -375,7 +395,7 @@ impl AgentConfig {
     /// The models it may run on, in order, when it runs on LLM backends.
     pub fn fallback(&self) -> Option<&Fallback> {
         match &self.adapter {
-            Adapter::ClaudeCode(_) | Adapter::Codex(_) => None,
+            Adapter::ClaudeCode(_) | Adapter::Codex(_) | Adapter::Node(_) => None,
             Adapter::OpenCode(o) => match &o.model {
                 OpenCodeModel::Provider { .. } => None,
                 OpenCodeModel::LlmBackend(f) => Some(f),
@@ -413,12 +433,15 @@ impl AgentConfig {
     /// LLM backend.
     pub fn context_window(&self) -> Option<u32> {
         match &self.adapter {
-            Adapter::ClaudeCode(_) | Adapter::Codex(_) | Adapter::Direct(_) => None,
             Adapter::OpenCode(o) => o.context_window(),
+            _ => None,
         }
     }
     /// Where it runs: the adapter type, and the LLM backend when there is one.
     pub fn runs_on(&self) -> String {
+        if let Adapter::Node(n) = &self.adapter {
+            return format!("{NODE_AGENT} {}", n.nodes.join(" or "));
+        }
         match self.llm_backend() {
             Some(backend) => format!("{} on {backend}", self.kind()),
             None => self.kind().to_string(),
@@ -437,6 +460,8 @@ impl AgentConfig {
             Adapter::OpenCode(o) => o.tools.iter().any(|t| opencode_tool_writes(t)),
             Adapter::Codex(c) => codex_sandbox_writes(&c.sandbox),
             Adapter::Direct(_) => false,
+            // What it changed there comes back and is written here.
+            Adapter::Node(_) => true,
         }
     }
 
@@ -448,6 +473,8 @@ impl AgentConfig {
             // Its sandbox is what stands in for a list of tools.
             Adapter::Codex(c) => vec![c.sandbox.as_str()],
             Adapter::Direct(_) => Vec::new(),
+            // The node's own agent has tools; they are its owner's to choose.
+            Adapter::Node(_) => vec!["(on the node)"],
         }
     }
 }
@@ -591,7 +618,10 @@ pub use hub::{
     HUB_FILENAME, Hub, IssueTracker, Knowledge, Permission, Personal, Recall, Registration, Server,
     Tasks, hub_path, load_hub, parse_hub,
 };
-pub use node::{NODE_FILENAME, Node, load_node, node_path, parse_node};
+pub use node::{
+    Access, NODE_FILENAME, Node, OfferedModels, OfferedRuns, Offers, load_node, node_path,
+    parse_node,
+};
 pub use validate::{load, parse};
 
 #[cfg(test)]

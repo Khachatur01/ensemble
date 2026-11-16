@@ -37,6 +37,48 @@ pub const TASK_EVENT: &str = "task";
 /// Event: the person answered a task's question, `{delivery, text}`.
 pub const ANSWER_EVENT: &str = "answer";
 
+/// This connection is a node: `{name, access, agents: [{name, about}],
+/// models: [names]}`. A shared node needs the `host` permission. Answered
+/// with `{node}`, its `<owner>/<name>`.
+pub const NODE: &str = "node";
+/// The nodes this account may use: `{}`, answered with `{nodes: [{node,
+/// access, agents, models, running}]}`.
+pub const NODES: &str = "nodes";
+/// Run an agent a node offers: `{agent, nodes, task, context, files}`.
+/// Answered at once with `{run, node}`; then `run_progress` and `run_done`
+/// events come on this connection.
+pub const RUN: &str = "run";
+/// Stop a run this connection started: `{run}`.
+pub const RUN_CANCEL: &str = "run_cancel";
+/// From the node running it: a line of what the agent is doing, `{run, line}`.
+pub const RUN_PROGRESS: &str = "run_progress";
+/// From the node running it: how it ended, `{run, ok, text | error, model,
+/// prompt_tokens, completion_tokens, steps, tool_calls, commands, changes}`.
+pub const RUN_DONE: &str = "run_done";
+/// From a node answering a model call: `{call, status, content_type}` first,
+/// then `{call, chunk}` (base64) as the server sends it, then `{call, done}`;
+/// or `{call, error}`.
+pub const MODEL_REPLY: &str = "model_reply";
+
+/// Event: run this for someone, `{run, from, agent, task, context, files}`.
+/// Also, on the connection that asked for a run: `run_progress` and
+/// `run_done`, with the data the node sent.
+pub const RUN_EVENT: &str = "run";
+/// Event: the run was cancelled, or its caller went away, `{run}`.
+pub const RUN_CANCEL_EVENT: &str = "run_cancel";
+/// Event: a request for one of the node's models, `{call, from, path, body}`.
+pub const MODEL_CALL_EVENT: &str = "model_call";
+
+/// The most a WebSocket message may be: a run's files, base64, and some room.
+pub const MAX_MESSAGE: usize = 48 * 1024 * 1024;
+
+/// What the link's WebSockets accept, on both ends.
+pub fn socket_config() -> tungstenite::protocol::WebSocketConfig {
+    tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE))
+        .max_frame_size(Some(MAX_MESSAGE))
+}
+
 /// Something the hub tells a node unasked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {

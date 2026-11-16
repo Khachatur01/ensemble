@@ -124,8 +124,8 @@
       }
     },
     "permission": {
-      "description": "share: keep knowledge in the organization vault. recall: read its notes. tasks: receive the tasks the hub's inbox finds assigned to you. admin: manage users, approve sign-ups, give roles, revoke tokens.",
-      "enum": ["share", "recall", "tasks", "admin"]
+      "description": "share: keep knowledge in the organization vault. recall: read its notes. tasks: receive the tasks the hub's inbox finds assigned to you. admin: manage users, approve sign-ups, give roles, revoke tokens. compute: use other people's shared nodes, the agents and models they offer. host: connect a shared node, which works for those whose role has compute.",
+      "enum": ["share", "recall", "tasks", "admin", "compute", "host"]
     },
     "tasks": {
       "type": "object",

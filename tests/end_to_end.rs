@@ -2746,7 +2746,7 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stdout_of(&out).contains("as ana (member: share, recall, tasks)"),
+        stdout_of(&out).contains("as ana (member: share, recall, tasks, compute)"),
         "{}",
         stdout_of(&out)
     );
@@ -2983,7 +2983,7 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_computer_and_reported_back(
     std::fs::write(
         config.join("node.yaml"),
         format!(
-            "version: 1\nprojects:\n  shop: \"{}\"\n",
+            "version: 2\nname: laptop\naccess: private\nprojects:\n  shop: \"{}\"\noffers: {{}}\n",
             s.path().display()
         ),
     )
@@ -3152,5 +3152,188 @@ fn connect_with_hooks_writes_them_into_the_clis_settings() {
     assert!(
         !bin.join("opencode.args").exists(),
         "nothing was registered"
+    );
+}
+
+/// `ensemble node serve`, started and waited for until it is connected.
+fn serve_node(scratch: &Scratch, url: &str, node: &Path) -> Served {
+    let mut child = command(scratch)
+        .args(["node", "serve", "--hub", url, "--node"])
+        .arg(node)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = BufReader::new(child.stderr.take().unwrap());
+    let mut seen = String::new();
+    loop {
+        let mut line = String::new();
+        assert!(err.read_line(&mut line).unwrap() > 0, "it stopped: {seen}");
+        seen.push_str(&line);
+        if line.contains("serving") {
+            break;
+        }
+    }
+    std::thread::spawn(move || {
+        let mut rest = String::new();
+        let _ = err.read_to_string(&mut rest);
+    });
+    Served(child)
+}
+
+#[test]
+fn an_agent_runs_on_a_node_and_what_it_changed_comes_back() {
+    let s = Scratch::new("node-run");
+    let (hub, address, token) = hub_server(&s);
+    let _hub = serve_hub(&s, &hub);
+    let url = format!("ws://{address}");
+    let out = command(&s)
+        .args(["login", &url, "--token", &token])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    // Ana's node, with a helper team of its own whose `reviewer` changes a
+    // file, adds one, and lists what it was given.
+    let team = s.0.with_extension("node-team");
+    std::fs::create_dir_all(&team).unwrap();
+    let cli = s.opencode(
+        "changed it there",
+        "printf 'hello, changed' > a.txt\nprintf new > b.txt\nls -a > given.txt",
+    );
+    std::fs::write(team.join("config.yaml"), config_yaml(&cli, NOWHERE)).unwrap();
+    let node_file = s.0.with_extension("node.yaml");
+    std::fs::write(
+        &node_file,
+        format!(
+            "version: 2\nname: laptop\naccess: private\nprojects: {{}}\noffers:\n  runs: {{ team: \"{}\", agents: [reviewer] }}\n",
+            team.display()
+        ),
+    )
+    .unwrap();
+    let _node = serve_node(&s, &url, &node_file);
+    let out = command(&s).args(["nodes", "--hub", &url]).output().unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("ana/laptop  (private, 0 running)\n  agents: reviewer"),
+        "{}",
+        stdout_of(&out)
+    );
+
+    // The project: a git repository, with a secret git ignores.
+    git_in(s.path(), &["init", "-q"]);
+    s.write("a.txt", "hello");
+    s.write(".gitignore", ".env\n");
+    s.write(".env", "KEY=secret");
+    s.write(
+        ".ensemble/config.yaml",
+        &format!(
+            "version: 3\nllm_backends: {{}}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: reviewer, nodes: [ana/laptop] }}\n"
+        ),
+    );
+    let out = ensemble(&s, &["run", "heavy", "change", "a.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).starts_with("changed it there"),
+        "{}",
+        stdout_of(&out)
+    );
+    assert_eq!(
+        std::fs::read_to_string(s.path().join("a.txt")).unwrap(),
+        "hello, changed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(s.path().join("b.txt")).unwrap(),
+        "new"
+    );
+    let given = std::fs::read_to_string(s.path().join("given.txt")).unwrap();
+    assert!(
+        given.contains("a.txt") && given.contains(".gitignore"),
+        "{given}"
+    );
+    assert!(
+        !given.contains(".env"),
+        "what git ignores stays here: {given}"
+    );
+
+    // A node that is not there is said by name.
+    s.write(
+        ".ensemble/config.yaml",
+        &format!(
+            "version: 3\nllm_backends: {{}}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: reviewer, nodes: [kim/gpu-box] }}\n"
+        ),
+    );
+    let out = ensemble(&s, &["run", "heavy", "change", "a.txt"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("kim/gpu-box is not connected"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+#[test]
+fn a_node_serves_its_models_through_the_hub_and_a_shared_node_lends_no_login() {
+    let s = Scratch::new("node-models");
+    let (hub, address, token) = hub_server(&s);
+    let _hub = serve_hub(&s, &hub);
+    let url = format!("ws://{address}");
+    let out = command(&s)
+        .args(["login", &url, "--token", &token])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let server = models_stub(r#"{"choices":[{"message":{"content":"hi from the node"}}]}"#);
+    let node_file = |access: &str, offers: &str| {
+        let path = s.0.with_extension(format!("{access}.yaml"));
+        std::fs::write(
+            &path,
+            format!("version: 2\nname: {access}-box\naccess: {access}\nprojects: {{}}\noffers:\n{offers}"),
+        )
+        .unwrap();
+        path
+    };
+    let models =
+        format!("  models: {{ base_url: \"{server}\", timeout_seconds: 5, names: [small] }}\n");
+    let _node = serve_node(&s, &url, &node_file("private", &models));
+    let mut answer = ureq::post(format!("http://{address}/nodes/v1/chat/completions"))
+        .header("authorization", format!("Bearer {token}"))
+        .send(r#"{"model": "small", "messages": [{"role": "user", "content": "hi"}]}"#)
+        .unwrap();
+    let body = answer.body_mut().read_to_string().unwrap();
+    assert!(body.contains("hi from the node"), "{body}");
+
+    // A member may not host a shared node.
+    let out = command(&s)
+        .args(["node", "serve", "--hub", &url, "--node"])
+        .arg(node_file("shared", &models))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("`host` permission"),
+        "{}",
+        stderr_of(&out)
+    );
+    // And a shared node never offers an agent on its CLI's own login.
+    let team = s.0.with_extension("node-team");
+    std::fs::create_dir_all(&team).unwrap();
+    std::fs::write(team.join("config.yaml"), config_yaml("opencode", NOWHERE)).unwrap();
+    let out = command(&s)
+        .args(["node", "serve", "--hub", &url, "--node"])
+        .arg(node_file(
+            "shared",
+            &format!(
+                "  runs: {{ team: \"{}\", agents: [reviewer] }}\n",
+                team.display()
+            ),
+        ))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("never lends"),
+        "{}",
+        stderr_of(&out)
     );
 }

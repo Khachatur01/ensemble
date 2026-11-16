@@ -71,6 +71,8 @@ server:
     failures: 5                  # failed logins before a name is refused
     minutes: 15                  # and for how long
 roles:                           # names are yours; the first admin: `ensemble hub user add`
-  admin: [admin, share, recall, tasks]
-  member: [share, recall, tasks]
+  # Permissions: share, recall, tasks, admin; compute (use shared nodes) and
+  # host (connect a shared node that works for those with compute).
+  admin: [admin, share, recall, tasks, compute, host]
+  member: [share, recall, tasks, compute]
   reader: [recall]

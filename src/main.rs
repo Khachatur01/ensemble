@@ -50,8 +50,19 @@ COMMANDS:
                             with every setting, and make its knowledge vault a
                             git repository. --server writes a hub server for a
                             team instead of a hub for you alone.
-    node init [--force]     Write ~/.config/ensemble/node.yaml, which maps the
-                            projects of a hub server's tasks to folders here.
+    node init [--node FILE] [--force|--stdout]
+                            Write a node: ~/.config/ensemble/node.yaml, or FILE.
+                            It names the node, says whom it works for (private:
+                            you; shared: also those whose role has `compute`),
+                            maps the projects of your tasks to folders here, and
+                            says what it offers: agents that run here, models.
+    node serve --hub URL [--node FILE]
+                            Run that node until stopped: it connects to the hub
+                            server and runs the agents and serves the models it
+                            offers, for whom it works. A computer may run any
+                            number of nodes, each from its own file.
+    nodes --hub URL         The nodes of a hub server you may use now, with the
+                            agents and models each offers.
     hub check               Load and validate hub.yaml, and say which model
                             would distill shares now.
     hub serve               Run the --hub as a server for a team, until stopped
@@ -247,7 +258,7 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             "--manager" | "--adapter" | "--model" | "--backend" | "--starter" | "--prompt"
             | "--status" | "--text" | "--goal" | "--repo" | "--gate" | "--since" | "--after"
             | "--files" | "--constraints" | "--done-when" | "--ref" | "--title" | "--role"
-            | "--token" | "--user" => {
+            | "--token" | "--user" | "--node" => {
                 opts.insert(arg.clone(), value(&arg)?);
             }
             other if other.starts_with('-') && command.is_none() => {
@@ -322,6 +333,9 @@ fn run() -> Result<ExitCode, String> {
     }
     if args.command == "node" {
         return cmd_node(&args);
+    }
+    if args.command == "nodes" {
+        return cmd_nodes(&args);
     }
     if args.command == "share" {
         return cmd_share(&args, &dir);
@@ -727,10 +741,22 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
 
 /// `ensemble node init`: write `~/.config/ensemble/node.yaml`, which maps the
 /// projects of a hub server's tasks to folders on this computer.
+/// The node file `--node` names, else ~/.config/ensemble/node.yaml.
+fn node_file(args: &Args) -> Result<PathBuf, String> {
+    match opt(args, "--node") {
+        Some(file) => absolute(Path::new(file)),
+        None => Ok(config::node_path(&state::config_root()?)),
+    }
+}
+
 fn cmd_node(args: &Args) -> Result<ExitCode, String> {
     match args.rest.first().map(String::as_str) {
         Some("init") => {
-            let path = config::node_path(&state::config_root()?);
+            if has(args, "--stdout") {
+                print!("{}", config::node::NODE_SAMPLE);
+                return Ok(ExitCode::SUCCESS);
+            }
+            let path = node_file(args)?;
             if path.exists() && !has(args, "--force") {
                 return Err(format!(
                     "{} already exists. Pass --force to overwrite it.",
@@ -744,13 +770,120 @@ fn cmd_node(args: &Args) -> Result<ExitCode, String> {
             std::fs::write(&path, config::node::NODE_SAMPLE)
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
             println!(
-                "wrote {}: map each project to its folder on this computer",
+                "wrote {}: name the node, say whom it works for and what it offers",
                 path.display()
             );
             Ok(ExitCode::SUCCESS)
         }
-        _ => Err("node: needs init. Try --help.".into()),
+        Some("serve") => cmd_node_serve(args),
+        _ => Err("node: needs init or serve. Try --help.".into()),
     }
+}
+
+/// `ensemble node serve --hub URL [--node FILE]`: run a node until stopped.
+fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
+    let url = hub_url(args).ok_or(
+        "node serve: needs --hub, a hub server's ws:// or wss:// address you signed in to with `ensemble login`",
+    )?;
+    let path = node_file(args)?;
+    let node = config::load_node(&path)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "node serve: no node file at {}; `ensemble node init` writes one",
+                path.display()
+            )
+        })?;
+    let tokens = ensemble::link::Tokens::load()?;
+    let token = tokens.get(&url).ok_or_else(|| {
+        format!("node serve: no token for the hub {url}. Sign in first: ensemble login {url} --user <name>")
+    })?;
+    let team = match &node.offers.runs {
+        Some(runs) => Some(
+            config::load(
+                &config::config_path(&runs.team),
+                args.env_file.as_deref(),
+                &SystemEnv,
+            )
+            .map_err(|e| format!("node serve: offers.runs.team: {e}"))?,
+        ),
+        None => None,
+    };
+    let scratch = state::root()?
+        .join("nodes")
+        .join(state::labelled_text(&format!(
+            "{}-{}",
+            node.name,
+            ensemble::link::tokens::normal(&url)
+        )));
+    let _lock = ensemble::lock::acquire(&scratch).map_err(|pid| {
+        format!(
+            "node serve: process {pid} already runs the node '{}' for {url}",
+            node.name
+        )
+    })?;
+    let worker = ensemble::node::Worker::new(&url, token, node, team, scratch)
+        .map_err(|e| format!("node serve: {e}"))?;
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+    }
+    let say = |line: &str| eprintln!("ensemble: {line}");
+    worker
+        .work(&STOP, &say)
+        .map_err(|e| format!("node serve: the hub refused this node: {e}"))?;
+    say("stopped");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `ensemble nodes --hub URL`: the nodes of a hub server you may use now.
+fn cmd_nodes(args: &Args) -> Result<ExitCode, String> {
+    let url = hub_url(args).ok_or("nodes: needs --hub, a hub server's ws:// or wss:// address")?;
+    let tokens = ensemble::link::Tokens::load()?;
+    let token = tokens.get(&url).ok_or_else(|| {
+        format!(
+            "nodes: no token for the hub {url}. Sign in first: ensemble login {url} --user <name>"
+        )
+    })?;
+    let mut link = ensemble::link::client::Connection::open(&url, token)?;
+    let listed = link
+        .call(ensemble::link::protocol::NODES, serde_json::json!({}))
+        .map_err(|f| f.message())?;
+    link.close();
+    let nodes = listed["nodes"].as_array().cloned().unwrap_or_default();
+    if nodes.is_empty() {
+        println!("No node you may use is connected to {url}.");
+    }
+    for n in nodes {
+        let names = |key: &str, field: Option<&str>| -> String {
+            let all: Vec<&str> = n[key]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| match field {
+                            Some(f) => v[f].as_str(),
+                            None => v.as_str(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if all.is_empty() {
+                "-".into()
+            } else {
+                all.join(", ")
+            }
+        };
+        println!(
+            "{}  ({}, {} running)\n  agents: {}\n  models: {}",
+            n["node"].as_str().unwrap_or("?"),
+            n["access"].as_str().unwrap_or("?"),
+            n["running"].as_u64().unwrap_or(0),
+            names("agents", Some("name")),
+            names("models", None)
+        );
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `ensemble hub serve`: the hub as a server for a team, until stopped.
@@ -1574,6 +1707,18 @@ fn cmd_show(config: &Config, args: &Args) -> Result<ExitCode, String> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&inline).map_err(|e| e.to_string())?
+            );
+        }
+        Adapter::Node(na) => {
+            println!(
+                "{} `run` {}",
+                na.hub,
+                serde_json::json!({
+                    "agent": na.agent,
+                    "nodes": na.nodes,
+                    "task": TASK,
+                    "files": "<the files git tracks in the working folder>",
+                })
             );
         }
     }

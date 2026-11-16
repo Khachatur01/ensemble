@@ -363,7 +363,8 @@ impl Server<'_> {
                 serde_json::from_value::<Vec<Permission>>(v.clone()).map_err(|_| {
                     Refusal(
                         400,
-                        "`scopes` must be a list of share, recall or admin".into(),
+                        "`scopes` must be a list of share, recall, tasks, admin, compute or host"
+                            .into(),
                     )
                 })?,
             ),

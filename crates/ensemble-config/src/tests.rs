@@ -520,6 +520,11 @@ fn the_schema_names_exactly_the_keys_the_config_accepts() {
             "direct adapter",
         ),
         (
+            "node_adapter",
+            accepted_keys::<RawNodeAdapter>(),
+            "node adapter",
+        ),
+        (
             "opencode_llm_backend_model",
             accepted_keys::<RawBackendModel>(),
             "opencode llm_backend model",
@@ -572,6 +577,7 @@ fn the_schema_requires_every_key_but_the_optional_two() {
         ("opencode_adapter", vec![]),
         ("opencode_provider_model", vec![]),
         ("direct_adapter", vec![]),
+        ("node_adapter", vec![]),
         ("opencode_llm_backend_model", vec![]),
         ("opencode_llm_backend_candidate", vec![]),
         ("direct_candidate", vec![]),
@@ -594,6 +600,7 @@ fn the_schemas_choices_are_the_codes() {
     assert_eq!(tag("tracker_local_markdown"), "local_markdown");
     assert_eq!(tag("opencode_adapter"), OPENCODE_AGENT);
     assert_eq!(tag("direct_adapter"), DIRECT_AGENT);
+    assert_eq!(tag("node_adapter"), NODE_AGENT);
     assert_eq!(tag("opencode_provider_model"), PROVIDER_MODEL);
     assert_eq!(tag("opencode_llm_backend_model"), LLM_BACKEND_MODEL);
     assert_eq!(schema["properties"]["version"]["const"], SUPPORTED_VERSION);
@@ -694,7 +701,13 @@ fn a_named_env_file_that_is_missing_is_an_error() {
 fn the_sample_loads_and_sets_every_setting_the_schema_has() {
     let c = parse(SAMPLE, &p(), &env(&[])).expect("the sample is a valid config");
     let kinds: Vec<&str> = c.agents.values().map(|a| a.kind()).collect();
-    for kind in [CLAUDE_CODE_AGENT, OPENCODE_AGENT, CODEX_AGENT, DIRECT_AGENT] {
+    for kind in [
+        CLAUDE_CODE_AGENT,
+        OPENCODE_AGENT,
+        CODEX_AGENT,
+        DIRECT_AGENT,
+        NODE_AGENT,
+    ] {
         assert!(kinds.contains(&kind), "the sample has no {kind} agent");
     }
     assert!(
@@ -768,6 +781,7 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
         ("codex_adapter", adapters(CODEX_AGENT)),
         ("opencode_adapter", adapters(OPENCODE_AGENT)),
         ("direct_adapter", adapters(DIRECT_AGENT)),
+        ("node_adapter", adapters(NODE_AGENT)),
         ("opencode_provider_model", models(PROVIDER_MODEL)),
         ("opencode_llm_backend_model", models(LLM_BACKEND_MODEL)),
         (
@@ -1771,13 +1785,56 @@ fn a_hub_servers_inbox_takes_no_person_and_an_embedded_one_needs_one() {
 fn a_node_maps_projects_to_absolute_folders_and_its_sample_and_schema_agree() {
     let node = parse_node(node::NODE_SAMPLE, Path::new("node.yaml")).unwrap();
     assert_eq!(node.projects["shop"], PathBuf::from("/home/you/code/shop"));
-    let said = parse_node(
-        "version: 1\nprojects: { shop: code/shop }\n",
+    assert_eq!(
+        (node.name.as_str(), node.access),
+        ("laptop", node::Access::Private)
+    );
+    let runs = node.offers.runs.as_ref().expect("the sample offers runs");
+    assert_eq!(runs.agents, vec!["coder"]);
+    let models = node
+        .offers
+        .models
+        .as_ref()
+        .expect("the sample offers models");
+    assert_eq!(models.names, vec!["qwen3.5:9b"]);
+    assert_eq!(models.api_key_env, None);
+
+    let problems = |yaml: &str| {
+        parse_node(yaml, Path::new("node.yaml"))
+            .unwrap_err()
+            .to_string()
+    };
+    let said = problems(
+        "version: 2\nname: a/b\naccess: shared\nprojects: { shop: code/shop }\noffers:\n  runs: { team: team, agents: [] }\n  models: { base_url: localhost, timeout_seconds: 0, names: [] }\n",
+    );
+    for wanted in [
+        "absolute folder",
+        "name: 'a/b'",
+        "offers.runs.team",
+        "offers.runs.agents: name at least one",
+        "offers.models.base_url",
+        "timeout_seconds",
+        "offers.models.names",
+    ] {
+        assert!(said.contains(wanted), "{wanted}: {said}");
+    }
+    let said = problems("version: 1\nprojects: { shop: /code/shop }\n");
+    assert!(
+        said.contains("version: 1 is no longer read") && said.contains("access: private"),
+        "{said}"
+    );
+    let bare = parse_node(
+        "version: 2\nname: box\naccess: shared\nprojects: {}\noffers: {}\n",
         Path::new("node.yaml"),
     )
-    .unwrap_err()
-    .to_string();
-    assert!(said.contains("absolute folder"), "{said}");
+    .unwrap();
+    assert_eq!(
+        bare.offers,
+        node::Offers {
+            runs: None,
+            models: None
+        }
+    );
     assert!(
         load_node(Path::new("/nonexistent/node.yaml"))
             .unwrap()
@@ -1786,6 +1843,64 @@ fn a_node_maps_projects_to_absolute_folders_and_its_sample_and_schema_agree() {
     let schema: serde_json::Value = serde_json::from_str(node::NODE_SCHEMA).unwrap();
     assert_eq!(schema_keys(&schema), accepted_keys::<node::RawNode>());
     assert_eq!(schema_required(&schema), accepted_keys::<node::RawNode>());
+    let defs = &schema["definitions"];
+    assert_eq!(
+        schema_keys(&schema["properties"]["offers"]),
+        accepted_keys::<node::RawOffers>()
+    );
+    assert_eq!(
+        schema_keys(&defs["runs"]),
+        accepted_keys::<node::RawOfferedRuns>()
+    );
+    assert_eq!(
+        schema_required(&defs["runs"]),
+        accepted_keys::<node::RawOfferedRuns>()
+    );
+    let models_keys = accepted_keys::<node::RawOfferedModels>();
+    assert_eq!(schema_keys(&defs["models"]), models_keys);
+    let mut required = models_keys.clone();
+    required.retain(|k| k != "api_key_env");
+    assert_eq!(schema_required(&defs["models"]), required);
     let id = schema["$id"].as_str().unwrap();
     assert!(node::NODE_SAMPLE.starts_with(&format!("# yaml-language-server: $schema={id}")));
+}
+
+#[test]
+fn a_node_agent_names_a_hub_server_an_agent_and_nodes_as_owner_and_name() {
+    let team = |adapter: &str| {
+        format!(
+            "version: 3\nllm_backends: {{}}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: worktree\n    budget: {{ type: unlimited }}\n    adapter: {adapter}\n"
+        )
+    };
+    let c = parse(
+        &team("{ type: node, hub: \"wss://hub.example.com/\", agent: coder, nodes: [kim/gpu-box, ana/box] }"),
+        &p(),
+        &env(&[]),
+    )
+    .unwrap();
+    let heavy = &c.agents["heavy"];
+    let Adapter::Node(n) = &heavy.adapter else {
+        panic!("a node agent")
+    };
+    assert_eq!(n.hub, "wss://hub.example.com");
+    assert_eq!(heavy.kind(), NODE_AGENT);
+    assert_eq!(heavy.runs_on(), "node kim/gpu-box or ana/box");
+    assert_eq!(heavy.model(), "coder on kim/gpu-box or ana/box");
+    assert!(heavy.can_change_files());
+    let said = joined_problems(&team(
+        "{ type: node, hub: \"https://hub\", agent: \" \", nodes: [gpu-box] }",
+    ));
+    for wanted in [
+        "ws:// or wss://",
+        "`agent` is empty",
+        "'gpu-box' must be <owner>/<name>",
+    ] {
+        assert!(said.contains(wanted), "{wanted}: {said}");
+    }
+    assert!(
+        joined_problems(&team(
+            "{ type: node, hub: \"ws://h\", agent: a, nodes: [] }"
+        ))
+        .contains("`nodes` is empty")
+    );
 }

@@ -11,6 +11,7 @@
 mod api;
 pub mod client;
 mod http;
+mod nodes;
 pub mod protocol;
 pub mod server;
 pub mod tokens;

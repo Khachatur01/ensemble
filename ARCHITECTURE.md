@@ -88,8 +88,7 @@ config says what it offers, one or both:
 
 - **models**: the models its machine serves (its GPUs), reached through the hub
   as a backend, so other people's agents run on their own nodes and use it;
-- **runs**: whole agent runs for other users' tasks, with the agent CLI and
-  gates on the shared machine.
+- **runs**: agent runs for other users' tasks, on the shared machine.
 
 Who may use shared nodes is decided by hub roles, through a permission, like
 every other access in the hub. The helper team stays defined on its owner's
@@ -97,9 +96,37 @@ node; a shared node lends power, not its owner's team.
 
 Limits that follow from the rules below: a shared node runs other users' work
 only on API keys or on models its machine serves, never on its owner's CLI
-subscription. A run on a shared node needs the code it works on and runs
-commands there, so the node's owner can see that code, and the user's gates run
-on someone else's machine; both sides must allow it.
+subscription. A run on a shared node needs the code it works on, so the node's
+owner can see that code.
+
+How it is built (chosen by the assistant on 2026-11-16, when the owner asked
+for it all to be built; open to change):
+
+- A node is a process, `ensemble node serve`, described by one `node.yaml`
+  (version 2): `name`, `access: private|shared`, the `projects` its owner's
+  tasks land in, and `offers` with an optional `runs` block (a helper team on
+  that computer and which of its agents run for others) and an optional
+  `models` block (an OpenAI-compatible server and the models offered). A
+  computer runs more nodes with `--node <file>`. The hub knows a node as
+  `<owner>/<name>` while it is connected, and keeps nothing after.
+- Permissions: `compute` uses other people's shared nodes; `host` connects a
+  shared node. A node's owner always may use their own.
+- A run: the requester's helper team has an agent of `type: node` naming the
+  hub, an agent the nodes offer, and the nodes, tried in order. The task goes
+  with a snapshot of the files git tracks or would track (never what
+  `.gitignore` leaves out), the node's own agent works on a copy in a folder of
+  its own, and the changed files come back and are written into the
+  requester's folder. Gates, worktrees, branches and commits stay with the
+  requester; nothing runs on the node but its owner's agent definitions. A
+  shared node may offer only agents on `llm_backends` (`opencode` on
+  `llm_backend`, or `direct`), which is how "never a subscription" is kept.
+- Models: the hub serves `/nodes/v1/models`, `/nodes/v1/chat/completions` and
+  `/nodes/v1/completions` with an access token as the API key, and streams
+  each call from the least busy node that serves the model, the user's own
+  first.
+- Over the link: `node`, `nodes`, `run` and `run_cancel` requests; the node's
+  `run_progress`, `run_done` and `model_reply`; and `run`, `run_cancel` and
+  `model_call` events. Each connection has an outbox the others fill.
 
 ### Rules that hold everywhere
 
@@ -304,7 +331,8 @@ There are no teams of people in the hub, only roles. Ensemble defines a fixed
 set of permissions (such as managing users, managing the hub's backends,
 sharing, recalling, receiving tasks), and each hub's config names its own roles
 as sets of them, so an organization decides what roles it has. (Decided
-2026-11-10.) Built so far: `share`, `recall` and `admin`, which manages users.
+2026-11-10.) Built so far: `share`, `recall`, `tasks`, `admin`, which manages
+users, `compute` and `host`, for nodes.
 
 People join a hub server by signing up through its REST API (`/api/v1/`, on
 the hub's own port, for a web UI and scripts): they get a token at once, and it
@@ -364,10 +392,10 @@ in either process.
    guards and a background worker, BM25 recall; the `share` and `recall` MCP
    tools; `ensemble share`, `recall`, `knowledge status|distill|rebuild`;
    notes given with each task to the helper agents whose `recall` asks for
-   them. Not yet: the organization vault and visibility, the privacy gate
-   beyond the secret check. Session hooks for Claude Code and Codex put the
-   notes about each prompt into the conversation, once per session; OpenCode
-   has plugins only, so it gets the MCP tools alone.)
+   them; session hooks that put the notes about each prompt into Claude Code
+   and Codex sessions, once per session (OpenCode has plugins only, so it gets
+   the MCP tools alone). Not yet: the organization vault and visibility, the
+   privacy gate beyond the secret check.)
 5. Hub server, link, identity, tracker adapters. (Started: the inbox, in the
    embedded hub, with a local markdown tracker: issues become tasks in the
    folder their project maps to, for the agent a `<label>:<agent>` label names
@@ -382,8 +410,11 @@ in either process.
    issue goes to the account whose tracker name is its assignee, as a
    delivery the hub keeps until one of that person's computers takes it over
    the link, makes it a task in the folder its `node.yaml` maps the project
-   to, and reports back. Not yet: GitLab, GitHub and Jira; OIDC and the device
-   flow; the chat API and the web UI.)
+   to, and reports back. Then nodes: `ensemble node serve`, private or
+   shared, running the agents and serving the models it offers through the
+   hub, an agent of `type: node` that runs on one, and `/nodes/v1/`. Not yet:
+   GitLab, GitHub and Jira; OIDC and the device flow; the chat API and the
+   web UI.)
 
 The link, as built: the node opens one WebSocket and signs in with
 `Authorization: Bearer <token>` during the upgrade (401 without a valid one).
@@ -395,17 +426,19 @@ pushes `task` and `answer` events, each once per connection and again after a
 reconnect. The link knows no tracker: a hub server's inbox fills a
 `TaskRelay`. Every request is checked against the token's permissions, its
 role narrowed by its scopes, read again from the hub's state, so a revoked
-token stops at once. The permissions so far are `share`, `recall`, `tasks`
-and `admin`.
+token stops at once. The permissions so far are `share`, `recall`, `tasks`,
+`admin`, `compute` and `host`. Nodes add `node`, `nodes`, `run` and
+`run_cancel`, with what is described under "Private and shared nodes".
 
 ## Open questions
 
 1. Export from workplace to home: who approves.
 2. Recording from a browser without sending audio to the hub.
 3. Telegram as a team chat source: keep it or drop it.
-4. Shared nodes: how a run gets its code (a clone and a pushed branch, or
-   something else); how the hub picks a node for a run; what the node's owner
-   and the user each consent to; the permission's name.
+4. Shared nodes, as built (see "Private and shared nodes"): whether the
+   owner and the user should consent to each run, beyond roles; whether the
+   hub should pick the least busy node for runs too; whether a node should
+   also take its owner's tasks from the inbox, as `ensemble mcp` does now.
 5. Chat from anywhere: how the hub's chat API picks the node that runs the
    helper agent a chat names, and what a chat gets when no such node is
    connected.

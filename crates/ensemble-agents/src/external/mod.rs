@@ -5,6 +5,7 @@ pub mod claude_code;
 pub mod codex;
 pub mod direct;
 pub mod gate;
+pub mod node;
 pub mod opencode;
 mod process;
 

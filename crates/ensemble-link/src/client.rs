@@ -56,12 +56,14 @@ impl Connection {
             .parse()
             .map_err(|_| "the token has characters a header cannot carry")?;
         req.headers_mut().insert("authorization", bearer);
-        let (socket, _) = tungstenite::connect(req).map_err(|e| match e {
-            tungstenite::Error::Http(resp) if resp.status() == 401 => format!(
-                "the hub {url} did not accept the token; `ensemble login {url}` with a new one"
-            ),
-            e => format!("cannot reach the hub {url}: {e}"),
-        })?;
+        let config = Some(crate::protocol::socket_config());
+        let (socket, _) =
+            tungstenite::client::connect_with_config(req, config, 3).map_err(|e| match e {
+                tungstenite::Error::Http(resp) if resp.status() == 401 => format!(
+                    "the hub {url} did not accept the token; `ensemble login {url}` with a new one"
+                ),
+                e => format!("cannot reach the hub {url}: {e}"),
+            })?;
         Ok(Connection {
             url,
             socket,
@@ -125,6 +127,22 @@ impl Connection {
                 _ => {}
             }
         }
+    }
+
+    /// Ask the hub without waiting for its answer: what a node says about a
+    /// run while it goes on reading events. The answer is read, and dropped,
+    /// with the events.
+    pub fn send(&mut self, method: &str, params: Value) -> Result<(), String> {
+        let req = Request {
+            id: self.next,
+            method: method.into(),
+            params,
+        };
+        self.next += 1;
+        let json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
+        self.socket
+            .send(Message::text(json))
+            .map_err(|e| e.to_string())
     }
 
     /// The next event from the hub, waiting at most `how_long`; none when
