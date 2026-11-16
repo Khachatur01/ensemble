@@ -199,7 +199,7 @@ impl<'e> Queue<'e> {
         agent: &str,
         topic: &str,
         context: Option<&str>,
-        progress: &dyn Fn(&str),
+        progress: &(dyn Fn(&str) + Sync),
     ) -> Option<String> {
         let context = context.map(str::to_string);
         let Some(limits) = self.ensemble.config().agent(agent).and_then(|a| a.recall) else {
@@ -815,7 +815,7 @@ impl<'e> Queue<'e> {
                 return (result, reported("not run"));
             }
             note(&format!("gate {}: running `{}`", gate.name, check.command));
-            let verdict = gate::run(check, dir, cancel);
+            let verdict = ensemble_agents::runtime::block_on(gate::run(check, dir, cancel));
             if verdict.passed {
                 let text = format!(
                     "{}\n\n[gate {}: passed on attempt {attempt} of {attempts}]",

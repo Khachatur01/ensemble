@@ -16,6 +16,16 @@ pub struct ModelServer {
 /// one per request, in order; the last one again once they run out. It runs
 /// until the test ends.
 pub fn model_server(models: &[&str], answers: &[&str]) -> ModelServer {
+    let messages: Vec<serde_json::Value> = answers
+        .iter()
+        .map(|a| serde_json::json!({ "role": "assistant", "content": a }))
+        .collect();
+    chat_server(models, &messages)
+}
+
+/// [`model_server`], answering with whole assistant `messages`, such as ones
+/// that call tools: `{"role": "assistant", "tool_calls": [...]}`.
+pub fn chat_server(models: &[&str], messages: &[serde_json::Value]) -> ModelServer {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let data: Vec<String> = models
@@ -23,11 +33,16 @@ pub fn model_server(models: &[&str], answers: &[&str]) -> ModelServer {
         .map(|m| format!("{{\"id\":\"{m}\"}}"))
         .collect();
     let list = format!("{{\"data\":[{}]}}", data.join(","));
-    let chats: Vec<String> = answers
+    let chats: Vec<String> = messages
         .iter()
-        .map(|a| {
+        .map(|m| {
+            let finish = if m.get("tool_calls").is_some() {
+                "tool_calls"
+            } else {
+                "stop"
+            };
             serde_json::json!({
-                "choices": [{ "message": { "content": a }, "finish_reason": "stop" }]
+                "choices": [{ "message": m, "finish_reason": finish }]
             })
             .to_string()
         })

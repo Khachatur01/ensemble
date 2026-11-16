@@ -27,13 +27,13 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 /// Run a `codex` agent on one task, in `workdir`.
-pub fn run(
+pub async fn run(
     agent: &AgentConfig,
     cx: &CodexAdapter,
     task: &str,
     context: Option<&str>,
     workdir: &Path,
-    progress: &dyn Fn(&str),
+    progress: &(dyn Fn(&str) + Sync),
     cancel: &AtomicBool,
 ) -> Result<AgentRun, Error> {
     run_program(
@@ -46,6 +46,7 @@ pub fn run(
         progress,
         cancel,
     )
+    .await
 }
 
 /// The command line, less the program. Codex runs in the directory it is
@@ -69,14 +70,14 @@ pub fn arguments(agent: &AgentConfig, cx: &CodexAdapter, prompt: &str) -> Vec<St
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_program(
+async fn run_program(
     program: &[String],
     agent: &AgentConfig,
     cx: &CodexAdapter,
     task: &str,
     context: Option<&str>,
     workdir: &Path,
-    progress: &dyn Fn(&str),
+    progress: &(dyn Fn(&str) + Sync),
     cancel: &AtomicBool,
 ) -> Result<AgentRun, Error> {
     let backend = CODEX_AGENT.to_string();
@@ -106,7 +107,8 @@ fn run_program(
         max_seconds: agent.max_seconds,
         cancel,
     }
-    .stream(&mut |line| stream.read(line))?;
+    .stream(&mut |line| stream.read(line))
+    .await?;
 
     let mut out = AgentRun {
         text: String::new(),
@@ -164,7 +166,7 @@ fn run_program(
 /// What the `exec --json` events have said so far.
 struct Stream<'a> {
     workspace: &'a Workspace,
-    say: &'a dyn Fn(&str),
+    say: &'a (dyn Fn(&str) + Sync),
     turns: u32,
     tool_calls: u32,
     commands: Vec<String>,
@@ -174,7 +176,7 @@ struct Stream<'a> {
 }
 
 impl<'a> Stream<'a> {
-    fn new(workspace: &'a Workspace, say: &'a dyn Fn(&str)) -> Self {
+    fn new(workspace: &'a Workspace, say: &'a (dyn Fn(&str) + Sync)) -> Self {
         Stream {
             workspace,
             say,
@@ -283,6 +285,22 @@ pub fn health(command: &str) -> Result<(), Error> {
 mod tests {
     use super::process::testing::{emitting, fake};
     use super::*;
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_program(
+        program: &[String],
+        agent: &AgentConfig,
+        cx: &CodexAdapter,
+        task: &str,
+        context: Option<&str>,
+        workdir: &Path,
+        progress: &(dyn Fn(&str) + Sync),
+        cancel: &AtomicBool,
+    ) -> Result<AgentRun, Error> {
+        crate::runtime::block_on(super::run_program(
+            program, agent, cx, task, context, workdir, progress, cancel,
+        ))
+    }
     use ensemble_config::Adapter;
     use ensemble_core::workspace::testing::TempDir;
     use serde_json::json;
@@ -313,7 +331,7 @@ mod tests {
         cx: &CodexAdapter,
         dir: &Path,
     ) -> (Result<AgentRun, Error>, Vec<String>) {
-        let seen = std::cell::RefCell::new(Vec::new());
+        let seen = std::sync::Mutex::new(Vec::new());
         let r = run_program(
             program,
             a,
@@ -321,10 +339,10 @@ mod tests {
             "fix it",
             Some("it is broken"),
             dir,
-            &|l| seen.borrow_mut().push(l.to_string()),
+            &|l| seen.lock().unwrap().push(l.to_string()),
             &AtomicBool::new(false),
         );
-        (r, seen.into_inner())
+        (r, seen.into_inner().unwrap())
     }
 
     fn message(text: &str) -> serde_json::Value {

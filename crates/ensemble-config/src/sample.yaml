@@ -205,6 +205,37 @@ agents:
       # Most tokens of answer; an answer cut off there is marked unfinished.
       max_tokens: 1000
 
+  # An agent loop in Ensemble itself, on a model from llm_backends: it reads,
+  # edits and runs commands with the tools listed, so no agent CLI needs
+  # installing. What OpenCode on an LLM backend does, with nothing to install.
+  patcher:
+    prompt: |
+      You fix small, well-described bugs. Read the code before changing it,
+      change as little as you can, and say what you changed.
+    max_seconds: 1800
+    max_concurrent: 1
+    isolation: worktree
+    budget:
+      type: per_hour
+      delegations: 20
+    adapter:
+      type: builtin
+      # The models it may run on, in order, as for `coder` above.
+      try:
+        - backend: local
+          model: qwen3-coder:30b
+          # Tokens of context the server runs the model with; the loop
+          # compacts the conversation before it outgrows them.
+          context_window: 65536
+      when_none: fail
+      # read, list, grep and glob only look; write and edit change files;
+      # shell runs any command in the working directory.
+      tools: [read, list, grep, glob, edit, write, shell]
+      # Most model calls for one delegation.
+      max_steps: 40
+      # Most tokens of answer per model call.
+      max_tokens: 4000
+
   # An agent a node of a hub server offers, such as a colleague's shared node
   # on a machine with big GPUs. The task and a copy of the files git tracks go
   # there; what the agent changed comes back and is written here, where gates,

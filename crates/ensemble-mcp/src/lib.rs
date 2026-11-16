@@ -29,10 +29,10 @@ use ensemble_tasks::delegation;
 use ensemble_tasks::queue::{Queue, Task};
 use ensemble_tasks::tasks::Store;
 use serde_json::{Value, json};
-use std::cell::Cell;
+
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 mod notify;
@@ -96,7 +96,7 @@ pub fn handle_reporting<'s>(
     ensemble: &'s Ensemble,
     memory: Option<&dyn KnowledgeAccess>,
     request: &Value,
-    notify: &dyn Fn(Value),
+    notify: &(dyn Fn(Value) + Sync),
     cancel: &AtomicBool,
     queue: &'s Queue<'s>,
     spawn: &dyn Fn(Task<'s>),
@@ -163,14 +163,14 @@ pub fn handle_reporting<'s>(
                     "isError": is_error
                 }));
             }
-            let count = Cell::new(0u64);
+            let count = AtomicU64::new(0);
             let result = delegation::call(
                 ensemble,
                 name,
                 &args,
                 &|line| {
-                    count.set(count.get() + 1);
-                    notify(progress_message(&token, count.get(), line));
+                    let n = count.fetch_add(1, Ordering::Relaxed) + 1;
+                    notify(progress_message(&token, n, line));
                     notify(log_message(line));
                 },
                 cancel,

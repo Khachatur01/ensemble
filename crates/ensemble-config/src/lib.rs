@@ -54,6 +54,11 @@ pub const CODEX_AGENT: &str = "codex";
 pub const CODEX_SANDBOXES: [&str; 3] = ["read-only", "workspace-write", "danger-full-access"];
 /// The light adapter: one request to an LLM backend, no CLI and no tools.
 pub const DIRECT_AGENT: &str = "direct";
+/// An agent loop in Ensemble itself, on an LLM backend: it reads, edits and
+/// runs commands with tools of its own, so no agent CLI has to be installed.
+pub const BUILTIN_AGENT: &str = "builtin";
+/// The tools a `builtin` agent may be given.
+pub const BUILTIN_TOOLS: [&str; 7] = ["read", "list", "grep", "glob", "write", "edit", "shell"];
 /// An agent a node on a hub server offers: the task and a copy of the files go
 /// there, and what the agent changed comes back.
 pub const NODE_AGENT: &str = "node";
@@ -188,6 +193,7 @@ pub enum Adapter {
     OpenCode(OpenCodeAdapter),
     Codex(CodexAdapter),
     Direct(DirectAdapter),
+    Builtin(BuiltinAdapter),
     Node(NodeAdapter),
 }
 
@@ -279,6 +285,38 @@ impl DirectAdapter {
     }
 }
 
+/// An agent loop in Ensemble itself: the model on an LLM backend asks for
+/// tools, Ensemble runs them in the working directory and answers, until the
+/// model is done or `max_steps` is reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinAdapter {
+    /// The models it may run on, in the order they are tried. Each has its
+    /// `context_window`.
+    pub fallback: Fallback,
+    /// Of [`BUILTIN_TOOLS`], the ones it may use.
+    pub tools: Vec<String>,
+    /// Most model calls for one delegation.
+    pub max_steps: u32,
+    /// Most tokens of answer per model call.
+    pub max_tokens: u32,
+}
+
+impl BuiltinAdapter {
+    /// The LLM backend of its first model.
+    pub fn backend(&self) -> &str {
+        self.fallback.first().map_or("", |c| c.backend.as_str())
+    }
+
+    /// The id its first model is served under.
+    pub fn model(&self) -> &str {
+        self.fallback.first().map_or("", |c| c.model.as_str())
+    }
+}
+
+/// Can this `builtin` tool change files?
+pub fn builtin_tool_writes(tool: &str) -> bool {
+    matches!(tool, "write" | "edit" | "shell")
+}
 /// What an agent does when none of the models in its `try` list can be used:
 /// no backend answers, or none serves the model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -369,6 +407,7 @@ impl AgentConfig {
             Adapter::OpenCode(_) => OPENCODE_AGENT,
             Adapter::Codex(_) => CODEX_AGENT,
             Adapter::Direct(_) => DIRECT_AGENT,
+            Adapter::Builtin(_) => BUILTIN_AGENT,
             Adapter::Node(_) => NODE_AGENT,
         }
     }
@@ -379,6 +418,7 @@ impl AgentConfig {
             Adapter::OpenCode(o) => o.model_id(),
             Adapter::Codex(c) => &c.model,
             Adapter::Direct(d) => d.model(),
+            Adapter::Builtin(b) => b.model(),
             Adapter::Node(n) => &n.label,
         }
     }
@@ -389,6 +429,7 @@ impl AgentConfig {
             Adapter::ClaudeCode(_) | Adapter::Codex(_) | Adapter::Node(_) => None,
             Adapter::OpenCode(o) => o.llm_backend(),
             Adapter::Direct(d) => Some(d.backend()),
+            Adapter::Builtin(b) => Some(b.backend()),
         }
     }
 
@@ -401,6 +442,7 @@ impl AgentConfig {
                 OpenCodeModel::LlmBackend(f) => Some(f),
             },
             Adapter::Direct(d) => Some(&d.fallback),
+            Adapter::Builtin(b) => Some(&b.fallback),
         }
     }
 
@@ -424,6 +466,7 @@ impl AgentConfig {
                 ..
             }) => *f = f.bound(index),
             Adapter::Direct(d) => d.fallback = d.fallback.bound(index),
+            Adapter::Builtin(b) => b.fallback = b.fallback.bound(index),
             _ => {}
         }
         bound
@@ -434,6 +477,7 @@ impl AgentConfig {
     pub fn context_window(&self) -> Option<u32> {
         match &self.adapter {
             Adapter::OpenCode(o) => o.context_window(),
+            Adapter::Builtin(b) => b.fallback.first().and_then(|c| c.context_window),
             _ => None,
         }
     }
@@ -460,6 +504,7 @@ impl AgentConfig {
             Adapter::OpenCode(o) => o.tools.iter().any(|t| opencode_tool_writes(t)),
             Adapter::Codex(c) => codex_sandbox_writes(&c.sandbox),
             Adapter::Direct(_) => false,
+            Adapter::Builtin(b) => b.tools.iter().any(|t| builtin_tool_writes(t)),
             // What it changed there comes back and is written here.
             Adapter::Node(_) => true,
         }
@@ -473,6 +518,7 @@ impl AgentConfig {
             // Its sandbox is what stands in for a list of tools.
             Adapter::Codex(c) => vec![c.sandbox.as_str()],
             Adapter::Direct(_) => Vec::new(),
+            Adapter::Builtin(b) => b.tools.iter().map(String::as_str).collect(),
             // The node's own agent has tools; they are its owner's to choose.
             Adapter::Node(_) => vec!["(on the node)"],
         }

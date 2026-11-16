@@ -29,13 +29,13 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 /// Run a `claude-code` agent on one task, in `workdir`.
-pub fn run(
+pub async fn run(
     agent: &AgentConfig,
     cc: &ClaudeCodeAdapter,
     task: &str,
     context: Option<&str>,
     workdir: &Path,
-    progress: &dyn Fn(&str),
+    progress: &(dyn Fn(&str) + Sync),
     cancel: &AtomicBool,
 ) -> Result<AgentRun, Error> {
     run_program(
@@ -48,6 +48,7 @@ pub fn run(
         progress,
         cancel,
     )
+    .await
 }
 
 /// The command line, less the program. One argument per tool: the CLI takes
@@ -81,14 +82,14 @@ pub fn arguments(agent: &AgentConfig, cc: &ClaudeCodeAdapter, prompt: &str) -> V
 /// [`run`], with the program given as an argv prefix, so tests can stand in a
 /// script for `claude`.
 #[allow(clippy::too_many_arguments)]
-fn run_program(
+async fn run_program(
     program: &[String],
     agent: &AgentConfig,
     cc: &ClaudeCodeAdapter,
     task: &str,
     context: Option<&str>,
     workdir: &Path,
-    progress: &dyn Fn(&str),
+    progress: &(dyn Fn(&str) + Sync),
     cancel: &AtomicBool,
 ) -> Result<AgentRun, Error> {
     let backend = CLAUDE_CODE_AGENT.to_string();
@@ -122,7 +123,8 @@ fn run_program(
         max_seconds: agent.max_seconds,
         cancel,
     }
-    .stream(&mut |line| stream.read(line))?;
+    .stream(&mut |line| stream.read(line))
+    .await?;
     let (status, stderr, stopped) = (ended.status, ended.stderr, ended.stopped);
 
     let mut out = AgentRun {
@@ -261,7 +263,7 @@ fn finish(
 /// What the `stream-json` events have said so far.
 struct Stream<'a> {
     workspace: &'a Workspace,
-    say: &'a dyn Fn(&str),
+    say: &'a (dyn Fn(&str) + Sync),
     model: Option<String>,
     turns: u32,
     tool_calls: u32,
@@ -275,7 +277,7 @@ struct Stream<'a> {
 }
 
 impl<'a> Stream<'a> {
-    fn new(workspace: &'a Workspace, say: &'a dyn Fn(&str)) -> Self {
+    fn new(workspace: &'a Workspace, say: &'a (dyn Fn(&str) + Sync)) -> Self {
         Stream {
             workspace,
             say,
@@ -389,6 +391,22 @@ pub fn health(command: &str) -> Result<(), Error> {
 mod tests {
     use super::process::testing::{emitting, fake};
     use super::*;
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_program(
+        program: &[String],
+        agent: &AgentConfig,
+        cc: &ClaudeCodeAdapter,
+        task: &str,
+        context: Option<&str>,
+        workdir: &Path,
+        progress: &(dyn Fn(&str) + Sync),
+        cancel: &AtomicBool,
+    ) -> Result<AgentRun, Error> {
+        crate::runtime::block_on(super::run_program(
+            program, agent, cc, task, context, workdir, progress, cancel,
+        ))
+    }
     use ensemble_config::Adapter;
     use ensemble_core::workspace::testing::TempDir;
     use std::time::{Duration, Instant};
@@ -443,7 +461,7 @@ mod tests {
         cc: &ClaudeCodeAdapter,
         dir: &Path,
     ) -> (Result<AgentRun, Error>, Vec<String>) {
-        let seen = std::cell::RefCell::new(Vec::new());
+        let seen = std::sync::Mutex::new(Vec::new());
         let r = run_program(
             program,
             a,
@@ -451,10 +469,10 @@ mod tests {
             "review it",
             Some("it is new"),
             dir,
-            &|l| seen.borrow_mut().push(l.to_string()),
+            &|l| seen.lock().unwrap().push(l.to_string()),
             &AtomicBool::new(false),
         );
-        (r, seen.into_inner())
+        (r, seen.into_inner().unwrap())
     }
 
     #[test]

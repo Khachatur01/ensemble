@@ -1,6 +1,7 @@
 //! Adapters for external agents: CLIs that are whole agents of their own,
 //! started in the project with a task and read as they work.
 
+pub mod builtin;
 pub mod claude_code;
 pub mod codex;
 pub mod direct;

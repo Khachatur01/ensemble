@@ -176,6 +176,8 @@ pub(crate) enum RawAdapter {
     Codex(RawCodexAdapter),
     #[serde(rename = "direct")]
     Direct(RawDirectAdapter),
+    #[serde(rename = "builtin")]
+    Builtin(RawBuiltinAdapter),
     #[serde(rename = "node")]
     Node(RawNodeAdapter),
 }
@@ -207,6 +209,35 @@ pub(crate) struct RawDirectAdapter {
     pub(crate) max_tokens: u32,
 }
 
+/// An agent loop in Ensemble itself, on an LLM backend, with tools of its own.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawBuiltinAdapter {
+    /// The models it may run on, in the order they are tried.
+    #[serde(rename = "try")]
+    pub(crate) candidates: Vec<RawBuiltinCandidate>,
+    /// What happens when none of them can be used.
+    pub(crate) when_none: WhenNone,
+    /// What it may do: `read`, `list`, `grep`, `glob`, `write`, `edit`, `shell`.
+    pub(crate) tools: Vec<String>,
+    /// Most model calls for one delegation.
+    pub(crate) max_steps: u32,
+    /// Most tokens of answer per model call.
+    pub(crate) max_tokens: u32,
+}
+
+/// One model a `builtin` agent may run on.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawBuiltinCandidate {
+    /// Which of `llm_backends` serves the model.
+    pub(crate) backend: String,
+    /// The id the endpoint serves the model under.
+    pub(crate) model: String,
+    /// Tokens of context the server runs the model with: the loop compacts
+    /// the conversation before it outgrows them.
+    pub(crate) context_window: u32,
+}
 /// One model a `direct` agent may run on.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

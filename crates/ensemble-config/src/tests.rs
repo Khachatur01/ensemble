@@ -136,13 +136,13 @@ fn the_reference_config_loads() {
 }
 
 #[test]
-fn the_removed_ensemble_type_points_to_opencode() {
+fn the_removed_ensemble_type_points_to_builtin() {
     let doc = REFERENCE.replace("type: claude-code", "type: ensemble");
     let detail = refusal(&doc);
     assert!(
         detail.contains("agents.reviewer.adapter")
             && detail.contains("'ensemble' was removed")
-            && detail.contains("type 'opencode'"),
+            && detail.contains("type 'builtin'"),
         "{detail}"
     );
 }
@@ -539,6 +539,16 @@ fn the_schema_names_exactly_the_keys_the_config_accepts() {
             accepted_keys::<RawDirectCandidate>(),
             "direct adapter's try entry",
         ),
+        (
+            "builtin_adapter",
+            accepted_keys::<RawBuiltinAdapter>(),
+            "builtin adapter",
+        ),
+        (
+            "builtin_candidate",
+            accepted_keys::<RawBuiltinCandidate>(),
+            "builtin adapter's try entry",
+        ),
     ] {
         assert_eq!(schema_keys(&defs[def]), keys, "{label}");
     }
@@ -706,9 +716,13 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
         OPENCODE_AGENT,
         CODEX_AGENT,
         DIRECT_AGENT,
+        BUILTIN_AGENT,
         NODE_AGENT,
     ] {
-        assert!(kinds.contains(&kind), "the sample has no {kind} agent");
+        assert!(
+            kinds.contains(&kind),
+            "the sample has no {kind} agent: {kinds:?}"
+        );
     }
     assert!(
         c.agents.values().any(|a| a.llm_backend().is_some()),
@@ -781,6 +795,14 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
         ("codex_adapter", adapters(CODEX_AGENT)),
         ("opencode_adapter", adapters(OPENCODE_AGENT)),
         ("direct_adapter", adapters(DIRECT_AGENT)),
+        ("builtin_adapter", adapters(BUILTIN_AGENT)),
+        (
+            "builtin_candidate",
+            adapters(BUILTIN_AGENT)
+                .into_iter()
+                .flat_map(|a| a["try"].as_array().unwrap())
+                .collect(),
+        ),
         ("node_adapter", adapters(NODE_AGENT)),
         ("opencode_provider_model", models(PROVIDER_MODEL)),
         ("opencode_llm_backend_model", models(LLM_BACKEND_MODEL)),
@@ -1903,4 +1925,36 @@ fn a_node_agent_names_a_hub_server_an_agent_and_nodes_as_owner_and_name() {
         ))
         .contains("`nodes` is empty")
     );
+}
+
+#[test]
+fn a_builtin_agent_runs_on_llm_backends_with_tools_it_has() {
+    let doc = format!(
+        "{REFERENCE}  fixer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: builtin\n      try:\n        - backend: openai-local\n          model: small\n          context_window: 32768\n      when_none: fail\n      tools: [read, grep]\n      max_steps: 10\n      max_tokens: 400\n"
+    );
+    let c = parse(&doc, &p(), &env(&[])).unwrap();
+    let a = &c.agents["fixer"];
+    assert_eq!(
+        (a.kind(), a.model(), a.llm_backend()),
+        (BUILTIN_AGENT, "small", Some("openai-local"))
+    );
+    assert_eq!(a.runs_on(), "builtin on openai-local");
+    assert_eq!(a.context_window(), Some(32768));
+    assert!(a.has_tools() && !a.can_change_files());
+    let writes = doc.replace("tools: [read, grep]", "tools: [read, edit]");
+    assert!(parse(&writes, &p(), &env(&[])).unwrap().agents["fixer"].can_change_files());
+
+    let bad = doc
+        .replace("tools: [read, grep]", "tools: [read, read, browse]")
+        .replace("context_window: 32768", "context_window: 0")
+        .replace("max_steps: 10", "max_steps: 0");
+    let joined = joined_problems(&bad);
+    for expected in [
+        "tool 'browse' is not one a builtin agent has",
+        "tool 'read' is listed twice",
+        "`context_window` must be greater than 0",
+        "`max_steps` must be greater than 0",
+    ] {
+        assert!(joined.contains(expected), "{expected}: {joined}");
+    }
 }

@@ -82,7 +82,7 @@ impl Worker {
                     };
                     if node.access == Access::Shared && !on_llm_backends(&agent.adapter) {
                         return Err(format!(
-                            "offers.runs: '{name}' runs on {}, which uses an agent CLI's own login or provider, and a shared node never lends that; offer an agent of type opencode on llm_backends, or direct",
+                            "offers.runs: '{name}' runs on {}, which uses an agent CLI's own login or provider, and a shared node never lends that; offer an agent of type opencode on llm_backends, builtin, or direct",
                             agent.runs_on()
                         ));
                     }
@@ -270,7 +270,9 @@ impl Worker {
         };
         let task = data["task"].as_str().unwrap_or("");
         let context = data["context"].as_str();
-        let outcome = team.delegate_in(agent, task, context, &dir, &progress, cancel);
+        let outcome = ensemble_agents::runtime::block_on(
+            team.delegate_in(agent, task, context, &dir, &progress, cancel),
+        );
         let line = match outcome {
             Ok(out) => match snapshot::changes(&files, &dir) {
                 Ok(changes) => {
@@ -307,7 +309,7 @@ impl Worker {
         team: &Ensemble,
         agent: &str,
         cancel: &AtomicBool,
-        progress: &dyn Fn(&str),
+        progress: &(dyn Fn(&str) + Sync),
     ) -> Option<Slot<'w>> {
         let limit = team.config().agent(agent).map_or(1, |a| a.max_concurrent);
         let mut busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
@@ -425,7 +427,7 @@ impl Drop for Slot<'_> {
 /// its CLI's own?
 fn on_llm_backends(adapter: &Adapter) -> bool {
     match adapter {
-        Adapter::Direct(_) => true,
+        Adapter::Direct(_) | Adapter::Builtin(_) => true,
         Adapter::OpenCode(o) => matches!(o.model, OpenCodeModel::LlmBackend(_)),
         Adapter::ClaudeCode(_) | Adapter::Codex(_) | Adapter::Node(_) => false,
     }

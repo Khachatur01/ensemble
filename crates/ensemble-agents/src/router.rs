@@ -13,7 +13,9 @@ use ensemble_config::{
 use ensemble_core::port::Error;
 use ensemble_core::workspace::Changes;
 use std::borrow::Cow;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 /// What a delegation produced, with enough provenance to audit it.
@@ -290,23 +292,24 @@ impl Ensemble {
     }
 
     /// Send a task to an agent and return what it produced.
-    pub fn delegate(
+    pub async fn delegate(
         &self,
         name: &str,
         task: &str,
         context: Option<&str>,
     ) -> Result<Outcome, RouteError> {
         self.delegate_reporting(name, task, context, &|_| {}, &AtomicBool::new(false))
+            .await
     }
 
     /// [`Self::delegate`], telling `progress` what the agent is doing as it
     /// goes. Setting `cancel` stops the agent's process.
-    pub fn delegate_reporting(
+    pub async fn delegate_reporting(
         &self,
         name: &str,
         task: &str,
         context: Option<&str>,
-        progress: &dyn Fn(&str),
+        progress: &(dyn Fn(&str) + Sync),
         cancel: &AtomicBool,
     ) -> Result<Outcome, RouteError> {
         let agent = self.resolve(name)?;
@@ -317,90 +320,107 @@ impl Ensemble {
             })
         })?;
         self.delegate_in(name, task, context, &workdir, progress, cancel)
+            .await
     }
 
     /// [`Self::delegate_reporting`], with the agent working in `workdir`
     /// instead of the project directory, such as a task's git worktree.
-    pub fn delegate_in(
+    pub async fn delegate_in(
         &self,
         name: &str,
         task: &str,
         context: Option<&str>,
         workdir: &std::path::Path,
-        progress: &dyn Fn(&str),
+        progress: &(dyn Fn(&str) + Sync),
         cancel: &AtomicBool,
     ) -> Result<Outcome, RouteError> {
         let (bound, note) = self.bind(self.resolve(name)?)?;
-        let mut outcome = self.run_on(&bound, name, task, context, workdir, progress, cancel)?;
+        let mut outcome = self
+            .run_on(&bound, name, task, context, workdir, progress, cancel)
+            .await?;
         if let Some(note) = note {
             outcome.runs_on = format!("{} ({note})", outcome.runs_on);
         }
         Ok(outcome)
     }
 
+    /// The LLM backend an agent bound to one model runs on.
+    fn backend_of(&self, name: &str, backend: &str) -> Result<&LlmBackend, RouteError> {
+        self.config.llm_backends.get(backend).ok_or_else(|| {
+            RouteError::Agent(Error::Unsupported {
+                backend: backend.to_string(),
+                detail: format!("LLM backend for agent '{name}' is not defined"),
+            })
+        })
+    }
+
     /// Run `agent`, already bound to one model, once.
     #[allow(clippy::too_many_arguments)]
-    fn run_on(
+    async fn run_on(
         &self,
         agent: &AgentConfig,
         name: &str,
         task: &str,
         context: Option<&str>,
         workdir: &std::path::Path,
-        progress: &dyn Fn(&str),
+        progress: &(dyn Fn(&str) + Sync),
         cancel: &AtomicBool,
     ) -> Result<Outcome, RouteError> {
+        use crate::external::{builtin, claude_code, codex, direct, node, opencode};
+        let run = |run| self.run_tracked(agent, workdir, run);
         match &agent.adapter {
-            Adapter::ClaudeCode(cc) => self.run_tracked(agent, workdir, |dir| {
-                crate::external::claude_code::run(agent, cc, task, context, dir, progress, cancel)
-            }),
-            Adapter::Codex(cx) => self.run_tracked(agent, workdir, |dir| {
-                crate::external::codex::run(agent, cx, task, context, dir, progress, cancel)
-            }),
+            Adapter::ClaudeCode(cc) => {
+                run(Box::pin(claude_code::run(
+                    agent, cc, task, context, workdir, progress, cancel,
+                )))
+                .await
+            }
+            Adapter::Codex(cx) => {
+                run(Box::pin(codex::run(
+                    agent, cx, task, context, workdir, progress, cancel,
+                )))
+                .await
+            }
             Adapter::Direct(la) => {
-                let backend = self.config.llm_backends.get(la.backend()).ok_or_else(|| {
-                    RouteError::Agent(Error::Unsupported {
-                        backend: la.backend().to_string(),
-                        detail: format!("LLM backend for agent '{name}' is not defined"),
-                    })
-                })?;
-                self.run_tracked(agent, workdir, |_| {
-                    crate::external::direct::run(
-                        agent, la, backend, task, context, progress, cancel,
-                    )
-                })
+                let backend = self.backend_of(name, la.backend())?;
+                run(Box::pin(direct::run(
+                    agent, la, backend, task, context, progress, cancel,
+                )))
+                .await
+            }
+            Adapter::Builtin(ba) => {
+                let backend = self.backend_of(name, ba.backend())?;
+                run(Box::pin(builtin::run(
+                    agent, ba, backend, task, context, workdir, progress, cancel,
+                )))
+                .await
             }
             Adapter::OpenCode(oc) => {
                 let backend = oc
                     .llm_backend()
-                    .map(|b| {
-                        self.config.llm_backends.get(b).ok_or_else(|| {
-                            RouteError::Agent(Error::Unsupported {
-                                backend: b.to_string(),
-                                detail: format!("LLM backend for agent '{name}' is not defined"),
-                            })
-                        })
-                    })
+                    .map(|b| self.backend_of(name, b))
                     .transpose()?;
-                self.run_tracked(agent, workdir, |dir| {
-                    crate::external::opencode::run(
-                        agent, oc, backend, task, context, dir, progress, cancel,
-                    )
-                })
+                run(Box::pin(opencode::run(
+                    agent, oc, backend, task, context, workdir, progress, cancel,
+                )))
+                .await
             }
-            Adapter::Node(na) => self.run_tracked(agent, workdir, |dir| {
-                crate::external::node::run(agent, na, task, context, dir, progress, cancel)
-            }),
+            Adapter::Node(na) => {
+                run(Box::pin(node::run(
+                    agent, na, task, context, workdir, progress, cancel,
+                )))
+                .await
+            }
         }
     }
 
-    /// Run an agent in the project: `run` gets the project directory, and the
-    /// result says whether another delegation overlapped it.
-    fn run_tracked(
+    /// Run an agent: `run` is its run, in `workdir`; the result says whether
+    /// another delegation in the project overlapped it.
+    async fn run_tracked(
         &self,
         agent: &AgentConfig,
         workdir: &std::path::Path,
-        run: impl FnOnce(&std::path::Path) -> Result<AgentRun, Error>,
+        run: Pin<Box<dyn Future<Output = Result<AgentRun, Error>> + Send + '_>>,
     ) -> Result<Outcome, RouteError> {
         // Only runs in the project itself can see each other's changes; one in
         // a worktree of its own neither counts nor is counted.
@@ -410,12 +430,12 @@ impl Ensemble {
         let run = if in_project {
             let me = self.started.fetch_add(1, Ordering::SeqCst) + 1;
             let others_running = self.active.fetch_add(1, Ordering::SeqCst) > 0;
-            let run = run(workdir);
+            let run = run.await;
             let overlapped = others_running || self.started.load(Ordering::SeqCst) != me;
             self.active.fetch_sub(1, Ordering::SeqCst);
             run.map(|r| (r, overlapped))
         } else {
-            run(workdir).map(|r| (r, false))
+            run.await.map(|r| (r, false))
         };
         let seconds = clock.elapsed().as_secs_f64();
         let started = started
@@ -498,7 +518,7 @@ impl Ensemble {
                 Adapter::OpenCode(oc) => commands.push((OPENCODE_AGENT, &oc.command)),
                 Adapter::Codex(cx) => commands.push((ensemble_config::CODEX_AGENT, &cx.command)),
                 // No program: its backend, checked below, is all it needs.
-                Adapter::Direct(_) => {}
+                Adapter::Direct(_) | Adapter::Builtin(_) => {}
                 // Checked below, against its hub.
                 Adapter::Node(_) => {}
             }
@@ -664,7 +684,7 @@ agents:
     #[test]
     fn a_run_falls_back_to_the_next_model_and_says_so() {
         let (e, _tmp) = with_fallback(&nowhere(), &model_server(&["big"], "from central"), "fail");
-        let out = e.delegate("summariser", "sum it", None).unwrap();
+        let out = crate::runtime::block_on(e.delegate("summariser", "sum it", None)).unwrap();
         assert_eq!(out.text, "from central");
         assert_eq!(out.model, "big");
         assert_eq!(out.runs_on, "direct on central (fallback 2 of 2)");
@@ -676,7 +696,7 @@ agents:
     fn the_first_model_is_used_when_its_backend_serves_it() {
         let home = model_server(&["small"], "from home");
         let (e, _tmp) = with_fallback(&home, &nowhere(), "fail");
-        let out = e.delegate("summariser", "sum it", None).unwrap();
+        let out = crate::runtime::block_on(e.delegate("summariser", "sum it", None)).unwrap();
         assert_eq!(
             (out.text.as_str(), out.runs_on.as_str()),
             ("from home", "direct on home")
@@ -688,7 +708,7 @@ agents:
     fn with_no_usable_model_a_run_fails_or_its_tasks_wait() {
         let not_served = model_server(&["other"], "x");
         let (e, _tmp) = with_fallback(&nowhere(), &not_served, "fail");
-        let err = e.delegate("summariser", "sum it", None).unwrap_err();
+        let err = crate::runtime::block_on(e.delegate("summariser", "sum it", None)).unwrap_err();
         let RouteError::NoBackend {
             refusals, waits, ..
         } = &err
@@ -734,7 +754,7 @@ agents:
     #[test]
     fn an_unknown_agent_lists_the_real_ones_and_is_not_retryable() {
         let e = ensemble("/nonexistent", None);
-        let err = e.delegate("nobody", "x", None).unwrap_err();
+        let err = crate::runtime::block_on(e.delegate("nobody", "x", None)).unwrap_err();
         assert!(!err.is_retryable());
         let msg = err.to_string();
         assert!(msg.contains("doer, looker, reviewer"), "{msg}");
@@ -744,7 +764,9 @@ agents:
     fn a_cli_that_is_not_installed_is_reported_by_name() {
         let tmp = TempDir::new();
         let e = ensemble("/nonexistent/opencode", Some(tmp.0.clone()));
-        let msg = e.delegate("looker", "x", None).unwrap_err().to_string();
+        let msg = crate::runtime::block_on(e.delegate("looker", "x", None))
+            .unwrap_err()
+            .to_string();
         assert!(msg.contains("/nonexistent/opencode"), "{msg}");
     }
 

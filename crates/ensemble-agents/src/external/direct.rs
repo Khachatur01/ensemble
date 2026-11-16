@@ -5,14 +5,15 @@
 //! The request itself is `ensemble_backends::chat`; this is the agent around it.
 
 use super::AgentRun;
+use crate::runtime::until_set;
 use ensemble_backends::chat::{self, Ask};
 use ensemble_config::{AgentConfig, DIRECT_AGENT, DirectAdapter, LlmBackend};
 use ensemble_core::port::Error;
 use ensemble_core::workspace::Changes;
 use serde_json::Value;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::AtomicBool;
+
+use std::time::Duration;
 
 /// The one user message: the task, after its context when there is one.
 fn user_message(task: &str, context: Option<&str>) -> String {
@@ -54,16 +55,16 @@ pub fn request(
     chat::openai_body(&ask(agent, la, &user))
 }
 
-/// Send the task and return the answer. The request runs on a thread of its
-/// own so a cancel or the agent's `max_seconds` can end the wait; the
-/// request itself ends at the backend's `timeout_seconds`.
-pub fn run(
+/// Send the task and return the answer. A cancel or the agent's
+/// `max_seconds` ends the wait; the request itself ends at the backend's
+/// `timeout_seconds`.
+pub async fn run(
     agent: &AgentConfig,
     la: &DirectAdapter,
     backend: &LlmBackend,
     task: &str,
     context: Option<&str>,
-    progress: &dyn Fn(&str),
+    progress: &(dyn Fn(&str) + Sync),
     cancel: &AtomicBool,
 ) -> Result<AgentRun, Error> {
     let (path, body) = request_for(backend, agent, la, task, context);
@@ -74,35 +75,18 @@ pub fn run(
         la.model(),
         backend.name
     ));
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(chat::send(&backend, path, &body));
-    });
-    let deadline = Instant::now() + Duration::from_secs(u64::from(agent.max_seconds));
-    let answer = loop {
-        let why = if cancel.load(Ordering::Relaxed) {
-            Some("cancelled".to_string())
-        } else if Instant::now() >= deadline {
-            Some(format!("stopped at the {}s time limit", agent.max_seconds))
-        } else {
-            None
-        };
-        if let Some(why) = why {
-            return Ok(AgentRun {
-                text: format!("[{why} before the model answered; the work is unfinished]"),
-                ..empty(la.model())
-            });
-        }
-        match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(answer) => break answer?,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(Error::Protocol {
-                    backend: DIRECT_AGENT.into(),
-                    detail: "the request ended without an answer".into(),
-                });
-            }
-        }
+    let request = tokio::task::spawn_blocking(move || chat::send(&backend, path, &body));
+    let limit = Duration::from_secs(u64::from(agent.max_seconds));
+    let answer = tokio::select! {
+        answer = request => answer.map_err(|e| Error::Protocol {
+            backend: DIRECT_AGENT.into(),
+            detail: format!("the request ended without an answer: {e}"),
+        })??,
+        () = tokio::time::sleep(limit) => return Ok(unfinished(
+            &format!("stopped at the {}s time limit", agent.max_seconds),
+            la.model(),
+        )),
+        () = until_set(cancel) => return Ok(unfinished("cancelled", la.model())),
     };
     progress(&format!("{} · answered", agent.name));
     Ok(AgentRun {
@@ -112,6 +96,13 @@ pub fn run(
         steps: 1,
         ..empty(la.model())
     })
+}
+
+fn unfinished(why: &str, model: &str) -> AgentRun {
+    AgentRun {
+        text: format!("[{why} before the model answered; the work is unfinished]"),
+        ..empty(model)
+    }
 }
 
 fn empty(model: &str) -> AgentRun {
@@ -129,11 +120,28 @@ fn empty(model: &str) -> AgentRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        agent: &AgentConfig,
+        la: &DirectAdapter,
+        backend: &LlmBackend,
+        task: &str,
+        context: Option<&str>,
+        progress: &(dyn Fn(&str) + Sync),
+        cancel: &AtomicBool,
+    ) -> Result<AgentRun, Error> {
+        crate::runtime::block_on(super::run(
+            agent, la, backend, task, context, progress, cancel,
+        ))
+    }
     use ensemble_config::{
         Adapter, BackendSettings, Budget, Candidate, Fallback, Isolation, WhenNone,
     };
     use serde_json::json;
     use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::mpsc;
+    use std::time::Instant;
 
     fn agent(prompt: Option<&str>, max_seconds: u32) -> (AgentConfig, DirectAdapter) {
         let la = DirectAdapter {

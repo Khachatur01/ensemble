@@ -89,7 +89,7 @@ pub(super) fn explain(e: &serde_norway::Error) -> String {
     }
     if detail.contains(&format!("unknown variant `{REMOVED_ENSEMBLE_AGENT}`")) {
         detail.push_str(&format!(
-            ". Type '{REMOVED_ENSEMBLE_AGENT}' was removed; Ensemble no longer runs agents itself. To run a model on an LLM backend, use type '{OPENCODE_AGENT}' with a `model` of type '{LLM_BACKEND_MODEL}'."
+            ". Type '{REMOVED_ENSEMBLE_AGENT}' was removed; Its successor is type '{BUILTIN_AGENT}': an agent loop on an LLM backend, with tools listed in `tools`."
         ));
     }
     detail
@@ -233,6 +233,9 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
             RawAdapter::Direct(d) => {
                 Adapter::Direct(direct_adapter(&at, d, &raw.llm_backends, &mut problems))
             }
+            RawAdapter::Builtin(b) => {
+                Adapter::Builtin(builtin_adapter(&at, b, &raw.llm_backends, &mut problems))
+            }
             RawAdapter::Node(n) => Adapter::Node(node_adapter(&at, n, &mut problems)),
         };
         agents.insert(
@@ -321,6 +324,63 @@ pub(super) fn direct_adapter(
     }
 }
 
+pub(super) fn builtin_adapter(
+    at: &str,
+    ad: &RawBuiltinAdapter,
+    declared: &BTreeMap<String, RawLlmBackend>,
+    problems: &mut Vec<String>,
+) -> BuiltinAdapter {
+    if ad.candidates.is_empty() {
+        problems.push(format!(
+            "{at}: `try` is empty; name at least one model, as {{ backend, model, context_window }}"
+        ));
+    }
+    let mut candidates = Vec::new();
+    for (i, c) in ad.candidates.iter().enumerate() {
+        let here = format!("{at}.try[{i}]");
+        if !declared.contains_key(&c.backend) {
+            problems.push(undefined_backend(&here, &c.backend, declared));
+        }
+        if c.model.trim().is_empty() {
+            problems.push(format!("{here}: `model` is empty"));
+        }
+        if c.context_window == 0 {
+            problems.push(format!("{here}: `context_window` must be greater than 0"));
+        }
+        candidates.push(Candidate {
+            backend: c.backend.clone(),
+            model: c.model.clone(),
+            context_window: Some(c.context_window),
+        });
+    }
+    let mut seen = Vec::new();
+    for tool in &ad.tools {
+        if !BUILTIN_TOOLS.contains(&tool.as_str()) {
+            problems.push(format!(
+                "{at}: tool '{tool}' is not one a builtin agent has; it has {}",
+                BUILTIN_TOOLS.join(", ")
+            ));
+        } else if seen.contains(&tool) {
+            problems.push(format!("{at}: tool '{tool}' is listed twice"));
+        }
+        seen.push(tool);
+    }
+    if ad.max_steps == 0 {
+        problems.push(format!("{at}: `max_steps` must be greater than 0"));
+    }
+    if ad.max_tokens == 0 {
+        problems.push(format!("{at}: `max_tokens` must be greater than 0"));
+    }
+    BuiltinAdapter {
+        fallback: Fallback {
+            candidates,
+            when_none: ad.when_none,
+        },
+        tools: ad.tools.clone(),
+        max_steps: ad.max_steps,
+        max_tokens: ad.max_tokens,
+    }
+}
 /// An adapter names a backend `llm_backends` does not have.
 pub(super) fn undefined_backend(
     at: &str,

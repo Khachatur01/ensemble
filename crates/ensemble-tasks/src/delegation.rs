@@ -335,7 +335,7 @@ pub fn call<'s>(
     ensemble: &'s Ensemble,
     name: &str,
     args: &Value,
-    progress: &dyn Fn(&str),
+    progress: &(dyn Fn(&str) + Sync),
     cancel: &AtomicBool,
     queue: &'s Queue<'s>,
     spawn: &dyn Fn(Task<'s>),
@@ -725,13 +725,23 @@ pub(super) fn run_delegation(
     task: &str,
     context: Option<&str>,
     workdir: Option<&std::path::Path>,
-    progress: &dyn Fn(&str),
+    progress: &(dyn Fn(&str) + Sync),
     cancel: &AtomicBool,
 ) -> ToolResult {
-    let outcome = match workdir {
-        Some(dir) => ensemble.delegate_in(role, task, context, dir, progress, cancel),
-        None => ensemble.delegate_reporting(role, task, context, progress, cancel),
-    };
+    let outcome = ensemble_agents::runtime::block_on(async {
+        match workdir {
+            Some(dir) => {
+                ensemble
+                    .delegate_in(role, task, context, dir, progress, cancel)
+                    .await
+            }
+            None => {
+                ensemble
+                    .delegate_reporting(role, task, context, progress, cancel)
+                    .await
+            }
+        }
+    });
     match outcome {
         Ok(out) => ToolResult {
             text: format!("{}\n\n{}", out.text, agent_footer(role, &out.stats)),

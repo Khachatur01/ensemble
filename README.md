@@ -11,9 +11,10 @@ Code, OpenCode, anything that speaks MCP) sees the team as tools and delegates t
 an agent by name, so cheap work goes to cheap models and you keep working on your
 own tasks. Nothing of Ensemble lives in your projects.
 
-Ensemble runs no agent loop of its own. It starts the agent's CLI headless in
-the project with the task, reads what it does as it works, and returns the
-answer with what it changed. Four adapters ship:
+Ensemble mostly runs no agent loop of its own. It starts the agent's CLI
+headless in the project with the task, reads what it does as it works, and
+returns the answer with what it changed. When you would rather install no CLI,
+the `builtin` adapter is a loop in Ensemble itself. Five adapters ship:
 
 - **`claude-code`**, the Claude Code CLI, on your own subscription, with the
   tools you allow it.
@@ -21,6 +22,10 @@ answer with what it changed. Four adapters ship:
   provider OpenCode is set up for, or on a model server of yours that you
   define once in Ensemble's config.
 - **`codex`**, the Codex CLI, on your own login, limited by Codex's own sandbox.
+- **`builtin`**, an agent loop in Ensemble itself
+  ([harness-rs](https://github.com/liliang-cn/harness-rs)) on a model server of
+  yours: it reads, edits and runs commands with the tools you list, and needs
+  nothing installed.
 - **`direct`**, a light agent: one chat request straight to a model server of
   yours, with no CLI and no tools, for cheap work that needs no files.
 
@@ -225,15 +230,16 @@ one professional your agent can hand work to. It has:
 
 An **LLM backend** is a model server of yours, or one your company runs, defined
 once. An OpenCode agent names it in its model (`type: llm_backend`), and a
-`direct` agent in its adapter, and Ensemble hands the agent's CLI the endpoint
+`builtin` or `direct` agent in its adapter, and Ensemble hands the agent's CLI the endpoint
 and key for each run, so you never configure the same server again in the CLI's
 own settings. It has a `type`:
 
 - `openai-compatible-api`: any `/chat/completions` endpoint: llama-server, vLLM,
-  Ollama, Unsloth, a hosted API. `opencode` and `direct` agents can run on it.
+  Ollama, Unsloth, a hosted API. `opencode`, `builtin` and `direct` agents can
+  run on it.
 - `anthropic-api`: Anthropic's own Messages API (`base_url:
-  https://api.anthropic.com`, the key sent as `x-api-key`). Only a `direct` agent can
-  run on it; OpenCode needs an openai-compatible one, and a config that says
+  https://api.anthropic.com`, the key sent as `x-api-key`). `builtin` and `direct` agents
+  can run on it; OpenCode needs an openai-compatible one, and a config that says
   otherwise is refused by name. Claude Code uses your own login, not a backend.
 
 Either requires `base_url` (the URL itself; no variable overrides it) and
@@ -422,6 +428,49 @@ agents:
 The request waits up to the backend's `timeout_seconds`, and the agent's
 `max_seconds` or a cancel ends the wait sooner. `ensemble show <agent>` prints
 the request; `health` checks the backend serves the model.
+
+### The `builtin` adapter
+
+An agent loop in Ensemble itself, so an agent on a model server of yours needs
+no CLI installed. The model asks for tools, Ensemble runs them in the working
+directory and sends back what they returned, until the model answers or
+`max_steps` is reached. The loop is [harness-rs](https://github.com/liliang-cn/harness-rs)
+(`AgentLoop`), pinned to one exact version.
+
+```yaml
+agents:
+  patcher:
+    prompt: You fix small, well-described bugs and say what you changed.
+    max_seconds: 1800
+    max_concurrent: 1
+    isolation: worktree
+    budget:
+      type: per_hour
+      delegations: 20
+    adapter:
+      type: builtin
+      try:                       # in order; a run uses the first that works
+        - backend: local         # one of llm_backends, of either type
+          model: qwen3-coder:30b
+          context_window: 65536  # the loop compacts before it outgrows it
+      when_none: fail
+      tools: [read, list, grep, glob, edit, write, shell]
+      max_steps: 40              # model calls for one delegation
+      max_tokens: 4000           # answer tokens per model call
+```
+
+| tool | what it is |
+| --- | --- |
+| `read`, `list`, `grep`, `glob` | look at files and folders |
+| `write`, `edit` | change files |
+| `shell` | run any program, with arguments, in the working directory |
+
+The file tools cannot leave the working directory: they open it as a
+capability directory, so `..`, absolute paths and symlinks out are refused by
+the operating system. `shell` has no such limit, which is why an agent has it
+only when it is listed. At `max_steps`, at the agent's `max_seconds`, or on a
+cancel, the run stops with what it did so far, marked unfinished. A shared
+node may offer a `builtin` agent: it runs on the node's own model servers.
 
 ### The `codex` adapter
 
@@ -1247,7 +1296,7 @@ nodes is connected and offers the agent.
 What runs is the node owner's agent, from their helper team: nothing of your
 agent's definition but the name goes there, so the owner decides what runs on
 their machine. They also see your files. A shared node offers only agents that
-run on models from `llm_backends` (`opencode` on `llm_backend`, or `direct`):
+run on models from `llm_backends` (`opencode` on `llm_backend`, `builtin`, or `direct`):
 an agent CLI's own login, such as a Claude Code subscription, belongs to its
 owner and is never lent; `node serve` refuses to start otherwise. A private
 node may offer any of its owner's agents, for the owner's own use from another
@@ -1318,7 +1367,7 @@ An agent spawns `ensemble mcp` by name, so it has to find `ensemble` on the
 
 ### Other Unix: cargo
 
-Needs Rust 1.85 or newer (edition 2024) and a C linker.
+Needs Rust 1.92 or newer (edition 2024) and a C linker.
 
 ```console
 $ cargo install --git https://github.com/Khachatur01/ensemble
@@ -1407,7 +1456,7 @@ server, are added as crates on top.
 | `ensemble-backends` | one chat request to a model server in its own format (`chat.rs`), asking it which models it serves, for `health` (`models.rs`), choosing the first usable model of a `try` list (`resolve.rs`), and a stand-in model server for tests (`testing.rs`) |
 | `ensemble-knowledge` | the hub's knowledge: the vault of shares and notes, a git repository (`vault.rs`), the secret check a share passes first (`secrets.rs`), the pipeline that turns shares into notes (`pipeline.rs`), finding notes by their words (`search.rs`), and the `share` and `recall` tools and the background worker (`lib.rs`) |
 | `ensemble-link` | a hub server's users, sign-ups and their tokens, kept as hashes (`users.rs`), the REST API (`api.rs`) over a little HTTP reader (`http.rs`), what a node and the hub say over their WebSocket (`protocol.rs`), the hub's side (`server.rs`), the connected nodes and the runs and model calls between them, with `/nodes/v1/` (`nodes.rs`), and the node's: a hub server's knowledge over the link (`client.rs`) and the token file (`tokens.rs`) |
-| `ensemble-agents` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess, its JSON events read as it goes), the `direct` adapter, the `node` adapter that runs an agent a node offers, and gates (`external/`); a git worktree and branch per task (`worktree.rs`); agents to adapters, slots, budgets and `health` (`router.rs`) |
+| `ensemble-agents` | the `claude-code`, `opencode` and `codex` adapters (each CLI as a subprocess on tokio, its JSON events read as it goes), the `builtin` adapter (harness-rs's loop), the `direct` adapter, the `node` adapter that runs an agent a node offers, and gates (`external/`); a git worktree and branch per task (`worktree.rs`); agents to adapters, slots, budgets and `health` (`router.rs`); the async runtime runs are on (`runtime.rs`) |
 | `ensemble-tasks` | tasks as files (`tasks.rs`); the `Tracker` trait and `LocalMarkdown`, its one implementation (`tracker.rs`); the worker that runs tasks and background delegations within each agent's slots (`queue.rs`); the tools your agent calls (`delegation.rs`); `review`, `diff` and `merge` of a worktree task's branch (`review.rs`) |
 | `ensemble-inbox` | the task inbox: what it needs from a tracker (`tracker.rs`), a folder of markdown issues, the first tracker (`local_markdown.rs`), making an issue into a task and saying what it reports (`work.rs`), the embedded hub's inbox (`bridge.rs`), a hub server's (`relay.rs`), and a member's computer's part in it (`node.rs`) |
 | `ensemble-node` | a node: `ensemble node serve`, running the agents and serving the models it offers to whom it works for |
@@ -1460,10 +1509,10 @@ scripts stand in for the CLIs.
 
 ## Limitations
 
-- **Five adapters so far.** `claude-code`, `opencode`, `codex`, `direct`, and
-  `node`, which runs an agent a node of a hub server offers.
-- **Only `opencode` and `direct` agents run on an LLM backend**, and an Anthropic
-  one only a `direct` agent. Claude Code and Codex use your own login.
+- **Six adapters so far.** `claude-code`, `opencode`, `codex`, `builtin`,
+  `direct`, and `node`, which runs an agent a node of a hub server offers.
+- **Only `opencode`, `builtin` and `direct` agents run on an LLM backend**, and
+  an Anthropic one only a `builtin` or `direct` agent. Claude Code and Codex use your own login.
 - **One flat team.** A helper team is a list of agents with no hierarchy, and a
   user connects one helper team at a time.
 - **Only the end of a run can ask.** An agent stops with a question
@@ -1473,7 +1522,8 @@ scripts stand in for the CLIs.
   and the agent goes on from what it had. A session lasts as long as the MCP
   session.
 - **No sandbox of Ensemble's own.** The agents' tools are the CLIs' own; their
-  permission settings are what limit them.
+  permission settings are what limit them. A `builtin` agent's file tools stay in
+  the working directory, but its `shell` does not.
 - **Limits are per agent unless shared.** Agents on one server share a limit only
   when they name the same one. Budgets are shared by every project that uses the
   helper team. A token budget counts what runs report, which not every CLI does.

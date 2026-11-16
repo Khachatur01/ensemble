@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Khachatur01/ensemble"
-rust-version = "1.85"
+rust-version = "1.92"
 
 [workspace.dependencies]
 # Config and wire formats. serde_norway is the maintained fork of serde_yaml,
@@ -28,6 +28,19 @@ libc = "0.2"
 tungstenite = { version = "0.28", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 # Hashing hub tokens and making new ones; already in the tree through rustls.
 ring = "0.17"
+# The async runtime. Agents, the link and the node run on it; harness-rs, the
+# built-in agent's loop, is async too.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "net", "signal", "fs"] }
+tokio-util = "0.7"
+async-trait = "0.1"
+# The `builtin` adapter: an agent loop, its tools and model clients, in this
+# binary, so an agent on an LLM backend needs no CLI installed. Pinned exactly:
+# it is young, and its API moves between releases.
+harness-rs = "=0.0.72"
+harness-rs-loop = "=0.0.72"
+harness-rs-models = "=0.0.72"
+harness-rs-tools = "=0.0.72"
+harness-rs-context = "=0.0.72"
 ensemble-core = { path = "crates/ensemble-core" }
 ensemble-config = { path = "crates/ensemble-config" }
 ensemble-backends = { path = "crates/ensemble-backends" }

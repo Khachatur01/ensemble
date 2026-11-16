@@ -1629,9 +1629,9 @@ fn cmd_run(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
     }
 
     let ensemble = ensemble_for(config, dir, args);
-    let outcome = ensemble
-        .delegate(role, &task, args.context.as_deref())
-        .map_err(|e| e.to_string())?;
+    let outcome =
+        ensemble::runtime::block_on(ensemble.delegate(role, &task, args.context.as_deref()))
+            .map_err(|e| e.to_string())?;
 
     // The answer to stdout so it pipes; the provenance to stderr so it does not
     // end up in whatever consumed the answer.
@@ -1708,6 +1708,22 @@ fn cmd_show(config: &Config, args: &Args) -> Result<ExitCode, String> {
                 "{}",
                 serde_json::to_string_pretty(&inline).map_err(|e| e.to_string())?
             );
+        }
+        Adapter::Builtin(ba) => {
+            let backend = config.llm_backends.get(ba.backend()).map_or_else(
+                || format!("<undefined backend {}>", ba.backend()),
+                |b| b.settings.base_url().to_string(),
+            );
+            println!(
+                "Ensemble's own agent loop: {} on {backend}, up to {} steps of {} tokens each",
+                ba.model(),
+                ba.max_steps,
+                ba.max_tokens
+            );
+            println!("tools: {}", ba.tools.join(", "));
+            if let Some(prompt) = agent.prompt.as_deref() {
+                println!("system prompt:\n{prompt}");
+            }
         }
         Adapter::Node(na) => {
             println!(

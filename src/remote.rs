@@ -412,6 +412,34 @@ pub fn describe(config: &Config) -> String {
                     .collect::<Vec<_>>()
                     .join(", else ")
             )),
+            Adapter::Builtin(b) => {
+                out.push_str(&format!(
+                    "  {}: Ensemble's own agent loop on {}, tools [{}]\n",
+                    a.name,
+                    b.fallback
+                        .candidates
+                        .iter()
+                        .map(|c| format!("backend '{}'", c.backend))
+                        .collect::<Vec<_>>()
+                        .join(", else "),
+                    b.tools.join(", ")
+                ));
+                if b.tools.iter().any(|t| t == "shell") {
+                    risks.push(format!(
+                        "{} can run any command in your working folder",
+                        a.name
+                    ));
+                } else if b
+                    .tools
+                    .iter()
+                    .any(|t| crate::config::builtin_tool_writes(t))
+                {
+                    risks.push(format!(
+                        "{} can change files in your working folder",
+                        a.name
+                    ));
+                }
+            }
             Adapter::Node(n) => {
                 out.push_str(&format!(
                     "  {}: sends its tasks, with the files git tracks in your working folder, to `{}` on {} through the hub {}, and writes back what it changed\n",

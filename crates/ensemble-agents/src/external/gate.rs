@@ -21,7 +21,7 @@ pub struct Verdict {
 
 /// Run `gate` in `dir` until it exits, reaches its time limit, or `cancel` is
 /// set.
-pub fn run(gate: &Gate, dir: &Path, cancel: &AtomicBool) -> Verdict {
+pub async fn run(gate: &Gate, dir: &Path, cancel: &AtomicBool) -> Verdict {
     let program = [
         "sh".to_string(),
         "-c".to_string(),
@@ -38,7 +38,8 @@ pub fn run(gate: &Gate, dir: &Path, cancel: &AtomicBool) -> Verdict {
         max_seconds: gate.timeout_seconds,
         cancel,
     }
-    .stream(&mut |line| lines.push(line.to_string()));
+    .stream(&mut |line| lines.push(line.to_string()))
+    .await;
     let skip = lines.len().saturating_sub(KEPT_LINES);
     let mut output = lines[skip..].join("\n");
     if skip > 0 {
@@ -65,6 +66,10 @@ pub fn run(gate: &Gate, dir: &Path, cancel: &AtomicBool) -> Verdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run(gate: &Gate, dir: &Path, cancel: &AtomicBool) -> Verdict {
+        crate::runtime::block_on(super::run(gate, dir, cancel))
+    }
     use ensemble_core::workspace::testing::TempDir;
 
     fn gate(command: &str, timeout_seconds: u32) -> Gate {

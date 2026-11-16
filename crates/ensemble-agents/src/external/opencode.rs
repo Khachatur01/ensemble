@@ -43,14 +43,14 @@ pub const REDACTED: &str = "<redacted>";
 /// Run an `opencode` agent on one task, in `workdir`. `backend` is the LLM
 /// backend the agent names, if it names one.
 #[allow(clippy::too_many_arguments)]
-pub fn run(
+pub async fn run(
     agent: &AgentConfig,
     oc: &OpenCodeAdapter,
     backend: Option<&LlmBackend>,
     task: &str,
     context: Option<&str>,
     workdir: &Path,
-    progress: &dyn Fn(&str),
+    progress: &(dyn Fn(&str) + Sync),
     cancel: &AtomicBool,
 ) -> Result<AgentRun, Error> {
     run_program(
@@ -64,6 +64,7 @@ pub fn run(
         progress,
         cancel,
     )
+    .await
 }
 
 /// The name the agent runs under inside OpenCode.
@@ -264,7 +265,7 @@ pub fn arguments(
 /// [`run`], with the program given as an argv prefix, so tests can stand in a
 /// script for `opencode`.
 #[allow(clippy::too_many_arguments)]
-fn run_program(
+async fn run_program(
     program: &[String],
     agent: &AgentConfig,
     oc: &OpenCodeAdapter,
@@ -272,7 +273,7 @@ fn run_program(
     task: &str,
     context: Option<&str>,
     workdir: &Path,
-    progress: &dyn Fn(&str),
+    progress: &(dyn Fn(&str) + Sync),
     cancel: &AtomicBool,
 ) -> Result<AgentRun, Error> {
     let workspace = Workspace::new(workdir).map_err(|detail| Error::Unsupported {
@@ -310,7 +311,8 @@ fn run_program(
         max_seconds: agent.max_seconds,
         cancel,
     }
-    .stream(&mut |line| stream.read(line))?;
+    .stream(&mut |line| stream.read(line))
+    .await?;
 
     let mut out = AgentRun {
         text: String::new(),
@@ -367,7 +369,7 @@ fn run_program(
 /// What the `--format json` events have said so far.
 struct Stream<'a> {
     workspace: &'a Workspace,
-    say: &'a dyn Fn(&str),
+    say: &'a (dyn Fn(&str) + Sync),
     steps: u32,
     tool_calls: u32,
     usage: Usage,
@@ -379,7 +381,7 @@ struct Stream<'a> {
 }
 
 impl<'a> Stream<'a> {
-    fn new(workspace: &'a Workspace, say: &'a dyn Fn(&str)) -> Self {
+    fn new(workspace: &'a Workspace, say: &'a (dyn Fn(&str) + Sync)) -> Self {
         Stream {
             workspace,
             say,
@@ -469,6 +471,23 @@ pub fn health(command: &str) -> Result<(), Error> {
 mod tests {
     use super::process::testing::{emitting, fake};
     use super::*;
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_program(
+        program: &[String],
+        agent: &AgentConfig,
+        oc: &OpenCodeAdapter,
+        backend: Option<&LlmBackend>,
+        task: &str,
+        context: Option<&str>,
+        workdir: &Path,
+        progress: &(dyn Fn(&str) + Sync),
+        cancel: &AtomicBool,
+    ) -> Result<AgentRun, Error> {
+        crate::runtime::block_on(super::run_program(
+            program, agent, oc, backend, task, context, workdir, progress, cancel,
+        ))
+    }
     use ensemble_config::BackendSettings;
     use ensemble_config::{Adapter, OpenCodeModel};
     use ensemble_core::workspace::testing::TempDir;
@@ -519,7 +538,7 @@ mod tests {
         oc: &OpenCodeAdapter,
         dir: &Path,
     ) -> (Result<AgentRun, Error>, Vec<String>) {
-        let seen = std::cell::RefCell::new(Vec::new());
+        let seen = std::sync::Mutex::new(Vec::new());
         let r = run_program(
             program,
             a,
@@ -528,10 +547,10 @@ mod tests {
             "review it",
             None,
             dir,
-            &|l| seen.borrow_mut().push(l.to_string()),
+            &|l| seen.lock().unwrap().push(l.to_string()),
             &AtomicBool::new(false),
         );
-        (r, seen.into_inner())
+        (r, seen.into_inner().unwrap())
     }
 
     fn on_local_box(model: &str, context_window: u32) -> OpenCodeModel {

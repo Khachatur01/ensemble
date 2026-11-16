@@ -25,14 +25,28 @@ use std::time::{Duration, Instant};
 const GRACE: Duration = Duration::from_secs(30);
 
 /// Run the task on a node, and write what the agent there changed into
-/// `workdir`.
-pub fn run(
+/// `workdir`. The link is not async yet, so this holds its thread meanwhile.
+pub async fn run(
     agent: &AgentConfig,
     na: &NodeAdapter,
     task: &str,
     context: Option<&str>,
     workdir: &Path,
-    progress: &dyn Fn(&str),
+    progress: &(dyn Fn(&str) + Sync),
+    cancel: &AtomicBool,
+) -> Result<AgentRun, Error> {
+    tokio::task::block_in_place(|| {
+        run_blocking(agent, na, task, context, workdir, progress, cancel)
+    })
+}
+
+fn run_blocking(
+    agent: &AgentConfig,
+    na: &NodeAdapter,
+    task: &str,
+    context: Option<&str>,
+    workdir: &Path,
+    progress: &(dyn Fn(&str) + Sync),
     cancel: &AtomicBool,
 ) -> Result<AgentRun, Error> {
     let backend = || format!("{NODE_AGENT} {}", na.nodes.join(" or "));

@@ -308,7 +308,7 @@ fn a_config_with_the_removed_ensemble_type_says_what_to_use_instead() {
     assert!(!out.status.success());
     let err = stderr_of(&out);
     assert!(
-        err.contains("'ensemble' was removed") && err.contains("'llm_backend'"),
+        err.contains("'ensemble' was removed") && err.contains("'builtin'"),
         "{err}"
     );
 }

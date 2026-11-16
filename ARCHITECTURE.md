@@ -119,7 +119,7 @@ for it all to be built; open to change):
   requester's folder. Gates, worktrees, branches and commits stay with the
   requester; nothing runs on the node but its owner's agent definitions. A
   shared node may offer only agents on `llm_backends` (`opencode` on
-  `llm_backend`, or `direct`), which is how "never a subscription" is kept.
+  `llm_backend`, `builtin`, or `direct`), which is how "never a subscription" is kept.
 - Models: the hub serves `/nodes/v1/models`, `/nodes/v1/chat/completions` and
   `/nodes/v1/completions` with an access token as the API key, and streams
   each call from the least busy node that serves the model, the user's own
@@ -183,6 +183,19 @@ The light adapter that sends one chat request straight to a backend, with no CLI
 and no tools, is called `direct` (it was `llm` before version 3). The chat
 client it uses belongs to the backends module, so the knowledge pipeline and the
 hub's chat API can share it.
+
+An agent loop of Ensemble's own is back, as the `builtin` adapter: harness-rs's
+`AgentLoop`, its file and shell tools, and its model clients, on the user's LLM
+backends, so a helper team (or a shared node) needs no agent CLI installed. It
+is pinned to one exact version because the library is young. (Decided
+2026-11-16; the old `ensemble` type, removed in version 3, was a loop of its
+own written here.)
+
+Ensemble is async, on tokio. harness-rs is async, and so are a node that runs
+many agents and serves models at once, and the link. The switch goes from the
+agents outward: agent runs, CLI processes included, are async first; code that
+is not converted yet waits for them with `runtime::block_on`. (Decided
+2026-11-16; Ensemble was synchronous on purpose until then.)
 
 An organization may later limit helper teams through policy, not structure:
 which backends its data may be sent to, gates its repositories require, budgets
@@ -415,6 +428,10 @@ in either process.
    hub, an agent of `type: node` that runs on one, and `/nodes/v1/`. Not yet:
    GitLab, GitHub and Jira; OIDC and the device flow; the chat API and the
    web UI.)
+6. Async, the `builtin` adapter, and one node per worker that is also the MCP
+   server. (Started: tokio, async agent runs, `builtin` on harness-rs. Not
+   yet: tasks, MCP and the link on tokio; `ensemble mcp` as a bridge to a
+   running node.)
 
 The link, as built: the node opens one WebSocket and signs in with
 `Authorization: Bearer <token>` during the upgrade (401 without a valid one).
