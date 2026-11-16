@@ -7,8 +7,9 @@
 # environment, or from a file passed with --env-file.
 #
 # Nothing has a default value: every setting is written here, and one that is
-# missing is refused by name. Only two may be left out, because leaving them
-# out means "not used": an agent's `prompt` and a backend's `api_key_env`.
+# missing is refused by name. Only a few may be left out, because leaving them
+# out means "not used": an agent's `prompt` and `recall`, and a backend's
+# `api_key_env`.
 # This file is a map of what can be set rather than a team to keep as it is:
 # delete the agents you do not want and change the rest. Check it with
 # `ensemble check --team <dir>`, see how an agent is started with
@@ -112,6 +113,11 @@ agents:
       You implement exactly what is asked, in the style of the surrounding
       code. Read the relevant files first, make the change, and report what
       you changed.
+    # With a hub that keeps knowledge (--hub), each task and delegation comes
+    # with the notes of the vault about it, at most this many characters. They
+    # go to the model the agent runs on. Leave it out for no notes.
+    recall:
+      max_chars: 3000
     # Wall-clock limit for one delegation.
     max_seconds: 1800
     # Its slots and budget come from a shared limit above, in place of its own

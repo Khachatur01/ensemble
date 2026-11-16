@@ -24,7 +24,7 @@
 
 use ensemble_agents::router::Ensemble;
 use ensemble_inbox::{Inbox, NodeInbox};
-use ensemble_knowledge::{KnowledgeAccess, Memory};
+use ensemble_knowledge::{KnowledgeAccess, Memory, RECALL, RECALL_HEADER, recalled_within};
 use ensemble_tasks::delegation;
 use ensemble_tasks::queue::{Queue, Task};
 use ensemble_tasks::tasks::Store;
@@ -82,7 +82,7 @@ pub fn handle_with(
         request,
         &|_| {},
         &AtomicBool::new(false),
-        &Queue::new(ensemble, None),
+        &queue_for(ensemble, None, memory),
         &|task| task(),
     )
 }
@@ -266,7 +266,8 @@ pub fn serve_with<W: Write + Send>(
     if let Some(usage) = ensemble.usage_dir() {
         store = store.with_usage_dir(usage);
     }
-    let queue = Queue::new(ensemble, Some(store));
+    note_recall_without_knowledge(ensemble, memory);
+    let queue = queue_for(ensemble, Some(store), memory);
     let (send, notify, running, queue) = (&send, &notify, &running, &queue);
 
     let hub_stop = &AtomicBool::new(false);
@@ -369,6 +370,50 @@ pub fn serve_with<W: Write + Send>(
         hub_stop.store(true, Ordering::Relaxed);
         result
     })
+}
+
+/// A queue of `ensemble` whose agents with `recall` are given notes from
+/// `memory`, when the session has a hub that keeps knowledge.
+pub(crate) fn queue_for<'s>(
+    ensemble: &'s Ensemble,
+    store: Option<Store>,
+    memory: Option<&'s dyn KnowledgeAccess>,
+) -> Queue<'s> {
+    let queue = Queue::new(ensemble, store);
+    let Some(memory) = memory else {
+        return queue;
+    };
+    queue.with_recall(move |topic, max_chars| {
+        match memory.call(RECALL, &json!({ "query": topic })) {
+            Some(Ok(text)) => Ok(text
+                .starts_with(RECALL_HEADER)
+                .then(|| recalled_within(&text, max_chars))),
+            Some(Err(e)) => Err(e),
+            None => Err("this session's hub offers no recall".into()),
+        }
+    })
+}
+
+/// Say once, on stderr, that agents with `recall` get no notes in a session
+/// without a hub that keeps knowledge.
+pub(crate) fn note_recall_without_knowledge(
+    ensemble: &Ensemble,
+    memory: Option<&dyn KnowledgeAccess>,
+) {
+    let wanting: Vec<&str> = ensemble
+        .config()
+        .agents
+        .values()
+        .filter(|a| a.recall.is_some())
+        .map(|a| a.name.as_str())
+        .collect();
+    if memory.is_none() && !wanting.is_empty() {
+        eprintln!(
+            "ensemble: note: {} {} `recall`, but no hub that keeps knowledge was given (--hub), so no notes are given",
+            wanting.join(", "),
+            if wanting.len() == 1 { "has" } else { "have" }
+        );
+    }
 }
 
 /// Runs background work on a thread of `scope`.

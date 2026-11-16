@@ -130,7 +130,19 @@ pub struct AgentConfig {
     /// The shared limit it takes `max_concurrent` and `budget` from, when it
     /// names one: its slots and its budget are then shared with the others.
     pub limit: Option<String>,
+    /// What it is given from the hub's knowledge with each task; `None` when
+    /// it is given nothing.
+    pub recall: Option<AgentRecall>,
     pub adapter: Adapter,
+}
+
+/// Notes from the hub's knowledge vault that an agent is given with each task
+/// and delegation: those about the task, within the hub's recall limits and
+/// the agent's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentRecall {
+    /// Most characters of notes given with one task.
+    pub max_chars: u32,
 }
 
 /// Where an agent's tasks run. Delegations, blocking or in the background,

@@ -473,6 +473,11 @@ fn the_schema_names_exactly_the_keys_the_config_accepts() {
         ),
         ("limit", accepted_keys::<RawLimit>(), "limits"),
         (
+            "agent_recall",
+            accepted_keys::<RawAgentRecall>(),
+            "an agent's recall",
+        ),
+        (
             "budget_per_hour_tokens",
             accepted_keys::<RawPerHourTokens>(),
             "per_hour_tokens budget",
@@ -551,7 +556,11 @@ fn the_schema_requires_every_key_but_the_optional_two() {
     for (def, keys) in [
         ("openai_compatible_api_backend", vec!["api_key_env"]),
         ("anthropic_api_backend", vec!["api_key_env"]),
-        ("agent", vec!["prompt", "max_concurrent", "budget", "limit"]),
+        (
+            "agent",
+            vec!["prompt", "max_concurrent", "budget", "limit", "recall"],
+        ),
+        ("agent_recall", vec![]),
         ("limit", vec![]),
         ("budget_per_hour_tokens", vec![]),
         ("tracker_local_markdown", vec![]),
@@ -745,6 +754,14 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
         ("anthropic_api_backend", of_type(&backends, ANTHROPIC_API)),
         ("tracker_local_markdown", trackers),
         ("agent", agents.clone()),
+        (
+            "agent_recall",
+            agents
+                .iter()
+                .map(|a| &a["recall"])
+                .filter(|r| !r.is_null())
+                .collect(),
+        ),
         ("budget_unlimited", budgets("unlimited")),
         ("budget_per_hour", budgets("per_hour")),
         ("claude_code_adapter", adapters(CLAUDE_CODE_AGENT)),
@@ -1193,6 +1210,29 @@ fn a_prompt_is_optional_and_absent_means_none() {
         );
     let c = parse(&with, &p(), &env(&[])).unwrap();
     assert_eq!(c.agents["coder"].prompt.as_deref(), Some("Writes code."));
+}
+
+#[test]
+fn recall_is_optional_absent_means_none_and_needs_a_size() {
+    let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
+    assert_eq!(c.agents["coder"].recall, None);
+    let with = |recall: &str| {
+        REFERENCE.replacen(
+            "  coder:\n    max_seconds: 900\n",
+            &format!("  coder:\n    recall: {recall}\n    max_seconds: 900\n"),
+            1,
+        )
+    };
+    let c = parse(&with("{ max_chars: 2000 }"), &p(), &env(&[])).unwrap();
+    assert_eq!(
+        c.agents["coder"].recall,
+        Some(AgentRecall { max_chars: 2000 })
+    );
+    assert!(
+        joined_problems(&with("{ max_chars: 0 }"))
+            .contains("agents.coder.recall: `max_chars` must be greater than 0")
+    );
+    assert!(parse(&with("{}"), &p(), &env(&[])).is_err());
 }
 
 /// A helper team of a `coder` and a `planner`, with one gate.

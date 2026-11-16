@@ -397,19 +397,20 @@ pub fn call<'s>(
                         Ok(repo) => repo,
                         Err(e) => return ToolResult::err(format!("{DELEGATE}: {e}")),
                     };
-                    let context = args.get("context").and_then(Value::as_str);
+                    // What the knowledge vault has about it comes with the
+                    // context, and stays with it when the agent asks.
+                    let context = queue.with_notes(
+                        role,
+                        given,
+                        args.get("context").and_then(Value::as_str),
+                        progress,
+                    );
                     let prompt = if background {
                         given.to_string()
                     } else {
                         format!("{given}\n\n{ASK_INSTRUCTION}")
                     };
-                    (
-                        role.to_string(),
-                        given.to_string(),
-                        context.map(str::to_string),
-                        repo,
-                        prompt,
-                    )
+                    (role.to_string(), given.to_string(), context, repo, prompt)
                 }
             };
             let (role, context) = (role.as_str(), context.as_deref());

@@ -123,12 +123,22 @@ impl Ask {
     }
 }
 
+/// What the hub's knowledge vault holds about a topic, in at most a number of
+/// characters of notes: the notes as text, `None` when it holds none, or why
+/// it could not be asked.
+pub type Recall<'e> = dyn Fn(&str, usize) -> Result<Option<String>, String> + Sync + 'e;
+
+/// The most of a task's text used as the topic of a recall.
+const MAX_TOPIC_CHARS: usize = 1000;
+
 /// The tasks and background delegations of one session.
 pub struct Queue<'e> {
     ensemble: &'e Ensemble,
     /// Where tasks live. Without one (a request handled outside a session)
     /// there are no tasks, and background delegations are kept in memory.
     store: Option<Store>,
+    /// The session's hub knowledge, for agents given notes with their tasks.
+    recall: Option<Box<Recall<'e>>>,
     inner: Mutex<Inner>,
     /// Signalled whenever something starts, ends, frees a slot or is
     /// submitted.
@@ -160,6 +170,7 @@ impl<'e> Queue<'e> {
         Queue {
             ensemble,
             store,
+            recall: None,
             inner: Mutex::new(Inner {
                 last_adhoc,
                 usage,
@@ -167,6 +178,58 @@ impl<'e> Queue<'e> {
             }),
             changed: Condvar::new(),
         }
+    }
+
+    /// This queue, with the agents that have `recall` given what `recall`
+    /// finds about each of their tasks.
+    pub fn with_recall(
+        mut self,
+        recall: impl Fn(&str, usize) -> Result<Option<String>, String> + Sync + 'e,
+    ) -> Self {
+        self.recall = Some(Box::new(recall));
+        self
+    }
+
+    /// The context `agent` is given with a task about `topic`: `context`, and
+    /// after it the notes of the knowledge vault about the task when the agent
+    /// has `recall`, within its `max_chars`. A vault that cannot be asked is
+    /// told to `progress`, and the task goes on without notes.
+    pub fn with_notes(
+        &self,
+        agent: &str,
+        topic: &str,
+        context: Option<&str>,
+        progress: &dyn Fn(&str),
+    ) -> Option<String> {
+        let context = context.map(str::to_string);
+        let Some(limits) = self.ensemble.config().agent(agent).and_then(|a| a.recall) else {
+            return context;
+        };
+        let Some(recall) = &self.recall else {
+            return context;
+        };
+        let topic: String = topic.chars().take(MAX_TOPIC_CHARS).collect();
+        let notes = match recall(&topic, limits.max_chars as usize) {
+            Ok(Some(notes)) => notes,
+            Ok(None) => {
+                progress(&format!(
+                    "{agent}: the knowledge vault has no notes about this"
+                ));
+                return context;
+            }
+            Err(e) => {
+                progress(&format!("{agent}: no notes from the knowledge vault: {e}"));
+                return context;
+            }
+        };
+        progress(&format!(
+            "{agent}: given {} characters of notes from the knowledge vault",
+            notes.chars().count()
+        ));
+        Some(match context.filter(|c| !c.trim().is_empty()) {
+            Some(c) => format!("{c}\n\n{notes}"),
+            None => notes,
+        })
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -701,12 +764,19 @@ impl<'e> Queue<'e> {
         base.push_str(&format!(
             "\n\nIf you cannot finish without a decision that only the person who asked can make, stop and end your reply with one line: {ASK_MARKER} <your question>\nIf the next part belongs to another agent, end your reply with one line: {HANDOFF_MARKER} <agent> <what remains>"
         ));
+        // Recalled once: a gate's retry is the same task.
+        let context = self.with_notes(
+            &ticket.agent,
+            &format!("{}\n\n{}", ticket.title, ticket.prompt()),
+            ticket.context.as_deref(),
+            &note,
+        );
         let delegate = |prompt: &str| {
             run_delegation(
                 self.ensemble,
                 &ticket.agent,
                 prompt,
-                ticket.context.as_deref(),
+                context.as_deref(),
                 Some(dir),
                 &note,
                 cancel,

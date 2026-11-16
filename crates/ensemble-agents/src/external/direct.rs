@@ -155,6 +155,7 @@ mod tests {
             isolation: Isolation::Shared,
             budget: Budget::Unlimited,
             limit: None,
+            recall: None,
             adapter: Adapter::Direct(la.clone()),
         };
         (a, la)

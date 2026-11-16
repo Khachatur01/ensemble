@@ -4,7 +4,7 @@
 use crate::Hub;
 use ensemble_agents::router::Ensemble;
 use ensemble_tasks::lock;
-use ensemble_tasks::queue::{Queue, Task};
+use ensemble_tasks::queue::Task;
 use ensemble_tasks::tasks::Store;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -33,7 +33,8 @@ pub fn run(
     if let Some(usage) = ensemble.usage_dir() {
         store = store.with_usage_dir(usage);
     }
-    let queue = Queue::new(ensemble, Some(store));
+    crate::note_recall_without_knowledge(ensemble, hub.knowledge);
+    let queue = crate::queue_for(ensemble, Some(store), hub.knowledge);
     say(&format!(
         "serving the tasks in {}",
         state.join("tasks").display()

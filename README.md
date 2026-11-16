@@ -937,6 +937,27 @@ within `max_notes` and `max_chars`, marked as reference data.
 `ensemble recall --hub <dir> <topic>` prints the same. The search is by words
 (BM25, a title's words counting more), with no index to keep.
 
+**Notes for the helper team.** An agent of the helper team gets notes only if
+its block in `config.yaml` asks for them:
+
+```yaml
+agents:
+  coder:
+    recall:
+      max_chars: 3000   # most characters of notes given with one task
+    # ...
+```
+
+Then each task and delegation it gets comes with the vault's notes about it,
+found from the task's text, after the task's context, and still under the header
+that marks them as reference data. Recall happens once per task, not again for
+each gate retry. A question the agent stops to ask keeps the notes for the
+answer. Leave `recall` out and an agent gets no notes. That matters because the
+notes go to whatever model the agent runs on, so give them only to agents whose
+backend may see them. With no hub that keeps knowledge (`--hub`), an agent with
+`recall` gets nothing, and the session says so on stderr. A hub that cannot be
+reached costs the task its notes, not its run.
+
 ## Tasks from a tracker
 
 Tasks live in a tracker and are assigned to **people**. When an issue is
@@ -1316,7 +1337,7 @@ scripts stand in for the CLIs.
 | `crates/ensemble-link/` | sign-up, approval and the REST API's codes, tokens kept as hashes and revoked at once, roles checked per request, shares under the signed-in name, a reader offered only `recall`, the token file 0600, the link opened again when it breaks |
 | `crates/ensemble-inbox/` | markdown issues read and written with only the status line changed; a hub server's deliveries: matched by tracker name, accepted once, refused, asked and answered, reported; issues to tasks, questions and answers through comments, results posted once, one inbox per hub |
 | `crates/ensemble-tasks/` | ticket files: reading, ids, results written once, run logs; review and merge |
-| `crates/ensemble-mcp/src/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session |
+| `crates/ensemble-mcp/src/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session, notes recalled for agents with `recall` |
 | `tests/workspace.rs` | the crates depend on each other in one direction only |
 | `tests/end_to_end.rs` | the real binary: CLI, `show`, `health` against a stub server, MCP over real pipes, an agent changing a file |
 | `crates/ensemble-agents/tests/fixtures/` | saved event streams per CLI version, replayed through each adapter's parser (see its README) |
@@ -1353,8 +1374,9 @@ scripts stand in for the CLIs.
   factor. The API sends no CORS headers, so a UI is served from the hub's own
   origin. Connectors to chats and mail are not built either.
 - **Recall is a word search.** It finds notes that use your words, not ones
-  that only mean the same. Your agent recalls when it decides to; delegated
-  agents get no notes on their own.
+  that only mean the same. Your agent recalls when it decides to; a helper
+  agent with `recall` gets the notes its task's words find, once, when the task
+  starts. Memory files and session hooks for your CLI are not built.
 - **One tracker so far.** The inbox reads a folder of markdown issues; GitLab,
   GitHub and Jira adapters are not built. A member's computer takes a hub
   server's tasks only while `ensemble mcp` or `ensemble serve` runs on it.

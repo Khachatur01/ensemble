@@ -362,9 +362,10 @@ in either process.
    tool, recall. (Done: `hub.yaml` and `--hub`; the `ensemble-knowledge`
    crate with the vault, the secret check, the pipeline with the injection
    guards and a background worker, BM25 recall; the `share` and `recall` MCP
-   tools; `ensemble share`, `recall`, `knowledge status|distill|rebuild`. Not
-   yet: the organization vault and visibility, the privacy gate beyond the
-   secret check, recall handed to delegated agents, memory files and hooks.)
+   tools; `ensemble share`, `recall`, `knowledge status|distill|rebuild`;
+   notes given with each task to the helper agents whose `recall` asks for
+   them. Not yet: the organization vault and visibility, the privacy gate
+   beyond the secret check, memory files and hooks.)
 5. Hub server, link, identity, tracker adapters. (Started: the inbox, in the
    embedded hub, with a local markdown tracker: issues become tasks in the
    folder their project maps to, for the agent a `<label>:<agent>` label names

@@ -56,6 +56,16 @@ fn team_with(
     max_concurrent: u32,
     isolation: &str,
 ) -> (Ensemble, TempDir) {
+    team_changed(scripts, max_concurrent, isolation, |_| {})
+}
+
+/// [`team_with`], with its config changed by `change` before use.
+fn team_changed(
+    scripts: &[(&str, &str, &str)],
+    max_concurrent: u32,
+    isolation: &str,
+    change: impl FnOnce(&mut config::Config),
+) -> (Ensemble, TempDir) {
     let tmp = TempDir::new();
     let bin = tmp.0.join("bin");
     let project = tmp.0.join("project");
@@ -72,7 +82,9 @@ fn team_with(
             ));
     }
     let yaml = config::migrate::to_v3(&yaml).unwrap();
-    let cfg = config::parse(&yaml, std::path::Path::new("config.yaml"), &BTreeMap::new()).unwrap();
+    let mut cfg =
+        config::parse(&yaml, std::path::Path::new("config.yaml"), &BTreeMap::new()).unwrap();
+    change(&mut cfg);
     let state = project.join(".ensemble");
     (Ensemble::new(cfg, Some(project)).with_state(state), tmp)
 }
@@ -756,6 +768,15 @@ fn waiting_for_a_job_that_does_not_exist_is_a_readable_error() {
 /// Run a session on `e` while `script` talks to it; the session ends, as
 /// when the caller goes away, when `script` returns.
 fn session(e: &Ensemble, script: impl FnOnce(&mut dyn FnMut(&str, Value) -> String)) {
+    session_with(e, Hub::default(), script)
+}
+
+/// [`session`], with what a hub adds.
+fn session_with(
+    e: &Ensemble,
+    hub: Hub<'_>,
+    script: impl FnOnce(&mut dyn FnMut(&str, Value) -> String),
+) {
     let (tx, rx) = std::sync::mpsc::channel();
     let out = Shared::default();
     std::thread::scope(|s| {
@@ -765,7 +786,7 @@ fn session(e: &Ensemble, script: impl FnOnce(&mut dyn FnMut(&str, Value) -> Stri
                 lines: rx,
                 pending: Vec::new(),
             });
-            serve(e, input, output).unwrap();
+            serve_with(e, hub, input, output).unwrap();
         });
         let mut id = 0;
         script(&mut |name, args| {
@@ -1677,4 +1698,139 @@ fn with_a_hub_the_knowledge_tools_are_offered_and_a_share_is_kept() {
     )
     .unwrap();
     assert_eq!(r["result"]["isError"], true, "{r}");
+}
+
+/// A hub's knowledge with one note, about deploys, and a long tail.
+struct Deploys;
+
+impl KnowledgeAccess for Deploys {
+    fn tools(&self) -> Vec<ensemble_knowledge::Tool> {
+        ensemble_knowledge::tool_definitions()
+    }
+
+    fn instructions(&self) -> String {
+        String::new()
+    }
+
+    fn call(&self, name: &str, args: &Value) -> Option<Result<String, String>> {
+        let query = args["query"].as_str().unwrap_or("");
+        (name == RECALL).then(|| {
+            Ok(if query.contains("deploy") {
+                format!(
+                    "{RECALL_HEADER}\n\n## Deploys\nWe deploy on Fridays.{}",
+                    " tail".repeat(100)
+                )
+            } else {
+                format!("No note in the user's knowledge vault is about '{query}'.")
+            })
+        })
+    }
+
+    fn set_client(&self, _: &str) {}
+}
+
+/// Writes its prompt to `<agent>.txt`, then answers.
+fn prompt_writer(agent: &str) -> String {
+    format!(
+        "for last; do :; done\nprintf '%s' \"$last\" > {agent}.txt\n{}",
+        emit(&step(vec![text("ok")]))
+    )
+}
+
+/// A coder given at most `max_chars` of notes, and a scout given none.
+fn recalling(max_chars: u32) -> (Ensemble, TempDir) {
+    let (coder, scout) = (prompt_writer("coder"), prompt_writer("scout"));
+    team_changed(
+        &[("coder", "read", &coder), ("scout", "read", &scout)],
+        4,
+        "shared",
+        |cfg| cfg.agents.get_mut("coder").unwrap().recall = Some(config::AgentRecall { max_chars }),
+    )
+}
+
+fn prompt_of(tmp: &TempDir, agent: &str) -> String {
+    std::fs::read_to_string(project(tmp).join(format!("{agent}.txt"))).unwrap()
+}
+
+#[test]
+fn an_agent_with_recall_is_given_the_notes_about_its_task_within_its_size() {
+    let (e, tmp) = recalling(60);
+    let delegate = |agent: &str, task: &str| {
+        handle_with(
+            &e,
+            Some(&Deploys),
+            &rpc(
+                "tools/call",
+                json!({"name": "delegate", "arguments":
+                    {"agent": agent, "task": task, "context": "on main"}}),
+            ),
+        )
+        .unwrap()
+    };
+    delegate("coder", "fix the deploy script");
+    let prompt = prompt_of(&tmp, "coder");
+    assert!(
+        prompt.starts_with(&format!("Context:\non main\n\n{RECALL_HEADER}")),
+        "{prompt}"
+    );
+    // The header that marks them as data is kept whole; the notes after it
+    // are cut to max_chars.
+    let notes = prompt
+        .split_once(RECALL_HEADER)
+        .unwrap()
+        .1
+        .split_once(" [...]")
+        .unwrap()
+        .0;
+    assert!(notes.contains("We deploy on Fridays."), "{prompt}");
+    assert!(notes.chars().count() <= 60, "cut to max_chars: {prompt}");
+    assert!(prompt.contains("fix the deploy script"), "{prompt}");
+
+    // An agent without `recall` is given nothing, and nor is a task the
+    // vault has no notes about.
+    delegate("scout", "fix the deploy script");
+    assert!(!prompt_of(&tmp, "scout").contains(RECALL_HEADER));
+    delegate("coder", "rename the parser");
+    let prompt = prompt_of(&tmp, "coder");
+    assert!(
+        prompt.starts_with("Context:\non main\n\nrename the parser"),
+        "{prompt}"
+    );
+
+    // Without a hub, `recall` gives nothing either.
+    call(
+        &e,
+        "delegate",
+        json!({"agent": "coder", "task": "fix the deploy script"}),
+    );
+    assert!(!prompt_of(&tmp, "coder").contains(RECALL_HEADER));
+}
+
+#[test]
+fn a_task_of_an_agent_with_recall_is_given_the_notes_about_it() {
+    let (e, tmp) = recalling(2000);
+    write_task(
+        &tmp,
+        "0001-deploy",
+        "coder",
+        "Make the deploy script retry.",
+    );
+    let hub = Hub {
+        knowledge: Some(&Deploys),
+        ..Hub::default()
+    };
+    session_with(&e, hub, |ask| {
+        let r = ask(
+            "wait",
+            json!({"task": "0001-deploy", "timeout_seconds": 20}),
+        );
+        assert!(r.starts_with("---\nstatus: done\n"), "{r}");
+    });
+    let prompt = prompt_of(&tmp, "coder");
+    assert!(
+        prompt.starts_with(&format!("Context:\n{RECALL_HEADER}")),
+        "{prompt}"
+    );
+    assert!(prompt.contains("We deploy on Fridays."), "{prompt}");
+    assert!(!prompt.contains("[...]"), "within its size: {prompt}");
 }

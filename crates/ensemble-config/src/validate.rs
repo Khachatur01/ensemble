@@ -214,6 +214,9 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
                 (1, Budget::Unlimited, None)
             }
         };
+        if ra.recall.as_ref().is_some_and(|r| r.max_chars == 0) {
+            problems.push(format!("{path}.recall: `max_chars` must be greater than 0"));
+        }
         let at = format!("{path}.adapter");
         let adapter = match &ra.adapter {
             RawAdapter::ClaudeCode(c) => {
@@ -241,6 +244,9 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
                 isolation: ra.isolation,
                 budget,
                 limit,
+                recall: ra.recall.as_ref().map(|r| AgentRecall {
+                    max_chars: r.max_chars,
+                }),
                 adapter,
             },
         );

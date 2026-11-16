@@ -50,6 +50,18 @@
     }
   },
   "definitions": {
+    "agent_recall": {
+      "type": "object",
+      "required": ["max_chars"],
+      "additionalProperties": false,
+      "properties": {
+        "max_chars": {
+          "description": "Most characters of notes given with one task. Keep it small for a model with a short context.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
     "limit": {
       "type": "object",
       "required": ["max_concurrent", "budget"],
@@ -253,6 +265,10 @@
           "description": "Wall-clock limit for one delegation. At the limit the agent's process is stopped and what it did is returned, marked unfinished.",
           "type": "integer",
           "minimum": 1
+        },
+        "recall": {
+          "description": "Give the agent, with each task and delegation, the notes the hub's knowledge vault has about it, within the hub's recall limits and `max_chars`. It needs a hub that keeps knowledge (`--hub`). Leave it out and the agent is given no notes; with it, the notes go to whatever model the agent runs on.",
+          "$ref": "#/definitions/agent_recall"
         },
         "limit": {
           "description": "The name of one of the team's `limits`, in place of `max_concurrent` and `budget`: the slots and the budget are then shared with every agent that names it.",
