@@ -19,23 +19,30 @@ use crate::protocol::{
 };
 use crate::users::Users;
 use ensemble_config::Permission;
+use ensemble_core::runtime::{self, blocking};
 use ensemble_knowledge::Memory;
+use futures_util::SinkExt;
+use futures_util::stream::{SplitSink, StreamExt};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
-use tungstenite::handshake::server::{ErrorResponse, Request as Upgrade, Response};
-use tungstenite::{Message, WebSocket};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::handshake::server::{
+    ErrorResponse, Request as Upgrade, Response,
+};
+use tokio_tungstenite::tungstenite::{self, Message};
 
-/// How often a waiting connection looks at the stop flag.
-const TICK: Duration = Duration::from_millis(200);
-/// How long a link waits for a message before it looks at its outbox: what a
-/// streamed model answer or a run's progress may lag by.
-const LINK_TICK: Duration = Duration::from_millis(20);
+/// How long a connection may take to send its request's head.
+const HEAD_WAIT: Duration = Duration::from_secs(10);
+/// How often a subscribed node's waiting events are looked for.
+const LOOK_EVERY: Duration = Duration::from_secs(1);
+
+/// The sending half of a node's link.
+type Sender = SplitSink<WebSocketStream<http::Replay<TcpStream>>, Message>;
 
 /// A hub server: its knowledge, its roles, how people join, and where its
 /// users are kept.
@@ -90,91 +97,101 @@ impl<'a> Server<'a> {
         self
     }
 
-    /// Accept nodes on `listener` until `stop` is set, each on its own thread.
-    /// `say` gets one line per connection and per request, never what was
-    /// shared.
-    pub fn run(&self, listener: TcpListener, stop: &AtomicBool, say: &(dyn Fn(&str) + Sync)) {
-        if listener.set_nonblocking(true).is_err() {
-            say("cannot wait for connections without blocking");
-            return;
-        }
-        std::thread::scope(|scope| {
-            while !stop.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((stream, peer)) => {
-                        scope.spawn(move || {
-                            if let Err(e) = self.connection(stream, stop, say) {
-                                say(&format!("{peer}: {e}"));
-                            }
-                        });
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(TICK)
-                    }
-                    Err(e) => say(&format!("accept: {e}")),
+    /// Accept nodes on `listener` until `stop` is set, each connection a task
+    /// of its own. `say` gets one line per connection and per request, never
+    /// what was shared. The server lives as long as the process, so it is
+    /// borrowed for good.
+    pub async fn run(
+        &'static self,
+        listener: std::net::TcpListener,
+        stop: &'static AtomicBool,
+        say: &'static (dyn Fn(&str) + Sync),
+    ) where
+        'a: 'static,
+    {
+        let listener = match listener
+            .set_nonblocking(true)
+            .and_then(|()| TcpListener::from_std(listener))
+        {
+            Ok(listener) => listener,
+            Err(e) => return say(&format!("cannot wait for connections: {e}")),
+        };
+        loop {
+            let accepted = tokio::select! {
+                accepted = listener.accept() => accepted,
+                () = runtime::until_set(stop) => return,
+            };
+            match accepted {
+                Ok((stream, peer)) => {
+                    tokio::spawn(async move {
+                        if let Err(e) = self.connection(stream, stop, say).await {
+                            say(&format!("{peer}: {e}"));
+                        }
+                    });
                 }
+                Err(e) => say(&format!("accept: {e}")),
             }
-        });
+        }
     }
 
     pub(crate) fn users(&self) -> Result<Users, String> {
         Users::load(&self.users).map_err(String::from)
     }
 
-    // The handshake callback's error type is tungstenite's own response.
-    #[allow(clippy::result_large_err)]
-    fn connection(
+    async fn connection(
         &self,
-        stream: TcpStream,
+        mut stream: TcpStream,
         stop: &AtomicBool,
         say: &(dyn Fn(&str) + Sync),
     ) -> Result<(), String> {
-        stream.set_nonblocking(false).map_err(|e| e.to_string())?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .map_err(|e| e.to_string())?;
-        let (head, read, end) = http::read_head(&mut &stream)?;
+        let (head, read, end) = tokio::time::timeout(HEAD_WAIT, http::read_head(&mut stream))
+            .await
+            .map_err(|_| "no request came in time".to_string())??;
         if !head.is_upgrade() {
             if head.path.starts_with("/nodes/v1/") {
-                return self.model_request(stream, &head, &read[end..], say);
+                return self.model_request(stream, &head, &read[end..], say).await;
             }
-            return self.rest(stream, &head, &read[end..], say);
+            return self.rest(stream, &head, &read[end..], say).await;
         }
         let mut session = None;
-        let stream = Replay::new(read, stream);
-        let mut ws = tungstenite::accept_hdr_with_config(
-            stream,
-            |req: &Upgrade, resp: Response| match self.sign_in(req) {
-                Some(s) => {
-                    session = Some(s);
-                    Ok(resp)
-                }
-                None => Err(refused()),
-            },
+        // The handshake callback's error type is tungstenite's own response.
+        #[allow(clippy::result_large_err)]
+        let signed_in = |req: &Upgrade, resp: Response| match blocking(|| self.sign_in(req)) {
+            Some(s) => {
+                session = Some(s);
+                Ok(resp)
+            }
+            None => Err(refused()),
+        };
+        let ws = tokio_tungstenite::accept_hdr_async_with_config(
+            Replay::new(read, stream),
+            signed_in,
             Some(crate::protocol::socket_config()),
         )
+        .await
         .map_err(|e| format!("refused or broken handshake: {e}"))?;
         let session = session.ok_or("no session after the handshake")?;
         say(&format!("{} connected", session.user));
-        ws.get_ref()
-            .inner
-            .set_read_timeout(Some(LINK_TICK))
-            .map_err(|e| e.to_string())?;
         let (conn, outbox) = self.routes.connect();
-        let ended = self.link(&mut ws, &session, conn, &outbox, stop, say);
+        let (mut sender, receiver) = ws.split();
+        let ended = self
+            .link(&mut sender, receiver, &session, conn, outbox, stop, say)
+            .await;
         self.routes.disconnect(conn);
         say(&format!("{} disconnected", session.user));
-        let _ = ws.close(None);
+        let _ = sender.close().await;
         ended
     }
 
     /// Serve one node's link until it closes or `stop` is set.
-    fn link<S: Read + Write>(
+    #[allow(clippy::too_many_arguments)]
+    async fn link(
         &self,
-        ws: &mut WebSocket<S>,
+        sender: &mut Sender,
+        mut receiver: futures_util::stream::SplitStream<WebSocketStream<Replay<TcpStream>>>,
         session: &Session,
         conn: u64,
-        outbox: &std::sync::mpsc::Receiver<Event>,
+        mut outbox: tokio::sync::mpsc::UnboundedReceiver<Event>,
         stop: &AtomicBool,
         say: &(dyn Fn(&str) + Sync),
     ) -> Result<(), String> {
@@ -182,45 +199,42 @@ impl<'a> Server<'a> {
         // sent once on this connection, looked for about once a second.
         let mut subscribed = false;
         let mut sent: HashSet<String> = HashSet::new();
-        let mut looked = Instant::now();
-        while !stop.load(Ordering::Relaxed) {
-            // What other connections have for this one: runs, their progress,
-            // model calls.
-            while let Ok(event) = outbox.try_recv() {
-                push(ws, &event)?;
-            }
-            if let (true, Some(relay)) = (subscribed, self.relay)
-                && looked.elapsed() >= Duration::from_secs(1)
-            {
-                looked = Instant::now();
-                if self.permissions(session).is_err() {
-                    break;
-                }
-                for (id, event) in relay.pending(&session.user) {
-                    if sent.insert(id) {
-                        push(ws, &event)?;
-                    }
-                }
-            }
-            let message = match ws.read() {
-                Ok(m) => m,
-                Err(tungstenite::Error::Io(e))
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
+        let mut look = tokio::time::interval(LOOK_EVERY);
+        loop {
+            let message = tokio::select! {
+                () = runtime::until_set(stop) => return Ok(()),
+                // What other connections have for this one: runs, their
+                // progress, model calls.
+                Some(event) = outbox.recv() => {
+                    push(sender, &event).await?;
                     continue;
                 }
-                Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
-                    break;
+                _ = look.tick(), if subscribed && self.relay.is_some() => {
+                    let pending = blocking(|| {
+                        self.permissions(session)
+                            .map(|_| self.relay.map(|r| r.pending(&session.user)))
+                    });
+                    let Ok(pending) = pending else {
+                        return Ok(());
+                    };
+                    for (id, event) in pending.unwrap_or_default() {
+                        if sent.insert(id) {
+                            push(sender, &event).await?;
+                        }
+                    }
+                    continue;
                 }
-                Err(e) => return Err(e.to_string()),
+                message = receiver.next() => message,
             };
             let text = match message {
-                Message::Text(t) => t.to_string(),
-                Message::Close(_) => break,
-                _ => continue,
+                None
+                | Some(Err(
+                    tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed,
+                )) => return Ok(()),
+                Some(Err(e)) => return Err(e.to_string()),
+                Some(Ok(Message::Text(t))) => t.to_string(),
+                Some(Ok(Message::Close(_))) => return Ok(()),
+                Some(Ok(_)) => continue,
             };
             let reply = match serde_json::from_str::<Request>(&text) {
                 Ok(req) => {
@@ -229,19 +243,18 @@ impl<'a> Server<'a> {
                         say(&format!("{}: {}", session.user, req.method));
                     }
                     let subscribing = req.method == SUBSCRIBE;
-                    let reply = self.answer(session, conn, req);
+                    let reply = blocking(|| self.answer(session, conn, req));
                     if subscribing && reply.error.is_none() {
                         subscribed = true;
                         // The first look comes at once.
-                        looked = Instant::now() - Duration::from_secs(1);
+                        look.reset_immediately();
                     }
                     reply
                 }
                 Err(e) => Reply::err(0, format!("not a request: {e}")),
             };
-            send(ws, &reply)?;
+            send(sender, &reply).await?;
         }
-        Ok(())
     }
 
     /// The user an upgrade request's bearer token signs in as.
@@ -379,20 +392,27 @@ fn refused() -> ErrorResponse {
 }
 
 /// Tell the node something unasked.
-fn push<S: Read + Write>(ws: &mut WebSocket<S>, event: &Event) -> Result<(), String> {
+async fn push(sender: &mut Sender, event: &Event) -> Result<(), String> {
     let json = serde_json::to_string(event).map_err(|e| e.to_string())?;
-    ws.send(Message::text(json)).map_err(|e| e.to_string())
+    sender
+        .send(Message::text(json))
+        .await
+        .map_err(|e| e.to_string())
 }
 
-fn send<S: Read + Write>(ws: &mut WebSocket<S>, reply: &Reply) -> Result<(), String> {
+async fn send(sender: &mut Sender, reply: &Reply) -> Result<(), String> {
     let json = serde_json::to_string(reply).map_err(|e| e.to_string())?;
-    ws.send(Message::text(json)).map_err(|e| e.to_string())
+    sender
+        .send(Message::text(json))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use ensemble_core::workspace::testing::TempDir;
+    use std::sync::atomic::Ordering;
     use tungstenite::client::IntoClientRequest;
 
     /// The password of every account of the test hub.
@@ -407,7 +427,7 @@ pub(crate) mod tests {
         pub(crate) ana: String,
         pub(crate) rex: String,
         pub(crate) root: String,
-        stop: std::sync::Arc<AtomicBool>,
+        stop: &'static AtomicBool,
     }
 
     impl Drop for Running {
@@ -455,17 +475,17 @@ pub(crate) mod tests {
             users.set_password(name, PASSWORD).unwrap();
         }
         users.save().unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("ws://{}/", listener.local_addr().unwrap());
-        let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let (state, flag) = (tmp.0.join("state"), stop.clone());
-        std::thread::spawn(move || {
-            let mut server = Server::new(&memory, &hub.roles, hub.server.unwrap(), state);
-            if let Some(relay) = relay {
-                server = server.with_relay(relay);
-            }
-            server.run(listener, &flag, &|_| {});
-        });
+        let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let memory: &'static Memory = Box::leak(Box::new(memory));
+        let hub: &'static ensemble_config::Hub = Box::leak(Box::new(hub));
+        let mut server = Server::new(memory, &hub.roles, hub.server.unwrap(), tmp.0.join("state"));
+        if let Some(relay) = relay {
+            server = server.with_relay(relay);
+        }
+        let server: &'static Server<'static> = Box::leak(Box::new(server));
+        runtime::shared().spawn(server.run(listener, stop, &|_| {}));
         Running {
             tmp,
             url,
@@ -476,7 +496,7 @@ pub(crate) mod tests {
         }
     }
 
-    type Client = WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>;
+    type Client = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
 
     fn connect(url: &str, token: Option<&str>) -> Result<Client, tungstenite::Error> {
         let mut req = url.into_client_request().unwrap();

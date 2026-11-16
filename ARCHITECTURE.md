@@ -194,15 +194,23 @@ is pinned to one exact version because the library is young. (Decided
 2026-11-16; the old `ensemble` type, removed in version 3, was a loop of its
 own written here.)
 
-Ensemble is async, on tokio. harness-rs is async, and so are a node that runs
-many agents and serves models at once, and the link. The switch goes from the
-agents outward: agent runs, CLI processes included, are async first; code that
-is not converted yet waits for them with `runtime::block_on`. (Decided
-2026-11-16; Ensemble was synchronous on purpose until then.) A session's tool
+Ensemble is async, on tokio: agent runs (CLI processes included), the task
+queue, the MCP session, the node, and the link on both ends. harness-rs is
+async, and so is a node that runs many agents and serves models at once.
+(Decided 2026-11-16; Ensemble was synchronous on purpose until then.) What
+stays synchronous is the knowledge vault and its distilling, and the tracker
+inboxes: their loops run on threads of their own, and a call into them from
+async code goes through `runtime::blocking`. Short HTTP requests use ureq,
+what streams for long (a node's model calls) reqwest. `runtime::block_on` is
+for the CLI's entry points and for the few calls a sync interface needs, such
+as a hub server's knowledge behind `KnowledgeAccess`. A session's tool
 calls, and a queue's runs, are futures of one task each, so they borrow what
 the session holds instead of being `'static`; what still blocks there (a
 knowledge request, `health`, a git command) goes through `runtime::blocking`,
-and holds up the other futures of its task while it runs.
+and holds up the other futures of its task while it runs. A hub server's
+connections, though, are tasks of their own, so that one slow request holds up
+no other: the server and what it borrows are made once and live as long as
+the process.
 
 An organization may later limit helper teams through policy, not structure:
 which backends its data may be sent to, gates its repositories require, budgets
@@ -436,14 +444,14 @@ in either process.
    GitLab, GitHub and Jira; OIDC and the device flow; the chat API and the
    web UI.)
 6. Async, the `builtin` adapter, and one node per worker that is also the MCP
-   server. (Started: tokio, async agent runs, `builtin` on harness-rs; the
+   server. (Done: tokio, async agent runs, `builtin` on harness-rs; the
    node as the long-running MCP server on a socket, `ensemble mcp` without
    `--team` as a bridge to it, a worker per folder it served, `node.yaml`
    version 3 with `team` and without `projects`, the hub's tasks taken by the
    node into the folder of the project's name; the task queue and the MCP
    session on tokio, a session's calls and a queue's runs side by side in
-   one task each. Not yet: the link on tokio, which still runs on threads
-   and waits for agents with `runtime::block_on`.)
+   one task each; the link on tokio-tungstenite, a hub server's connections
+   each a task, a node's runs and model calls beside its link.)
 
 The link, as built: the node opens one WebSocket and signs in with
 `Authorization: Bearer <token>` during the upgrade (401 without a valid one).

@@ -886,25 +886,28 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
     let refused = std::sync::Mutex::new(None);
     std::thread::scope(|scope| {
         let stop = &STOP;
-        if let Some(worker) = &worker {
-            let refused = &refused;
-            scope.spawn(move || {
-                if let Err(e) = worker.work(stop, &say) {
-                    *refused.lock().unwrap() = Some(e);
-                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            });
-        }
-        if let Some(inbox) = &inbox {
-            scope.spawn(move || inbox.work(stop, &say));
-        }
+        // What is not async yet runs on threads of its own.
         if let Some(inbox) = &local_inbox {
             scope.spawn(move || inbox.work(stop, &say));
         }
         if let Some(memory) = &distill {
             scope.spawn(move || memory.work(stop, &say));
         }
-        let served = ensemble::runtime::shared().block_on(daemon.serve(&socket));
+        let link = async {
+            if let Some(worker) = &worker
+                && let Err(e) = worker.work(stop, &say).await
+            {
+                *refused.lock().unwrap() = Some(e);
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        };
+        let tasks = async {
+            if let Some(inbox) = &inbox {
+                inbox.work(stop, &say).await;
+            }
+        };
+        let (served, (), ()) = ensemble::runtime::shared()
+            .block_on(async { tokio::join!(daemon.serve(&socket), link, tasks) });
         STOP.store(true, std::sync::atomic::Ordering::Relaxed);
         served
     })
@@ -944,11 +947,15 @@ fn cmd_nodes(args: &Args) -> Result<ExitCode, String> {
             "nodes: no token for the hub {url}. Sign in first: ensemble login {url} --user <name>"
         )
     })?;
-    let mut link = ensemble::link::client::Connection::open(&url, token)?;
-    let listed = link
-        .call(ensemble::link::protocol::NODES, serde_json::json!({}))
-        .map_err(|f| f.message())?;
-    link.close();
+    let listed = ensemble::runtime::block_on(async {
+        let mut link = ensemble::link::client::Connection::open(&url, token).await?;
+        let listed = link
+            .call(ensemble::link::protocol::NODES, serde_json::json!({}))
+            .await
+            .map_err(|f| f.message());
+        link.close().await;
+        listed
+    })?;
     let nodes = listed["nodes"].as_array().cloned().unwrap_or_default();
     if nodes.is_empty() {
         println!("No node you may use is connected to {url}.");
@@ -1018,20 +1025,29 @@ fn cmd_hub_serve(args: &Args) -> Result<ExitCode, String> {
         hub.owner,
         listener.local_addr().unwrap_or(server.listen)
     ));
-    let inbox = hub
-        .tasks
-        .as_ref()
-        .map(|tasks| ensemble::inbox::ServerInbox::new(tasks, &hub.roles, users.clone()));
-    let mut server = ensemble::link::Server::new(&memory, &hub.roles, server, users);
-    if let Some(inbox) = &inbox {
+    // The server and what it borrows live until the process ends: each
+    // connection is a task of its own.
+    let hub: &'static config::Hub = Box::leak(Box::new(hub));
+    let memory: &'static ensemble::knowledge::Memory = Box::leak(Box::new(memory));
+    let inbox: Option<&'static ensemble::inbox::ServerInbox> = hub.tasks.as_ref().map(|tasks| {
+        &*Box::leak(Box::new(ensemble::inbox::ServerInbox::new(
+            tasks,
+            &hub.roles,
+            users.clone(),
+        )))
+    });
+    let mut server = ensemble::link::Server::new(memory, &hub.roles, server, users);
+    if let Some(inbox) = inbox {
         server = server.with_relay(inbox);
     }
+    let server: &'static ensemble::link::Server<'static> = Box::leak(Box::new(server));
     std::thread::scope(|scope| {
         scope.spawn(|| memory.work(&STOP, &say));
-        if let Some(inbox) = &inbox {
+        if let Some(inbox) = inbox {
             scope.spawn(|| inbox.work(&STOP, &say));
         }
-        server.run(listener, &STOP, &say);
+        ensemble::runtime::shared()
+            .block_on(server.run(listener, &STOP, &|line| eprintln!("ensemble: {line}")));
     });
     say("stopped");
     Ok(ExitCode::SUCCESS)

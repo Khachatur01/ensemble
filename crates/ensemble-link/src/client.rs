@@ -4,20 +4,22 @@
 //! again once when it breaks.
 
 use crate::protocol::{Event, HELLO, RECALL, Reply, Request, SHARE};
+use ensemble_core::runtime;
 use ensemble_knowledge::{KnowledgeAccess, Tool};
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
-use std::net::TcpStream;
 use std::sync::Mutex;
 use std::time::Duration;
-use tungstenite::client::IntoClientRequest;
-use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Message, WebSocket};
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::{self, Message};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 /// How long one request may wait for its answer.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
+type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// Why a request got no result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,7 +48,7 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn open(url: &str, token: &str) -> Result<Connection, String> {
+    pub async fn open(url: &str, token: &str) -> Result<Connection, String> {
         let url = crate::tokens::normal(url);
         let mut req = url
             .as_str()
@@ -57,13 +59,18 @@ impl Connection {
             .map_err(|_| "the token has characters a header cannot carry")?;
         req.headers_mut().insert("authorization", bearer);
         let config = Some(crate::protocol::socket_config());
-        let (socket, _) =
-            tungstenite::client::connect_with_config(req, config, 3).map_err(|e| match e {
-                tungstenite::Error::Http(resp) if resp.status() == 401 => format!(
-                    "the hub {url} did not accept the token; `ensemble login {url}` with a new one"
-                ),
-                e => format!("cannot reach the hub {url}: {e}"),
-            })?;
+        let opened = tokio::time::timeout(
+            TIMEOUT,
+            tokio_tungstenite::connect_async_with_config(req, config, false),
+        )
+        .await
+        .map_err(|_| format!("cannot reach the hub {url}: it did not answer in time"))?;
+        let (socket, _) = opened.map_err(|e| match e {
+            tungstenite::Error::Http(resp) if resp.status() == 401 => format!(
+                "the hub {url} did not accept the token; `ensemble login {url}` with a new one"
+            ),
+            e => format!("cannot reach the hub {url}: {e}"),
+        })?;
         Ok(Connection {
             url,
             socket,
@@ -76,19 +83,51 @@ impl Connection {
         &self.url
     }
 
-    fn wait(&self, how_long: Duration) -> Result<(), String> {
-        let tcp = match self.socket.get_ref() {
-            MaybeTlsStream::Plain(s) => s,
-            MaybeTlsStream::Rustls(s) => s.get_ref(),
-            _ => return Ok(()),
-        };
-        tcp.set_read_timeout(Some(how_long))
-            .map_err(|e| e.to_string())
-    }
-
     /// Ask the hub and wait for its answer. Events that come meanwhile are
     /// kept for [`Connection::next_event`].
-    pub fn call(&mut self, method: &str, params: Value) -> Result<Value, Failure> {
+    pub async fn call(&mut self, method: &str, params: Value) -> Result<Value, Failure> {
+        let id = self.send(method, params).await.map_err(Failure::Broken)?;
+        let answer = async {
+            loop {
+                match self.socket.next().await {
+                    Some(Ok(Message::Text(t))) => {
+                        if let Ok(reply) = serde_json::from_str::<Reply>(&t)
+                            && reply.id == id
+                        {
+                            return match (reply.result, reply.error) {
+                                (_, Some(e)) => Err(Failure::Hub(e)),
+                                (Some(v), None) => Ok(v),
+                                (None, None) => Err(Failure::Hub(format!(
+                                    "the hub answered `{method}` with nothing"
+                                ))),
+                            };
+                        }
+                        if let Ok(event) = serde_json::from_str::<Event>(&t) {
+                            self.events.push_back(event);
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        return Err(Failure::Broken("the hub closed the link".into()));
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => return Err(Failure::Broken(e.to_string())),
+                }
+            }
+        };
+        tokio::time::timeout(TIMEOUT, answer)
+            .await
+            .unwrap_or_else(|_| {
+                Err(Failure::Broken(format!(
+                    "the hub did not answer `{method}` within {}s",
+                    TIMEOUT.as_secs()
+                )))
+            })
+    }
+
+    /// Ask the hub without waiting for its answer: what a node says about a
+    /// run while it goes on reading events. The answer is read, and dropped,
+    /// with the events. Returns the request's id.
+    pub async fn send(&mut self, method: &str, params: Value) -> Result<u64, String> {
         let id = self.next;
         self.next += 1;
         let req = Request {
@@ -96,88 +135,38 @@ impl Connection {
             method: method.into(),
             params,
         };
-        let json = serde_json::to_string(&req).map_err(|e| Failure::Broken(e.to_string()))?;
-        self.wait(TIMEOUT).map_err(Failure::Broken)?;
-        self.socket
-            .send(Message::text(json))
-            .map_err(|e| Failure::Broken(e.to_string()))?;
-        loop {
-            match self
-                .socket
-                .read()
-                .map_err(|e| Failure::Broken(e.to_string()))?
-            {
-                Message::Text(t) => {
-                    if let Ok(reply) = serde_json::from_str::<Reply>(&t)
-                        && reply.id == id
-                    {
-                        return match (reply.result, reply.error) {
-                            (_, Some(e)) => Err(Failure::Hub(e)),
-                            (Some(v), None) => Ok(v),
-                            (None, None) => Err(Failure::Hub(format!(
-                                "the hub answered `{method}` with nothing"
-                            ))),
-                        };
-                    }
-                    if let Ok(event) = serde_json::from_str::<Event>(&t) {
-                        self.events.push_back(event);
-                    }
-                }
-                Message::Close(_) => return Err(Failure::Broken("the hub closed the link".into())),
-                _ => {}
-            }
-        }
-    }
-
-    /// Ask the hub without waiting for its answer: what a node says about a
-    /// run while it goes on reading events. The answer is read, and dropped,
-    /// with the events.
-    pub fn send(&mut self, method: &str, params: Value) -> Result<(), String> {
-        let req = Request {
-            id: self.next,
-            method: method.into(),
-            params,
-        };
-        self.next += 1;
         let json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
         self.socket
             .send(Message::text(json))
-            .map_err(|e| e.to_string())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(id)
     }
 
-    /// The next event from the hub, waiting at most `how_long`; none when
-    /// nothing came. An error means the link broke.
-    pub fn next_event(&mut self, how_long: Duration) -> Result<Option<Event>, String> {
+    /// The next event from the hub. An error means the link broke. Nothing
+    /// is lost when this is dropped before it resolves, so it may race a
+    /// timer or another source of work.
+    pub async fn next_event(&mut self) -> Result<Event, String> {
         if let Some(event) = self.events.pop_front() {
-            return Ok(Some(event));
+            return Ok(event);
         }
-        self.wait(how_long)?;
         loop {
-            match self.socket.read() {
-                Ok(Message::Text(t)) => {
+            match self.socket.next().await {
+                Some(Ok(Message::Text(t))) => {
                     if let Ok(event) = serde_json::from_str::<Event>(&t) {
-                        return Ok(Some(event));
+                        return Ok(event);
                     }
                 }
-                Ok(Message::Close(_)) => return Err("the hub closed the link".into()),
-                Ok(_) => {}
-                Err(tungstenite::Error::Io(e))
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    return Ok(None);
-                }
-                Err(e) => return Err(e.to_string()),
+                Some(Ok(Message::Close(_))) | None => return Err("the hub closed the link".into()),
+                Some(Ok(_)) => {}
+                Some(Err(e)) => return Err(e.to_string()),
             }
         }
     }
 
     /// Close the link.
-    pub fn close(&mut self) {
-        let _ = self.socket.close(None);
-        let _ = self.socket.flush();
+    pub async fn close(&mut self) {
+        let _ = self.socket.close(None).await;
     }
 }
 
@@ -197,7 +186,7 @@ pub struct RemoteMemory {
     /// The working folder's name, never its path.
     project: Option<String>,
     client: Mutex<Option<String>>,
-    socket: Mutex<Option<Connection>>,
+    socket: tokio::sync::Mutex<Option<Connection>>,
     hello: Mutex<Option<Hello>>,
 }
 
@@ -208,7 +197,7 @@ impl RemoteMemory {
             token: token.trim().to_string(),
             project,
             client: Mutex::new(None),
-            socket: Mutex::new(None),
+            socket: tokio::sync::Mutex::new(None),
             hello: Mutex::new(None),
         }
     }
@@ -228,16 +217,21 @@ impl RemoteMemory {
         Ok(hello)
     }
 
+    /// Ask the hub, waiting for its answer: [`KnowledgeAccess`] is not async.
+    fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+        runtime::block_on(self.ask(method, params))
+    }
+
     /// Ask the hub, opening the link when it is not open, and once more when
     /// it broke since.
-    fn request(&self, method: &str, params: Value) -> Result<Value, String> {
-        let mut socket = self.socket.lock().unwrap_or_else(|e| e.into_inner());
+    async fn ask(&self, method: &str, params: Value) -> Result<Value, String> {
+        let mut socket = self.socket.lock().await;
         for attempt in 0..2 {
             if socket.is_none() {
-                *socket = Some(Connection::open(&self.url, &self.token)?);
+                *socket = Some(Connection::open(&self.url, &self.token).await?);
             }
             let link = socket.as_mut().expect("just opened");
-            match link.call(method, params.clone()) {
+            match link.call(method, params.clone()).await {
                 Ok(v) => return Ok(v),
                 Err(Failure::Hub(e)) => return Err(e),
                 Err(Failure::Broken(e)) => {
@@ -401,9 +395,11 @@ mod tests {
         let m = RemoteMemory::new(&hub.url, &hub.ana, None);
         m.hello().unwrap();
         // Break it from this side: the next request opens a new one.
-        if let Some(link) = m.socket.lock().unwrap().as_mut() {
-            link.close();
-        }
+        runtime::block_on(async {
+            if let Some(link) = m.socket.lock().await.as_mut() {
+                link.close().await;
+            }
+        });
         let notes = m.call("recall", &json!({"query": "deploy"})).unwrap();
         assert!(notes.is_ok(), "{notes:?}");
     }
@@ -449,39 +445,44 @@ mod relay_tests {
         )
     }
 
+    /// The next event within `wait`, if one comes.
+    async fn within(link: &mut Connection, wait: Duration) -> Option<Event> {
+        tokio::time::timeout(wait, link.next_event())
+            .await
+            .ok()
+            .map(Result::unwrap)
+    }
+
     /// The deliveries of the events that come within `wait`.
-    fn deliveries(link: &mut Connection, wait: Duration) -> Vec<String> {
+    async fn deliveries(link: &mut Connection, wait: Duration) -> Vec<String> {
         let mut out = Vec::new();
-        while let Some(e) = link.next_event(wait).unwrap() {
+        while let Some(e) = within(link, wait).await {
             out.push(e.data["delivery"].as_str().unwrap().to_string());
         }
         out
     }
 
-    #[test]
-    fn a_subscribed_node_gets_each_event_once_and_again_after_reconnecting() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_subscribed_node_gets_each_event_once_and_again_after_reconnecting() {
         let relay: &'static FakeRelay = Box::leak(Box::default());
         relay.events.lock().unwrap().push(event("d1"));
         let hub = start_with(Some(relay));
-        let mut link = Connection::open(&hub.url, &hub.ana).unwrap();
+        let wait = Duration::from_millis(1500);
+        let mut link = Connection::open(&hub.url, &hub.ana).await.unwrap();
         assert!(
-            link.next_event(Duration::from_millis(1500))
-                .unwrap()
-                .is_none(),
+            within(&mut link, wait).await.is_none(),
             "nothing before subscribing"
         );
-        link.call(SUBSCRIBE, json!({})).unwrap();
-        assert_eq!(
-            deliveries(&mut link, Duration::from_millis(1500)),
-            vec!["d1"]
-        );
+        link.call(SUBSCRIBE, json!({})).await.unwrap();
+        assert_eq!(deliveries(&mut link, wait).await, vec!["d1"]);
         relay.events.lock().unwrap().push(event("d2"));
         assert_eq!(
-            deliveries(&mut link, Duration::from_millis(1500)),
+            deliveries(&mut link, wait).await,
             vec!["d2"],
             "d1 is not sent twice on one connection"
         );
         link.call(TASK_ACCEPT, json!({"delivery": "d1", "task": "3"}))
+            .await
             .unwrap();
         let heard = relay.heard.lock().unwrap().clone();
         assert_eq!(
@@ -493,22 +494,23 @@ mod relay_tests {
             )]
         );
 
-        let mut again = Connection::open(&hub.url, &hub.ana).unwrap();
-        again.call(SUBSCRIBE, json!({})).unwrap();
-        let mut got = deliveries(&mut again, Duration::from_millis(1500));
+        let mut again = Connection::open(&hub.url, &hub.ana).await.unwrap();
+        again.call(SUBSCRIBE, json!({})).await.unwrap();
+        let mut got = deliveries(&mut again, wait).await;
         got.sort();
         assert_eq!(got, vec!["d1", "d2"], "a new connection hears them again");
     }
 
-    #[test]
-    fn a_token_without_the_tasks_permission_cannot_subscribe() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_token_without_the_tasks_permission_cannot_subscribe() {
         let relay: &'static FakeRelay = Box::leak(Box::default());
         let hub = start_with(Some(relay));
-        let mut link = Connection::open(&hub.url, &hub.rex).unwrap();
-        let err = link.call(SUBSCRIBE, json!({})).unwrap_err().message();
+        let mut link = Connection::open(&hub.url, &hub.rex).await.unwrap();
+        let err = link.call(SUBSCRIBE, json!({})).await.unwrap_err().message();
         assert!(err.contains("do not allow `tasks`"), "{err}");
         let err = link
             .call(TASK_ACCEPT, json!({"delivery": "d1", "task": "3"}))
+            .await
             .unwrap_err()
             .message();
         assert!(err.contains("do not allow `tasks`"), "{err}");

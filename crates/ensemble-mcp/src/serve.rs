@@ -48,9 +48,6 @@ pub fn run(
         if let Some(inbox) = hub.inbox {
             scope.spawn(move || inbox.work(hub_stop, say));
         }
-        if let Some(node) = hub.node {
-            scope.spawn(move || node.work(hub_stop, say));
-        }
         // Says when the worker runs out of work and when it has some again,
         // and closes the queue when it is time to stop.
         let watch = async {
@@ -78,8 +75,14 @@ pub fn run(
             }
             say("stopping: running tasks are stopped and queued again");
             queue.close();
+            hub_stop.store(true, Ordering::Relaxed);
         };
-        runtime::block_on(async { tokio::join!(queue.work(true), watch) });
+        let node = async {
+            if let Some(node) = hub.node {
+                node.work(hub_stop, say).await;
+            }
+        };
+        runtime::block_on(async { tokio::join!(queue.work(true), watch, node) });
         hub_stop.store(true, Ordering::Relaxed);
     });
     Ok(())

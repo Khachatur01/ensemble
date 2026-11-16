@@ -14,7 +14,9 @@ ensemble-knowledge.workspace = true
 ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tungstenite.workspace = true
+tokio-tungstenite.workspace = true
+tokio.workspace = true
+futures-util = { workspace = true, features = ["sink"] }
 
 [dev-dependencies]
 ureq.workspace = true

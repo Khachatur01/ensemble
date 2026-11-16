@@ -15,6 +15,7 @@
 use crate::tracker::{Issue, Status};
 use crate::work::{self, Update};
 use ensemble_core::folders::Folders;
+use ensemble_core::runtime;
 use ensemble_link::client::{Connection, Failure};
 use ensemble_link::protocol::{
     ANSWER_EVENT, ANSWER_TAKEN, Event, SUBSCRIBE, TASK_ACCEPT, TASK_EVENT, TASK_REFUSE, TASK_UPDATE,
@@ -25,7 +26,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const STATE_FILE: &str = "node.json";
 /// How often the tasks are looked at for something to say.
@@ -110,14 +111,14 @@ impl NodeInbox {
     /// Take the hub's tasks until `stop` is set, connecting again when the
     /// link breaks. Another process that does this for the hub already, or a
     /// token that may not receive tasks, makes it return.
-    pub fn work(&self, stop: &AtomicBool, say: &(dyn Fn(&str) + Sync)) {
+    pub async fn work(&self, stop: &AtomicBool, say: &(dyn Fn(&str) + Sync)) {
         let Ok(_lock) = ensemble_core::lock::acquire(&self.dir) else {
             return;
         };
         let mut backoff = Duration::from_secs(1);
         let mut said_down = false;
         while !stop.load(Ordering::Relaxed) {
-            match self.session(stop, say) {
+            match self.session(stop, say).await {
                 Ok(()) => return,
                 Err(Failure::Hub(e)) => {
                     say(&format!(
@@ -136,41 +137,40 @@ impl NodeInbox {
                     }
                 }
             }
-            let until = Instant::now() + backoff;
-            while Instant::now() < until && !stop.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(100));
+            tokio::select! {
+                () = tokio::time::sleep(backoff) => {}
+                () = runtime::until_set(stop) => {}
             }
             backoff = (backoff * 2).min(Duration::from_secs(60));
         }
     }
 
     /// One connection's life: subscribe, take events, report, until `stop`.
-    fn session(&self, stop: &AtomicBool, say: &(dyn Fn(&str) + Sync)) -> Result<(), Failure> {
-        let mut link = Connection::open(&self.url, &self.token).map_err(Failure::Broken)?;
-        link.call(SUBSCRIBE, json!({}))?;
-        let mut followed = Instant::now() - FOLLOW;
-        while !stop.load(Ordering::Relaxed) {
-            if let Some(event) = link
-                .next_event(Duration::from_millis(200))
-                .map_err(Failure::Broken)?
-            {
-                for line in self.on_event(&mut link, &event)? {
-                    say(&format!("tasks: {line}"));
+    async fn session(&self, stop: &AtomicBool, say: &(dyn Fn(&str) + Sync)) -> Result<(), Failure> {
+        let mut link = Connection::open(&self.url, &self.token)
+            .await
+            .map_err(Failure::Broken)?;
+        link.call(SUBSCRIBE, json!({})).await?;
+        let mut follow = tokio::time::interval(FOLLOW);
+        loop {
+            let lines = tokio::select! {
+                () = runtime::until_set(stop) => break,
+                event = link.next_event() => {
+                    let event = event.map_err(Failure::Broken)?;
+                    self.on_event(&mut link, &event).await?
                 }
-            }
-            if followed.elapsed() >= FOLLOW {
-                followed = Instant::now();
-                for line in self.report(&mut link)? {
-                    say(&format!("tasks: {line}"));
-                }
+                _ = follow.tick() => self.report(&mut link).await?,
+            };
+            for line in lines {
+                say(&format!("tasks: {line}"));
             }
         }
-        link.close();
+        link.close().await;
         Ok(())
     }
 
     /// Act on one event from the hub.
-    fn on_event(&self, link: &mut Connection, event: &Event) -> Result<Vec<String>, Failure> {
+    async fn on_event(&self, link: &mut Connection, event: &Event) -> Result<Vec<String>, Failure> {
         let data = &event.data;
         let text = |k: &str| data[k].as_str().unwrap_or("").to_string();
         let delivery = text("delivery");
@@ -182,7 +182,8 @@ impl NodeInbox {
                     link.call(
                         TASK_ACCEPT,
                         json!({ "delivery": delivery, "task": local.task }),
-                    )?;
+                    )
+                    .await?;
                     return Ok(Vec::new());
                 }
                 let project = text("project");
@@ -193,14 +194,16 @@ impl NodeInbox {
                             "its folder for project {project}, {}, is not a folder",
                             f.display()
                         );
-                        link.call(TASK_REFUSE, json!({ "delivery": delivery, "why": why }))?;
+                        link.call(TASK_REFUSE, json!({ "delivery": delivery, "why": why }))
+                            .await?;
                         return Ok(vec![format!("refused {delivery}: {why}")]);
                     }
                     None => {
                         let why = format!(
                             "it has not worked in a folder named '{project}'; open a session there first"
                         );
-                        link.call(TASK_REFUSE, json!({ "delivery": delivery, "why": why }))?;
+                        link.call(TASK_REFUSE, json!({ "delivery": delivery, "why": why }))
+                            .await?;
                         return Ok(vec![format!("refused {delivery}: {why}")]);
                     }
                 };
@@ -231,7 +234,10 @@ impl NodeInbox {
                     "on this computer",
                 )
                 .map_err(Failure::Hub)?;
-                match link.call(TASK_ACCEPT, json!({ "delivery": delivery, "task": task })) {
+                match link
+                    .call(TASK_ACCEPT, json!({ "delivery": delivery, "task": task }))
+                    .await
+                {
                     Ok(_) => {
                         taken.insert(
                             delivery.clone(),
@@ -269,7 +275,8 @@ impl NodeInbox {
                 if store.open_question(&local.task).is_some() {
                     work::answer(&store, &local.task, &text("text")).map_err(Failure::Hub)?;
                 }
-                link.call(ANSWER_TAKEN, json!({ "delivery": delivery }))?;
+                link.call(ANSWER_TAKEN, json!({ "delivery": delivery }))
+                    .await?;
                 Ok(vec![format!("task {}: answered", local.task)])
             }
             _ => Ok(Vec::new()),
@@ -277,14 +284,15 @@ impl NodeInbox {
     }
 
     /// Send each task's new question or result.
-    fn report(&self, link: &mut Connection) -> Result<Vec<String>, Failure> {
+    async fn report(&self, link: &mut Connection) -> Result<Vec<String>, Failure> {
         let mut taken = self.taken();
         let mut said = Vec::new();
         for (delivery, local) in taken.iter_mut().filter(|(_, l)| !l.reported) {
             let store = self.store(&local.folder).map_err(Failure::Hub)?;
             match work::follow(&store, &local.task, local.asked.as_deref()) {
                 Some(Update::Question(q)) => {
-                    link.call(TASK_UPDATE, json!({ "delivery": delivery, "question": q }))?;
+                    link.call(TASK_UPDATE, json!({ "delivery": delivery, "question": q }))
+                        .await?;
                     said.push(format!("task {} asked a question", local.task));
                     local.asked = Some(q);
                 }
@@ -295,7 +303,8 @@ impl NodeInbox {
                             "delivery": delivery,
                             "result": { "status": status.as_str(), "text": reply },
                         }),
-                    )?;
+                    )
+                    .await?;
                     said.push(format!("task {} {}", local.task, status.as_str()));
                     local.reported = true;
                 }

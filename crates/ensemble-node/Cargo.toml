@@ -13,7 +13,9 @@ ensemble-config.workspace = true
 ensemble-core.workspace = true
 ensemble-link.workspace = true
 serde_json.workspace = true
-ureq.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
 ensemble-agents = { workspace = true, features = ["test-support"] }

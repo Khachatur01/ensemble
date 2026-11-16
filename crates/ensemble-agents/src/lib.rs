@@ -6,5 +6,5 @@
 
 pub mod external;
 pub mod router;
-pub mod runtime;
+pub use ensemble_core::runtime;
 pub mod worktree;

@@ -15,17 +15,19 @@ rust-version = "1.92"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_norway = "0.9"
-# Blocking HTTP client for `health` and the `direct` adapter. Chosen over
-# reqwest so the whole program stays synchronous: no async runtime is pulled in
-# for one request.
+# Blocking HTTP client for short requests from code that may block: `health`,
+# the `direct` adapter (on a blocking thread), the CLI's calls to a hub.
 ureq = "3"
+# Async HTTP for what streams for long: a node's model calls. Already in the
+# tree through harness-rs, with these features.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 # killpg: a time limit or a cancel must take an agent CLI's whole process tree
 # down, and std can signal one pid. Already in the tree via ureq, so this costs
 # no extra compilation.
 libc = "0.2"
-# The link between a node and a hub server: one WebSocket, synchronous like
-# the rest, TLS through rustls, which ureq already brings.
-tungstenite = { version = "0.28", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+# The link between a node and a hub server: one WebSocket on tokio, TLS through
+# rustls, which ureq already brings.
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 # Hashing hub tokens and making new ones; already in the tree through rustls.
 ring = "0.17"
 # The async runtime. Agents, the link and the node run on it; harness-rs, the

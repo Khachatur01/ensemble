@@ -32,9 +32,10 @@ use crate::http::{self, Head};
 use crate::server::Server;
 use crate::users::{Kind, Signed, Token, User, Users, UsersError};
 use ensemble_config::{Permission, Registration};
+use ensemble_core::runtime::blocking;
 use serde_json::{Value, json};
-use std::net::TcpStream;
 use std::time::{Duration, Instant};
+use tokio::net::TcpStream;
 
 /// A refusal: the status, and why.
 struct Refusal(u16, String);
@@ -70,7 +71,7 @@ impl Body {
 
 impl Server<'_> {
     /// Answer one REST request on `stream`, then close it.
-    pub(crate) fn rest(
+    pub(crate) async fn rest(
         &self,
         mut stream: TcpStream,
         head: &Head,
@@ -78,8 +79,8 @@ impl Server<'_> {
         say: &(dyn Fn(&str) + Sync),
     ) -> Result<(), String> {
         let mut unread = false;
-        let answer = match http::read_body(&mut stream, head, already) {
-            Ok(body) => self.route(head, &body),
+        let answer = match http::read_body(&mut stream, head, already).await {
+            Ok(body) => blocking(|| self.route(head, &body)),
             Err(e) => {
                 unread = true;
                 Err(Refusal(400, e))
@@ -89,16 +90,19 @@ impl Server<'_> {
             Ok(ok) => ok,
             Err(Refusal(status, why)) => (status, json!({ "error": why })),
         };
-        let who = head
-            .bearer()
-            .and_then(|t| self.users().ok()?.identify(t).map(|u| u.name.clone()))
-            .unwrap_or_else(|| "-".into());
+        let who = blocking(|| {
+            head.bearer()
+                .and_then(|t| self.users().ok()?.identify(t).map(|u| u.name.clone()))
+        })
+        .unwrap_or_else(|| "-".into());
         say(&format!("{} {} {who} {status}", head.method, head.path));
-        http::respond(&mut stream, status, &body).map_err(|e| e.to_string())?;
+        http::respond(&mut stream, status, &body)
+            .await
+            .map_err(|e| e.to_string())?;
         if unread {
             // Closing with a body still unread resets the connection, and the
             // client may see the reset before the answer: read it away first.
-            http::drain(&mut stream);
+            http::drain(&mut stream).await;
         }
         Ok(())
     }

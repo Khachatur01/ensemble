@@ -270,17 +270,21 @@ pub fn serve_with(
         if let Some(inbox) = hub.inbox {
             scope.spawn(move || inbox.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
         }
-        if let Some(node) = hub.node {
-            scope.spawn(move || node.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
-        }
         // The session closes the queue when it ends, and the worker returns
         // once what it runs has stopped.
-        let (result, ()) = runtime::block_on(async {
-            tokio::join!(
-                serve_session(ensemble, memory, queue, input, output, true),
-                queue.work(worker),
-            )
-        });
+        let session = async {
+            let result = serve_session(ensemble, memory, queue, input, output, true).await;
+            hub_stop.store(true, Ordering::Relaxed);
+            result
+        };
+        let node = async {
+            if let Some(node) = hub.node {
+                node.work(hub_stop, &|line| eprintln!("ensemble: {line}"))
+                    .await;
+            }
+        };
+        let (result, (), ()) =
+            runtime::block_on(async { tokio::join!(session, queue.work(worker), node) });
         hub_stop.store(true, Ordering::Relaxed);
         result
     })

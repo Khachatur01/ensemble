@@ -1,5 +1,6 @@
-//! The async runtime agents run on, and what code that is not async yet uses
-//! to wait for them.
+//! The async runtime Ensemble runs on, and the bridges between it and code
+//! that blocks: [`block_on`] for an entry point or a sync interface that waits
+//! on async work, [`blocking`] for async code that calls something that blocks.
 
 use std::future::Future;
 use std::sync::OnceLock;

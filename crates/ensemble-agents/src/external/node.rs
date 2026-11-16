@@ -11,36 +11,23 @@
 use super::AgentRun;
 use ensemble_config::{AgentConfig, NODE_AGENT, NodeAdapter};
 use ensemble_core::port::{Error, Usage};
+use ensemble_core::runtime;
 use ensemble_core::snapshot;
 use ensemble_core::workspace::{Change, Changes};
 use ensemble_link::client::{Connection, Failure};
 use ensemble_link::protocol::{RUN, RUN_CANCEL, RUN_DONE, RUN_PROGRESS};
 use serde_json::{Value, json};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 /// Time past the agent's `max_seconds` to wait for the node's own answer,
 /// which carries what it did before its limit.
 const GRACE: Duration = Duration::from_secs(30);
 
 /// Run the task on a node, and write what the agent there changed into
-/// `workdir`. The link is not async yet, so this holds its thread meanwhile.
+/// `workdir`.
 pub async fn run(
-    agent: &AgentConfig,
-    na: &NodeAdapter,
-    task: &str,
-    context: Option<&str>,
-    workdir: &Path,
-    progress: &(dyn Fn(&str) + Sync),
-    cancel: &AtomicBool,
-) -> Result<AgentRun, Error> {
-    tokio::task::block_in_place(|| {
-        run_blocking(agent, na, task, context, workdir, progress, cancel)
-    })
-}
-
-fn run_blocking(
     agent: &AgentConfig,
     na: &NodeAdapter,
     task: &str,
@@ -61,7 +48,7 @@ fn run_blocking(
             na.hub, na.hub
         ))
     })?;
-    let files = snapshot::pack(workdir).map_err(unsupported)?;
+    let files = runtime::blocking(|| snapshot::pack(workdir)).map_err(unsupported)?;
     progress(&format!(
         "{} · sending {} files to the hub",
         agent.name,
@@ -71,7 +58,7 @@ fn run_blocking(
         backend: backend(),
         detail,
     };
-    let mut link = Connection::open(&na.hub, token).map_err(transport)?;
+    let mut link = Connection::open(&na.hub, token).await.map_err(transport)?;
     let started = link
         .call(
             RUN,
@@ -83,6 +70,7 @@ fn run_blocking(
                 "files": files,
             }),
         )
+        .await
         .map_err(|f| match f {
             Failure::Hub(e) => unsupported(e),
             Failure::Broken(e) => transport(e),
@@ -91,35 +79,32 @@ fn run_blocking(
     let node = started["node"].as_str().unwrap_or("?").to_string();
     progress(&format!("{} · running on {node}", agent.name));
     let limit = Duration::from_secs(u64::from(agent.max_seconds));
-    let deadline = Instant::now() + limit + GRACE;
-    let stopped = |why: String, link: &mut Connection| {
-        let _ = link.send(RUN_CANCEL, json!({ "run": run }));
-        link.close();
-        Ok(AgentRun {
-            text: format!("[{why} before {node} answered; the work is unfinished]"),
-            model: na.label.clone(),
-            usage: Usage::default(),
-            steps: 0,
-            tool_calls: 0,
-            changes: Changes::new(),
-            commands: Vec::new(),
-        })
+    let deadline = tokio::time::Instant::now() + limit + GRACE;
+    let unfinished = |why: String| AgentRun {
+        text: format!("[{why} before {node} answered; the work is unfinished]"),
+        model: na.label.clone(),
+        usage: Usage::default(),
+        steps: 0,
+        tool_calls: 0,
+        changes: Changes::new(),
+        commands: Vec::new(),
     };
     loop {
-        if cancel.load(Ordering::Relaxed) {
-            return stopped("cancelled".into(), &mut link);
-        }
-        if Instant::now() >= deadline {
-            return stopped(
-                format!("stopped at the {}s time limit", agent.max_seconds),
-                &mut link,
-            );
-        }
-        let Some(event) = link
-            .next_event(Duration::from_millis(200))
-            .map_err(|e| transport(format!("the link to the hub broke during the run: {e}")))?
-        else {
-            continue;
+        let event = tokio::select! {
+            () = runtime::until_set(cancel) => Err("cancelled".to_string()),
+            () = tokio::time::sleep_until(deadline) => {
+                Err(format!("stopped at the {}s time limit", agent.max_seconds))
+            }
+            event = link.next_event() => Ok(event),
+        };
+        let event = match event {
+            Ok(event) => event
+                .map_err(|e| transport(format!("the link to the hub broke during the run: {e}")))?,
+            Err(why) => {
+                let _ = link.send(RUN_CANCEL, json!({ "run": run })).await;
+                link.close().await;
+                return Ok(unfinished(why));
+            }
         };
         if event.data["run"].as_str() != Some(run.as_str()) {
             continue;
@@ -131,8 +116,8 @@ fn run_blocking(
                 }
             }
             RUN_DONE => {
-                link.close();
-                return finished(&event.data, &node, na, workdir, backend());
+                link.close().await;
+                return runtime::blocking(|| finished(&event.data, &node, na, workdir, backend()));
             }
             _ => {}
         }
@@ -218,18 +203,19 @@ pub fn health(na: &NodeAdapter) -> Result<(), Error> {
             na.hub, na.hub
         ),
     })?;
-    let mut link = Connection::open(&na.hub, token).map_err(|detail| Error::Transport {
+    let listed = runtime::block_on(async {
+        let mut link = Connection::open(&na.hub, token).await?;
+        let listed = link
+            .call(ensemble_link::protocol::NODES, json!({}))
+            .await
+            .map_err(|f| f.message());
+        link.close().await;
+        listed
+    })
+    .map_err(|detail| Error::Transport {
         backend: backend(),
         detail,
     })?;
-    let listed = link
-        .call(ensemble_link::protocol::NODES, json!({}))
-        .map_err(|f| Error::Transport {
-            backend: backend(),
-            detail: f.message(),
-        });
-    link.close();
-    let listed = listed?;
     let nodes = listed["nodes"].as_array().cloned().unwrap_or_default();
     let offers = |n: &Value| {
         n["agents"]

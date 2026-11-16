@@ -73,8 +73,8 @@ pub const MODEL_CALL_EVENT: &str = "model_call";
 pub const MAX_MESSAGE: usize = 48 * 1024 * 1024;
 
 /// What the link's WebSockets accept, on both ends.
-pub fn socket_config() -> tungstenite::protocol::WebSocketConfig {
-    tungstenite::protocol::WebSocketConfig::default()
+pub fn socket_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
         .max_message_size(Some(MAX_MESSAGE))
         .max_frame_size(Some(MAX_MESSAGE))
 }

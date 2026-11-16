@@ -1,10 +1,13 @@
-//! Just enough HTTP/1.1 for the hub's REST API, synchronous like the rest: one
+//! Just enough HTTP/1.1 for the hub's REST API, on tokio: one
 //! request per connection, a `Content-Length` body, a JSON answer, then the
 //! connection closes. A WebSocket upgrade is read the same way and handed to
 //! the link with the bytes already read put back in front ([`Replay`]).
 
 use serde_json::Value;
-use std::io::{Read, Write};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 /// The most a request's head may be.
 const MAX_HEAD: usize = 16 * 1024;
@@ -45,7 +48,9 @@ impl Head {
 
 /// Read a request's head. Returns it, and every byte read so far, which may
 /// run past the head into the body.
-pub fn read_head(stream: &mut impl Read) -> Result<(Head, Vec<u8>, usize), String> {
+pub async fn read_head(
+    stream: &mut (impl AsyncRead + Unpin),
+) -> Result<(Head, Vec<u8>, usize), String> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 2048];
     let end = loop {
@@ -55,7 +60,7 @@ pub fn read_head(stream: &mut impl Read) -> Result<(Head, Vec<u8>, usize), Strin
         if buf.len() > MAX_HEAD {
             return Err("the request's head is too large".into());
         }
-        let n = stream.read(&mut chunk).map_err(|e| e.to_string())?;
+        let n = stream.read(&mut chunk).await.map_err(|e| e.to_string())?;
         if n == 0 {
             return Err("the connection closed before a request came".into());
         }
@@ -81,13 +86,17 @@ pub fn read_head(stream: &mut impl Read) -> Result<(Head, Vec<u8>, usize), Strin
 }
 
 /// Read the body that follows a head: `already` holds what was read past it.
-pub fn read_body(stream: &mut impl Read, head: &Head, already: &[u8]) -> Result<Vec<u8>, String> {
-    read_body_up_to(stream, head, already, MAX_BODY)
+pub async fn read_body(
+    stream: &mut (impl AsyncRead + Unpin),
+    head: &Head,
+    already: &[u8],
+) -> Result<Vec<u8>, String> {
+    read_body_up_to(stream, head, already, MAX_BODY).await
 }
 
 /// [`read_body`], for a body of at most `max` bytes.
-pub fn read_body_up_to(
-    stream: &mut impl Read,
+pub async fn read_body_up_to(
+    stream: &mut (impl AsyncRead + Unpin),
     head: &Head,
     already: &[u8],
     max: usize,
@@ -102,7 +111,7 @@ pub fn read_body_up_to(
     let mut body = already[..already.len().min(length)].to_vec();
     let mut chunk = [0u8; 4096];
     while body.len() < length {
-        let n = stream.read(&mut chunk).map_err(|e| e.to_string())?;
+        let n = stream.read(&mut chunk).await.map_err(|e| e.to_string())?;
         if n == 0 {
             return Err("the connection closed in the middle of the body".into());
         }
@@ -112,34 +121,44 @@ pub fn read_body_up_to(
 }
 
 /// Write a JSON response and end the exchange.
-pub fn respond(stream: &mut impl Write, status: u16, body: &Value) -> std::io::Result<()> {
+pub async fn respond(
+    stream: &mut (impl AsyncWrite + Unpin),
+    status: u16,
+    body: &Value,
+) -> std::io::Result<()> {
     let text = body.to_string();
-    write!(
-        stream,
+    let response = format!(
         "HTTP/1.1 {status} {}\r\ncontent-type: application/json\r\ncache-control: no-store\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}",
         reason(status),
         text.len()
-    )?;
-    stream.flush()
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await
 }
 
 /// The most read away after a refused body, before the connection is closed
 /// anyway.
 const MAX_DRAIN: usize = 16 * MAX_BODY;
 
+/// How long [`drain`] waits for the client.
+const DRAIN_WAIT: Duration = Duration::from_secs(10);
+
 /// Read what the client still sends, up to [`MAX_DRAIN`], after the answer
-/// was written: it ends with the client's end of the request, or with the
-/// stream's read timeout.
-pub fn drain(stream: &mut std::net::TcpStream) {
-    let _ = stream.shutdown(std::net::Shutdown::Write);
-    let mut chunk = [0u8; 8192];
-    let mut read = 0;
-    while read < MAX_DRAIN {
-        match stream.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => read += n,
+/// was written: it ends with the client's end of the request, or after a
+/// while.
+pub async fn drain(stream: &mut tokio::net::TcpStream) {
+    let _ = stream.shutdown().await;
+    let read_away = async {
+        let mut chunk = [0u8; 8192];
+        let mut read = 0;
+        while read < MAX_DRAIN {
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => read += n,
+            }
         }
-    }
+    };
+    let _ = tokio::time::timeout(DRAIN_WAIT, read_away).await;
 }
 
 fn reason(status: u16) -> &'static str {
@@ -168,7 +187,7 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 pub struct Replay<S> {
     first: Vec<u8>,
     at: usize,
-    pub inner: S,
+    inner: S,
 }
 
 impl<S> Replay<S> {
@@ -181,44 +200,58 @@ impl<S> Replay<S> {
     }
 }
 
-impl<S: Read> Read for Replay<S> {
-    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+impl<S: AsyncRead + Unpin> AsyncRead for Replay<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         if self.at < self.first.len() {
-            let n = out.len().min(self.first.len() - self.at);
-            out[..n].copy_from_slice(&self.first[self.at..self.at + n]);
+            let n = out.remaining().min(self.first.len() - self.at);
+            let at = self.at;
+            out.put_slice(&self.first[at..at + n]);
             self.at += n;
-            return Ok(n);
+            return Poll::Ready(Ok(()));
         }
-        self.inner.read(out)
+        Pin::new(&mut self.inner).poll_read(cx, out)
     }
 }
 
-impl<S: Write> Write for Replay<S> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.inner.write(buf)
+impl<S: AsyncWrite + Unpin> AsyncWrite for Replay<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ensemble_core::runtime::block_on;
 
     #[test]
     fn a_request_is_read_head_then_body() {
         let raw = b"POST /api/v1/register?x=1 HTTP/1.1\r\nHost: h\r\nContent-Length: 13\r\nAuthorization: Bearer ens_1\r\n\r\n{\"name\":\"a\"}!";
         let mut stream = &raw[..];
-        let (head, read, end) = read_head(&mut stream).unwrap();
+        let (head, read, end) = block_on(read_head(&mut stream)).unwrap();
         assert_eq!(
             (head.method.as_str(), head.path.as_str()),
             ("POST", "/api/v1/register")
         );
         assert_eq!(head.bearer(), Some("ens_1"));
         assert!(!head.is_upgrade());
-        let body = read_body(&mut stream, &head, &read[end..]).unwrap();
+        let body = block_on(read_body(&mut stream, &head, &read[end..])).unwrap();
         assert_eq!(body, b"{\"name\":\"a\"}!");
     }
 
@@ -229,16 +262,16 @@ mod tests {
             MAX_BODY + 1
         );
         let mut stream = raw.as_bytes();
-        let (head, read, end) = read_head(&mut stream).unwrap();
-        assert!(read_body(&mut stream, &head, &read[end..]).is_err());
-        assert!(read_head(&mut &b"hello\r\n\r\n"[..]).is_err());
+        let (head, read, end) = block_on(read_head(&mut stream)).unwrap();
+        assert!(block_on(read_body(&mut stream, &head, &read[end..])).is_err());
+        assert!(block_on(read_head(&mut &b"hello\r\n\r\n"[..])).is_err());
     }
 
     #[test]
     fn replay_gives_back_what_was_read_then_the_rest() {
         let mut r = Replay::new(b"ab".to_vec(), &b"cd"[..]);
         let mut all = String::new();
-        r.read_to_string(&mut all).unwrap();
+        block_on(r.read_to_string(&mut all)).unwrap();
         assert_eq!(all, "abcd");
     }
 }

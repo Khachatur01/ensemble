@@ -321,6 +321,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -334,6 +335,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
+ "tokio",
 ]
 
 [[package]]
@@ -355,10 +357,12 @@ dependencies = [
  "ensemble-config",
  "ensemble-core",
  "ensemble-knowledge",
+ "futures-util",
  "ring",
  "serde",
  "serde_json",
- "tungstenite",
+ "tokio",
+ "tokio-tungstenite",
  "ureq",
 ]
 
@@ -385,8 +389,10 @@ dependencies = [
  "ensemble-config",
  "ensemble-core",
  "ensemble-link",
+ "futures-util",
+ "reqwest",
  "serde_json",
- "ureq",
+ "tokio",
 ]
 
 [[package]]
@@ -416,7 +422,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1205,7 +1211,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1393,7 +1399,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1782,6 +1788,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
+dependencies = [
+ "futures-util",
+ "log",
+ "rustls",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tungstenite",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1932,7 +1954,6 @@ dependencies = [
  "sha1",
  "thiserror",
  "utf-8",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -2196,7 +2217,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
