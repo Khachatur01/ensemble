@@ -11,8 +11,10 @@
 //! in it would stay in the history. The pipeline (`pipeline`) turns shares into
 //! notes, in the background, finding related notes by their words (`search`).
 
+use async_trait::async_trait;
 use ensemble_backends::resolve::Resolver;
 use ensemble_config::{Hub, Knowledge, LlmBackend};
+use ensemble_core::runtime;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -63,29 +65,33 @@ pub struct Tool {
 
 /// What an agent session needs from a hub's knowledge, wherever the hub is:
 /// embedded in this node ([`Memory`]), or a hub server reached over the link.
+/// Async, because a hub server answers over the network.
+#[async_trait]
 pub trait KnowledgeAccess: Sync {
     /// The knowledge tools this session's agent is offered.
-    fn tools(&self) -> Vec<Tool>;
+    async fn tools(&self) -> Vec<Tool>;
     /// What the server says about them when an agent connects.
-    fn instructions(&self) -> String;
+    async fn instructions(&self) -> String;
     /// Run one of them: `None` when `name` is not one of them, else the text
     /// for the caller, or why it failed.
-    fn call(&self, name: &str, args: &Value) -> Option<Result<String, String>>;
+    async fn call(&self, name: &str, args: &Value) -> Option<Result<String, String>>;
     /// Remember which agent CLI the session talks to, as it named itself.
     fn set_client(&self, name: &str);
 }
 
+#[async_trait]
 impl KnowledgeAccess for Memory {
-    fn tools(&self) -> Vec<Tool> {
+    async fn tools(&self) -> Vec<Tool> {
         Memory::tools(self)
     }
 
-    fn instructions(&self) -> String {
+    async fn instructions(&self) -> String {
         Memory::instructions(self)
     }
 
-    fn call(&self, name: &str, args: &Value) -> Option<Result<String, String>> {
-        Memory::call(self, name, args)
+    async fn call(&self, name: &str, args: &Value) -> Option<Result<String, String>> {
+        // The vault is files and a git repository on this disk.
+        runtime::blocking(|| Memory::call(self, name, args))
     }
 
     fn set_client(&self, name: &str) {

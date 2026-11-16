@@ -1722,16 +1722,17 @@ fn with_a_hub_the_knowledge_tools_are_offered_and_a_share_is_kept() {
 /// A hub's knowledge with one note, about deploys, and a long tail.
 struct Deploys;
 
+#[async_trait::async_trait]
 impl KnowledgeAccess for Deploys {
-    fn tools(&self) -> Vec<ensemble_knowledge::Tool> {
+    async fn tools(&self) -> Vec<ensemble_knowledge::Tool> {
         ensemble_knowledge::tool_definitions()
     }
 
-    fn instructions(&self) -> String {
+    async fn instructions(&self) -> String {
         String::new()
     }
 
-    fn call(&self, name: &str, args: &Value) -> Option<Result<String, String>> {
+    async fn call(&self, name: &str, args: &Value) -> Option<Result<String, String>> {
         let query = args["query"].as_str().unwrap_or("");
         (name == RECALL).then(|| {
             Ok(if query.contains("deploy") {

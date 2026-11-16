@@ -11,13 +11,18 @@ pub const SERVER_NAME: &str = "ensemble";
 ///
 /// `agents` is the whole helper team; `memory`, a hub's knowledge, adds its
 /// tools.
-pub(super) fn tool_definitions(agents: &[&str], memory: Option<&dyn KnowledgeAccess>) -> Value {
+pub(super) async fn tool_definitions(
+    agents: &[&str],
+    memory: Option<&dyn KnowledgeAccess>,
+) -> Value {
+    let knowledge = match memory {
+        Some(m) => m.tools().await,
+        None => Vec::new(),
+    };
     let team = delegation::tools(agents)
         .into_iter()
         .map(|t| (t.name, t.description, t.parameters));
-    let knowledge = memory
-        .map(|m| m.tools())
-        .unwrap_or_default()
+    let knowledge = knowledge
         .into_iter()
         .map(|t| (t.name, t.description, t.parameters));
     Value::Array(

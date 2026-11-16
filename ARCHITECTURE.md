@@ -200,17 +200,18 @@ async, and so is a node that runs many agents and serves models at once.
 (Decided 2026-11-16; Ensemble was synchronous on purpose until then.) What
 stays synchronous is the knowledge vault and its distilling, and the tracker
 inboxes: their loops run on threads of their own, and a call into them from
-async code goes through `runtime::blocking`. Short HTTP requests use ureq,
-what streams for long (a node's model calls) reqwest. `runtime::block_on` is
-for the CLI's entry points and for the few calls a sync interface needs, such
-as a hub server's knowledge behind `KnowledgeAccess`. A session's tool
-calls, and a queue's runs, are futures of one task each, so they borrow what
-the session holds instead of being `'static`; what still blocks there (a
-knowledge request, `health`, a git command) goes through `runtime::blocking`,
-and holds up the other futures of its task while it runs. A hub server's
-connections, though, are tasks of their own, so that one slow request holds up
-no other: the server and what it borrows are made once and live as long as
-the process.
+async code goes through `runtime::blocking`. `KnowledgeAccess`, what a session
+asks of a hub's knowledge, is async: a hub server's is awaited over the link,
+and the embedded vault does its disk work in `runtime::blocking`. Short HTTP
+requests use ureq, what streams for long (a node's model calls) reqwest.
+`runtime::block_on` is for the CLI's entry points and for the few calls a sync
+interface needs. A session's tool calls, and a queue's runs, are futures of
+one task each, so they borrow what the session holds instead of being
+`'static`; what still blocks there (the embedded vault, `health`, a git
+command) goes through `runtime::blocking`, and holds up the other futures of
+its task while it runs. A hub server's connections, though, are tasks of
+their own, so that one slow request holds up no other: the server and what it
+borrows are made once and live as long as the process.
 
 An organization may later limit helper teams through policy, not structure:
 which backends its data may be sent to, gates its repositories require, budgets
@@ -451,7 +452,9 @@ in either process.
    node into the folder of the project's name; the task queue and the MCP
    session on tokio, a session's calls and a queue's runs side by side in
    one task each; the link on tokio-tungstenite, a hub server's connections
-   each a task, a node's runs and model calls beside its link.)
+   each a task, a node's runs and model calls beside its link;
+   `KnowledgeAccess` async, so a hub server's knowledge holds up nothing
+   else in a session.)
 
 The link, as built: the node opens one WebSocket and signs in with
 `Authorization: Bearer <token>` during the upgrade (401 without a valid one).

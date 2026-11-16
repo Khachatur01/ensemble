@@ -8,6 +8,7 @@ rust-version.workspace = true
 description = "Ensemble's hub server and the link to it: users and tokens, the WebSocket protocol, the server, and the node's client."
 
 [dependencies]
+async-trait.workspace = true
 ensemble-config.workspace = true
 ensemble-core.workspace = true
 ensemble-knowledge.workspace = true

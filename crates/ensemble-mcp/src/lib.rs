@@ -131,7 +131,7 @@ pub async fn handle_reporting(
             }
             let mut instructions = protocol::instructions(ensemble.config());
             if let Some(memory) = memory {
-                instructions.push_str(&runtime::blocking(|| memory.instructions()));
+                instructions.push_str(&memory.instructions().await);
             }
             reply(json!({
                 "protocolVersion": version,
@@ -142,7 +142,7 @@ pub async fn handle_reporting(
         }
 
         "tools/list" => {
-            let tools = runtime::blocking(|| tool_definitions(&ensemble.agents(), memory));
+            let tools = tool_definitions(&ensemble.agents(), memory).await;
             reply(json!({ "tools": tools }))
         }
 
@@ -161,7 +161,11 @@ pub async fn handle_reporting(
                 .cloned()
                 .or_else(|| id.clone())
                 .unwrap_or_else(|| json!("ensemble"));
-            if let Some(result) = memory.and_then(|m| runtime::blocking(|| m.call(name, &args))) {
+            let known = match memory {
+                Some(m) => m.call(name, &args).await,
+                None => None,
+            };
+            if let Some(result) = known {
                 let (text, is_error) = match result {
                     Ok(text) => (text, false),
                     Err(text) => (text, true),
@@ -442,13 +446,15 @@ pub fn queue_for<'s>(
         return queue;
     };
     queue.with_recall(move |topic, max_chars| {
-        match memory.call(RECALL, &json!({ "query": topic })) {
-            Some(Ok(text)) => Ok(text
-                .starts_with(RECALL_HEADER)
-                .then(|| recalled_within(&text, max_chars))),
-            Some(Err(e)) => Err(e),
-            None => Err("this session's hub offers no recall".into()),
-        }
+        Box::pin(async move {
+            match memory.call(RECALL, &json!({ "query": topic })).await {
+                Some(Ok(text)) => Ok(text
+                    .starts_with(RECALL_HEADER)
+                    .then(|| recalled_within(&text, max_chars))),
+                Some(Err(e)) => Err(e),
+                None => Err("this session's hub offers no recall".into()),
+            }
+        })
     })
 }
 

@@ -459,6 +459,7 @@ fn token_view(token: &Token) -> Value {
 #[cfg(test)]
 mod tests {
     use crate::server::tests::{PASSWORD, start};
+    use ensemble_core::runtime::block_on;
     use serde_json::{Value, json};
 
     /// One REST call: the status and the JSON answer.
@@ -565,12 +566,10 @@ mod tests {
         let token = made["token"].as_str().unwrap().to_string();
 
         let link = crate::RemoteMemory::new(&hub.url, &token, None);
-        let hello = link.hello().unwrap();
+        let hello = block_on(link.hello()).unwrap();
         assert_eq!(hello.permissions, vec!["recall"]);
         use ensemble_knowledge::KnowledgeAccess;
-        let share = link
-            .call("share", &json!({"title": "t", "text": "x"}))
-            .unwrap();
+        let share = block_on(link.call("share", &json!({"title": "t", "text": "x"}))).unwrap();
         assert!(share.unwrap_err().contains("do not allow `share`"));
 
         let (status, _) = call(
@@ -594,11 +593,7 @@ mod tests {
             None,
         );
         assert_eq!(status, 200);
-        assert!(
-            crate::RemoteMemory::new(&hub.url, &token, None)
-                .hello()
-                .is_err()
-        );
+        assert!(block_on(crate::RemoteMemory::new(&hub.url, &token, None).hello()).is_err());
 
         let (status, _) = call(&hub.url, "POST", "/api/v1/logout", Some(&session), None);
         assert_eq!(status, 200);

@@ -399,12 +399,14 @@ pub async fn call(
                     };
                     // What the knowledge vault has about it comes with the
                     // context, and stays with it when the agent asks.
-                    let context = queue.with_notes(
-                        role,
-                        given,
-                        args.get("context").and_then(Value::as_str),
-                        progress,
-                    );
+                    let context = queue
+                        .with_notes(
+                            role,
+                            given,
+                            args.get("context").and_then(Value::as_str),
+                            progress,
+                        )
+                        .await;
                     let prompt = if background {
                         given.to_string()
                     } else {

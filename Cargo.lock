@@ -342,6 +342,7 @@ dependencies = [
 name = "ensemble-knowledge"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "ensemble-backends",
  "ensemble-config",
  "ensemble-core",
@@ -354,6 +355,7 @@ dependencies = [
 name = "ensemble-link"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "ensemble-config",
  "ensemble-core",
  "ensemble-knowledge",
@@ -370,6 +372,7 @@ dependencies = [
 name = "ensemble-mcp"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "ensemble-agents",
  "ensemble-config",
  "ensemble-core",

@@ -4,7 +4,7 @@
 //! again once when it breaks.
 
 use crate::protocol::{Event, HELLO, RECALL, Reply, Request, SHARE};
-use ensemble_core::runtime;
+use async_trait::async_trait;
 use ensemble_knowledge::{KnowledgeAccess, Tool};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -207,19 +207,14 @@ impl RemoteMemory {
     }
 
     /// Who the node is on the hub; asked once, then remembered.
-    pub fn hello(&self) -> Result<Hello, String> {
+    pub async fn hello(&self) -> Result<Hello, String> {
         if let Some(hello) = self.hello.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             return Ok(hello);
         }
-        let v = self.request(HELLO, json!({}))?;
+        let v = self.ask(HELLO, json!({})).await?;
         let hello = hello_from(&v);
         *self.hello.lock().unwrap_or_else(|e| e.into_inner()) = Some(hello.clone());
         Ok(hello)
-    }
-
-    /// Ask the hub, waiting for its answer: [`KnowledgeAccess`] is not async.
-    fn request(&self, method: &str, params: Value) -> Result<Value, String> {
-        runtime::block_on(self.ask(method, params))
     }
 
     /// Ask the hub, opening the link when it is not open, and once more when
@@ -244,14 +239,6 @@ impl RemoteMemory {
         }
         unreachable!("the loop returns")
     }
-
-    fn may(&self, name: &str) -> bool {
-        // A hub that cannot be asked yet gets every tool; the call says why
-        // it fails.
-        self.hello()
-            .map(|h| h.permissions.iter().any(|p| p == name))
-            .unwrap_or(true)
-    }
 }
 
 /// A `hello` answer, read.
@@ -273,22 +260,30 @@ pub fn hello_from(v: &Value) -> Hello {
     }
 }
 
+#[async_trait]
 impl KnowledgeAccess for RemoteMemory {
-    fn tools(&self) -> Vec<Tool> {
+    async fn tools(&self) -> Vec<Tool> {
+        // A hub that cannot be asked yet gets every tool; the call says why
+        // it fails.
+        let permissions = self.hello().await.map(|h| h.permissions).ok();
         ensemble_knowledge::tool_definitions()
             .into_iter()
-            .filter(|t| self.may(t.name))
+            .filter(|t| {
+                permissions
+                    .as_ref()
+                    .is_none_or(|p| p.iter().any(|p| p == t.name))
+            })
             .collect()
     }
 
-    fn instructions(&self) -> String {
-        match self.hello() {
+    async fn instructions(&self) -> String {
+        match self.hello().await {
             Ok(h) => h.instructions,
             Err(_) => ensemble_knowledge::instructions_for(&[SHARE, RECALL]),
         }
     }
 
-    fn call(&self, name: &str, args: &Value) -> Option<Result<String, String>> {
+    async fn call(&self, name: &str, args: &Value) -> Option<Result<String, String>> {
         let text = |key: &str| {
             args.get(key)
                 .and_then(Value::as_str)
@@ -303,7 +298,7 @@ impl KnowledgeAccess for RemoteMemory {
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
                 Some(
-                    self.request(
+                    self.ask(
                         SHARE,
                         json!({
                             "title": text("title"),
@@ -312,6 +307,7 @@ impl KnowledgeAccess for RemoteMemory {
                             "project": self.project,
                         }),
                     )
+                    .await
                     .map(|v| {
                         format!(
                             "Shared as {} on the hub {}. It turns it into notes in the background.",
@@ -322,7 +318,8 @@ impl KnowledgeAccess for RemoteMemory {
                 )
             }
             RECALL => Some(
-                self.request(RECALL, json!({ "query": text("query") }))
+                self.ask(RECALL, json!({ "query": text("query") }))
+                    .await
                     .map(|v| v["text"].as_str().unwrap_or("").to_string()),
             ),
             _ => None,
@@ -342,12 +339,12 @@ mod tests {
     use super::*;
     use crate::server::tests::start;
 
-    #[test]
-    fn a_members_session_shares_and_recalls_on_the_hub() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_members_session_shares_and_recalls_on_the_hub() {
         let hub = start();
         let m = RemoteMemory::new(&hub.url, &hub.ana, Some("shop".into()));
-        assert_eq!(m.hello().unwrap().user, "ana");
-        let names: Vec<&str> = m.tools().iter().map(|t| t.name).collect();
+        assert_eq!(m.hello().await.unwrap().user, "ana");
+        let names: Vec<&str> = m.tools().await.iter().map(|t| t.name).collect();
         assert_eq!(names, vec!["share", "recall"]);
         m.set_client("claude-code");
         let said = m
@@ -355,6 +352,7 @@ mod tests {
                 "share",
                 &json!({"title": "Ports", "text": "The shop listens on 8080."}),
             )
+            .await
             .unwrap()
             .unwrap();
         assert!(said.starts_with("Shared as "), "{said}");
@@ -370,37 +368,36 @@ mod tests {
         );
         let notes = m
             .call("recall", &json!({"query": "deploy"}))
+            .await
             .unwrap()
             .unwrap();
         assert!(notes.contains("Tuesdays"), "{notes}");
-        assert!(m.call("delegate", &json!({})).is_none());
+        assert!(m.call("delegate", &json!({})).await.is_none());
     }
 
-    #[test]
-    fn a_reader_is_offered_recall_only_and_a_bad_token_is_named() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reader_is_offered_recall_only_and_a_bad_token_is_named() {
         let hub = start();
         let rex = RemoteMemory::new(&hub.url, &hub.rex, None);
-        let names: Vec<&str> = rex.tools().iter().map(|t| t.name).collect();
+        let names: Vec<&str> = rex.tools().await.iter().map(|t| t.name).collect();
         assert_eq!(names, vec!["recall"]);
-        assert!(!rex.instructions().contains("`share`"));
+        assert!(!rex.instructions().await.contains("`share`"));
 
         let bad = RemoteMemory::new(&hub.url, "ens_wrong", None);
-        let err = bad.hello().unwrap_err();
+        let err = bad.hello().await.unwrap_err();
         assert!(err.contains("did not accept the token"), "{err}");
     }
 
-    #[test]
-    fn the_link_is_opened_again_when_it_breaks() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_link_is_opened_again_when_it_breaks() {
         let hub = start();
         let m = RemoteMemory::new(&hub.url, &hub.ana, None);
-        m.hello().unwrap();
+        m.hello().await.unwrap();
         // Break it from this side: the next request opens a new one.
-        runtime::block_on(async {
-            if let Some(link) = m.socket.lock().await.as_mut() {
-                link.close().await;
-            }
-        });
-        let notes = m.call("recall", &json!({"query": "deploy"})).unwrap();
+        if let Some(link) = m.socket.lock().await.as_mut() {
+            link.close().await;
+        }
+        let notes = m.call("recall", &json!({"query": "deploy"})).await.unwrap();
         assert!(notes.is_ok(), "{notes:?}");
     }
 }

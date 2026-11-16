@@ -367,13 +367,11 @@ fn run() -> Result<ExitCode, String> {
                 "recall: needs a topic, such as `ensemble recall --hub <dir> deploys`".into(),
             );
         }
-        let notes = knowledge
-            .access()
-            .call(
-                ensemble::knowledge::RECALL,
-                &serde_json::json!({ "query": query }),
-            )
-            .expect("recall is a knowledge tool")?;
+        let notes = ensemble::runtime::block_on(knowledge.access().call(
+            ensemble::knowledge::RECALL,
+            &serde_json::json!({ "query": query }),
+        ))
+        .expect("recall is a knowledge tool")?;
         println!("{notes}");
         return Ok(ExitCode::SUCCESS);
     }
@@ -529,10 +527,10 @@ fn hook(args: &Args) -> Result<(), String> {
     let Some(knowledge) = knowledge_for(args, &dir)? else {
         return Ok(());
     };
-    let answer = match knowledge.access().call(
+    let answer = match ensemble::runtime::block_on(knowledge.access().call(
         ensemble::knowledge::RECALL,
         &serde_json::json!({ "query": topic }),
-    ) {
+    )) {
         Some(answer) => answer?,
         None => return Ok(()),
     };
@@ -559,9 +557,9 @@ fn cmd_login(args: &Args) -> Result<ExitCode, String> {
             );
         }
     };
-    let hello = ensemble::link::RemoteMemory::new(url, &token, None)
-        .hello()
-        .map_err(|e| format!("login: {e}"))?;
+    let hello =
+        ensemble::runtime::block_on(ensemble::link::RemoteMemory::new(url, &token, None).hello())
+            .map_err(|e| format!("login: {e}"))?;
     let mut tokens = ensemble::link::Tokens::load()?;
     tokens.set(url, &token);
     tokens.save()?;
@@ -1529,12 +1527,11 @@ fn cmd_share(args: &Args, dir: &Path) -> Result<ExitCode, String> {
     }
     let knowledge = knowledge.access();
     knowledge.set_client("ensemble-cli");
-    let said = knowledge
-        .call(
-            ensemble::knowledge::SHARE,
-            &serde_json::json!({ "title": title, "text": text }),
-        )
-        .expect("share is a knowledge tool")?;
+    let said = ensemble::runtime::block_on(knowledge.call(
+        ensemble::knowledge::SHARE,
+        &serde_json::json!({ "title": title, "text": text }),
+    ))
+    .expect("share is a knowledge tool")?;
     println!("{said}");
     Ok(ExitCode::SUCCESS)
 }

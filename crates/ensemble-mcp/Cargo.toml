@@ -19,5 +19,6 @@ tokio.workspace = true
 futures-util.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 ensemble-agents = { workspace = true, features = ["test-support"] }
 ensemble-core = { workspace = true, features = ["test-support"] }
