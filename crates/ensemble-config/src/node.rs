@@ -1,20 +1,21 @@
-//! `node.yaml`: one node, a worker that gives this computer's power to the
-//! people of a hub server. The usual one is `~/.config/ensemble/node.yaml`; a
-//! computer may run more, each from a file of its own (`--node <file>`).
+//! `node.yaml`: one node, a worker that gives this computer's power to its
+//! owner and, when shared, to the people of a hub server. The usual one is
+//! `~/.config/ensemble/node.yaml`; a computer may run more, each from a file
+//! of its own (`--node <file>`).
 //!
-//! A node says which folder each project's work happens in, so that the tasks
-//! the hub sends its owner land in the right place; who it works for (its
-//! owner alone, or also the others whose role has `compute`); and what it
-//! offers: agents of a helper team on this computer that run tasks sent to it,
-//! and the models a server here serves. Without the file this computer takes
-//! no tasks from a hub.
+//! A node says who it works for (its owner alone, or also the others whose
+//! role has `compute`), the helper team it runs, and what it offers: agents of
+//! that team that run tasks sent to it, and the models a server here serves.
+//! It is tied to no project: your agent CLI's sessions reach its team from any
+//! folder through `ensemble mcp`, and a task from a hub goes to the folder of
+//! its project's name where a session last ran.
 
 use super::validate::explain;
 use super::*;
 use serde::Deserialize;
 
 pub const NODE_FILENAME: &str = "node.yaml";
-pub const NODE_SUPPORTED_VERSION: u32 = 2;
+pub const NODE_SUPPORTED_VERSION: u32 = 3;
 
 /// The JSON Schema for `node.yaml`.
 pub const NODE_SCHEMA: &str = include_str!("../../../node.schema.json");
@@ -26,12 +27,12 @@ pub const NODE_SAMPLE: &str = include_str!("node_sample.yaml");
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Node {
     pub version: u32,
-    /// Its name on the hub, which knows it as `<owner>/<name>`.
+    /// Its name, which a hub knows as `<owner>/<name>`.
     pub name: String,
     pub access: Access,
-    /// An issue's `project`, and the folder on this computer its work happens
-    /// in.
-    pub projects: BTreeMap<String, PathBuf>,
+    /// The helper team it runs: the directory with its `config.yaml`. None: it
+    /// runs no agents, and only serves models.
+    pub team: Option<PathBuf>,
     pub offers: Offers,
     pub source: PathBuf,
 }
@@ -55,20 +56,19 @@ impl Access {
     }
 }
 
-/// What a node offers. Each block is there or not: absent, it is not offered.
+/// What a node offers through a hub. Each block is there or not: absent, it
+/// is not offered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Offers {
     pub runs: Option<OfferedRuns>,
     pub models: Option<OfferedModels>,
 }
 
-/// Agents of a helper team on this computer, which run tasks sent to the node
-/// in a folder of their own and send back what they changed.
+/// Agents of the node's helper team, which run tasks sent to the node in a
+/// folder of their own and send back what they changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfferedRuns {
-    /// The helper team's directory, with its `config.yaml`.
-    pub team: PathBuf,
-    /// Which of its agents others may run.
+    /// Which of the team's agents others may run.
     pub agents: Vec<String>,
 }
 
@@ -90,7 +90,7 @@ pub(crate) struct RawNode {
     pub(crate) version: u32,
     pub(crate) name: String,
     pub(crate) access: Access,
-    pub(crate) projects: BTreeMap<String, String>,
+    pub(crate) team: Option<String>,
     pub(crate) offers: RawOffers,
 }
 
@@ -104,7 +104,6 @@ pub(crate) struct RawOffers {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawOfferedRuns {
-    pub(crate) team: String,
     pub(crate) agents: Vec<String>,
 }
 
@@ -138,16 +137,27 @@ pub fn load_node(path: &Path) -> Result<Option<Node>, ConfigError> {
 }
 
 pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
-    // Version 1 had projects only; say what to add rather than a missing key.
-    if let Ok(v) = serde_norway::from_str::<serde_norway::Value>(text)
-        && v.get("version").and_then(serde_norway::Value::as_u64) == Some(1)
-    {
-        return Err(ConfigError::Invalid {
+    // Say what changed rather than which key is missing.
+    let old = |problem: &str| {
+        Err(ConfigError::Invalid {
             path: path.to_path_buf(),
-            problems: vec![format!(
-                "version: 1 is no longer read. Make it `version: {NODE_SUPPORTED_VERSION}` and add `name:` (this node's name on the hub), `access: private` and `offers: {{}}`; `ensemble node init --stdout` prints every setting"
-            )],
-        });
+            problems: vec![problem.to_string()],
+        })
+    };
+    if let Ok(v) = serde_norway::from_str::<serde_norway::Value>(text) {
+        match v.get("version").and_then(serde_norway::Value::as_u64) {
+            Some(1) => {
+                return old(&format!(
+                    "version: 1 is no longer read. Make it `version: {NODE_SUPPORTED_VERSION}`, remove `projects`, and add `name:` (this node's name), `access: private`, `team:` (your helper team's directory) and `offers: {{}}`; `ensemble node init --stdout` prints every setting"
+                ));
+            }
+            Some(2) => {
+                return old(&format!(
+                    "version: 2 is no longer read. Make it `version: {NODE_SUPPORTED_VERSION}`, remove `projects` (a task now goes to the folder of its project's name where a session last ran), and move `offers.runs.team` up to `team:`, the helper team the node runs"
+                ));
+            }
+            _ => {}
+        }
     }
     let raw: RawNode = serde_norway::from_str(text).map_err(|e| ConfigError::Syntax {
         path: path.to_path_buf(),
@@ -166,22 +176,20 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
             "name: '{name}' must be letters, digits, '-', '_' or '.', such as laptop or gpu-box"
         ));
     }
-    let mut projects = BTreeMap::new();
-    for (project, dir) in &raw.projects {
-        let folder = PathBuf::from(dir.trim());
-        if project.trim().is_empty() || !folder.is_absolute() {
-            problems.push(format!(
-                "projects.{project}: needs a name and an absolute folder, such as /home/ana/code/shop"
-            ));
-        }
-        projects.insert(project.trim().to_string(), folder);
-    }
-    let runs = raw.offers.runs.as_ref().map(|r| {
-        let team = PathBuf::from(r.team.trim());
+    let team = raw.team.as_ref().map(|t| {
+        let team = PathBuf::from(t.trim());
         if !team.is_absolute() {
             problems.push(
-                "offers.runs.team: needs the absolute directory of a helper team, such as /srv/ensemble/team"
+                "team: needs the absolute directory of a helper team, such as /home/ana/team"
                     .into(),
+            );
+        }
+        team
+    });
+    let runs = raw.offers.runs.as_ref().map(|r| {
+        if team.is_none() {
+            problems.push(
+                "offers.runs: offers agents of the node's team, but there is no `team`".into(),
             );
         }
         let agents: Vec<String> = r.agents.iter().map(|a| a.trim().to_string()).collect();
@@ -196,7 +204,7 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
                 ));
             }
         }
-        OfferedRuns { team, agents }
+        OfferedRuns { agents }
     });
     let models = raw.offers.models.as_ref().map(|m| {
         let base_url = m.base_url.trim().trim_end_matches('/').to_string();
@@ -226,7 +234,7 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
             version: raw.version,
             name,
             access: raw.access,
-            projects,
+            team,
             offers: Offers { runs, models },
             source: path.to_path_buf(),
         })

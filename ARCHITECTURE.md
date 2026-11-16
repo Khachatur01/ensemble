@@ -18,10 +18,13 @@ the end are open; everything else is decided unless marked otherwise.
 - **Hub**: the people layer: identities, the task inbox, knowledge vaults, the
   knowledge pipeline, model access. The word "organization" is not used for it,
   to keep it apart from the old agent config.
-- **Node**: a worker: a process that gives computing resources to the hub's
-  users. A computer may run any number of nodes. A node is **private**, working
-  only for its owner, or **shared**, lending its machine's power to other users
-  of the hub. (Decided 2026-11-16; a node was one person's machine before.)
+- **Node**: a worker: a process that gives computing resources to its owner
+  and the hub's users. A computer may run any number of nodes. A node is
+  **private**, working only for its owner, or **shared**, lending its
+  machine's power to other users of the hub. It holds a helper team and is the
+  MCP server for its owner's agent sessions from any folder: `ensemble mcp`
+  is a bridge to it. It is tied to no project. (Decided 2026-11-16; a node
+  was one person's machine before.)
 - **Interface**: what a person talks to the system through: their own agent CLI
   (Claude Code, Codex, OpenCode) with Ensemble's MCP tools, or later the hub's
   chat API and web UI. There is no personal agent and no manager. (Decided
@@ -103,12 +106,12 @@ How it is built (chosen by the assistant on 2026-11-16, when the owner asked
 for it all to be built; open to change):
 
 - A node is a process, `ensemble node serve`, described by one `node.yaml`
-  (version 2): `name`, `access: private|shared`, the `projects` its owner's
-  tasks land in, and `offers` with an optional `runs` block (a helper team on
-  that computer and which of its agents run for others) and an optional
-  `models` block (an OpenAI-compatible server and the models offered). A
-  computer runs more nodes with `--node <file>`. The hub knows a node as
-  `<owner>/<name>` while it is connected, and keeps nothing after.
+  (version 3): `name`, `access: private|shared`, the `team` it runs, and
+  `offers` with an optional `runs` block (which of the team's agents run for
+  others) and an optional `models` block (an OpenAI-compatible server and
+  the models offered). A computer runs more nodes with `--node <file>`. The
+  hub knows a node as `<owner>/<name>` while it is connected, and keeps
+  nothing after.
 - Permissions: `compute` uses other people's shared nodes; `host` connects a
   shared node. A node's owner always may use their own.
 - A run: the requester's helper team has an agent of `type: node` naming the
@@ -429,9 +432,13 @@ in either process.
    GitLab, GitHub and Jira; OIDC and the device flow; the chat API and the
    web UI.)
 6. Async, the `builtin` adapter, and one node per worker that is also the MCP
-   server. (Started: tokio, async agent runs, `builtin` on harness-rs. Not
-   yet: tasks, MCP and the link on tokio; `ensemble mcp` as a bridge to a
-   running node.)
+   server. (Started: tokio, async agent runs, `builtin` on harness-rs; the
+   node as the long-running MCP server on a socket, `ensemble mcp` without
+   `--team` as a bridge to it, a worker per folder it served, `node.yaml`
+   version 3 with `team` and without `projects`, the hub's tasks taken by the
+   node into the folder of the project's name. Not yet: the task queue, the
+   MCP session and the link on tokio, which still run on threads and wait
+   for agents with `runtime::block_on`.)
 
 The link, as built: the node opens one WebSocket and signs in with
 `Authorization: Bearer <token>` during the upgrade (401 without a valid one).
@@ -454,8 +461,8 @@ token stops at once. The permissions so far are `share`, `recall`, `tasks`,
 3. Telegram as a team chat source: keep it or drop it.
 4. Shared nodes, as built (see "Private and shared nodes"): whether the
    owner and the user should consent to each run, beyond roles; whether the
-   hub should pick the least busy node for runs too; whether a node should
-   also take its owner's tasks from the inbox, as `ensemble mcp` does now.
+   hub should pick the least busy node for runs too. (A node takes its
+   owner's tasks from the inbox: decided 2026-11-16.)
 5. Chat from anywhere: how the hub's chat API picks the node that runs the
    helper agent a chat names, and what a chat gets when no such node is
    connected.

@@ -28,7 +28,7 @@ pub mod setup;
 pub use ensemble_agents::{external, router, runtime, worktree};
 pub use ensemble_backends as backends;
 pub use ensemble_config as config;
-pub use ensemble_core::{lock, port, records, snapshot, state, workspace};
+pub use ensemble_core::{folders, lock, port, records, snapshot, state, workspace};
 pub use ensemble_inbox as inbox;
 pub use ensemble_knowledge as knowledge;
 pub use ensemble_link as link;

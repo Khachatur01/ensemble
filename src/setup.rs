@@ -253,6 +253,27 @@ pub fn registration(
         serve.push("--env-file".into());
         serve.push(env_file.display().to_string());
     }
+    with_manager(manager, global, serve)
+}
+
+/// How to register `ensemble mcp` with `manager` as a session of the running
+/// node `node` names (its file), else the usual node.
+pub fn node_registration(
+    manager: &str,
+    ensemble: &str,
+    node: Option<&Path>,
+    global: bool,
+) -> Result<Registration, String> {
+    let mut serve = vec![ensemble.to_string(), "mcp".into()];
+    if let Some(node) = node {
+        serve.push("--node".into());
+        serve.push(node.display().to_string());
+    }
+    with_manager(manager, global, serve)
+}
+
+/// `manager`'s own command that adds the server `serve` starts.
+fn with_manager(manager: &str, global: bool, serve: Vec<String>) -> Result<Registration, String> {
     let (program, mut args): (&'static str, Vec<String>) = match manager {
         CLAUDE_CODE_AGENT => (
             "claude",
@@ -589,6 +610,18 @@ mod tests {
             "codex mcp add ensemble -- ensemble mcp --team /home/me/org"
         );
         assert!(registration("emacs", "ensemble", org, None, None, false).is_err());
+        let r = node_registration("claude-code", "ensemble", None, false).unwrap();
+        assert_eq!(
+            r.line(),
+            "claude mcp add --scope local ensemble -- ensemble mcp"
+        );
+        let r =
+            node_registration("codex", "ensemble", Some(Path::new("/n/gpu.yaml")), true).unwrap();
+        assert!(
+            r.line().ends_with("ensemble mcp --node /n/gpu.yaml"),
+            "{}",
+            r.line()
+        );
     }
 
     #[test]

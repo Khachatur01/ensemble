@@ -13,6 +13,8 @@ use ensemble::router::Ensemble;
 use ensemble::setup;
 use ensemble::state;
 use ensemble::tasks;
+
+mod daemon;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -24,10 +26,13 @@ USAGE:
     ensemble <COMMAND> [OPTIONS]
 
 COMMANDS:
-    mcp                     Serve the agents over MCP on stdio. This is what an
+    mcp [--node FILE]       Serve the agents over MCP on stdio. This is what an
                             agent (Claude Code, OpenCode, ...) spawns, with the
                             project as its working directory; it is not meant
-                            to be run by hand.
+                            to be run by hand. With --team it runs that helper
+                            team in this session alone; without, it is a
+                            session of the running node (`node serve`), whose
+                            tasks go on after the session ends.
     init [--force|--stdout] Write a sample helper team: config.yaml in the --team
                             directory, with every setting. Refuses to overwrite
                             it unless --force; --stdout prints it instead.
@@ -37,10 +42,11 @@ COMMANDS:
                             Set everything up: find the agent CLIs, write a
                             starter helper team, register it with the agent you
                             talk to and check it. Asks what it needs.
-    connect --manager M --team DIR [--hub DIR] [--env-file F] [--global] [--hooks]
+    connect --manager M [--team DIR | --node FILE] [--hub DIR] [--env-file F] [--global] [--hooks]
                             Register Ensemble with the agent you talk to:
                             claude-code, opencode or codex. Prints the command
-                            it runs. --hooks (Claude Code, Codex; needs --hub)
+                            it runs. With --team, each session runs that team;
+                            without, sessions reach your node. --hooks (Claude Code, Codex; needs --hub)
                             also adds session hooks that put the vault's notes
                             about each prompt into the conversation: in the
                             project's .claude/settings.local.json or
@@ -54,13 +60,17 @@ COMMANDS:
                             Write a node: ~/.config/ensemble/node.yaml, or FILE.
                             It names the node, says whom it works for (private:
                             you; shared: also those whose role has `compute`),
-                            maps the projects of your tasks to folders here, and
-                            says what it offers: agents that run here, models.
-    node serve --hub URL [--node FILE]
-                            Run that node until stopped: it connects to the hub
-                            server and runs the agents and serves the models it
-                            offers, for whom it works. A computer may run any
-                            number of nodes, each from its own file.
+                            the helper team it runs, and what it offers through
+                            a hub: agents of that team, models.
+    node serve [--node FILE] [--hub HUB]
+                            Run that node until stopped (Ctrl-C or SIGTERM):
+                            `ensemble mcp` sessions from any folder reach its
+                            team, and each folder's tasks go on between them.
+                            With a hub server it also takes your tasks from the
+                            hub (into the folder of the project's name where a
+                            session last ran), and runs the agents and serves
+                            the models it offers. A computer may run any number
+                            of nodes, each from its own file.
     nodes --hub URL         The nodes of a hub server you may use now, with the
                             agents and models each offers.
     hub check               Load and validate hub.yaml, and say which model
@@ -369,6 +379,9 @@ fn run() -> Result<ExitCode, String> {
     }
     if args.command == "hook" {
         return cmd_hook(&args);
+    }
+    if args.command == "mcp" && args.team.is_none() {
+        return cmd_mcp_bridge(&args, &dir);
     }
     if args.command == "login" {
         return cmd_login(&args);
@@ -780,11 +793,10 @@ fn cmd_node(args: &Args) -> Result<ExitCode, String> {
     }
 }
 
-/// `ensemble node serve --hub URL [--node FILE]`: run a node until stopped.
+/// `ensemble node serve [--node FILE] [--hub HUB]`: run a node until stopped.
+/// It serves `ensemble mcp` sessions from any folder with its team; with a hub
+/// server, it also takes your tasks from the hub and offers what it offers.
 fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
-    let url = hub_url(args).ok_or(
-        "node serve: needs --hub, a hub server's ws:// or wss:// address you signed in to with `ensemble login`",
-    )?;
     let path = node_file(args)?;
     let node = config::load_node(&path)
         .map_err(|e| e.to_string())?
@@ -794,46 +806,132 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
                 path.display()
             )
         })?;
-    let tokens = ensemble::link::Tokens::load()?;
-    let token = tokens.get(&url).ok_or_else(|| {
-        format!("node serve: no token for the hub {url}. Sign in first: ensemble login {url} --user <name>")
-    })?;
-    let team = match &node.offers.runs {
-        Some(runs) => Some(
+    let team = match &node.team {
+        Some(dir) => Some(
             config::load(
-                &config::config_path(&runs.team),
+                &config::config_path(dir),
                 args.env_file.as_deref(),
                 &SystemEnv,
             )
-            .map_err(|e| format!("node serve: offers.runs.team: {e}"))?,
+            .map_err(|e| format!("node serve: team: {e}"))?,
         ),
         None => None,
     };
-    let scratch = state::root()?
-        .join("nodes")
-        .join(state::labelled_text(&format!(
-            "{}-{}",
-            node.name,
-            ensemble::link::tokens::normal(&url)
-        )));
-    let _lock = ensemble::lock::acquire(&scratch).map_err(|pid| {
+    let dir = state::node_dir(&node.name)?;
+    let _lock = ensemble::lock::acquire(&dir).map_err(|pid| {
         format!(
-            "node serve: process {pid} already runs the node '{}' for {url}",
+            "node serve: process {pid} already runs the node '{}'",
             node.name
         )
     })?;
-    let worker = ensemble::node::Worker::new(&url, token, node, team, scratch)
-        .map_err(|e| format!("node serve: {e}"))?;
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
     }
     let say = |line: &str| eprintln!("ensemble: {line}");
-    worker
-        .work(&STOP, &say)
-        .map_err(|e| format!("node serve: the hub refused this node: {e}"))?;
+    let daemon = daemon::Daemon::new(args, node.clone(), team.clone(), &dir, &say);
+
+    // With a hub server: the link that offers what the node offers, and the
+    // tasks the hub sends you.
+    let url = hub_url(args);
+    let token = match &url {
+        Some(url) => Some(
+            ensemble::link::Tokens::load()?
+                .get(url)
+                .ok_or_else(|| {
+                    format!("node serve: no token for the hub {url}. Sign in first: ensemble login {url} --user <name>")
+                })?
+                .to_string(),
+        ),
+        None => None,
+    };
+    let worker = match (&url, &token) {
+        (Some(url), Some(token)) if node.offers.runs.is_some() || node.offers.models.is_some() => {
+            Some(
+                ensemble::node::Worker::new(
+                    url,
+                    token,
+                    node.clone(),
+                    team.clone(),
+                    dir.join("runs"),
+                )
+                .map_err(|e| format!("node serve: {e}"))?,
+            )
+        }
+        _ => None,
+    };
+    let inbox = match (&url, &token, &team) {
+        (Some(url), Some(token), Some(team)) => Some(ensemble::inbox::NodeInbox::new(
+            url,
+            token,
+            daemon.folders().clone(),
+            team.agent_names().into_iter().map(String::from).collect(),
+            dir.join("inbox"),
+        )),
+        _ => None,
+    };
+    // An embedded hub's own workers: shares into notes, issues into tasks.
+    let agents: Vec<String> = team
+        .as_ref()
+        .map(|t| t.agent_names().into_iter().map(String::from).collect())
+        .unwrap_or_default();
+    let local_inbox = inbox_for(args, agents)?;
+    let distill = match hub_url(args) {
+        None => memory_for(args, &dir)?,
+        Some(_) => None,
+    };
+
+    let socket = state::node_socket(&dir);
+    let refused = std::sync::Mutex::new(None);
+    std::thread::scope(|scope| {
+        let stop = &STOP;
+        if let Some(worker) = &worker {
+            let refused = &refused;
+            scope.spawn(move || {
+                if let Err(e) = worker.work(stop, &say) {
+                    *refused.lock().unwrap() = Some(e);
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        }
+        if let Some(inbox) = &inbox {
+            scope.spawn(move || inbox.work(stop, &say));
+        }
+        if let Some(inbox) = &local_inbox {
+            scope.spawn(move || inbox.work(stop, &say));
+        }
+        if let Some(memory) = &distill {
+            scope.spawn(move || memory.work(stop, &say));
+        }
+        let served = ensemble::runtime::shared().block_on(daemon.serve(&socket));
+        STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+        served
+    })
+    .map_err(|e| format!("node serve: {e}"))?;
+    if let Some(e) = refused.into_inner().unwrap() {
+        return Err(format!("node serve: the hub refused this node: {e}"));
+    }
     say("stopped");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `ensemble mcp` with no `--team`: a session of the running node, which
+/// `--node` names (else ~/.config/ensemble/node.yaml), in `dir`.
+fn cmd_mcp_bridge(args: &Args, dir: &Path) -> Result<ExitCode, String> {
+    let path = node_file(args)?;
+    let node = config::load_node(&path)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "mcp: no --team, and no node file at {} to reach a node instead. Pass --team <dir>, or write a node with `ensemble node init` and start it with `ensemble node serve`",
+                path.display()
+            )
+        })?;
+    let socket = state::node_socket(&state::node_dir(&node.name)?);
+    ensemble::runtime::shared()
+        .block_on(daemon::bridge(&socket, dir, &node.name))
+        .map_err(|e| format!("mcp: {e}"))?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1202,8 +1300,7 @@ fn cmd_mcp(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
     }
     let knowledge = knowledge_for(args, &dir)?;
     let agents: Vec<String> = config.agent_names().into_iter().map(String::from).collect();
-    let inbox = inbox_for(args, agents.clone())?;
-    let node = node_inbox_for(args, agents)?;
+    let inbox = inbox_for(args, agents)?;
     let ensemble = ensemble_for(config, dir, args);
     let stdin = std::io::stdin();
     // Not locked: delegations reply from their own threads.
@@ -1213,7 +1310,7 @@ fn cmd_mcp(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String
             knowledge: knowledge.as_ref().map(Knowledge::access),
             distill: knowledge.as_ref().and_then(Knowledge::local),
             inbox: inbox.as_ref(),
-            node: node.as_ref(),
+            node: None,
         },
         stdin.lock(),
         std::io::stdout(),
@@ -1267,33 +1364,6 @@ fn inbox_for(args: &Args, agents: Vec<String>) -> Result<Option<ensemble::inbox:
     };
     let dir = state::hub_dir(hub_dir).map_err(|e| format!("--hub {e}"))?;
     ensemble::inbox::Inbox::new(tasks, agents, dir).map(Some)
-}
-
-/// This computer's part in the task inbox of the hub server `--hub` names: when
-/// `--hub` is a URL with a saved token, and `node.yaml` maps projects to
-/// folders. None otherwise.
-fn node_inbox_for(
-    args: &Args,
-    agents: Vec<String>,
-) -> Result<Option<ensemble::inbox::NodeInbox>, String> {
-    let Some(url) = hub_url(args) else {
-        return Ok(None);
-    };
-    let Some(node) =
-        config::load_node(&config::node_path(&state::config_root()?)).map_err(|e| e.to_string())?
-    else {
-        return Ok(None);
-    };
-    let tokens = ensemble::link::Tokens::load()?;
-    let Some(token) = tokens.get(&url) else {
-        return Ok(None);
-    };
-    let dir = state::root()?
-        .join("nodes")
-        .join(state::labelled_text(&ensemble::link::tokens::normal(&url)));
-    Ok(Some(ensemble::inbox::NodeInbox::new(
-        &url, token, node, agents, dir,
-    )))
 }
 
 /// `ensemble inbox [--once]`: the issues the hub's inbox sees and the task each
@@ -1875,33 +1945,55 @@ fn cmd_connect(args: &Args) -> Result<ExitCode, String> {
         "connect: needs --manager, the agent you talk to: {}",
         setup::MANAGERS.join(" or ")
     ))?;
-    let spec = args
-        .team
-        .as_deref()
-        .ok_or_else(|| missing_team("connect"))?;
-    let team = match remote::parse_source(spec)? {
-        remote::Source::Local(dir) => absolute(&dir)?,
-        remote::Source::Remote { url, sha, git_ref } => {
-            // Pin it to the commit it is now, show what it would run, and
-            // record the approval, before anything is registered.
-            let sha = match sha {
-                Some(sha) => sha,
-                None => remote::resolve(&url, git_ref.as_deref())?,
-            };
-            approve(&url, &sha, args)?;
-            PathBuf::from(remote::pinned(&url, &sha))
-        }
-    };
     let env_file = args.env_file.as_deref().map(absolute).transpose()?;
     let hub = hub_for_registration(args)?;
-    let reg = setup::registration(
-        manager,
-        &setup::ensemble_command(),
-        &team,
-        hub.as_deref(),
-        env_file.as_deref(),
-        has(args, "--global"),
-    )?;
+    let reg = match args.team.as_deref() {
+        // No team: the agent's sessions go to the running node, which has one.
+        None => {
+            let node = opt(args, "--node")
+                .map(|f| absolute(Path::new(f)))
+                .transpose()?;
+            let file = match &node {
+                Some(file) => file.clone(),
+                None => config::node_path(&state::config_root()?),
+            };
+            if !file.exists() {
+                return Err(format!(
+                    "connect: needs --team <dir>, a helper team to run in each session, or a node to reach; there is no node file at {}. `ensemble node init` writes one",
+                    file.display()
+                ));
+            }
+            setup::node_registration(
+                manager,
+                &setup::ensemble_command(),
+                node.as_deref(),
+                has(args, "--global"),
+            )?
+        }
+        Some(spec) => {
+            let team = match remote::parse_source(spec)? {
+                remote::Source::Local(dir) => absolute(&dir)?,
+                remote::Source::Remote { url, sha, git_ref } => {
+                    // Pin it to the commit it is now, show what it would run,
+                    // and record the approval, before anything is registered.
+                    let sha = match sha {
+                        Some(sha) => sha,
+                        None => remote::resolve(&url, git_ref.as_deref())?,
+                    };
+                    approve(&url, &sha, args)?;
+                    PathBuf::from(remote::pinned(&url, &sha))
+                }
+            };
+            setup::registration(
+                manager,
+                &setup::ensemble_command(),
+                &team,
+                hub.as_deref(),
+                env_file.as_deref(),
+                has(args, "--global"),
+            )?
+        }
+    };
     // The hooks are checked before anything is registered, so that a request
     // that cannot be met changes nothing.
     let hooks = if has(args, "--hooks") {
@@ -2426,8 +2518,7 @@ fn cmd_serve(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, Stri
     }
     let knowledge = knowledge_for(args, &dir)?;
     let agents: Vec<String> = config.agent_names().into_iter().map(String::from).collect();
-    let inbox = inbox_for(args, agents.clone())?;
-    let node = node_inbox_for(args, agents)?;
+    let inbox = inbox_for(args, agents)?;
     let ensemble = ensemble_for(config, dir, args);
     ensemble::harness::serve::run(
         &ensemble,
@@ -2435,7 +2526,7 @@ fn cmd_serve(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, Stri
             knowledge: knowledge.as_ref().map(Knowledge::access),
             distill: knowledge.as_ref().and_then(Knowledge::local),
             inbox: inbox.as_ref(),
-            node: node.as_ref(),
+            node: None,
         },
         &STOP,
         &|line| eprintln!("ensemble: {line}"),

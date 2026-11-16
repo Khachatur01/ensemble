@@ -193,6 +193,17 @@ fn command(scratch: &Scratch) -> Command {
     c
 }
 
+/// The binary with only the scratch's directories set: no team, no state, as
+/// an agent CLI starts `ensemble mcp` to reach a node.
+fn bare_command(scratch: &Scratch) -> Command {
+    let mut c = Command::new(BIN);
+    c.current_dir(scratch.path())
+        .env("XDG_STATE_HOME", scratch.0.with_extension("xdg-state"))
+        .env("XDG_CACHE_HOME", scratch.0.with_extension("xdg-cache"))
+        .env("XDG_CONFIG_HOME", scratch.0.with_extension("xdg-config"));
+    c
+}
+
 fn ensemble(scratch: &Scratch, args: &[&str]) -> std::process::Output {
     command(scratch).args(args).output().expect("run ensemble")
 }
@@ -2905,11 +2916,7 @@ fn a_node_file_is_written_once_and_an_account_names_itself_in_the_tracker() {
     let out = command(&s).args(["node", "init"]).output().unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     let node = s.0.with_extension("xdg-config").join("ensemble/node.yaml");
-    assert!(
-        std::fs::read_to_string(&node)
-            .unwrap()
-            .contains("projects:")
-    );
+    assert!(std::fs::read_to_string(&node).unwrap().contains("team:"));
     let again = command(&s).args(["node", "init"]).output().unwrap();
     assert!(
         !again.status.success(),
@@ -2945,7 +2952,7 @@ fn a_node_file_is_written_once_and_an_account_names_itself_in_the_tracker() {
 }
 
 #[test]
-fn an_issue_on_the_hub_server_is_worked_on_a_members_computer_and_reported_back() {
+fn an_issue_on_the_hub_server_is_worked_on_a_members_node_and_reported_back() {
     let s = Scratch::new("hub-tasks");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
     s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
@@ -2964,15 +2971,9 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_computer_and_reported_back(
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     std::fs::create_dir_all(hub.join("issues")).unwrap();
-    let issue = hub.join("issues/7.md");
-    std::fs::write(
-        &issue,
-        "---\ntitle: Rename foo\nassignee: ana.p\nlabels: [ensemble, \"ensemble:coder\"]\nproject: shop\nstatus: open\n---\nRename foo to bar in a.txt.\n",
-    )
-    .unwrap();
     let _hub = serve_hub(&s, &hub);
 
-    // Ana's computer: signed in, and the project mapped to this folder.
+    // Ana's node, with her helper team, signed in to the hub.
     let url = format!("ws://{address}");
     let out = command(&s)
         .args(["login", &url, "--token", &token])
@@ -2983,27 +2984,55 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_computer_and_reported_back(
     std::fs::write(
         config.join("node.yaml"),
         format!(
-            "version: 2\nname: laptop\naccess: private\nprojects:\n  shop: \"{}\"\noffers: {{}}\n",
-            s.path().display()
+            "version: 3\nname: laptop\naccess: private\nteam: \"{}\"\noffers: {{}}\n",
+            s.org().display()
         ),
     )
     .unwrap();
-    let serve = Command::new(BIN)
-        .current_dir(s.path())
-        .env("XDG_STATE_HOME", s.0.with_extension("xdg-state"))
-        .env("XDG_CACHE_HOME", s.0.with_extension("xdg-cache"))
-        .env("XDG_CONFIG_HOME", s.0.with_extension("xdg-config"))
-        .arg("serve")
-        .arg("--team")
-        .arg(s.org())
-        .args(["--hub", &url])
+    let mut node = command(&s)
+        .args(["node", "serve", "--hub", &url])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let _serve = Served(serve);
+    let mut said = BufReader::new(node.stderr.take().unwrap());
+    let mut line = String::new();
+    while !line.contains("ready for `ensemble mcp` sessions") {
+        line.clear();
+        assert!(said.read_line(&mut line).unwrap() > 0, "the node stopped");
+    }
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut said, &mut std::io::sink());
+    });
+    let _node = Served(node);
 
+    // A session in the project's folder is how the node learns where it is.
+    let mut session = bare_command(&s)
+        .arg("mcp")
+        .current_dir(s.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(
+        session.stdin.as_mut().unwrap(),
+        "{}",
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    )
+    .unwrap();
+    drop(session.stdin.take());
+    let out = session.wait_with_output().unwrap();
+    assert!(stdout_of(&out).contains("\"id\":1"), "{}", stderr_of(&out));
+
+    let project = s.path().file_name().unwrap().to_string_lossy().into_owned();
+    let issue = hub.join("issues/7.md");
+    std::fs::write(
+        &issue,
+        format!("---\ntitle: Rename foo\nassignee: ana.p\nlabels: [ensemble, \"ensemble:coder\"]\nproject: {project}\nstatus: open\n---\nRename foo to bar in a.txt.\n"),
+    )
+    .unwrap();
     assert!(
         wait_for(60, || std::fs::read_to_string(&issue)
             .unwrap_or_default()
@@ -3170,7 +3199,7 @@ fn serve_node(scratch: &Scratch, url: &str, node: &Path) -> Served {
         let mut line = String::new();
         assert!(err.read_line(&mut line).unwrap() > 0, "it stopped: {seen}");
         seen.push_str(&line);
-        if line.contains("serving") {
+        if line.contains(" serving ws") {
             break;
         }
     }
@@ -3206,7 +3235,7 @@ fn an_agent_runs_on_a_node_and_what_it_changed_comes_back() {
     std::fs::write(
         &node_file,
         format!(
-            "version: 2\nname: laptop\naccess: private\nprojects: {{}}\noffers:\n  runs: {{ team: \"{}\", agents: [reviewer] }}\n",
+            "version: 3\nname: laptop\naccess: private\nteam: \"{}\"\noffers:\n  runs: {{ agents: [reviewer] }}\n",
             team.display()
         ),
     )
@@ -3288,13 +3317,14 @@ fn a_node_serves_its_models_through_the_hub_and_a_shared_node_lends_no_login() {
         let path = s.0.with_extension(format!("{access}.yaml"));
         std::fs::write(
             &path,
-            format!("version: 2\nname: {access}-box\naccess: {access}\nprojects: {{}}\noffers:\n{offers}"),
+            format!("version: 3\nname: {access}-box\naccess: {access}\n{offers}"),
         )
         .unwrap();
         path
     };
-    let models =
-        format!("  models: {{ base_url: \"{server}\", timeout_seconds: 5, names: [small] }}\n");
+    let models = format!(
+        "offers:\n  models: {{ base_url: \"{server}\", timeout_seconds: 5, names: [small] }}\n"
+    );
     let _node = serve_node(&s, &url, &node_file("private", &models));
     let mut answer = ureq::post(format!("http://{address}/nodes/v1/chat/completions"))
         .header("authorization", format!("Bearer {token}"))
@@ -3324,7 +3354,7 @@ fn a_node_serves_its_models_through_the_hub_and_a_shared_node_lends_no_login() {
         .arg(node_file(
             "shared",
             &format!(
-                "  runs: {{ team: \"{}\", agents: [reviewer] }}\n",
+                "team: \"{}\"\noffers:\n  runs: {{ agents: [reviewer] }}\n",
                 team.display()
             ),
         ))
@@ -3335,5 +3365,83 @@ fn a_node_serves_its_models_through_the_hub_and_a_shared_node_lends_no_login() {
         stderr_of(&out).contains("never lends"),
         "{}",
         stderr_of(&out)
+    );
+}
+
+#[test]
+fn a_session_reaches_the_node_from_its_folder_and_a_task_goes_on_after_it_ends() {
+    let s = Scratch::new("node-session");
+    let cli = s.opencode("renamed it", "sleep 1; echo bar > a.txt");
+    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("a.txt", "foo\n");
+    let session = |input: &[serde_json::Value]| {
+        let mut child = bare_command(&s)
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        for message in input {
+            writeln!(stdin, "{message}").unwrap();
+        }
+        drop(stdin);
+        child.wait_with_output().unwrap()
+    };
+
+    // With no node running, `mcp` without --team says how to start one.
+    let config = s.0.with_extension("xdg-config").join("ensemble");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("node.yaml"),
+        format!(
+            "version: 3\nname: desk\naccess: private\nteam: \"{}\"\noffers: {{}}\n",
+            s.org().display()
+        ),
+    )
+    .unwrap();
+    let out = session(&[]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("no node 'desk' is running"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    let mut node = bare_command(&s)
+        .args(["node", "serve"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut said = BufReader::new(node.stderr.take().unwrap());
+    let mut line = String::new();
+    while !line.contains("ready for `ensemble mcp` sessions") {
+        line.clear();
+        assert!(said.read_line(&mut line).unwrap() > 0, "the node stopped");
+    }
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut said, &mut std::io::sink());
+    });
+    let _node = Served(node);
+
+    let out = session(&[
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "submit",
+            "arguments": {"agent": "coder", "title": "Rename foo", "task": "rename foo to bar"}
+        }}),
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let replies = stdout_of(&out);
+    assert!(replies.contains("0001-rename-foo"), "{replies}");
+
+    // The session has ended; the node works the task all the same.
+    assert!(
+        wait_for(30, || std::fs::read_to_string(s.path().join("a.txt"))
+            .is_ok_and(|t| t == "bar\n")),
+        "the task did not run after the session"
     );
 }

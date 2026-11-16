@@ -1,11 +1,11 @@
-//! A member's side of a hub server's task inbox. While `ensemble mcp` or
-//! `ensemble serve` runs, it keeps its own connection to the hub, subscribed to
-//! the account's tasks:
+//! A member's side of a hub server's task inbox. While `ensemble node serve`
+//! runs, it keeps its own connection to the hub, subscribed to the account's
+//! tasks:
 //!
-//! - a `task` event becomes a task in the folder `node.yaml` maps its project
-//!   to, for the agent its `<label>:<agent>` label names or in the backlog,
-//!   and the hub is told; with no folder for the project, the hub is told
-//!   that, and another of the person's computers may take it;
+//! - a `task` event becomes a task in the folder of its project's name where a
+//!   session of the node last ran, for the agent its `<label>:<agent>` label
+//!   names or in the backlog, and the hub is told; with no folder for the
+//!   project, the hub is told that, and another of the person's computers may take it;
 //! - every few seconds, each task's new question or result goes back;
 //! - an `answer` event is passed to its task.
 //!
@@ -14,7 +14,7 @@
 
 use crate::tracker::{Issue, Status};
 use crate::work::{self, Update};
-use ensemble_config::Node;
+use ensemble_core::folders::Folders;
 use ensemble_link::client::{Connection, Failure};
 use ensemble_link::protocol::{
     ANSWER_EVENT, ANSWER_TAKEN, Event, SUBSCRIBE, TASK_ACCEPT, TASK_EVENT, TASK_REFUSE, TASK_UPDATE,
@@ -48,7 +48,8 @@ pub struct Local {
 pub struct NodeInbox {
     url: String,
     token: String,
-    node: Node,
+    /// The folders the node worked in, by project.
+    folders: Folders,
     /// The helper team's agents, which `<label>:<agent>` may name.
     agents: Vec<String>,
     /// Where `node.json` and the lock live.
@@ -57,11 +58,17 @@ pub struct NodeInbox {
 }
 
 impl NodeInbox {
-    pub fn new(url: &str, token: &str, node: Node, agents: Vec<String>, dir: PathBuf) -> Self {
+    pub fn new(
+        url: &str,
+        token: &str,
+        folders: Folders,
+        agents: Vec<String>,
+        dir: PathBuf,
+    ) -> Self {
         NodeInbox {
             url: url.to_string(),
             token: token.to_string(),
-            node,
+            folders,
             agents,
             dir,
             state_for: Box::new(ensemble_core::state::dir_for),
@@ -179,8 +186,8 @@ impl NodeInbox {
                     return Ok(Vec::new());
                 }
                 let project = text("project");
-                let folder = match self.node.projects.get(&project) {
-                    Some(f) if f.is_dir() => f.clone(),
+                let folder = match self.folders.of(&project) {
+                    Some(f) if f.is_dir() => f,
                     Some(f) => {
                         let why = format!(
                             "its folder for project {project}, {}, is not a folder",
@@ -190,8 +197,9 @@ impl NodeInbox {
                         return Ok(vec![format!("refused {delivery}: {why}")]);
                     }
                     None => {
-                        let why =
-                            format!("it has no folder for project '{project}' in its node.yaml");
+                        let why = format!(
+                            "it has not worked in a folder named '{project}'; open a session there first"
+                        );
                         link.call(TASK_REFUSE, json!({ "delivery": delivery, "why": why }))?;
                         return Ok(vec![format!("refused {delivery}: {why}")]);
                     }

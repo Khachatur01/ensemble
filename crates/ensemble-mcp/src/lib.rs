@@ -232,6 +232,60 @@ pub fn serve_with<W: Write + Send>(
     output: W,
 ) -> std::io::Result<()> {
     let memory = hub.knowledge;
+    let state = ensemble.state_dir()?;
+    // One worker per folder: when another process (a node, `ensemble serve`,
+    // or another session) has it, this one reads and writes the tasks and
+    // runs none.
+    let lock = ensemble_tasks::lock::acquire(&state);
+    if let Err(pid) = &lock {
+        eprintln!(
+            "ensemble: process {pid} is running this folder's tasks; this session only reads and writes them"
+        );
+    }
+    let worker = lock.is_ok();
+    let mut store = Store::new(&state);
+    if let Some(usage) = ensemble.usage_dir() {
+        store = store.with_usage_dir(usage);
+    }
+    note_recall_without_knowledge(ensemble, memory);
+    let queue = queue_for(ensemble, Some(store), memory);
+    let queue = &queue;
+
+    let hub_stop = &AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        if worker {
+            scope.spawn(move || queue.work(&spawner(scope)));
+        }
+        // Shares become notes alongside, unless another process does that.
+        if let Some(memory) = hub.distill {
+            scope.spawn(move || memory.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
+        }
+        // So do issues from the tracker, and tasks from a hub server.
+        if let Some(inbox) = hub.inbox {
+            scope.spawn(move || inbox.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
+        }
+        if let Some(node) = hub.node {
+            scope.spawn(move || node.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
+        }
+        let result = serve_session(ensemble, memory, queue, input, output, true);
+        hub_stop.store(true, Ordering::Relaxed);
+        result
+    })
+}
+
+/// One session: JSON-RPC from `input`, answered on `output`, until `input`
+/// ends, with tasks and background delegations kept in `queue`. With
+/// `close_at_end` the queue is closed when the caller goes, which stops what
+/// runs in it; a node's queue is not, and its work goes on. Blocking calls
+/// still running are finished before this returns.
+pub fn serve_session<W: Write + Send>(
+    ensemble: &Ensemble,
+    memory: Option<&dyn KnowledgeAccess>,
+    queue: &Queue<'_>,
+    input: impl BufRead,
+    output: W,
+    close_at_end: bool,
+) -> std::io::Result<()> {
     let output = Mutex::new(output);
     let min_level = AtomicUsize::new(rank(PROGRESS_LEVEL).unwrap_or(0));
     // Running calls by request id, so a cancellation can find its call.
@@ -252,40 +306,9 @@ pub fn serve_with<W: Write + Send>(
             let _ = send(&n);
         }
     };
-    let state = ensemble.state_dir()?;
-    // One worker per folder: when another process (`ensemble serve`, or another
-    // session) has it, this one reads and writes the tasks and runs none.
-    let lock = ensemble_tasks::lock::acquire(&state);
-    if let Err(pid) = &lock {
-        eprintln!(
-            "ensemble: process {pid} is running this folder's tasks; this session only reads and writes them"
-        );
-    }
-    let worker = lock.is_ok();
-    let mut store = Store::new(&state);
-    if let Some(usage) = ensemble.usage_dir() {
-        store = store.with_usage_dir(usage);
-    }
-    note_recall_without_knowledge(ensemble, memory);
-    let queue = queue_for(ensemble, Some(store), memory);
-    let (send, notify, running, queue) = (&send, &notify, &running, &queue);
+    let (send, notify, running) = (&send, &notify, &running);
 
-    let hub_stop = &AtomicBool::new(false);
     std::thread::scope(|scope| {
-        if worker {
-            scope.spawn(move || queue.work(&spawner(scope)));
-        }
-        // Shares become notes alongside, unless another process does that.
-        if let Some(memory) = hub.distill {
-            scope.spawn(move || memory.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
-        }
-        // So do issues from the tracker, and tasks from a hub server.
-        if let Some(inbox) = hub.inbox {
-            scope.spawn(move || inbox.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
-        }
-        if let Some(node) = hub.node {
-            scope.spawn(move || node.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
-        }
         let result = (|| -> std::io::Result<()> {
             for line in input.lines() {
                 let line = line?;
@@ -366,15 +389,16 @@ pub fn serve_with<W: Write + Send>(
         })();
         // The caller is gone, so nobody will ask for what background work
         // produces: stop it, or this would wait out its time limits.
-        queue.close();
-        hub_stop.store(true, Ordering::Relaxed);
+        if close_at_end {
+            queue.close();
+        }
         result
     })
 }
 
 /// A queue of `ensemble` whose agents with `recall` are given notes from
 /// `memory`, when the session has a hub that keeps knowledge.
-pub(crate) fn queue_for<'s>(
+pub fn queue_for<'s>(
     ensemble: &'s Ensemble,
     store: Option<Store>,
     memory: Option<&'s dyn KnowledgeAccess>,
@@ -396,10 +420,7 @@ pub(crate) fn queue_for<'s>(
 
 /// Say once, on stderr, that agents with `recall` get no notes in a session
 /// without a hub that keeps knowledge.
-pub(crate) fn note_recall_without_knowledge(
-    ensemble: &Ensemble,
-    memory: Option<&dyn KnowledgeAccess>,
-) {
+pub fn note_recall_without_knowledge(ensemble: &Ensemble, memory: Option<&dyn KnowledgeAccess>) {
     let wanting: Vec<&str> = ensemble
         .config()
         .agents

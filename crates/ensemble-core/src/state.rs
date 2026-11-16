@@ -79,6 +79,31 @@ pub fn hub_dir(hub: &Path) -> Result<PathBuf, String> {
     Ok(root()?.join("hubs").join(labelled(&canonical)))
 }
 
+/// What the node named `name` keeps: its lock, the folders it worked in, its
+/// runs for others.
+pub fn node_dir(name: &str) -> Result<PathBuf, String> {
+    Ok(root()?.join("nodes").join(labelled_text(name)))
+}
+
+/// Where the node whose state is in `node_dir` listens for `ensemble mcp`. A
+/// socket's path must be short, so it is not in the state directory but in
+/// the runtime one (`$XDG_RUNTIME_DIR`, else `/tmp`), in a folder only its
+/// user may enter, named by a hash of `node_dir`.
+pub fn node_socket(node_dir: &Path) -> PathBuf {
+    // What the kernel takes, less room to spare.
+    const MAX_SOCKET_PATH: usize = 100;
+    let file = format!("{:016x}.sock", fnv1a(node_dir.to_string_lossy().as_bytes()));
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|v| !v.is_empty())
+        .map(|d| PathBuf::from(d).join("ensemble").join(&file))
+        .filter(|p| p.as_os_str().len() <= MAX_SOCKET_PATH);
+    runtime.unwrap_or_else(|| {
+        let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
+        PathBuf::from("/tmp")
+            .join(format!("ensemble-{}", labelled_text(&user)))
+            .join(file)
+    })
+}
 pub fn labelled_text(text: &str) -> String {
     labelled(Path::new(text))
 }

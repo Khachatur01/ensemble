@@ -28,7 +28,7 @@ use ensemble_link::protocol::{
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
@@ -50,7 +50,7 @@ pub struct Worker {
     url: String,
     token: String,
     node: Node,
-    /// The helper team of `offers.runs`, when the node offers runs.
+    /// The node's helper team, when it offers runs.
     team: Option<Ensemble>,
     /// Where runs work, each in a folder of its own.
     scratch: PathBuf,
@@ -61,7 +61,7 @@ pub struct Worker {
 
 impl Worker {
     /// A worker for `node`, reaching the hub at `url` with `token`. `team` is
-    /// the helper team its `offers.runs` names, loaded; each agent offered
+    /// its helper team, loaded; each agent offered
     /// must be in it, and on a shared node run on `llm_backends`.
     pub fn new(
         url: &str,
@@ -76,7 +76,7 @@ impl Worker {
                     let Some(agent) = config.agent(name) else {
                         return Err(format!(
                             "offers.runs: the team {} has no agent '{name}'. Its agents: {}.",
-                            runs.team.display(),
+                            node.team.as_deref().unwrap_or(Path::new("?")).display(),
                             config.agent_names().join(", ")
                         ));
                     };
