@@ -365,7 +365,9 @@ in either process.
    tools; `ensemble share`, `recall`, `knowledge status|distill|rebuild`;
    notes given with each task to the helper agents whose `recall` asks for
    them. Not yet: the organization vault and visibility, the privacy gate
-   beyond the secret check, memory files and hooks.)
+   beyond the secret check. Session hooks for Claude Code and Codex put the
+   notes about each prompt into the conversation, once per session; OpenCode
+   has plugins only, so it gets the MCP tools alone.)
 5. Hub server, link, identity, tracker adapters. (Started: the inbox, in the
    embedded hub, with a local markdown tracker: issues become tasks in the
    folder their project maps to, for the agent a `<label>:<agent>` label names

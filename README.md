@@ -937,6 +937,27 @@ within `max_notes` and `max_chars`, marked as reference data.
 `ensemble recall --hub <dir> <topic>` prints the same. The search is by words
 (BM25, a title's words counting more), with no index to keep.
 
+**Notes in your own sessions.** Your agent recalls when it decides to. With
+session hooks, Claude Code and Codex get the notes without asking: before each
+prompt you send, the notes about it go into the conversation, and at the start
+of a session, those about the project's folder. Each note is given once per
+session, and again after the context is cleared or compacted. A prompt of one
+or two words recalls nothing. Set them up when you register Ensemble:
+
+```sh
+ensemble connect --manager claude-code --team <dir> --hub <hub> --hooks
+```
+
+This writes the hook into Claude Code's `.claude/settings.local.json` of the
+project you run it in (not committed), or into your own `~/.claude/settings.json`
+with `--global`. For Codex, it writes `.codex/hooks.json`, or `~/.codex/hooks.json`
+with `--global`, and Codex runs it once you trust it in `/hooks`. Other hooks in
+those files are kept, and running it again replaces only Ensemble's. The hook is
+`ensemble hook --hub <hub>`: it reads the event on stdin and prints the notes. It
+never fails your turn; a hub it cannot reach costs that prompt its notes.
+OpenCode has plugins, not command hooks, so it gets knowledge through the MCP
+tools only.
+
 **Notes for the helper team.** An agent of the helper team gets notes only if
 its block in `config.yaml` asks for them:
 
@@ -1376,7 +1397,8 @@ scripts stand in for the CLIs.
 - **Recall is a word search.** It finds notes that use your words, not ones
   that only mean the same. Your agent recalls when it decides to; a helper
   agent with `recall` gets the notes its task's words find, once, when the task
-  starts. Memory files and session hooks for your CLI are not built.
+  starts. Session hooks recall on your prompt's words in Claude Code and
+  Codex; OpenCode has none.
 - **One tracker so far.** The inbox reads a folder of markdown issues; GitLab,
   GitHub and Jira adapters are not built. A member's computer takes a hub
   server's tasks only while `ensemble mcp` or `ensemble serve` runs on it.

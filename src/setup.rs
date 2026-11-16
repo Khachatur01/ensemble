@@ -218,7 +218,7 @@ impl Registration {
     }
 }
 
-fn shell_word(s: &str) -> String {
+pub fn shell_word(s: &str) -> String {
     let plain = !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || "_-./:=@,+".contains(c));

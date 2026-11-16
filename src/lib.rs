@@ -21,6 +21,7 @@
 //! `external` know how each CLI is started and read.
 
 pub mod harness;
+pub mod hooks;
 pub mod remote;
 pub mod setup;
 

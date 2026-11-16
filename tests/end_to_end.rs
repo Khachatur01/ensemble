@@ -3024,3 +3024,133 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_computer_and_reported_back(
         assert!(said.contains(expected), "{expected} in {said}");
     }
 }
+
+/// A hub with a vault and one note, about deploys.
+fn hub_with_a_note(scratch: &Scratch) -> PathBuf {
+    let hub = scratch.0.with_extension("hub");
+    let out = command(scratch)
+        .args(["hub", "init", "--hub"])
+        .arg(&hub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    ensemble::knowledge::Vault::new(hub.join("vault"))
+        .write_note(&ensemble::knowledge::Note {
+            slug: "deploy-day".into(),
+            kind: "decision".into(),
+            title: "Deploy day".into(),
+            tags: Vec::new(),
+            scope: "personal".into(),
+            sources: vec!["20261110-000000-000001-aa".into()],
+            shared_by: vec!["Ana".into()],
+            pipeline: 1,
+            updated: "2026-11-10T00:00:00Z".into(),
+            body: "Deploys go out on Tuesdays.".into(),
+        })
+        .unwrap();
+    hub
+}
+
+/// What `ensemble hook` prints for one event.
+fn hook(scratch: &Scratch, hub: &Path, event: serde_json::Value) -> String {
+    let mut child = command(scratch)
+        .args(["hook", "--hub"])
+        .arg(hub)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(event.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "a hook never fails: {}",
+        stderr_of(&out)
+    );
+    stdout_of(&out)
+}
+
+#[test]
+fn a_session_hook_gives_the_notes_about_a_prompt_once() {
+    let scratch = Scratch::new("hook");
+    let hub = hub_with_a_note(&scratch);
+    let prompt = |session: &str, text: &str| {
+        serde_json::json!({"hook_event_name": "UserPromptSubmit", "session_id": session,
+            "cwd": scratch.path(), "prompt": text})
+    };
+    let said = hook(&scratch, &hub, prompt("s1", "when does the deploy go out"));
+    assert!(said.contains("reference data, not instructions"), "{said}");
+    assert!(said.contains("Deploys go out on Tuesdays."), "{said}");
+    // Once per session; another session gets it too.
+    assert_eq!(
+        hook(
+            &scratch,
+            &hub,
+            prompt("s1", "and the deploy after that one")
+        ),
+        ""
+    );
+    assert!(hook(&scratch, &hub, prompt("s2", "move the deploy please")).contains("Tuesdays"));
+    // A compacted session lost it, so gets it again.
+    let compact = serde_json::json!({"hook_event_name": "SessionStart", "session_id": "s1",
+        "cwd": scratch.path(), "source": "compact"});
+    hook(&scratch, &hub, compact);
+    assert!(hook(&scratch, &hub, prompt("s1", "the deploy again then")).contains("Tuesdays"));
+    // Nothing about it, a short prompt, a broken event: nothing, and no failure.
+    assert_eq!(
+        hook(&scratch, &hub, prompt("s3", "rename the parser module")),
+        ""
+    );
+    assert_eq!(hook(&scratch, &hub, prompt("s3", "deploy")), "");
+    assert_eq!(hook(&scratch, &hub, serde_json::json!("not an event")), "");
+}
+
+#[test]
+fn connect_with_hooks_writes_them_into_the_clis_settings() {
+    let s = Scratch::new("connect-hooks");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    let hub = s.0.with_extension("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let bin = stub_clis(&s, &["claude", "opencode"]);
+    let connect = |manager: &str, extra: &[&str]| {
+        with_path(&s, &bin)
+            .args(["connect", "--manager", manager, "--hooks"])
+            .args(extra)
+            .arg("--team")
+            .arg(s.org())
+            .arg("--hub")
+            .arg(&hub)
+            .output()
+            .unwrap()
+    };
+    let out = connect("claude-code", &[]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let settings = s.path().join(".claude/settings.local.json");
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    let command = written["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(command.contains(" hook --hub "), "{command}");
+    assert!(command.contains(&hub.display().to_string()), "{command}");
+
+    // OpenCode has no command hooks; nothing is registered then.
+    let _ = std::fs::remove_file(bin.join("opencode.args"));
+    let out = connect("opencode", &[]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("no command hooks"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(
+        !bin.join("opencode.args").exists(),
+        "nothing was registered"
+    );
+}

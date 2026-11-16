@@ -37,10 +37,14 @@ COMMANDS:
                             Set everything up: find the agent CLIs, write a
                             starter helper team, register it with the agent you
                             talk to and check it. Asks what it needs.
-    connect --manager M --team DIR [--hub DIR] [--env-file F] [--global]
+    connect --manager M --team DIR [--hub DIR] [--env-file F] [--global] [--hooks]
                             Register Ensemble with the agent you talk to:
                             claude-code, opencode or codex. Prints the command
-                            it runs.
+                            it runs. --hooks (Claude Code, Codex; needs --hub)
+                            also adds session hooks that put the vault's notes
+                            about each prompt into the conversation: in the
+                            project's .claude/settings.local.json or
+                            .codex/hooks.json, or your own with --global.
     hub init [--server] [--force]
                             Write a sample hub: hub.yaml in the --hub directory,
                             with every setting, and make its knowledge vault a
@@ -80,6 +84,10 @@ COMMANDS:
                             running `ensemble mcp` or `serve` does.
     recall TOPIC            Print the notes of the --hub vault about TOPIC, as
                             an agent's `recall` tool gets them.
+    hook --hub HUB          What a Claude Code or Codex session hook runs: reads
+                            the event on stdin and prints the notes about the
+                            prompt (or, at the start, the project) not given in
+                            the session yet. Set up by `connect --hooks`.
     knowledge status        Shares, those not yet distilled, notes, and what
                             waits in review/.
     knowledge distill       Turn every pending share into notes now, instead of
@@ -345,6 +353,9 @@ fn run() -> Result<ExitCode, String> {
         println!("{notes}");
         return Ok(ExitCode::SUCCESS);
     }
+    if args.command == "hook" {
+        return cmd_hook(&args);
+    }
     if args.command == "login" {
         return cmd_login(&args);
     }
@@ -457,6 +468,52 @@ fn knowledge_for(args: &Args, dir: &Path) -> Result<Option<Knowledge>, String> {
     Ok(Some(Knowledge::Remote(Box::new(
         ensemble::link::RemoteMemory::new(&url, token, project),
     ))))
+}
+
+/// `ensemble hook --hub H`: what a CLI's session hook prints, the vault's notes
+/// about the prompt or the project, each once per session. It never fails the
+/// CLI's turn: a problem is said on stderr, and nothing is printed.
+fn cmd_hook(args: &Args) -> Result<ExitCode, String> {
+    if let Err(e) = hook(args) {
+        eprintln!("ensemble: hook: {e}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn hook(args: &Args) -> Result<(), String> {
+    use ensemble::hooks::{Given, MAX_PRINTED, fresh_notes, read_event};
+    use std::io::Read;
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|e| format!("cannot read the event: {e}"))?;
+    let event = read_event(&input)?;
+    let mut given = Given::load(&state::root()?.join("hooks"), &event.session);
+    if event.forgets() {
+        given.notes.clear();
+    }
+    let Some(topic) = event.topic() else {
+        return given.save();
+    };
+    let dir = match &event.cwd {
+        Some(cwd) => cwd.clone(),
+        None => std::env::current_dir().map_err(|e| e.to_string())?,
+    };
+    let Some(knowledge) = knowledge_for(args, &dir)? else {
+        return Ok(());
+    };
+    let answer = match knowledge.access().call(
+        ensemble::knowledge::RECALL,
+        &serde_json::json!({ "query": topic }),
+    ) {
+        Some(answer) => answer?,
+        None => return Ok(()),
+    };
+    let answer = ensemble::knowledge::recalled_within(&answer, MAX_PRINTED);
+    if let Some(notes) = fresh_notes(&answer, &mut given.notes) {
+        print!("{notes}");
+    }
+    given.save()
 }
 
 /// `ensemble login URL [--token T]`: check a hub server's token and keep it.
@@ -1684,7 +1741,36 @@ fn cmd_connect(args: &Args) -> Result<ExitCode, String> {
         env_file.as_deref(),
         has(args, "--global"),
     )?;
+    // The hooks are checked before anything is registered, so that a request
+    // that cannot be met changes nothing.
+    let hooks = if has(args, "--hooks") {
+        let hub = hub.as_deref().ok_or(
+            "connect: --hooks needs --hub: the hooks put the notes of its vault into your sessions",
+        )?;
+        let home =
+            setup::home().ok_or("connect: cannot find your home directory: HOME is not set")?;
+        let dir = absolute(
+            &args
+                .dir
+                .clone()
+                .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?),
+        )?;
+        let path = ensemble::hooks::settings_path(manager, has(args, "--global"), &home, &dir)
+            .map_err(|e| format!("connect: --hooks: {e}"))?;
+        let command =
+            ensemble::hooks::hook_command(&setup::ensemble_command(), hub, env_file.as_deref());
+        Some((path, command))
+    } else {
+        None
+    };
     run_registration(&reg)?;
+    if let Some((path, command)) = hooks {
+        ensemble::hooks::install_into(&path, &command)?;
+        println!("Hooks written to {}: `{command}`", path.display());
+        if manager == config::CODEX_AGENT {
+            println!("Codex runs them once you trust them: open /hooks in Codex.");
+        }
+    }
     println!("Registered. Restart {manager} so that it starts the server.");
     Ok(ExitCode::SUCCESS)
 }
