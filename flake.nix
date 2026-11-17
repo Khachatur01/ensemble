@@ -1,5 +1,5 @@
 {
-  description = "ensemble — a helper team of coding agents behind one MCP server";
+  description = "ensemble — an agentic development system: a hub of services and nodes of computing power";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -27,7 +27,7 @@
           nativeCheckInputs = [ pkgs.git ];
 
           meta = {
-            description = "A helper team of coding agents (Claude Code, OpenCode, Codex) behind one MCP server";
+            description = "An agentic development system: a hub of services and nodes of computing power, reached over MCP";
             mainProgram = "ensemble";
           };
         };

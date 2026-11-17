@@ -1,4 +1,7 @@
-//! Ensemble: a helper team of coding agents behind one MCP server.
+//! Ensemble: an agentic development system. A hub provides services (task
+//! tracking, knowledge, accounts, integrations); nodes provide computing power
+//! (agents, model servers), and work spreads across them. An agent CLI reaches
+//! a node over MCP.
 //!
 //! ```text
 //!   your agent (Claude Code, OpenCode, Codex, ...)

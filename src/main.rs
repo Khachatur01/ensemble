@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-ensemble — a helper team of coding agents behind one MCP server
+ensemble — an agentic development system: a hub of services and nodes of
+computing power, reached over MCP
 
 USAGE:
     ensemble <COMMAND> [OPTIONS]

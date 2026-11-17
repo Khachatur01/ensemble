@@ -1,15 +1,42 @@
 # ensemble
 
-An MCP server that gives your agent a helper team of agents.
+An agentic development system: a hub that provides services, and nodes that
+provide computing power, with work spread across them.
+
+- **Nodes** are computational resources: the agents a computer can run (Claude
+  Code, OpenCode, Codex, or Ensemble's own loop) and the model servers it has.
+  A node holds a **helper team** of agents and works through tasks. A node is
+  private, working for you alone, or **shared**, lending its agents and models
+  to everyone on the hub whose role allows it, so a team uses the power of
+  every machine it has.
+- **The hub** provides services: task tracking (issues from a tracker become
+  tasks on the right person's node, and report back), a knowledge vault that
+  agents share to and recall from, accounts and tokens, and integrations, with
+  Telegram and others to come. It runs on a server for a team, or embedded in
+  your own node when you work alone.
+- **MCP is how you reach your node.** The agent CLI you already use connects
+  to it as an MCP server and sees the helper team as tools: it hands work to
+  an agent by name, submits tasks, and follows them. MCP is one way in, not
+  the system; the hub's tracker and integrations are others.
+
+```text
+                        hub  (ensemble hub serve)
+       task tracking · knowledge · accounts · integrations
+          routes runs and model calls between nodes
+           ║                     ║                      ║
+      your node             a teammate's node      a shared GPU box
+   helper team, tasks      helper team, tasks      agents and models
+           ▲                                        lent to the team
+           │ MCP
+   your agent CLI (Claude Code, OpenCode, Codex, ...)
+```
 
 You describe your helper team in one `config.yaml` in a directory of its own
 (usually a git repo): a flat list of professional agents, such as a coder, a
 reviewer or a PCB designer. The directory can be yours alone or one your company
-shares. Each agent is a coding agent CLI you already have, with an adapter that
-says how to start it, or one request straight to a model. Your own agent (Claude
-Code, OpenCode, anything that speaks MCP) sees the team as tools and delegates to
-an agent by name, so cheap work goes to cheap models and you keep working on your
-own tasks. Nothing of Ensemble lives in your projects.
+shares. Each agent has an adapter that says what runs it, so cheap work goes to
+cheap models and you keep working on your own tasks. Nothing of Ensemble lives
+in your projects.
 
 Ensemble mostly runs no agent loop of its own. It starts the agent's CLI
 headless in the project with the task, reads what it does as it works, and
@@ -44,32 +71,38 @@ See [Knowledge](#knowledge).
   your agent (Claude Code, OpenCode, Codex, ...)
         |  MCP over stdio, in the folder you work in
         v
-  ensemble mcp --team <dir>        or   ensemble mcp  --->  ensemble node serve
-  (the session runs the team)           (a bridge)          (a long-running node)
-        |
-        v
+  ensemble mcp  --->  ensemble node serve          or   ensemble mcp --team <dir>
+  (a bridge)          (your node, long-running)         (a node for this session only)
+                            |
+                            v
   the helper team (config.yaml): an agent -> its adapter -> a model
         |
         +--> claude -p / opencode run / codex exec   agent CLIs, headless
         +--> builtin                                 a loop in Ensemble
         +--> direct                                  one chat request
-        +--> node                                    a run on another computer
+        +--> node                                    a run on another node, through the hub
 ```
 
-- **Your agent sees the helper team as tools.** It calls `delegate` and gets
-  the work back, or `submit`s a task and follows it with `status` and `wait`.
-  It never names a model: the config decides what runs each agent.
-- **A session or a node runs the work.** `ensemble mcp --team <dir>` runs the
-  team inside the session your agent started, so its tasks stop with the
-  session. A **node** (`ensemble node serve`) is a process you keep running
-  that holds the team for every folder; `ensemble mcp` with no `--team` is a
-  bridge to it, and tasks go on after the session ends.
+- **Your node runs the work.** `ensemble node serve` is a process you keep
+  running. It holds the helper team for every folder you work in, runs each
+  folder's tasks, and goes on after your agent's session ends. With a hub
+  server, it also takes the tasks the hub has for you and lends what it offers
+  to others.
+- **Your agent reaches it over MCP.** `ensemble mcp`, which your agent CLI
+  starts, is a bridge to the node: your agent sees the helper team as tools.
+  It calls `delegate` and gets the work back, or `submit`s a task and follows
+  it with `status` and `wait`. It never names a model: the config decides what
+  runs each agent. To try Ensemble without a node, `ensemble mcp --team <dir>`
+  runs the team inside the session instead, and its tasks stop with it.
+- **Load spreads across nodes.** An agent of `type: node` runs on another
+  node through the hub, and a node's model servers can serve the whole team
+  through the hub as an OpenAI-compatible endpoint.
+- **The hub provides the services.** On a server (`ensemble hub serve`), it
+  keeps the team's accounts and knowledge, turns tracker issues into tasks on
+  the right person's node, and connects the nodes. Alone, embed it in your
+  node with `--hub <dir>`: your own knowledge vault and tracker.
 - **Work is kept outside your projects**, in a per-user state directory: tasks
   as markdown tickets, run logs, git worktrees, usage and run records.
-- **A hub adds the people layer.** Embedded (`--hub <dir>`), it keeps your
-  knowledge vault and turns tracker issues into tasks. On a server
-  (`ensemble hub serve`), it does that for a team, with accounts and tokens,
-  and connects nodes, which can lend agent runs and models to each other.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) is the full map: the processes, the crates,
 where everything is kept, and the life of a delegation, a task, a share, an
@@ -109,7 +142,8 @@ path that leaves the folder is refused.
 
 ## Connect your agent
 
-Ensemble is a standard MCP server on stdio. `ensemble setup` and
+Your agent reaches Ensemble as a standard MCP server on stdio, `ensemble mcp`.
+`ensemble setup` and
 `ensemble connect --manager claude-code|opencode|codex --team <dir>` register
 it for you and print what they run; this shows the same by hand. Any agent that
 can spawn one can use it; nothing in it is specific to one harness. Register it

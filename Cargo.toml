@@ -61,7 +61,7 @@ ensemble-node = { path = "crates/ensemble-node" }
 name = "ensemble"
 version.workspace = true
 edition.workspace = true
-description = "A helper team of coding agents (Claude Code, OpenCode, Codex) behind one MCP server."
+description = "An agentic development system: a hub of services (task tracking, knowledge, integrations) and nodes of computing power (agents, model servers), reached over MCP."
 license.workspace = true
 repository.workspace = true
 readme = "README.md"

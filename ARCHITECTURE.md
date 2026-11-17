@@ -15,18 +15,28 @@ below) was built, phase by phase.
 
 ## The pieces
 
-Ensemble is one binary, `ensemble`, with three roles:
+Ensemble is an agentic development system, not an MCP server: a **hub** that
+provides services, and **nodes** that provide computing power, with work
+spread across them. MCP is how an agent CLI reaches a node. It is one binary,
+`ensemble`, in these roles:
 
+- **The node**: a computational resource. It holds a helper team, runs its
+  agents (agent CLIs, Ensemble's own loop) and works through tasks, and may
+  offer the model servers of its machine. A private node works for its owner;
+  a shared one lends its agents and models to others on the hub, so a team
+  spreads its load over every machine it has. It serves its owner's agent
+  sessions from any folder.
+- **The hub**: the services: task tracking (issues from a tracker become tasks
+  on the right person's node), knowledge, accounts and tokens, routing runs
+  and model calls between nodes, and integrations (Telegram and others, to
+  come). It runs as `ensemble hub serve` on a server for a team, or embedded
+  in one person's own node or session.
 - **The helper team**: agents described in one `config.yaml`, each run by an
   adapter (an agent CLI started headless, an agent loop of Ensemble's own, one
-  chat request to a model, or a run on another computer). Your own agent CLI
-  sees the team as MCP tools and hands it work.
-- **The node**: the process that holds a helper team on a computer and serves
-  your agent sessions from any folder. With a hub server, it also takes the
-  tasks the hub sends you and lends what it offers to other people.
-- **The hub**: the people layer: knowledge, the task inbox, accounts, and
-  which node runs what. It runs embedded, inside your own session or node, for
-  one person, or as `ensemble hub serve` on a server for a team.
+  chat request to a model, or a run on another node).
+- **The ways in**: the agent CLI a person already uses, which reaches its node
+  over MCP and sees the helper team as tools; the hub's tracker, whose issues
+  become tasks; and, to come, the hub's integrations, chat API and web UI.
 
 On one computer:
 
@@ -377,8 +387,9 @@ and is written to be read by the model that will see it.
   a git repository; a company may share one, or each user may keep their own.
   The description is strict YAML, never natural language. This replaced the
   version 2 "organization of teams".
-- **Hub**: the people layer: identities, the task inbox, knowledge vaults, the
-  knowledge pipeline, model access. The word "organization" is not used for it,
+- **Hub**: the services: identities, task tracking and the inbox, knowledge
+  vaults and the pipeline, integrations (Telegram and others), routing work
+  between nodes, model access. The word "organization" is not used for it,
   to keep it apart from the old agent config.
 - **Node**: a worker: a process that gives computing resources to its owner
   and the hub's users. A computer may run any number of nodes. A node is
@@ -388,13 +399,16 @@ and is written to be read by the model that will see it.
   is a bridge to it. It is tied to no project. (Decided 2026-11-16; a node
   was one person's machine before.)
 - **Interface**: what a person talks to the system through: their own agent CLI
-  (Claude Code, Codex, OpenCode) with Ensemble's MCP tools, or later the hub's
-  chat API and web UI. There is no personal agent and no manager. (Decided
-  2026-11-16; see "No personal agent".)
+  (Claude Code, Codex, OpenCode) with Ensemble's MCP tools, the hub's tracker,
+  or later the hub's integrations, chat API and web UI. There is no personal
+  agent and no manager. (Decided 2026-11-16; see "No personal agent".)
 
 ## What it is
 
-One tool for two kinds of user: a single developer who wants agents to work on
+An agentic development system: a hub of services and nodes of computing
+power, with work spread across them; MCP is one way in. (Decided 2026-11-17:
+Ensemble is described as this, not as an MCP server.) It serves two kinds of
+user: a single developer who wants agents to work on
 tasks and save tokens by sending cheap work to cheap models, and an organization
 whose people and agents share knowledge. The same binary serves both. Features
 beyond the core are modules switched on by their own config block; a block that
@@ -413,11 +427,13 @@ in their own node (level 1). (Decided 2026-11-10.)
 
 ## Hub and node
 
-**Hub** (`ensemble hub`): one per group of people, always on. It owns identities
-and tokens, the front door for clients (built: the REST API and `/nodes/v1/`;
-to come: an OpenAI-compatible chat API, an MCP endpoint, a web UI), the task
-inbox and tracker adapters, the knowledge pipeline and vaults, and model access
-(to come: hub API keys, a central LLM server, quotas per user, a usage log).
+**Hub** (`ensemble hub`): one per group of people, always on; it provides the
+services. It owns identities and tokens, the front door for clients (built: the
+REST API and `/nodes/v1/`; to come: an OpenAI-compatible chat API, an MCP
+endpoint, a web UI), task tracking (the inbox and tracker adapters), the
+knowledge pipeline and vaults, integrations (Telegram and others, to come),
+which node runs what, and model access (to come: hub API keys, a central LLM
+server, quotas per user, a usage log).
 
 **Node** (`ensemble node`): a worker. It runs its owner's helper team, wires the
 local agent CLIs (MCP, session hooks), and connects outbound to the hub over
@@ -717,8 +733,7 @@ and no registration and no API. (Decided 2026-11-11.)
 | Obsidian over Git | Direct read of the vaults; a correction is shared like any knowledge. (Works today.) |
 | Task tracker | Assign a task to a person and add the delegation signal. (Built for markdown issues.) |
 | `ensemble` CLI | `share`, `recall`, `tasks`, `nodes`, and later `ask`, `record start`. |
-
-No Telegram bot client for now.
+| Integrations (Telegram and others) | Hub services that bring messages in and send results out. (Not built.) |
 
 ## Modules
 
@@ -776,7 +791,8 @@ built above.
 
 1. Export from workplace to home: who approves.
 2. Recording from a browser without sending audio to the hub.
-3. Telegram as a team chat source: keep it or drop it.
+3. Telegram, as a hub integration (decided 2026-11-17): what it does first:
+   talk to the helper team, feed the knowledge vault, or report on tasks.
 4. Shared nodes, as built (see "Private and shared nodes"): whether the
    owner and the user should consent to each run, beyond roles; whether the
    hub should pick the least busy node for runs too. (A node takes its
