@@ -184,7 +184,9 @@ ensemble: ensemble mcp - ✔ Connected
 this project only. Without a node running, a session says how to start one.
 
 Your agent sees these tools: `delegate` (send a task to an agent, get the work
-back), `submit` (write a task for an agent to work through), `status`, `wait`
+back), `submit` (make a task for an agent to work through), `plan` and `plans`
+(propose work too big for one task, broken down into tasks, for you to
+approve; see how far it has got), `status`, `wait`
 and `cancel` (follow tasks and background delegations), `answer` (answer a
 question a task stopped to ask), `agents` (every agent and what it is for),
 `teams` (the teams and where each comes from), `team_create` (write a new team
@@ -818,6 +820,49 @@ not have to.
 
 Tasks that ask you something (`NEEDS INPUT:`) wait for your answer, through
 your agent or `ensemble answer`.
+
+### Plans
+
+Your work and your agents' work are kept apart. An **issue** is yours, such as
+"a panorama video app with rotating cameras": high-level, in a tracker,
+assigned to you. A **task** is one agent's: one goal, one check, such as "the
+camera calibration module in `calib/`, `cargo test` passes". You never get a
+task to do yourself, and an agent never gets an issue.
+
+A **plan** is the bridge: work too big for one task, broken down into tasks.
+Talk the work through with your agent; it proposes a plan (the `plan` tool):
+
+```console
+$ ensemble plan plan-0001-panorama-rig
+plan-0001-panorama-rig · waiting for approval · Panorama video app
+  goal: A video app that stitches the feeds of four rotating cameras.
+  1. rig (hw/firmware): Drive the camera motors, gate test (3 attempts)
+  2. calib (cv/coder): Calibrate the cameras, after rig
+  3. stitch (cv/coder): Stitch the feeds, after calib
+  4. player (web/coder): The player page
+```
+
+- **Nothing of it runs until you approve it**, in a terminal: `ensemble plan
+  approve <id>` shows it and asks (`--yes` to answer for it). Your agent has no
+  tool that approves, as it has none that merges. Then each step becomes a
+  task, `after` the tasks of the steps it comes after, so a step starts when
+  those are done: here the rig and the player run first, side by side.
+- **A step is a task like any other**: its agent, its gate, its `repo`, and
+  in its context the plan it belongs to and what the plan is for. Your nodes
+  run it, it may ask you, and it may hand on.
+- **A plan changes only by your approval.** Your agent proposes a revision
+  (`plan` with `revise`); until you approve it, the plan's tasks go on as they
+  were. Approving a revision keeps the tasks of steps that did not change, and
+  cancels those of steps that changed or went (and of the steps after them),
+  if they have not ended; while one of those runs, approving is refused. Agents
+  never add steps on their own.
+- **`ensemble plans`** and the `plans` tool show each plan and how far it has
+  got (`approved, 2 of 4 done`, then `done`); `ensemble plan <id>` shows each
+  step with its task. `ensemble plan cancel <id>` cancels a plan and every task
+  of it that has not ended.
+
+A plan is kept on the hub, like tasks, per account and project, and may name
+the tracker issue it breaks down (`issue`).
 
 ### Running the node
 
@@ -1704,8 +1749,12 @@ $ ensemble diff <id>              # the whole change
 $ ensemble merge <id> [--squash] [--cleanup]   # only you run this; undone on a conflict
 $ ensemble tasks [--status S]      # the tasks of this working folder's project, on the hub, and where each stands
 $ ensemble task <id>               # one task: ticket, state, question or result
-$ ensemble submit <agent> <title> --text T   # write a task (also --goal --context --repo --gate --after ...)
+$ ensemble submit <agent> <title> --text T   # make a task (also --goal --context --repo --gate --after ...)
 $ ensemble submit <title> --backlog --text T # write a task with no assignee yet
+$ ensemble plans                   # the plans of this working folder's project, and how far each has got
+$ ensemble plan <id>               # one plan: its goal, each step and its task
+$ ensemble plan approve <id> [--yes]   # only you run this: its steps become tasks
+$ ensemble plan cancel <id> [--yes]    # cancel a plan and its unfinished tasks
 $ ensemble assign <id> <agent>     # give a task to an agent
 $ ensemble answer <id> <text>      # answer the question a task stopped to ask
 $ ensemble stats [--since 7d] [--json]   # what each agent has done: runs, failures, time, tokens
@@ -1773,8 +1822,8 @@ scripts stand in for the CLIs.
 | `crates/ensemble-link/` | sign-up, approval and the REST API's codes, tokens kept as hashes and revoked at once, roles checked per request, shares under the signed-in name, a reader offered only `recall`, the token file 0600, the link opened again when it breaks; runs sent to a node that may be used and offers the agent, each side told when the other goes away, model calls streamed from a node |
 | `crates/ensemble-inbox/` | markdown issues read and written with only the status line changed; issues to tasks of the account matched by tracker name, questions and answers through comments, results posted once, a closed issue cancelling its task |
 | `crates/ensemble-core/` | the state directories and their hashes, the worker lock, run records, a snapshot of a folder and its changes written back |
-| `crates/ensemble-tasks/` | tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the node holding the lease, questions, hand-offs, cancelling; over the link as the signed-in account; run logs; review and merge |
-| `crates/ensemble-mcp/src/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session, notes recalled for agents with `recall` |
+| `crates/ensemble-tasks/` | tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the node holding the lease, questions, hand-offs, cancelling, work carried on another node or pinned to one; plans: checked, approved into tasks released in order, revised keeping what did not change, cancelled; over the link as the signed-in account; run logs; review and merge |
+| `crates/ensemble-mcp/src/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session, a plan that runs only once approved, notes recalled for agents with `recall` |
 | `tests/workspace.rs` | the crates depend on each other in one direction only |
 | `tests/end_to_end.rs` | the real binary: CLI, `show`, `health` against a stub server, MCP over real pipes, an agent changing a file; session hooks; an agent run on a node and its changes back; a node's models through the hub; a session through a node, its task going on after the session; a task stopped on one computer and carried on by another from its pushed branch; a hub task worked by a node |
 | `crates/ensemble-agents/tests/fixtures/` | saved event streams per CLI version, replayed through each adapter's parser (see its README) |

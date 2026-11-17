@@ -25,6 +25,7 @@
 
 use super::delegation::{ToolResult, run_delegation};
 use crate::board::{Board, Cancelled, Claim, End, LEASE, Progress, Renewal};
+use crate::plans::Draft;
 use crate::runs::Runs;
 use crate::tasks::{
     ASK_MARKER, Detail, HANDOFF_MARKER, Status, Task, Ticket, entry_line, handoff_in, idle_line,
@@ -1240,6 +1241,83 @@ impl<'e> Queue<'e> {
                 ))
             }
             Err(e) => ToolResult::err(format!("cannot keep the task on {}: {e}", board.place())),
+        }
+    }
+
+    /// Propose `draft` as a plan, or with `revise` as the next revision of
+    /// that plan: kept on the hub, waiting for the person to approve it.
+    pub async fn plan(&self, draft: &Draft, revise: Option<&str>) -> ToolResult {
+        let board = match self.tasks() {
+            Ok(board) => board,
+            Err(refused) => return refused,
+        };
+        let id = match revise {
+            Some(id) => match board.revise(id, draft).await {
+                Ok(_) => id.to_string(),
+                Err(e) => return ToolResult::err(e),
+            },
+            None => match board.propose(draft).await {
+                Ok(id) => id,
+                Err(e) => {
+                    return ToolResult::err(format!(
+                        "cannot keep the plan on {}: {e}",
+                        board.place()
+                    ));
+                }
+            },
+        };
+        let all = match self.all(board).await {
+            Ok(all) => all,
+            Err(refused) => return refused,
+        };
+        match board.plan(&id).await {
+            Ok(Some(plan)) => ToolResult::ok(format!(
+                "{}\n\nNothing of it runs until the person approves it. Show it to them, and \
+                 ask them to run `ensemble plan approve {id}` in a terminal; then its steps \
+                 become tasks, each starting when the ones before it are done. To change it, \
+                 call `plan` again with `revise: {id}`: the person approves each revision.",
+                plan.describe(&all)
+            )),
+            Ok(None) => ToolResult::err(format!("the hub has no plan '{id}'")),
+            Err(e) => ToolResult::err(e),
+        }
+    }
+
+    /// One plan with its steps and their tasks, or every plan.
+    pub async fn plans(&self, id: Option<&str>) -> ToolResult {
+        let board = match self.tasks() {
+            Ok(board) => board,
+            Err(refused) => return refused,
+        };
+        let (plans, all) = match (board.plans().await, self.all(board).await) {
+            (Ok(plans), Ok(all)) => (plans, all),
+            (Err(e), _) => return ToolResult::err(e),
+            (_, Err(refused)) => return refused,
+        };
+        match id {
+            Some(id) => match plans.iter().find(|p| p.id == id) {
+                Some(plan) => ToolResult::ok(plan.describe(&all)),
+                None => ToolResult::err(format!(
+                    "no plan '{id}'. Plans: {}.",
+                    if plans.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        plans
+                            .iter()
+                            .map(|p| p.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                )),
+            },
+            None if plans.is_empty() => ToolResult::ok("No plans."),
+            None => ToolResult::ok(
+                plans
+                    .iter()
+                    .map(|p| p.line(&all))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
         }
     }
 

@@ -66,7 +66,12 @@ pub(super) fn instructions(config: &ensemble_config::Config) -> String {
          owner into tasks: `submit` with an `agent` assigns one, `submit` with no agent puts it \
          in the backlog, and `assign` gives a backlog task to an agent. An agent may hand a task \
          on to another. `status` says when nothing is active; then the team waits for the next \
-         planning with the owner.",
+         planning with the owner.\n\n\
+         Work too big for one task, such as an issue of the person's, is a `plan`: talk it \
+         through with the person, then propose its steps, each a task for one agent with one \
+         goal, and which comes after which. Nothing of it runs until the person approves it \
+         in a terminal with `ensemble plan approve <id>`; say so. `plans` shows how far each \
+         has got. Never give the person a step-sized task to do themselves.",
     );
     out
 }

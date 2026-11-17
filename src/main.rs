@@ -148,14 +148,22 @@ COMMANDS:
                             and undoes the latter. --cleanup then removes the
                             task's worktree and branch. Only you run this: your
                             agent has no tool for it.
-    tasks [--status S]      List the tasks of this working folder and where each
-                            stands. Reads files; starts nothing.
+    tasks [--status S]      List the tasks of this working folder's project, kept
+                            on your node's hub, and where each stands.
     task ID                 Show one task: its ticket, where it stands, its
                             question or its result.
     submit AGENT TITLE --text T   (or TITLE --backlog: put it in the backlog)
            [--goal G] [--context C] [--repo R] [--gate N:K]
            [--after ID,ID] [--files F,F] [--constraints C,C] [--done-when D,D]
-                            Write a task. Your running node picks it up.
+                            Make a task on the hub. A node of yours runs it.
+    plans                   List the plans of this working folder's project and
+                            how far each has got.
+    plan ID                 Show a plan: its goal, and each step with its task.
+    plan approve ID [--yes] Read a plan your agent proposed and approve it: its
+                            steps become tasks, each starting once the ones
+                            before it are done. Only you run this: your agent
+                            has no tool for it.
+    plan cancel ID [--yes]  Cancel a plan, and every task of it not ended.
     answer ID TEXT          Answer the question a task stopped to ask.
     assign ID AGENT         Give a task to an agent: from the backlog, or to
                             someone else.
@@ -344,6 +352,7 @@ fn run() -> Result<ExitCode, String> {
     match args.command.as_str() {
         "review" | "diff" | "merge" => return cmd_review(&args, &dir),
         "tasks" => return cmd_tasks(&args, &dir),
+        "plans" | "plan" => return cmd_plan(&args, &dir),
         "task" => return cmd_task(&args, &dir),
         "answer" => return cmd_answer(&args, &dir),
         "setup" => return cmd_setup(&args, &dir),
@@ -2216,6 +2225,89 @@ fn cmd_task(args: &Args, dir: &Path) -> Result<ExitCode, String> {
     }
     if let Some(outcome) = &detail.outcome {
         println!("\n{}", outcome.text);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `plans`, and `plan ID|approve ID|cancel ID`: the project's plans, for
+/// the person, who alone approves and cancels them.
+fn cmd_plan(args: &Args, dir: &Path) -> Result<ExitCode, String> {
+    let board = board_for(dir, &args.command)?;
+    let (plans, all) = ensemble::runtime::block_on(async {
+        Ok::<_, String>((board.plans().await?, board.scan().await?))
+    })
+    .map_err(|e| format!("{}: {e}", args.command))?;
+    let find = |id: &str| {
+        plans.iter().find(|p| p.id == id).ok_or_else(|| {
+            format!(
+                "{}: no plan '{id}'. `ensemble plans` lists them.",
+                args.command
+            )
+        })
+    };
+    let words: Vec<&str> = args
+        .rest
+        .iter()
+        .map(String::as_str)
+        .filter(|w| !w.starts_with("--"))
+        .collect();
+    match (args.command.as_str(), words.as_slice()) {
+        ("plans", []) | ("plan", []) => {
+            if plans.is_empty() {
+                println!("No plans on {}.", board.place());
+            }
+            for plan in &plans {
+                println!("{}", plan.line(&all));
+            }
+        }
+        ("plan", ["approve", id]) => {
+            let plan = find(id)?;
+            println!("{}\n", plan.describe(&all));
+            if plan.status != ensemble::plans::PlanStatus::Draft {
+                return Err(format!(
+                    "plan approve: {id} is {}; it waits for no approval",
+                    plan.status.as_str()
+                ));
+            }
+            if !confirm(
+                &format!(
+                    "Approve revision {} of {id}? Its {} step(s) become tasks your nodes run.",
+                    plan.revision,
+                    plan.steps.len()
+                ),
+                args,
+            )? {
+                return Err("plan approve: not approved; nothing runs".into());
+            }
+            let approved = ensemble::runtime::block_on(board.approve(id))
+                .map_err(|e| format!("plan approve: {e}"))?;
+            for step in &approved.steps {
+                if let Some(task) = approved.tasks.get(&step.key) {
+                    println!("{}: task {task}", step.key);
+                }
+            }
+            println!("{id} is approved: {}.", tell_node(dir));
+        }
+        ("plan", ["cancel", id]) => {
+            let plan = find(id)?;
+            println!("{}\n", plan.describe(&all));
+            if !confirm(
+                &format!("Cancel {id}, and every task of it that has not ended?"),
+                args,
+            )? {
+                return Err("plan cancel: nothing was cancelled".into());
+            }
+            ensemble::runtime::block_on(board.cancel_plan(id))
+                .map_err(|e| format!("plan cancel: {e}"))?;
+            println!("{id} is cancelled.");
+        }
+        ("plan", [id]) => println!("{}", find(id)?.describe(&all)),
+        _ => {
+            return Err(
+                "plan: `ensemble plans`, `ensemble plan <id>`, `ensemble plan approve <id>` or `ensemble plan cancel <id>`"
+                    .into(),
+            );
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

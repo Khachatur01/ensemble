@@ -20,17 +20,20 @@
 //! its database ([`DbBoard`]) and answers the link's task methods with them
 //! ([`Service`]); a node reaches them over the link ([`RemoteBoard`]).
 
+use crate::plans::{Draft, Plan, PlanStatus};
 use crate::tasks::{Detail, Outcome, Status, Task, Ticket, slug, utc, yaml_str};
 use async_trait::async_trait;
 use ensemble_core::runtime::blocking;
 use ensemble_link::Link;
 use ensemble_link::protocol::{
-    TASK, TASK_ANSWER, TASK_ASSIGN, TASK_CANCEL, TASK_CLAIM, TASK_CREATE, TASK_FINISH,
-    TASK_RELEASE, TASK_RENEW, TASKS, TaskService,
+    PLAN, PLAN_APPROVE, PLAN_CANCEL, PLAN_PROPOSE, PLAN_REVISE, PLANS, TASK, TASK_ANSWER,
+    TASK_ASSIGN, TASK_CANCEL, TASK_CLAIM, TASK_CREATE, TASK_FINISH, TASK_RELEASE, TASK_RENEW,
+    TASKS, TaskService,
 };
 use ensemble_link::store::{self, Value as Sql};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
@@ -146,6 +149,17 @@ pub trait Board: Send + Sync {
     /// Give it to `agent`, from the backlog or from whoever has it.
     async fn assign(&self, id: &str, agent: &str) -> Result<(), String>;
     async fn cancel(&self, id: &str) -> Result<Cancelled, String>;
+    /// Every plan, oldest first.
+    async fn plans(&self) -> Result<Vec<Plan>, String>;
+    async fn plan(&self, id: &str) -> Result<Option<Plan>, String>;
+    /// Keep `draft` as a new plan, waiting for the person's approval.
+    async fn propose(&self, draft: &Draft) -> Result<String, String>;
+    /// Change plan `id` to `draft`, a new revision waiting for approval.
+    async fn revise(&self, id: &str, draft: &Draft) -> Result<u32, String>;
+    /// The person approves plan `id`: its steps become tasks.
+    async fn approve(&self, id: &str) -> Result<Plan, String>;
+    /// The person cancels plan `id` and its unfinished tasks.
+    async fn cancel_plan(&self, id: &str) -> Result<Plan, String>;
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +332,15 @@ impl DbBoard {
         change: impl FnOnce(&mut Record, u64) -> Result<T, String>,
     ) -> Result<T, String> {
         let _held = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
+        self.change_held(id, change)
+    }
+
+    /// [`Self::change`], with [`CHANGING`] held already.
+    fn change_held<T>(
+        &self,
+        id: &str,
+        change: impl FnOnce(&mut Record, u64) -> Result<T, String>,
+    ) -> Result<T, String> {
         let mut record = self.record(id)?.ok_or_else(|| format!("no task '{id}'"))?;
         let out = change(&mut record, unix_now())?;
         let data = serde_json::to_string(&record).map_err(|e| e.to_string())?;
@@ -349,6 +372,11 @@ impl DbBoard {
     pub fn add(&self, ticket: &Ticket) -> Result<String, String> {
         ticket.check()?;
         let _held = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
+        self.add_held(ticket)
+    }
+
+    /// [`Self::add`], with [`CHANGING`] held already.
+    fn add_held(&self, ticket: &Ticket) -> Result<String, String> {
         let records = self.records()?;
         if let Some(missing) = ticket
             .after
@@ -618,6 +646,231 @@ impl DbBoard {
     }
 }
 
+impl DbBoard {
+    /// Every plan, oldest first.
+    pub fn plans_now(&self) -> Result<Vec<Plan>, String> {
+        let rows = store::with(&self.dir, async |c| {
+            store::rows(
+                c,
+                "SELECT data FROM plans WHERE owner = ?1 AND project = ?2 ORDER BY number",
+                self.keys(),
+            )
+            .await
+        })?;
+        rows.iter()
+            .map(|row| {
+                let data = store::text(&row[0]).unwrap_or_default();
+                serde_json::from_str(&data).map_err(|e| format!("a plan is unreadable: {e}"))
+            })
+            .collect()
+    }
+
+    pub fn plan_now(&self, id: &str) -> Result<Option<Plan>, String> {
+        Ok(self.plans_now()?.into_iter().find(|p| p.id == id))
+    }
+
+    fn save_plan(&self, plan: &Plan) -> Result<(), String> {
+        let data = serde_json::to_string(plan).map_err(|e| e.to_string())?;
+        let mut params = vec![Sql::Text(data)];
+        params.extend(self.keys());
+        params.push(Sql::Text(plan.id.clone()));
+        store::with(&self.dir, async |c| {
+            store::execute(
+                c,
+                "UPDATE plans SET data = ?1 WHERE owner = ?2 AND project = ?3 AND id = ?4",
+                params,
+            )
+            .await
+        })
+        .map(|_| ())
+    }
+
+    /// Keep `draft` as a new plan, waiting for approval, and return its id.
+    pub fn propose_now(&self, draft: &Draft) -> Result<String, String> {
+        draft.check()?;
+        let _held = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
+        let number = self.plans_now()?.len() as i64 + 1;
+        let slug = slug(&draft.title);
+        let id = if slug.is_empty() {
+            format!("plan-{number:04}")
+        } else {
+            format!("plan-{number:04}-{slug}")
+        };
+        let plan = Plan {
+            id: id.clone(),
+            title: draft.title.trim().to_string(),
+            goal: draft.goal.trim().to_string(),
+            issue: draft.issue.clone(),
+            steps: draft.steps.clone(),
+            status: PlanStatus::Draft,
+            revision: 1,
+            tasks: BTreeMap::new(),
+            made: BTreeMap::new(),
+        };
+        let data = serde_json::to_string(&plan).map_err(|e| e.to_string())?;
+        let mut params = self.keys();
+        params.extend([Sql::Text(id.clone()), Sql::Integer(number), Sql::Text(data)]);
+        store::with(&self.dir, async |c| {
+            store::execute(
+                c,
+                "INSERT INTO plans (owner, project, id, number, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params,
+            )
+            .await
+        })?;
+        Ok(id)
+    }
+
+    /// Change plan `id` to `draft`: a new revision, waiting for approval
+    /// again. Its tasks go on as they are until it is approved.
+    pub fn revise_now(&self, id: &str, draft: &Draft) -> Result<u32, String> {
+        draft.check()?;
+        let _held = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
+        let mut plan = self
+            .plan_now(id)?
+            .ok_or_else(|| format!("no plan '{id}'"))?;
+        if plan.status == PlanStatus::Cancelled {
+            return Err(format!("{id} was cancelled; propose a new plan instead"));
+        }
+        plan.title = draft.title.trim().to_string();
+        plan.goal = draft.goal.trim().to_string();
+        plan.issue = draft.issue.clone();
+        plan.steps = draft.steps.clone();
+        plan.revision += 1;
+        plan.status = PlanStatus::Draft;
+        self.save_plan(&plan)?;
+        Ok(plan.revision)
+    }
+
+    /// Approve plan `id`: each of its steps becomes a task, after the tasks of
+    /// the steps it comes after, so the hub releases each as those are done.
+    /// For a revision, a step that did not change keeps its task, and the task
+    /// of a step that changed or went is cancelled if it has not ended;
+    /// approving is refused while such a task runs.
+    pub fn approve_now(&self, id: &str) -> Result<Plan, String> {
+        let _held = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
+        let mut plan = self
+            .plan_now(id)?
+            .ok_or_else(|| format!("no plan '{id}'"))?;
+        match plan.status {
+            PlanStatus::Draft => {}
+            PlanStatus::Approved => return Err(format!("{id} is approved already")),
+            PlanStatus::Cancelled => return Err(format!("{id} was cancelled")),
+        }
+        // A step keeps its task when neither it nor a step it comes after
+        // changed.
+        let mut kept: Vec<String> = Vec::new();
+        for step in &plan.steps {
+            let same = plan.made.get(&step.key) == Some(step)
+                && step.ticket.after.iter().all(|a| kept.contains(a));
+            if same && plan.tasks.contains_key(&step.key) {
+                kept.push(step.key.clone());
+            }
+        }
+        let now = unix_now();
+        let records = self.records()?;
+        let gone: Vec<(String, String)> = plan
+            .tasks
+            .iter()
+            .filter(|(key, _)| !kept.contains(key))
+            .map(|(key, task)| (key.clone(), task.clone()))
+            .collect();
+        for (key, task) in &gone {
+            if let Some(r) = records.iter().find(|r| &r.ticket.id == task)
+                && r.result.is_none()
+                && let Some(node) = r.holder(now)
+            {
+                return Err(format!(
+                    "step '{key}' changed, and its task {task} runs on {node} now; approve again once it stops, or cancel it"
+                ));
+            }
+        }
+        let note = format!("Replaced by revision {} of plan {id}.", plan.revision);
+        for (key, task) in gone {
+            self.change_held(&task, |r, _| {
+                if r.result.is_none() {
+                    r.lease = None;
+                    r.result = Some(outcome(
+                        Status::Cancelled,
+                        &r.ticket.agent,
+                        &utc(SystemTime::now()),
+                        &[],
+                        &note,
+                    ));
+                }
+                Ok(())
+            })?;
+            plan.tasks.remove(&key);
+            plan.made.remove(&key);
+        }
+        let about = format!(
+            "This task is one step of the plan {id}, \"{}\": {}",
+            plan.title,
+            plan.goal.trim()
+        );
+        for step in plan.steps.clone() {
+            if kept.contains(&step.key) {
+                continue;
+            }
+            let after = step
+                .ticket
+                .after
+                .iter()
+                .map(|key| {
+                    plan.tasks.get(key).cloned().ok_or_else(|| {
+                        format!("step '{}' comes after '{key}', which has no task", step.key)
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let context = match step.ticket.context.as_deref().map(str::trim) {
+                Some(c) if !c.is_empty() => format!("{about}\n\n{c}"),
+                _ => about.clone(),
+            };
+            let task = self.add_held(&Ticket {
+                after,
+                context: Some(context),
+                ..step.ticket.clone()
+            })?;
+            plan.tasks.insert(step.key.clone(), task);
+            plan.made.insert(step.key.clone(), step);
+        }
+        plan.status = PlanStatus::Approved;
+        self.save_plan(&plan)?;
+        Ok(plan)
+    }
+
+    /// Cancel plan `id`, and every task of it that has not ended.
+    pub fn cancel_plan_now(&self, id: &str) -> Result<Plan, String> {
+        let _held = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
+        let mut plan = self
+            .plan_now(id)?
+            .ok_or_else(|| format!("no plan '{id}'"))?;
+        for task in plan.tasks.values() {
+            self.change_held(task, |r, now| {
+                if r.result.is_some() {
+                    return Ok(());
+                }
+                if r.holder(now).is_some() {
+                    r.cancel = true;
+                } else {
+                    r.lease = None;
+                    r.result = Some(outcome(
+                        Status::Cancelled,
+                        &r.ticket.agent,
+                        &utc(SystemTime::now()),
+                        &[],
+                        "Its plan was cancelled.",
+                    ));
+                }
+                Ok(())
+            })?;
+        }
+        plan.status = PlanStatus::Cancelled;
+        self.save_plan(&plan)?;
+        Ok(plan)
+    }
+}
+
 /// A result: front matter, then the reply.
 fn outcome(
     status: Status,
@@ -699,6 +952,24 @@ impl Board for DbBoard {
     }
     async fn cancel(&self, id: &str) -> Result<Cancelled, String> {
         blocking(|| self.stop(id))
+    }
+    async fn plans(&self) -> Result<Vec<Plan>, String> {
+        blocking(|| self.plans_now())
+    }
+    async fn plan(&self, id: &str) -> Result<Option<Plan>, String> {
+        blocking(|| self.plan_now(id))
+    }
+    async fn propose(&self, draft: &Draft) -> Result<String, String> {
+        blocking(|| self.propose_now(draft))
+    }
+    async fn revise(&self, id: &str, draft: &Draft) -> Result<u32, String> {
+        blocking(|| self.revise_now(id, draft))
+    }
+    async fn approve(&self, id: &str) -> Result<Plan, String> {
+        blocking(|| self.approve_now(id))
+    }
+    async fn cancel_plan(&self, id: &str) -> Result<Plan, String> {
+        blocking(|| self.cancel_plan_now(id))
     }
 }
 
@@ -790,6 +1061,19 @@ impl TaskService for Service {
                 Ok(json!({ "assigned": true }))
             }
             TASK_CANCEL => Ok(json!({ "cancel": board.stop(text("id")?)? })),
+            PLANS => Ok(json!({ "plans": board.plans_now()? })),
+            PLAN => Ok(json!({ "plan": board.plan_now(text("id")?)? })),
+            PLAN_PROPOSE | PLAN_REVISE => {
+                let draft: Draft = serde_json::from_value(parsed("draft")?)
+                    .map_err(|e| format!("{method}: `draft` is not a plan: {e}"))?;
+                if method == PLAN_PROPOSE {
+                    Ok(json!({ "id": board.propose_now(&draft)? }))
+                } else {
+                    Ok(json!({ "revision": board.revise_now(text("id")?, &draft)? }))
+                }
+            }
+            PLAN_APPROVE => Ok(json!({ "plan": board.approve_now(text("id")?)? })),
+            PLAN_CANCEL => Ok(json!({ "plan": board.cancel_plan_now(text("id")?)? })),
             other => Err(format!("no method `{other}`")),
         }
     }
@@ -893,6 +1177,28 @@ impl Board for RemoteBoard {
     }
     async fn cancel(&self, id: &str) -> Result<Cancelled, String> {
         read(&self.ask(TASK_CANCEL, json!({ "id": id })).await?, "cancel")
+    }
+    async fn plans(&self) -> Result<Vec<Plan>, String> {
+        read(&self.ask(PLANS, json!({})).await?, "plans")
+    }
+    async fn plan(&self, id: &str) -> Result<Option<Plan>, String> {
+        read(&self.ask(PLAN, json!({ "id": id })).await?, "plan")
+    }
+    async fn propose(&self, draft: &Draft) -> Result<String, String> {
+        read(
+            &self.ask(PLAN_PROPOSE, json!({ "draft": draft })).await?,
+            "id",
+        )
+    }
+    async fn revise(&self, id: &str, draft: &Draft) -> Result<u32, String> {
+        let params = json!({ "id": id, "draft": draft });
+        read(&self.ask(PLAN_REVISE, params).await?, "revision")
+    }
+    async fn approve(&self, id: &str) -> Result<Plan, String> {
+        read(&self.ask(PLAN_APPROVE, json!({ "id": id })).await?, "plan")
+    }
+    async fn cancel_plan(&self, id: &str) -> Result<Plan, String> {
+        read(&self.ask(PLAN_CANCEL, json!({ "id": id })).await?, "plan")
     }
 }
 
@@ -1224,6 +1530,133 @@ mod tests {
         assert_eq!(d.outcome.unwrap().reply(), "Cancelled while it ran.\n");
     }
 
+    #[test]
+    fn an_approved_plan_becomes_tasks_released_in_order() {
+        use crate::plans::tests::{plan, step};
+        let tmp = TempDir::new();
+        let b = board(&tmp);
+        let draft = plan(vec![
+            step("rig", "web/coder", &[]),
+            step("calib", "web/coder", &["rig"]),
+            step("ui", "web/designer", &[]),
+        ]);
+        let id = b.propose_now(&draft).unwrap();
+        assert_eq!(id, "plan-0001-panorama-rig");
+        assert!(b.list().unwrap().is_empty(), "nothing runs before approval");
+        let p = b.plan_now(&id).unwrap().unwrap();
+        assert!(
+            p.line(&[]).contains("waiting for approval"),
+            "{}",
+            p.line(&[])
+        );
+
+        let p = b.approve_now(&id).unwrap();
+        assert_eq!(p.status, PlanStatus::Approved);
+        let tasks = b.list().unwrap();
+        assert_eq!(tasks.len(), 3);
+        let (rig, calib) = (&p.tasks["rig"], &p.tasks["calib"]);
+        assert_eq!(tasks[1].ticket.after, vec![rig.clone()]);
+        let context = tasks[1].ticket.context.clone().unwrap();
+        assert!(
+            context.starts_with("This task is one step of the plan plan-0001-panorama-rig"),
+            "{context}"
+        );
+        assert_eq!(
+            b.take(calib, "desk", 60, true).unwrap(),
+            Claim::Refused(format!("it waits for {rig}"))
+        );
+        assert!(b.approve_now(&id).unwrap_err().contains("approved already"));
+
+        b.take(rig, "desk", 60, true).unwrap();
+        b.end(rig, "desk", result("rig done"), None).unwrap();
+        assert_eq!(b.take(calib, "desk", 60, true).unwrap(), Claim::Taken);
+        let all = b.list().unwrap();
+        let line = b.plan_now(&id).unwrap().unwrap().line(&all);
+        assert!(line.contains("approved, 1 of 3 done"), "{line}");
+        let shown = b.plan_now(&id).unwrap().unwrap().describe(&all);
+        assert!(
+            shown.contains("2. calib (web/coder): Do calib, after rig"),
+            "{shown}"
+        );
+        assert!(shown.contains("running on desk"), "{shown}");
+    }
+
+    #[test]
+    fn a_revised_plan_keeps_what_did_not_change_and_replaces_what_did() {
+        use crate::plans::tests::{plan, step};
+        let tmp = TempDir::new();
+        let b = board(&tmp);
+        let id = b
+            .propose_now(&plan(vec![
+                step("rig", "web/coder", &[]),
+                step("calib", "web/coder", &["rig"]),
+                step("ui", "web/designer", &[]),
+            ]))
+            .unwrap();
+        let first = b.approve_now(&id).unwrap();
+        // The rig is redone; calib comes after it, so it is replaced too; the
+        // ui is dropped, and a test step is added.
+        let mut rig = step("rig", "web/coder", &[]);
+        rig.ticket.text = "Rig it with four cameras.".into();
+        let revision = b
+            .revise_now(
+                &id,
+                &plan(vec![
+                    rig,
+                    step("calib", "web/coder", &["rig"]),
+                    step("test", "web/tester", &[]),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(revision, 2);
+        assert!(
+            b.plan_now(&id)
+                .unwrap()
+                .unwrap()
+                .line(&[])
+                .contains("revision 2, waiting for approval")
+        );
+        // While a replaced step's task runs, approval waits.
+        b.take(&first.tasks["rig"], "desk", 60, true).unwrap();
+        let err = b.approve_now(&id).unwrap_err();
+        assert!(
+            err.contains("step 'rig' changed") && err.contains("runs on desk"),
+            "{err}"
+        );
+        b.put_back(&first.tasks["rig"], "desk", None).unwrap();
+
+        let second = b.approve_now(&id).unwrap();
+        let tasks = b.list().unwrap();
+        let status = |task: &str| tasks.iter().find(|t| t.id() == task).unwrap().status;
+        for key in ["rig", "calib", "ui"] {
+            assert_eq!(status(&first.tasks[key]), Some(Status::Cancelled), "{key}");
+        }
+        assert_ne!(second.tasks["rig"], first.tasks["rig"]);
+        assert_eq!(status(&second.tasks["test"]), None);
+        assert!(!second.tasks.contains_key("ui"));
+        let calib = tasks
+            .iter()
+            .find(|t| t.id() == second.tasks["calib"])
+            .unwrap();
+        assert_eq!(calib.ticket.after, vec![second.tasks["rig"].clone()]);
+
+        // An unchanged revision keeps every task.
+        b.revise_now(&id, &plan(second.steps.clone())).unwrap();
+        let third = b.approve_now(&id).unwrap();
+        assert_eq!(third.tasks, second.tasks);
+
+        let cancelled = b.cancel_plan_now(&id).unwrap();
+        assert_eq!(cancelled.status, PlanStatus::Cancelled);
+        assert!(
+            b.list()
+                .unwrap()
+                .iter()
+                .all(|t| t.status == Some(Status::Cancelled)),
+            "every unfinished task of it is cancelled"
+        );
+        assert!(b.revise_now(&id, &plan(vec![step("a", "x", &[])])).is_err());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_node_reaches_its_tasks_through_the_hub() {
         let tmp = TempDir::new();
@@ -1255,8 +1688,16 @@ mod tests {
         assert_eq!(d.outcome.unwrap().reply(), "All done.\n");
         assert_eq!(laptop.get("0009").await.unwrap(), None);
         assert_eq!(laptop.cancel(&id).await.unwrap(), Cancelled::Ended);
-        // Kept for ana, never for the name a node sends.
-        assert_eq!(DbBoard::new(&tmp.0, "ana", "shop").list().unwrap().len(), 1);
+        // Plans too.
+        let draft =
+            crate::plans::tests::plan(vec![crate::plans::tests::step("a", "web/coder", &[])]);
+        let plan = laptop.propose(&draft).await.unwrap();
+        assert_eq!(laptop.plans().await.unwrap().len(), 1);
+        let approved = laptop.approve(&plan).await.unwrap();
+        assert_eq!(laptop.plan(&plan).await.unwrap(), Some(approved));
+        // Kept for ana, never for the name a node sends: the task, and the
+        // plan's.
+        assert_eq!(DbBoard::new(&tmp.0, "ana", "shop").list().unwrap().len(), 2);
         let err = RemoteBoard::new(&hub.url, &hub.ana, "a/b")
             .scan()
             .await
