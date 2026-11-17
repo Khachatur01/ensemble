@@ -86,7 +86,7 @@ Every process is the same binary. What runs in each:
 | `ensemble mcp` | a bridge: it connects to the node's socket, sends `{"dir": "<folder>"}`, and copies bytes between stdio and the socket | when the node closes the session |
 | `ensemble node serve` | the node, one per computer: a socket for sessions, a worker per folder that runs the tasks the hub keeps for its project, and with the hub its `node.yaml` names, a link that offers runs and models (`Worker`) | on SIGINT or SIGTERM |
 | `ensemble hub serve` | the hub, from `~/.config/ensemble/hub/`: one port for the link, the REST API and `/nodes/v1/`; the tasks; the vault's distiller; the tracker inbox | on SIGINT or SIGTERM |
-| everything else | one command: read the config and the state, or ask the hub, do one thing, print; `submit`, `assign` and `answer` also tell the node about the folder, so that its worker runs there | at once |
+| everything else | one command: read the config and the state, or ask the hub, do one thing, print; `task new`, `task assign` and `task answer` also tell the node about the folder, so that its worker runs there | at once |
 
 A folder's tasks are run by one worker of the computer at a time: whoever
 holds the lock file (`worker.lock`) in the folder's state directory; across
@@ -102,7 +102,7 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 
 | crate | what it is | files |
 | --- | --- | --- |
-| `ensemble-core` | what everything shares | the error vocabulary (`port.rs`); the per-user state, cache and config directories (`state.rs`); the working folder, a `repo` inside it and what a run changed (`workspace.rs`); the record of runs behind `ensemble stats` (`records.rs`); the one-worker lock (`lock.rs`); dates in UTC (`time.rs`); the files a run on a node carries there and back (`snapshot.rs`); the folders a node served, by project (`folders.rs`); the async runtime and its bridges to code that blocks (`runtime.rs`) |
+| `ensemble-core` | what everything shares | the error vocabulary (`port.rs`); the per-user state, cache and config directories (`state.rs`); the working folder, a `repo` inside it and what a run changed (`workspace.rs`); the record of runs behind `ensemble node agent stats` (`records.rs`); the one-worker lock (`lock.rs`); dates in UTC (`time.rs`); the files a run on a node carries there and back (`snapshot.rs`); the folders a node served, by project (`folders.rs`); the async runtime and its bridges to code that blocks (`runtime.rs`) |
 | `ensemble-config` | the three files a person writes | `config.yaml`: the document as written (`raw.rs`), the environment, `.env` files and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), adding and removing an agent as text, comments kept (`edit.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); `hub.yaml` (`hub.rs`); `node.yaml` (`node.rs`) |
 | `ensemble-backends` | talking to model servers | one chat request in the server's own format (`chat.rs`); which models a server serves (`models.rs`); the first usable model of a `try` list (`resolve.rs`); a stand-in server for tests (`testing.rs`) |
 | `ensemble-knowledge` | the hub's knowledge | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait a session uses (`lib.rs`) |
@@ -112,7 +112,7 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 | `ensemble-inbox` | issues from a tracker into tasks | the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`); an issue made a task and what the task reports (`work.rs`); the hub's inbox (`relay.rs`) |
 | `ensemble-node` | a node's link to a hub | `Worker`: runs and model calls for others (`lib.rs`) |
 | `ensemble-mcp` | MCP over stdio | the session loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`) |
-| `ensemble` (the root) | the binary | the commands (`src/main.rs`); the node's sessions and the bridge (`src/daemon.rs`); `setup`, `connect`, `doctor` (`src/setup.rs`); session hooks (`src/hooks.rs`); the node's teams, loaded, made, linked, pulled and approved (`src/teams.rs`), over git repositories pinned and trusted per commit (`src/remote.rs`) |
+| `ensemble` (the root) | the binary | the command line, parsed with clap (`src/cli.rs`), and what each group of commands does (`src/cmd/`: `node`, `team`, `agent`, `task`, `knowledge`, `hub`); the node's sessions and the bridge (`src/daemon.rs`); what `node setup`, `node connect` and `node doctor` find and register (`src/setup.rs`); session hooks (`src/hooks.rs`); the node's teams, loaded, made, linked, pulled and approved (`src/teams.rs`), over git repositories pinned and trusted per commit (`src/remote.rs`) |
 | `nix/` | not a crate: the NixOS module (`nixos-module.nix`: a hub as a system service, the node as a user service), the Home Manager module (`home-manager-module.nix`: the node on Linux or macOS), what they share about a node (`node.nix`), and an example configuration the flake's checks build (`example.nix`) |
 
 Two rules keep the layers apart. The MCP session knows the tools and the
@@ -122,7 +122,7 @@ how a CLI is started and read.
 ## Configuration and state
 
 What a person writes is **configuration**, reviewed and never changed by
-Ensemble except on request (`add-agent`, `team new`, an approved
+Ensemble except on request (`node agent add`, `node team new`, an approved
 `team_create`):
 
 | file | where | holds |
@@ -146,7 +146,7 @@ or a config directory:
 | path | holds |
 | --- | --- |
 | `~/.local/state/ensemble/workdirs/<folder>-<hash>/` | a working folder's `runs/`, `worktrees/`, `state.json` and `worker.lock` |
-| `~/.local/state/ensemble/orgs/teams-<hash>/` | the teams' `usage.json` (budgets) and `records.jsonl` (`ensemble stats`), by `<team>/<agent>`, shared by every folder |
+| `~/.local/state/ensemble/orgs/teams-<hash>/` | the teams' `usage.json` (budgets) and `records.jsonl` (`ensemble node agent stats`), by `<team>/<agent>`, shared by every folder |
 | `~/.local/state/ensemble/node/` | the node's lock, `folders.json` (the folder last used for each project), `runs/` for others |
 | `$XDG_RUNTIME_DIR/ensemble/<hash>.sock` | a node's socket, in a folder only its user may enter (`/tmp/ensemble-<user>/` without `XDG_RUNTIME_DIR`) |
 | `~/.config/ensemble/node/hubs.json` | the node's hub tokens, one per URL, mode 0600 |
@@ -212,7 +212,7 @@ router, the queue, budgets, records and tasks work as with one team, with
 agents named `web/coder`; a task's `gate: { name: test }` means the gate
 `test` of its agent's team.
 
-- **Made**: `team new` writes the sample; `add-agent` and `remove-agent` edit
+- **Made**: `node team new` writes the sample; `node agent add` and `node agent remove` edit
   it as text, comments kept.
 - **Linked**: `team add` makes a symbolic link to a folder with a
   `config.yaml`, such as a checkout a company keeps.
@@ -224,8 +224,8 @@ agents named `web/coder`; a task's `gate: { name: test }` means the gate
   a `pending` file; `team approve` shows what it would run and removes the
   file. The agent has no tool to change a team that exists.
 
-The commands that read teams (`check`, `agents`, `show`, `health`, `run`,
-`doctor`, `stats`, `submit`) load them the same way. A running node reloads them when a `team` command
+The commands that read teams (`node team check`, `node doctor`, the `node agent`
+commands, `task new`) load them the same way. A running node reloads them when a `node team` command
 changes the directory, or on `ensemble node reload` after a change by hand:
 it reads them again, and if one cannot be loaded it keeps the teams it had
 and says why. Otherwise each folder's `Ensemble` gets the new teams with
@@ -272,7 +272,7 @@ task; `status`, `wait` and `cancel` follow it.
 A task is kept on the hub, in its database, for one account and one project
 (a working folder's name): its ticket, its assignee, its questions and
 answers, what agents handed on, its result, and its **lease**. It comes from
-`submit`, `ensemble submit`, or the hub's inbox. The hub never runs one; a
+the `submit` tool, `ensemble task new`, or the hub's inbox. The hub never runs one; a
 node leases it. Each folder's worker, every two seconds and whenever
 something changes, asks the hub for its project's tasks (`RemoteBoard`, over
 one link that opens again when it breaks), and:
@@ -294,7 +294,7 @@ one link that opens again when it breaks), and:
    question and the task waits for `answer`; `HAND OFF: <agent> <what
    remains>` reassigns it with a note; otherwise its result (`done`, `failed`
    or `cancelled`), after committing everything on the task's branch in a
-   worktree. Nothing is merged: that is `ensemble merge`, which only a person
+   worktree. Nothing is merged: that is `ensemble task merge`, which only a person
    runs.
 
 A node that stops puts its running tasks back (`task_release`); one that dies
@@ -427,7 +427,7 @@ and is written to be read by the model that will see it.
 - **No sandbox of Ensemble's own.** Agents use their CLIs' own tools with your
   permissions; `tools` and `permission_mode` (or Codex's sandbox) limit them.
   `builtin`'s file tools cannot leave the working folder; its `shell` can.
-  `check` and `doctor` warn about agents that can change files in place.
+  `node team check` and `node doctor` warn about agents that can change files in place.
 - **What runs is what the config says.** A task cannot bring a command; gates
   are defined in `config.yaml`. A remote helper team is pinned to a commit and
   trusted per commit.
@@ -781,7 +781,7 @@ number of hours and is what a UI holds, and from a session a person makes
 access tokens for nodes and scripts, each named, with an optional expiry and
 optional scopes that narrow the account's role. Only a session may manage
 tokens or the password; failed logins lock a name for a while. (Decided
-2026-11-11.) CLIs and nodes enroll with `ensemble login <hub> --user NAME`,
+2026-11-11.) CLIs and nodes enroll with `ensemble node login <hub> --user NAME`,
 which makes an access token for that computer (the OAuth device flow and
 OIDC later). A node keeps its token in a file only its user can read,
 under `~/.config/ensemble`, like an SSH key; the OS keyring may come later as
@@ -841,7 +841,7 @@ crate holds it today.
 
 ## Build order
 
-1. The flat helper team, `direct`, `--team`. (Done.)
+1. The flat helper team, and `direct`. (Done.)
 2. The module split into a Cargo workspace, behavior-preserving. (Done.)
 3. Per-agent backend fallback and the resolver. (Done: `try` and `when_none`
    for models on LLM backends.)
@@ -853,7 +853,7 @@ crate holds it today.
    yet: visibility, the privacy gate beyond the secret check.)
 5. Hub server, link, identity, tracker adapters. (Done: the inbox with a local
    markdown tracker; `ensemble hub serve` with accounts, sessions, scoped
-   access tokens, sign-up with approval and a REST API; `ensemble login`; the organization vault over the
+   access tokens, sign-up with approval and a REST API; `ensemble node login`; the organization vault over the
    link; nodes, private or shared, running agents and serving models through
    the hub, the `node` adapter and `/nodes/v1/`. Not yet: GitLab, GitHub and
    Jira; OIDC and the device flow; the chat API and the web UI.)
@@ -862,7 +862,7 @@ crate holds it today.
    harness-rs; the node as the long-running MCP server on a socket, with
    `ensemble mcp` as a bridge to it and a worker per folder.)
 7. One node per computer, and the node as the only way in: every session
-   is `ensemble mcp`, a bridge to it; `setup` and `connect` register the
+   is `ensemble mcp`, a bridge to it; `node setup` and `node connect` register the
    bridge with the client. (Done.)
 8. Teams in a directory of the node: made, linked, pulled from git pinned
    to a trusted commit, or written by an agent and approved by the person;

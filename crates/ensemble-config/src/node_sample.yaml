@@ -1,11 +1,11 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/node.schema.json
 
 # node.yaml — this computer's node: a worker that runs your helper teams, every
-# team in its teams directory (`ensemble teams` lists them).
+# team in its teams directory (`ensemble node team list` lists them).
 # Your agent CLI reaches it from any folder through `ensemble mcp`, and its
 # tasks go on after the session ends. With a hub server you signed in to
-# (`ensemble login`), it also takes your tasks from the hub and can lend this
-# computer's power. Written by `ensemble setup` or `ensemble node init` in
+# (`ensemble node login`), it also runs the tasks the hub keeps for you and can
+# lend this computer's power. Written by `ensemble node setup` or `ensemble node init` in
 # ~/.config/ensemble. A computer runs one node.
 #
 # Nothing has a default value. Each block under `offers` may be left out, which
@@ -20,7 +20,7 @@ name: laptop                     # its name; a hub knows it as <you>/laptop
 # llm_backends, never on your agent CLI's subscription.
 access: private
 
-hub: wss://hub.example.com       # the hub server it connects to (`ensemble login` first); leave out for none
+hub: wss://hub.example.com       # the hub server it connects to (`ensemble node login` first); leave out for none
 
 offers:
   # Agents of its teams, which others name with an agent of `type: node`. A task

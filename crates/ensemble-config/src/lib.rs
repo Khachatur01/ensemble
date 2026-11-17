@@ -26,11 +26,11 @@ use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILENAME: &str = "config.yaml";
 
-/// The JSON Schema for `config.yaml`, for editors. `ensemble schema`
+/// The JSON Schema for `config.yaml`, for editors. `ensemble node team schema`
 /// prints it; the tests keep it in step with the structs below.
 pub const SCHEMA: &str = include_str!("../../../ensemble.schema.json");
 
-/// The config `ensemble team new` writes: every setting at least once, with what
+/// The config `ensemble node team new` writes: every setting at least once, with what
 /// it does. The tests keep it loading and complete.
 pub const SAMPLE: &str = include_str!("sample.yaml");
 
@@ -194,7 +194,7 @@ pub enum Adapter {
 /// definition sent from here, so the node's owner decides what runs there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeAdapter {
-    /// The hub server, `ws://` or `wss://`, signed in to with `ensemble login`.
+    /// The hub server, `ws://` or `wss://`, signed in to with `ensemble node login`.
     pub hub: String,
     /// The agent the nodes offer.
     pub agent: String,
@@ -621,7 +621,7 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::NotFound { path } => write!(
                 f,
-                "no {CONFIG_FILENAME} at {}. `ensemble teams` lists the teams; `ensemble team new <name>` makes one.",
+                "no {CONFIG_FILENAME} at {}. `ensemble node team list` lists the teams; `ensemble node team new <name>` makes one.",
                 path.display()
             ),
             ConfigError::HubNotFound { path } => write!(

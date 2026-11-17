@@ -49,7 +49,7 @@ pub struct Task {
 /// that was on another computer.
 pub fn find(detail: Option<Detail>, workdir: &Path, id: &str) -> Result<Task, String> {
     let Some(detail) = detail else {
-        return Err(format!("no task '{id}'. `ensemble tasks` lists them."));
+        return Err(format!("no task '{id}'. `ensemble task list` lists them."));
     };
     let ticket = detail.task.ticket;
     let repo = match ticket.repo.as_deref() {

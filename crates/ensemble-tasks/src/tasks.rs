@@ -207,7 +207,7 @@ pub struct Detail {
 
 /// One line about a task: its id, agent, where it stands and its title.
 /// `budget_wait` is the seconds until its agent may start another run, when
-/// it may not now. The tool `status` and the commands `ensemble tasks` and
+/// it may not now. The tool `status` and the commands `ensemble task list` and
 /// `ensemble task` all show a task this way.
 pub fn entry_line(task: &Task, all: &[Task], budget_wait: Option<u64>) -> String {
     let t = &task.ticket;

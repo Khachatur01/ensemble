@@ -267,7 +267,7 @@ impl<'e> Queue<'e> {
         self.board.as_deref().ok_or_else(|| {
             ToolResult::err(
                 "tasks are kept on a hub, and this node names none: add `hub:` to \
-                 ~/.config/ensemble/node/node.yaml and sign in with `ensemble login`. Without \
+                 ~/.config/ensemble/node/node.yaml and sign in with `ensemble node login`. Without \
                  one, `delegate` with `background: true` runs work you do not wait for.",
             )
         })

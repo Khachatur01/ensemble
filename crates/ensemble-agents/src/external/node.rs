@@ -44,7 +44,7 @@ pub async fn run(
     let tokens = ensemble_link::Tokens::load().map_err(unsupported)?;
     let token = tokens.get(&na.hub).ok_or_else(|| {
         unsupported(format!(
-            "no token for the hub {}; sign in first: ensemble login {} --user <name>",
+            "no token for the hub {}; sign in first: ensemble node login {} --user <name>",
             na.hub, na.hub
         ))
     })?;
@@ -199,7 +199,7 @@ pub fn health(na: &NodeAdapter) -> Result<(), Error> {
     let token = tokens.get(&na.hub).ok_or_else(|| Error::Unsupported {
         backend: backend(),
         detail: format!(
-            "no token for the hub {}; ensemble login {} --user <name>",
+            "no token for the hub {}; ensemble node login {} --user <name>",
             na.hub, na.hub
         ),
     })?;

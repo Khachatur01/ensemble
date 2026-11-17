@@ -283,7 +283,7 @@ fn check_accepts_a_valid_config_and_reports_the_team() {
     let s = Scratch::new("check-ok");
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
 
-    let out = ensemble(&s, &["check"]);
+    let out = ensemble(&s, &["node", "team", "check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(text.contains("team: ok (made here)"), "{text}");
@@ -322,7 +322,7 @@ agents:
       command: opencode
 "#,
     );
-    let out = ensemble(&s, &["check"]);
+    let out = ensemble(&s, &["node", "team", "check"]);
     assert!(!out.status.success());
     let err = stderr_of(&out);
     assert!(err.contains("version"), "{err}");
@@ -345,7 +345,7 @@ llm_backends:
     api_key: "sk-should-never-be-here"
 "#,
     );
-    let out = ensemble(&s, &["check"]);
+    let out = ensemble(&s, &["node", "team", "check"]);
     assert!(!out.status.success(), "secrets in the config must not load");
     assert!(stderr_of(&out).contains("api_key"), "{}", stderr_of(&out));
 }
@@ -355,10 +355,10 @@ fn with_no_team_check_says_how_to_make_one() {
     let s = Scratch::new("no-org");
     // The project folder holds a config of the old kind; it is not looked at.
     s.write("config.yaml", "version: 2\n");
-    let out = ensemble(&s, &["check"]);
+    let out = ensemble(&s, &["node", "team", "check"]);
     assert!(!out.status.success(), "no team means no helper team");
     assert!(
-        stderr_of(&out).contains("ensemble team new"),
+        stderr_of(&out).contains("ensemble node team new"),
         "{}",
         stderr_of(&out)
     );
@@ -368,7 +368,7 @@ fn with_no_team_check_says_how_to_make_one() {
 fn a_broken_team_is_named_rather_than_skipped() {
     let s = Scratch::new("no-config");
     s.write("@team/config.yaml", "version: 1\n");
-    let out = ensemble(&s, &["check"]);
+    let out = ensemble(&s, &["node", "team", "check"]);
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("team 'team'"),
@@ -382,7 +382,7 @@ fn agents_prints_the_routing_table() {
     let s = Scratch::new("agents");
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
 
-    let out = ensemble(&s, &["agents"]);
+    let out = ensemble(&s, &["node", "agent", "list"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(
@@ -401,7 +401,7 @@ fn the_base_url_is_the_one_in_the_config_and_no_variable_changes_it() {
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
 
     let out = command(&s)
-        .arg("check")
+        .args(["node", "team", "check"])
         .env("ENSEMBLE_TEST_LOCAL_URL", "http://10.0.0.9:9999/v1")
         .output()
         .unwrap();
@@ -420,7 +420,18 @@ fn run_starts_the_agents_cli_with_the_task_and_prints_its_answer() {
     let cli = s.opencode("the review is clean", "");
     s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
 
-    let out = ensemble(&s, &["run", "team/reviewer", "review", "this", "code"]);
+    let out = ensemble(
+        &s,
+        &[
+            "node",
+            "agent",
+            "run",
+            "team/reviewer",
+            "review",
+            "this",
+            "code",
+        ],
+    );
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).starts_with("the review is clean"),
@@ -456,7 +467,7 @@ fn an_agent_on_an_llm_backend_gets_its_endpoint_and_the_key_from_dotenv() {
     );
     s.write("@node/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-from-dotenv\n");
 
-    let out = ensemble(&s, &["run", "team/coder", "do it"]);
+    let out = ensemble(&s, &["node", "agent", "run", "team/coder", "do it"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         s.seen("args")
@@ -480,7 +491,7 @@ fn show_prints_how_an_agent_starts_with_the_key_hidden() {
     );
     s.write("@node/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-secret-value\n");
 
-    let out = ensemble(&s, &["show", "team/coder"]);
+    let out = ensemble(&s, &["node", "agent", "show", "team/coder"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(
@@ -494,7 +505,7 @@ fn show_prints_how_an_agent_starts_with_the_key_hidden() {
     assert!(text.contains("<redacted>"), "{text}");
     assert!(!text.contains("sk-secret-value"), "the key leaked: {text}");
 
-    let out = ensemble(&s, &["show", "nobody"]);
+    let out = ensemble(&s, &["node", "agent", "show", "nobody"]);
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("team/coder, team/reviewer"),
@@ -510,7 +521,10 @@ fn files_the_agent_changed_are_reported() {
     s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
 
-    let out = ensemble(&s, &["run", "team/coder", "rename foo to bar"]);
+    let out = ensemble(
+        &s,
+        &["node", "agent", "run", "team/coder", "rename foo to bar"],
+    );
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(s.read("a.txt"), "bar\n");
 }
@@ -521,7 +535,7 @@ fn health_checks_the_cli_and_that_the_backend_serves_the_model() {
     let cli = s.opencode("", "");
     let serving = models_stub(r#"{"object":"list","data":[{"id":"qwen3-coder"}]}"#);
     s.write("@team/config.yaml", &config_yaml(&cli, &serving));
-    let out = ensemble(&s, &["health"]);
+    let out = ensemble(&s, &["node", "agent", "health"]);
     assert!(
         out.status.success(),
         "{}{}",
@@ -534,7 +548,7 @@ fn health_checks_the_cli_and_that_the_backend_serves_the_model() {
 
     let other = models_stub(r#"{"object":"list","data":[{"id":"something-else"}]}"#);
     s.write("@team/config.yaml", &config_yaml(&cli, &other));
-    let out = ensemble(&s, &["health"]);
+    let out = ensemble(&s, &["node", "agent", "health"]);
     assert!(!out.status.success());
     let text = stdout_of(&out);
     assert!(text.contains("openai-local: FAILED"), "{text}");
@@ -544,7 +558,7 @@ fn health_checks_the_cli_and_that_the_backend_serves_the_model() {
     );
 
     s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
-    let out = ensemble(&s, &["health"]);
+    let out = ensemble(&s, &["node", "agent", "health"]);
     assert!(!out.status.success());
     assert!(
         stdout_of(&out).contains("could not reach the endpoint"),
@@ -927,7 +941,7 @@ fn an_invalid_team_stops_the_node_before_it_serves_anything() {
 #[test]
 fn team_new_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_accident() {
     let s = Scratch::new("init");
-    let out = ensemble(&s, &["team", "new", "team"]);
+    let out = ensemble(&s, &["node", "team", "new", "team"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let written = std::fs::read_to_string(s.team_dir().join("config.yaml")).unwrap();
     assert!(written.contains("type: opencode"), "{written}");
@@ -942,13 +956,13 @@ fn team_new_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_acci
         "nothing is written in the project"
     );
 
-    let check = ensemble(&s, &["check"]);
+    let check = ensemble(&s, &["node", "team", "check"]);
     assert!(check.status.success(), "{}", stderr_of(&check));
     let text = stdout_of(&check);
     assert!(text.contains("team/coder  ->"), "{text}");
 
     s.write("@team/config.yaml", "mine");
-    let again = ensemble(&s, &["team", "new", "team"]);
+    let again = ensemble(&s, &["node", "team", "new", "team"]);
     assert!(!again.status.success());
     assert!(
         stderr_of(&again).contains("already"),
@@ -960,7 +974,7 @@ fn team_new_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_acci
         "mine"
     );
 
-    let printed = ensemble(&s, &["team", "new", "--stdout"]);
+    let printed = ensemble(&s, &["node", "team", "new", "--stdout"]);
     assert_eq!(stdout_of(&printed), written);
 }
 
@@ -969,7 +983,7 @@ fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
     let s = Scratch::new("dotenv");
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     s.write("@node/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-from-dotenv\n");
-    let out = ensemble(&s, &["check"]);
+    let out = ensemble(&s, &["node", "team", "check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(text.contains("authenticated"), "{text}");
@@ -980,13 +994,13 @@ fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
     let out = command(&s)
         .arg("--env-file")
         .arg(&other)
-        .args(["show", "team/coder"])
+        .args(["node", "agent", "show", "team/coder"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
 
     s.write("@node/.env", "not a line\n");
-    let out = ensemble(&s, &["check"]);
+    let out = ensemble(&s, &["node", "team", "check"]);
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("line 1: expected NAME=value"),
@@ -996,7 +1010,7 @@ fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
     let out = command(&s)
         .arg("--env-file")
         .arg(&other)
-        .arg("check")
+        .args(["node", "team", "check"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -1007,7 +1021,7 @@ fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dotenv, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
-    let out = ensemble(&s, &["check"]);
+    let out = ensemble(&s, &["node", "team", "check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(stderr_of(&out).contains("chmod 600"), "{}", stderr_of(&out));
 }
@@ -1023,20 +1037,30 @@ fn check_says_which_tasks_on_the_hub_this_node_cannot_run() {
     s.write("@team/config.yaml", &gated);
     for args in [
         vec![
-            "submit",
-            "team/coder",
+            "task",
+            "new",
             "Ok",
+            "--agent",
+            "team/coder",
             "--text",
             "do it",
             "--gate",
             "test:1",
         ],
-        vec!["submit", "team/reviewer", "Look", "--text", "look"],
+        vec![
+            "task",
+            "new",
+            "Look",
+            "--agent",
+            "team/reviewer",
+            "--text",
+            "look",
+        ],
     ] {
         let out = ensemble(&s, &args);
         assert!(out.status.success(), "{}", stderr_of(&out));
     }
-    let out = ensemble(&s, &["check"]);
+    let out = ensemble(&s, &["node", "team", "check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).contains("tasks: 2 on the hub ws://")
@@ -1050,7 +1074,7 @@ fn check_says_which_tasks_on_the_hub_this_node_cannot_run() {
         "@team/config.yaml",
         &config_yaml("opencode", NOWHERE).replace("  reviewer:", "  critic:"),
     );
-    let out = ensemble(&s, &["check"]);
+    let out = ensemble(&s, &["node", "team", "check"]);
     assert!(!out.status.success());
     let text = stdout_of(&out);
     assert!(
@@ -1075,7 +1099,10 @@ fn a_light_agent_is_one_request_to_its_backend() {
     );
     s.write("@team/config.yaml", &config);
 
-    let out = ensemble(&s, &["run", "team/summariser", "sum", "it", "up"]);
+    let out = ensemble(
+        &s,
+        &["node", "agent", "run", "team/summariser", "sum", "it", "up"],
+    );
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).starts_with("three bullets"),
@@ -1083,7 +1110,7 @@ fn a_light_agent_is_one_request_to_its_backend() {
         stdout_of(&out)
     );
 
-    let out = ensemble(&s, &["show", "team/summariser"]);
+    let out = ensemble(&s, &["node", "agent", "show", "team/summariser"]);
     let text = stdout_of(&out);
     assert!(
         text.starts_with(&format!("POST {url}/chat/completions\n")),
@@ -1094,7 +1121,7 @@ fn a_light_agent_is_one_request_to_its_backend() {
         "{text}"
     );
 
-    let check = stdout_of(&ensemble(&s, &["check"]));
+    let check = stdout_of(&ensemble(&s, &["node", "team", "check"]));
     assert!(
         check.contains("team/summariser  ->  direct on team/openai-local / small"),
         "{check}"
@@ -1149,7 +1176,7 @@ fn connect_registers_a_session_of_the_node_with_the_client_and_says_what_it_ran(
         let s = Scratch::new(&format!("connect-{program}"));
         let bin = stub_clis(&s, &[program]);
         let out = with_path(&s, &bin)
-            .args(["connect", "--client", client, "--global"])
+            .args(["node", "connect", client, "--global"])
             .output()
             .unwrap();
         assert!(out.status.success(), "{}", stderr_of(&out));
@@ -1168,7 +1195,7 @@ fn connect_without_the_clients_cli_prints_the_command_and_fails() {
     let s = Scratch::new("connect-missing");
     let bin = stub_clis(&s, &[]);
     let out = with_path(&s, &bin)
-        .args(["connect", "--client", "claude-code"])
+        .args(["node", "connect", "claude-code"])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -1194,6 +1221,7 @@ fn setup_writes_the_node_registers_it_and_checks_its_teams() {
     let bin = stub_clis(&s, &["claude", "opencode"]);
     let out = with_path(&s, &bin)
         .args([
+            "node",
             "setup",
             "--yes",
             "--client",
@@ -1219,7 +1247,7 @@ fn setup_writes_the_node_registers_it_and_checks_its_teams() {
 
     // A second run keeps the node that is there.
     let again = with_path(&s, &bin)
-        .args(["setup", "--yes", "--client", "claude-code"])
+        .args(["node", "setup", "--yes", "--client", "claude-code"])
         .output()
         .unwrap();
     assert!(
@@ -1235,7 +1263,7 @@ fn setup_without_any_agent_cli_says_what_to_install() {
     let s = Scratch::new("setup-nothing");
     let bin = stub_clis(&s, &[]);
     let out = with_path(&s, &bin)
-        .args(["setup", "--yes", "--name", "desk"])
+        .args(["node", "setup", "--yes", "--name", "desk"])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -1254,7 +1282,7 @@ fn doctor_says_what_is_wrong_and_how_to_fix_it() {
         "@team/config.yaml",
         &config_yaml("/nonexistent/opencode", NOWHERE),
     );
-    let out = ensemble(&s, &["doctor"]);
+    let out = ensemble(&s, &["node", "doctor"]);
     assert!(!out.status.success());
     let text = stdout_of(&out);
     assert!(
@@ -1263,7 +1291,7 @@ fn doctor_says_what_is_wrong_and_how_to_fix_it() {
     );
     assert!(text.contains("fix: install `opencode`"), "{text}");
     assert!(
-        text.contains("ensemble remove-agent coder --team team"),
+        text.contains("ensemble node agent remove team/coder"),
         "{text}"
     );
     assert!(text.contains("problem: team/openai-local"), "{text}");
@@ -1274,7 +1302,7 @@ fn doctor_says_what_is_wrong_and_how_to_fix_it() {
     let url = models_stub(r#"{"data":[{"id":"qwen3-coder"}]}"#);
     s.write("@team/config.yaml", &config_yaml("true", &url));
     std::fs::create_dir_all(s.path().join(".git")).unwrap();
-    let out = ensemble(&s, &["doctor"]);
+    let out = ensemble(&s, &["node", "doctor"]);
     let text = stdout_of(&out);
     assert!(out.status.success(), "{text}");
     assert!(!text.contains("problem"), "{text}");
@@ -1287,10 +1315,10 @@ fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
     let out = ensemble(
         &s,
         &[
-            "add-agent",
-            "tester",
-            "--team",
-            "team",
+            "node",
+            "agent",
+            "add",
+            "team/tester",
             "--adapter",
             "claude-code",
             "--prompt",
@@ -1298,7 +1326,7 @@ fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
         ],
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let agents = ensemble(&s, &["agents"]);
+    let agents = ensemble(&s, &["node", "agent", "list"]);
     assert!(
         stdout_of(&agents).contains("team/tester\tclaude-code\tsonnet"),
         "{}",
@@ -1308,10 +1336,10 @@ fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
     let dup = ensemble(
         &s,
         &[
-            "add-agent",
-            "tester",
-            "--team",
-            "team",
+            "node",
+            "agent",
+            "add",
+            "team/tester",
             "--adapter",
             "claude-code",
         ],
@@ -1323,16 +1351,13 @@ fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
         stderr_of(&dup)
     );
 
-    let bad = ensemble(
-        &s,
-        &["add-agent", "x", "--team", "team", "--adapter", "llm"],
-    );
+    let bad = ensemble(&s, &["node", "agent", "add", "team/x", "--adapter", "llm"]);
     assert!(!bad.status.success(), "`llm` is no adapter any more");
 
-    let gone = ensemble(&s, &["remove-agent", "tester", "--team", "team"]);
+    let gone = ensemble(&s, &["node", "agent", "remove", "team/tester"]);
     assert!(gone.status.success(), "{}", stderr_of(&gone));
-    assert!(!stdout_of(&ensemble(&s, &["agents"])).contains("tester"));
-    let missing = ensemble(&s, &["remove-agent", "tester", "--team", "team"]);
+    assert!(!stdout_of(&ensemble(&s, &["node", "agent", "list"])).contains("tester"));
+    let missing = ensemble(&s, &["node", "agent", "remove", "team/tester"]);
     assert!(!missing.status.success());
 }
 
@@ -1391,7 +1416,7 @@ fn a_pulled_team_is_pinned_shown_trusted_and_then_used() {
     // Without a terminal and without --yes there is nobody to ask: a refusal,
     // and nothing is kept.
     let refused = command(&s)
-        .args(["team", "pull", &url, "--name", "web"])
+        .args(["node", "team", "pull", &url, "--name", "web"])
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -1401,10 +1426,11 @@ fn a_pulled_team_is_pinned_shown_trusted_and_then_used() {
         "{}",
         stderr_of(&refused)
     );
-    assert!(!stdout_of(&ensemble(&s, &["teams"])).contains("web"));
+    assert!(!stdout_of(&ensemble(&s, &["node", "team", "list"])).contains("web"));
 
     let pulled = command(&s)
         .args([
+            "node",
             "team",
             "pull",
             &format!("{url}@main"),
@@ -1423,7 +1449,7 @@ fn a_pulled_team_is_pinned_shown_trusted_and_then_used() {
     );
     assert_eq!(pinned_commit(&s, "web"), sha);
 
-    let out = ensemble(&s, &["check"]);
+    let out = ensemble(&s, &["node", "team", "check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(
@@ -1432,7 +1458,7 @@ fn a_pulled_team_is_pinned_shown_trusted_and_then_used() {
     );
     assert!(text.contains("web/coder"), "{text}");
     let again = command(&s)
-        .args(["team", "pull", &url, "--name", "web", "--yes"])
+        .args(["node", "team", "pull", &url, "--name", "web", "--yes"])
         .output()
         .unwrap();
     assert!(!again.status.success(), "a name is taken once");
@@ -1446,10 +1472,11 @@ fn a_pulled_team_is_pinned_shown_trusted_and_then_used() {
         serde_json::json!({"url": url, "commit": other}).to_string(),
     )
     .unwrap();
-    let out = ensemble(&s, &["check"]);
+    let out = ensemble(&s, &["node", "team", "check"]);
     assert!(!out.status.success(), "an untrusted commit is not used");
     assert!(
-        stderr_of(&out).contains("team 'sneaky'") && stderr_of(&out).contains("ensemble team pull"),
+        stderr_of(&out).contains("team 'sneaky'")
+            && stderr_of(&out).contains("ensemble node team pull"),
         "{}",
         stderr_of(&out)
     );
@@ -1460,14 +1487,14 @@ fn team_update_shows_what_changed_and_moves_only_once_trusted() {
     let s = Scratch::new("remote-update");
     let (url, old) = origin(&s, &config_yaml("true", NOWHERE));
     let pulled = command(&s)
-        .args(["team", "pull", &url, "--name", "web", "--yes"])
+        .args(["node", "team", "pull", &url, "--name", "web", "--yes"])
         .output()
         .unwrap();
     assert!(pulled.status.success(), "{}", stderr_of(&pulled));
     let (_, new) = origin(&s, &config_yaml("opencode", NOWHERE));
 
     let refused = command(&s)
-        .args(["team", "update", "web", "--ref", "main"])
+        .args(["node", "team", "update", "web", "--ref", "main"])
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -1480,7 +1507,7 @@ fn team_update_shows_what_changed_and_moves_only_once_trusted() {
     assert_eq!(pinned_commit(&s, "web"), old, "the pin did not move");
 
     let moved = command(&s)
-        .args(["team", "update", "web", "--ref", "main", "--yes"])
+        .args(["node", "team", "update", "web", "--ref", "main", "--yes"])
         .output()
         .unwrap();
     assert!(moved.status.success(), "{}", stderr_of(&moved));
@@ -1490,7 +1517,7 @@ fn team_update_shows_what_changed_and_moves_only_once_trusted() {
         stdout_of(&moved)
     );
     assert_eq!(pinned_commit(&s, "web"), new);
-    let again = ensemble(&s, &["team", "update", "web", "--ref", "main"]);
+    let again = ensemble(&s, &["node", "team", "update", "web", "--ref", "main"]);
     assert!(
         stdout_of(&again).contains("already"),
         "{}",
@@ -1498,7 +1525,7 @@ fn team_update_shows_what_changed_and_moves_only_once_trusted() {
     );
 
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
-    let made = ensemble(&s, &["team", "update", "team"]);
+    let made = ensemble(&s, &["node", "team", "update", "team"]);
     assert!(!made.status.success());
     assert!(
         stderr_of(&made).contains("was not pulled"),
@@ -1519,7 +1546,7 @@ fn a_task_kept_on_the_hub_by_submit_is_listed_shown_and_run_by_a_session() {
     s.write("a.txt", "foo\n");
     let _hub = with_hub(&s);
 
-    let none = ensemble(&s, &["tasks"]);
+    let none = ensemble(&s, &["task", "list"]);
     assert!(
         stdout_of(&none).contains("No tasks"),
         "{}",
@@ -1529,9 +1556,11 @@ fn a_task_kept_on_the_hub_by_submit_is_listed_shown_and_run_by_a_session() {
     let out = ensemble(
         &s,
         &[
-            "submit",
-            "team/coder",
+            "task",
+            "new",
             "Rename foo",
+            "--agent",
+            "team/coder",
             "--text",
             "rename foo to bar",
             "--goal",
@@ -1547,13 +1576,13 @@ fn a_task_kept_on_the_hub_by_submit_is_listed_shown_and_run_by_a_session() {
         stdout_of(&out)
     );
 
-    let listed = ensemble(&s, &["tasks"]);
+    let listed = ensemble(&s, &["task", "list"]);
     assert!(
         stdout_of(&listed).contains("0001-rename-foo · team/coder · queued · Rename foo"),
         "{}",
         stdout_of(&listed)
     );
-    let shown = ensemble(&s, &["task", "0001-rename-foo"]);
+    let shown = ensemble(&s, &["task", "show", "0001-rename-foo"]);
     let text = stdout_of(&shown);
     assert!(
         text.contains("rename foo to bar") && text.contains("Goal: no foo left"),
@@ -1575,19 +1604,19 @@ fn a_task_kept_on_the_hub_by_submit_is_listed_shown_and_run_by_a_session() {
     );
     drop(session);
 
-    let done = ensemble(&s, &["tasks", "--status", "done"]);
+    let done = ensemble(&s, &["task", "list", "--status", "done"]);
     assert!(
         stdout_of(&done).contains("0001-rename-foo"),
         "{}",
         stdout_of(&done)
     );
-    let queued = ensemble(&s, &["tasks", "--status", "queued"]);
+    let queued = ensemble(&s, &["task", "list", "--status", "queued"]);
     assert!(
         stdout_of(&queued).contains("No tasks with status 'queued'"),
         "{}",
         stdout_of(&queued)
     );
-    let shown = ensemble(&s, &["task", "0001-rename-foo"]);
+    let shown = ensemble(&s, &["task", "show", "0001-rename-foo"]);
     assert!(
         stdout_of(&shown).contains("status: done"),
         "{}",
@@ -1601,7 +1630,10 @@ fn submit_refuses_what_a_task_cannot_be() {
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     // Tasks are kept on a hub: without one there is nowhere to keep them.
     s.node_yaml();
-    let nowhere = ensemble(&s, &["submit", "team/coder", "T", "--text", "x"]);
+    let nowhere = ensemble(
+        &s,
+        &["task", "new", "T", "--agent", "team/coder", "--text", "x"],
+    );
     assert!(!nowhere.status.success());
     assert!(
         stderr_of(&nowhere).contains("names no hub"),
@@ -1609,15 +1641,20 @@ fn submit_refuses_what_a_task_cannot_be() {
         stderr_of(&nowhere)
     );
     let _hub = with_hub(&s);
-    let no_text = ensemble(&s, &["submit", "team/coder", "T"]);
+    let no_text = ensemble(&s, &["task", "new", "T", "--agent", "team/coder"]);
     assert!(!no_text.status.success());
     for (args, needle) in [
-        (vec!["submit", "nobody", "T", "--text", "x"], "no agent"),
+        (
+            vec!["task", "new", "T", "--agent", "nobody", "--text", "x"],
+            "no agent",
+        ),
         (
             vec![
-                "submit",
-                "team/coder",
+                "task",
+                "new",
                 "T",
+                "--agent",
+                "team/coder",
                 "--text",
                 "x",
                 "--gate",
@@ -1627,9 +1664,11 @@ fn submit_refuses_what_a_task_cannot_be() {
         ),
         (
             vec![
-                "submit",
-                "team/coder",
+                "task",
+                "new",
                 "T",
+                "--agent",
+                "team/coder",
                 "--text",
                 "x",
                 "--gate",
@@ -1639,9 +1678,11 @@ fn submit_refuses_what_a_task_cannot_be() {
         ),
         (
             vec![
-                "submit",
-                "team/coder",
+                "task",
+                "new",
                 "T",
+                "--agent",
+                "team/coder",
                 "--text",
                 "x",
                 "--repo",
@@ -1658,7 +1699,7 @@ fn submit_refuses_what_a_task_cannot_be() {
             stderr_of(&out)
         );
     }
-    assert!(stdout_of(&ensemble(&s, &["tasks"])).contains("No tasks"));
+    assert!(stdout_of(&ensemble(&s, &["task", "list"])).contains("No tasks"));
 }
 
 #[test]
@@ -1672,25 +1713,36 @@ printf '%s\n' "{\"type\":\"text\",\"part\":{\"text\":\"$t\"}}"; exit 0"#,
     s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     let _hub = with_hub(&s);
     let _node = start_node(&s, &[]);
-    let out = ensemble(&s, &["submit", "team/coder", "Ask", "--text", "rename it"]);
+    let out = ensemble(
+        &s,
+        &[
+            "task",
+            "new",
+            "Ask",
+            "--agent",
+            "team/coder",
+            "--text",
+            "rename it",
+        ],
+    );
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        wait_for(30, || stdout_of(&ensemble(&s, &["tasks"]))
+        wait_for(30, || stdout_of(&ensemble(&s, &["task", "list"]))
             .contains("needs input: Which name?")),
         "{}",
-        stdout_of(&ensemble(&s, &["tasks"]))
+        stdout_of(&ensemble(&s, &["task", "list"]))
     );
-    let none = ensemble(&s, &["answer", "0001-ask"]);
+    let none = ensemble(&s, &["task", "answer", "0001-ask"]);
     assert!(!none.status.success());
-    let out = ensemble(&s, &["answer", "0001-ask", "use", "bar"]);
+    let out = ensemble(&s, &["task", "answer", "0001-ask", "use", "bar"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let again = ensemble(&s, &["answer", "0001-ask", "twice"]);
+    let again = ensemble(&s, &["task", "answer", "0001-ask", "twice"]);
     assert!(
         !again.status.success(),
         "a second answer has no question to answer"
     );
     assert!(wait_for(30, || ended(&s, "0001-ask")), "it did not go on");
-    let shown = stdout_of(&ensemble(&s, &["task", "0001-ask"]));
+    let shown = stdout_of(&ensemble(&s, &["task", "show", "0001-ask"]));
     assert!(
         shown.contains("status: done") && shown.contains("renamed with bar"),
         "{shown}"
@@ -1734,9 +1786,11 @@ fn the_node_runs_a_submitted_task_without_a_session_and_stops_on_sigterm() {
     let out = ensemble(
         &s,
         &[
-            "submit",
-            "team/coder",
+            "task",
+            "new",
             "Rename foo",
+            "--agent",
+            "team/coder",
             "--text",
             "rename foo to bar",
         ],
@@ -1755,7 +1809,7 @@ fn the_node_runs_a_submitted_task_without_a_session_and_stops_on_sigterm() {
         std::fs::read_to_string(s.path().join("a.txt")).unwrap(),
         "bar\n"
     );
-    let listed = ensemble(&s, &["tasks"]);
+    let listed = ensemble(&s, &["task", "list"]);
     assert!(
         stdout_of(&listed).contains("done"),
         "{}",
@@ -1800,11 +1854,19 @@ fn a_task_stopped_in_the_middle_is_run_again_when_the_node_starts_again() {
     let mut first = start_node(&s, &[]);
     let out = ensemble(
         &s,
-        &["submit", "team/coder", "Slow", "--text", "take your time"],
+        &[
+            "task",
+            "new",
+            "Slow",
+            "--agent",
+            "team/coder",
+            "--text",
+            "take your time",
+        ],
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(wait_for(30, || marker.exists()));
-    let listed = ensemble(&s, &["tasks"]);
+    let listed = ensemble(&s, &["task", "list"]);
     assert!(
         stdout_of(&listed).contains("running on desk"),
         "{}",
@@ -1813,7 +1875,7 @@ fn a_task_stopped_in_the_middle_is_run_again_when_the_node_starts_again() {
     sigterm(&first);
     first.wait().unwrap();
     assert!(!ended(&s, "0001-slow"), "a stopped task has no result");
-    let listed = ensemble(&s, &["tasks"]);
+    let listed = ensemble(&s, &["task", "list"]);
     assert!(
         stdout_of(&listed).contains("queued (interrupted on desk, where its work is)"),
         "{}",
@@ -1837,7 +1899,7 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
     let s = Scratch::new("stats");
     let cli = s.opencode("fine", "");
     s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
-    let none = ensemble(&s, &["stats"]);
+    let none = ensemble(&s, &["node", "agent", "stats"]);
     assert!(
         stdout_of(&none).contains("No runs recorded"),
         "{}",
@@ -1845,7 +1907,7 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
     );
 
     for _ in 0..2 {
-        let out = ensemble(&s, &["run", "team/reviewer", "look"]);
+        let out = ensemble(&s, &["node", "agent", "run", "team/reviewer", "look"]);
         assert!(out.status.success(), "{}", stderr_of(&out));
     }
     // A run that cannot start is a failure on the record.
@@ -1853,10 +1915,10 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
         "@team/config.yaml",
         &config_yaml("/nonexistent/opencode", NOWHERE),
     );
-    let out = ensemble(&s, &["run", "team/reviewer", "look"]);
+    let out = ensemble(&s, &["node", "agent", "run", "team/reviewer", "look"]);
     assert!(!out.status.success());
 
-    let table = ensemble(&s, &["stats"]);
+    let table = ensemble(&s, &["node", "agent", "stats"]);
     let text = stdout_of(&table);
     let row = text
         .lines()
@@ -1865,12 +1927,12 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
     let cells: Vec<&str> = row.split_whitespace().collect();
     assert_eq!((cells[1], cells[2]), ("3", "1"), "3 runs, 1 failure: {row}");
 
-    let json = ensemble(&s, &["stats", "--json", "--since", "1h"]);
+    let json = ensemble(&s, &["node", "agent", "stats", "--json", "--since", "1h"]);
     let parsed: serde_json::Value = serde_json::from_str(&stdout_of(&json)).unwrap();
     assert_eq!(parsed[0]["agent"], "team/reviewer");
     assert_eq!(parsed[0]["runs"], 3);
 
-    let bad = ensemble(&s, &["stats", "--since", "soon"]);
+    let bad = ensemble(&s, &["node", "agent", "stats", "--since", "soon"]);
     assert!(!bad.status.success());
     assert!(stderr_of(&bad).contains("duration"), "{}", stderr_of(&bad));
 }
@@ -1889,16 +1951,10 @@ fn a_backlog_task_waits_until_it_is_assigned_and_the_helper_team_says_when_it_is
 
     let out = ensemble(
         &s,
-        &[
-            "submit",
-            "Rename foo",
-            "--backlog",
-            "--text",
-            "rename foo to bar",
-        ],
+        &["task", "new", "Rename foo", "--text", "rename foo to bar"],
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let listed = stdout_of(&ensemble(&s, &["tasks"]));
+    let listed = stdout_of(&ensemble(&s, &["task", "list"]));
     assert!(listed.contains("0001-rename-foo · - · backlog"), "{listed}");
     assert!(
         listed.contains("Idle: no active tasks (1 in the backlog, to be assigned)"),
@@ -1910,9 +1966,9 @@ fn a_backlog_task_waits_until_it_is_assigned_and_the_helper_team_says_when_it_is
     std::thread::sleep(std::time::Duration::from_secs(3));
     assert!(!ended(&s, "0001-rename-foo"));
 
-    let bad = ensemble(&s, &["assign", "0001-rename-foo", "nobody"]);
+    let bad = ensemble(&s, &["task", "assign", "0001-rename-foo", "nobody"]);
     assert!(!bad.status.success());
-    let ok = ensemble(&s, &["assign", "0001-rename-foo", "team/coder"]);
+    let ok = ensemble(&s, &["task", "assign", "0001-rename-foo", "team/coder"]);
     assert!(ok.status.success(), "{}", stderr_of(&ok));
     assert!(
         stdout_of(&ok).contains("assigned to team/coder"),
@@ -1928,8 +1984,8 @@ fn a_backlog_task_waits_until_it_is_assigned_and_the_helper_team_says_when_it_is
         std::fs::read_to_string(s.path().join("a.txt")).unwrap(),
         "bar\n"
     );
-    assert!(stdout_of(&ensemble(&s, &["tasks"])).contains("Idle: no active tasks"));
-    let shown = stdout_of(&ensemble(&s, &["task", "0001-rename-foo"]));
+    assert!(stdout_of(&ensemble(&s, &["task", "list"])).contains("Idle: no active tasks"));
+    let shown = stdout_of(&ensemble(&s, &["task", "show", "0001-rename-foo"]));
     assert!(shown.contains("status: done"), "{shown}");
 }
 
@@ -1937,7 +1993,7 @@ fn a_backlog_task_waits_until_it_is_assigned_and_the_helper_team_says_when_it_is
 fn check_warns_about_what_agents_may_do_without_failing() {
     let s = Scratch::new("check-warn");
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
-    let out = ensemble(&s, &["check"]);
+    let out = ensemble(&s, &["node", "team", "check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(text.contains("warnings:"), "{text}");
@@ -1956,10 +2012,10 @@ fn show_prints_how_a_codex_agent_starts() {
     let out = ensemble(
         &s,
         &[
-            "add-agent",
-            "fixer",
-            "--team",
-            "team",
+            "node",
+            "agent",
+            "add",
+            "team/fixer",
             "--adapter",
             "codex",
             "--prompt",
@@ -1968,7 +2024,7 @@ fn show_prints_how_a_codex_agent_starts() {
         ],
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let shown = ensemble(&s, &["show", "team/fixer"]);
+    let shown = ensemble(&s, &["node", "agent", "show", "team/fixer"]);
     assert!(shown.status.success(), "{}", stderr_of(&shown));
     let text = stdout_of(&shown);
     assert!(
@@ -1976,7 +2032,7 @@ fn show_prints_how_a_codex_agent_starts() {
         "{text}"
     );
     assert!(text.contains("Fixes it."), "{text}");
-    let agents = stdout_of(&ensemble(&s, &["agents"]));
+    let agents = stdout_of(&ensemble(&s, &["node", "agent", "list"]));
     assert!(agents.contains("fixer\tcodex\tgpt-5-codex"), "{agents}");
 }
 
@@ -1995,10 +2051,10 @@ fn a_light_agent_on_an_anthropic_backend_shows_a_messages_request() {
     let out = ensemble(
         &s,
         &[
-            "add-agent",
-            "helper",
-            "--team",
-            "team",
+            "node",
+            "agent",
+            "add",
+            "team/helper",
             "--adapter",
             "direct",
             "--backend",
@@ -2010,7 +2066,7 @@ fn a_light_agent_on_an_anthropic_backend_shows_a_messages_request() {
         ],
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let shown = ensemble(&s, &["show", "team/helper"]);
+    let shown = ensemble(&s, &["node", "agent", "show", "team/helper"]);
     assert!(shown.status.success(), "{}", stderr_of(&shown));
     let text = stdout_of(&shown);
     assert!(
@@ -2018,7 +2074,7 @@ fn a_light_agent_on_an_anthropic_backend_shows_a_messages_request() {
         "{text}"
     );
     assert!(text.contains("\"system\": \"You help.\""), "{text}");
-    let check = stdout_of(&ensemble(&s, &["check"]));
+    let check = stdout_of(&ensemble(&s, &["node", "team", "check"]));
     assert!(check.contains("claude-api  [anthropic-api]"), "{check}");
 }
 
@@ -2062,9 +2118,11 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
     let out = ensemble(
         &s,
         &[
-            "submit",
-            "team/coder",
+            "task",
+            "new",
             "Rename foo",
+            "--agent",
+            "team/coder",
             "--text",
             "rename foo to bar",
         ],
@@ -2081,7 +2139,7 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
         "the project is untouched"
     );
 
-    let review = ensemble(&s, &["review", "0001-rename-foo"]);
+    let review = ensemble(&s, &["task", "review", "0001-rename-foo"]);
     let text = stdout_of(&review);
     assert!(review.status.success(), "{}", stderr_of(&review));
     assert!(
@@ -2089,7 +2147,7 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
         "{text}"
     );
     assert!(text.contains("Result:"), "{text}");
-    let diff = stdout_of(&ensemble(&s, &["diff", "0001-rename-foo"]));
+    let diff = stdout_of(&ensemble(&s, &["task", "diff", "0001-rename-foo"]));
     assert!(diff.contains("-foo\n+bar"), "{diff}");
 
     // The manager can look, through the review tool, and has nothing to merge with.
@@ -2112,7 +2170,7 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
     drop(session);
 
     std::fs::write(s.path().join("a.txt"), "dirty\n").unwrap();
-    let dirty = ensemble(&s, &["merge", "0001-rename-foo"]);
+    let dirty = ensemble(&s, &["task", "merge", "0001-rename-foo"]);
     assert!(!dirty.status.success());
     assert!(
         stderr_of(&dirty).contains("uncommitted changes"),
@@ -2121,7 +2179,10 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
     );
     git_in(s.path(), &["checkout", "--quiet", "a.txt"]);
 
-    let merged = ensemble(&s, &["merge", "0001-rename-foo", "--squash", "--cleanup"]);
+    let merged = ensemble(
+        &s,
+        &["task", "merge", "0001-rename-foo", "--squash", "--cleanup"],
+    );
     assert!(merged.status.success(), "{}", stderr_of(&merged));
     assert!(
         stdout_of(&merged).contains("squashed"),
@@ -2133,7 +2194,7 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
         "bar\n"
     );
     assert!(!s.place("@state/worktrees/0001-rename-foo").exists());
-    let again = ensemble(&s, &["review", "0001-rename-foo"]);
+    let again = ensemble(&s, &["task", "review", "0001-rename-foo"]);
     assert!(!again.status.success(), "its branch is gone");
 }
 
@@ -2147,7 +2208,7 @@ fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
             "version: 1\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"{central}\", timeout_seconds: 5 }}\nlimits: {{}}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ backend: home, model: small }}\n        - {{ backend: central, model: big }}\n      when_none: wait\n      max_tokens: 10\n"
         ),
     );
-    let out = ensemble(&s, &["show", "team/summariser"]);
+    let out = ensemble(&s, &["node", "agent", "show", "team/summariser"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(
@@ -2160,7 +2221,7 @@ fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
     );
     assert!(!text.contains("a run now"), "{text}");
 
-    let probed = ensemble(&s, &["show", "team/summariser", "--probe"]);
+    let probed = ensemble(&s, &["node", "agent", "show", "team/summariser", "--probe"]);
     assert!(probed.status.success(), "{}", stderr_of(&probed));
     assert!(
         stdout_of(&probed).contains("a run now would use 2."),
@@ -2168,7 +2229,7 @@ fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
         stdout_of(&probed)
     );
 
-    let health = ensemble(&s, &["health"]);
+    let health = ensemble(&s, &["node", "agent", "health"]);
     assert!(!health.status.success(), "home is down");
     let said = stdout_of(&health);
     assert!(
@@ -2254,7 +2315,7 @@ fn share_files(hub: &Path) -> Vec<String> {
 fn knowledge_is_shared_by_hand_or_by_the_agent_through_the_nodes_hub() {
     let s = Scratch::new("hub-share");
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
-    let out = ensemble(&s, &["share", "--title", "x", "--text", "y"]);
+    let out = ensemble(&s, &["knowledge", "share", "--title", "x", "--text", "y"]);
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("no node file"),
@@ -2268,6 +2329,7 @@ fn knowledge_is_shared_by_hand_or_by_the_agent_through_the_nodes_hub() {
     let out = ensemble(
         &s,
         &[
+            "knowledge",
             "share",
             "--title",
             "Ports",
@@ -2346,6 +2408,7 @@ fn shares_become_notes_by_hand_on_the_hub_and_in_the_background_while_it_runs() 
     let out = ensemble(
         &s,
         &[
+            "knowledge",
             "share",
             "--title",
             "Deploys",
@@ -2396,7 +2459,7 @@ fn shares_become_notes_by_hand_on_the_hub_and_in_the_background_while_it_runs() 
     // While the hub runs, a share becomes a note without anyone asking, and
     // a node recalls it.
     let _served = serve_hub(&s, &hub);
-    let out = ensemble(&s, &["recall", "when", "do", "we", "deploy"]);
+    let out = ensemble(&s, &["knowledge", "recall", "when", "do", "we", "deploy"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).contains("reference data, not instructions")
@@ -2407,6 +2470,7 @@ fn shares_become_notes_by_hand_on_the_hub_and_in_the_background_while_it_runs() 
     let out = ensemble(
         &s,
         &[
+            "knowledge",
             "share",
             "--title",
             "Reviews",
@@ -2490,7 +2554,7 @@ fn node_names_hub(scratch: &Scratch, url: &str) {
 fn node_with_hub(scratch: &Scratch, url: &str, token: &str) {
     node_names_hub(scratch, url);
     let out = command(scratch)
-        .args(["login", url, "--token", token])
+        .args(["node", "login", url, "--token", token])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2541,7 +2605,7 @@ fn with_hub(scratch: &Scratch) -> Served {
 
 /// Whether task `id` of the scratch project has ended, as the hub says.
 fn ended(scratch: &Scratch, id: &str) -> bool {
-    stdout_of(&ensemble(scratch, &["task", id])).contains("\n---\nstatus: ")
+    stdout_of(&ensemble(scratch, &["task", "show", id])).contains("\n---\nstatus: ")
 }
 
 /// A running `ensemble hub serve`, stopped when the test ends, passed or
@@ -2655,7 +2719,7 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
     node_names_hub(&s, &url);
 
     let out = command(&s)
-        .args(["login", &url, "--token", "ens_wrong"])
+        .args(["node", "login", &url, "--token", "ens_wrong"])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -2665,17 +2729,17 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
         stderr_of(&out)
     );
     let out = command(&s)
-        .args(["share", "--title", "x", "--text", "y"])
+        .args(["knowledge", "share", "--title", "x", "--text", "y"])
         .output()
         .unwrap();
     assert!(
-        stderr_of(&out).contains("ensemble login"),
+        stderr_of(&out).contains("ensemble node login"),
         "nothing was saved: {}",
         stderr_of(&out)
     );
 
     let out = command(&s)
-        .args(["login", &url, "--token", &token])
+        .args(["node", "login", &url, "--token", &token])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2694,7 +2758,7 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
     let kim = stdout_of(&added).trim().to_string();
     let other = Scratch::new("hub-remote-kim");
     let out = command(&other)
-        .args(["login", &url, "--token", &kim])
+        .args(["node", "login", &url, "--token", &kim])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2713,6 +2777,7 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
 
     let out = command(&s)
         .args([
+            "knowledge",
             "share",
             "--title",
             "Deploys",
@@ -2751,7 +2816,7 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
         "{shares:?}"
     );
 
-    let out = command(&s).args(["logout", &url]).output().unwrap();
+    let out = command(&s).args(["node", "logout", &url]).output().unwrap();
     assert!(stdout_of(&out).contains("signed out"));
     let _ = child.kill();
     let _ = child.wait();
@@ -2792,7 +2857,7 @@ fn someone_signs_up_is_let_in_and_logs_in_from_a_node_with_a_password() {
     let url = format!("ws://{address}");
     let login = |user: &str| {
         let mut child = command(&s)
-            .args(["login", &url, "--user", user])
+            .args(["node", "login", &url, "--user", user])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2818,7 +2883,10 @@ fn someone_signs_up_is_let_in_and_logs_in_from_a_node_with_a_password() {
         stdout_of(&out)
     );
     node_names_hub(&s, &url);
-    let out = command(&s).args(["recall", "deploys"]).output().unwrap();
+    let out = command(&s)
+        .args(["knowledge", "recall", "deploys"])
+        .output()
+        .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     drop(child);
 
@@ -2899,7 +2967,7 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_node_and_reported_back() {
     // Ana's node, with her helper team, signed in to the hub.
     let url = format!("ws://{address}");
     let out = command(&s)
-        .args(["login", &url, "--token", &token])
+        .args(["node", "login", &url, "--token", &token])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -3055,7 +3123,7 @@ fn connect_with_hooks_writes_them_into_the_clis_settings() {
     let bin = stub_clis(&s, &["claude", "opencode"]);
     let connect = |client: &str, extra: &[&str]| {
         with_path(&s, &bin)
-            .args(["connect", "--client", client, "--hooks"])
+            .args(["node", "connect", client, "--hooks"])
             .args(extra)
             .output()
             .unwrap()
@@ -3161,7 +3229,7 @@ fn an_agent_runs_on_a_node_and_what_it_changed_comes_back() {
     let _hub = serve_hub(&s, &hub);
     let url = format!("ws://{address}");
     let out = command(&s)
-        .args(["login", &url, "--token", &token])
+        .args(["node", "login", &url, "--token", &token])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -3177,7 +3245,7 @@ fn an_agent_runs_on_a_node_and_what_it_changed_comes_back() {
         "version: 1\nname: laptop\naccess: private\noffers:\n  runs: { agents: [work/reviewer] }\n";
     let _node = serve_node(&s, &url, "laptop", node_yaml);
     node_names_hub(&s, &url);
-    let out = command(&s).args(["nodes"]).output().unwrap();
+    let out = command(&s).args(["node", "peers"]).output().unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).contains("ana/laptop  (private, 0 running)\n  agents: work/reviewer"),
@@ -3196,7 +3264,10 @@ fn an_agent_runs_on_a_node_and_what_it_changed_comes_back() {
             "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: work/reviewer, nodes: [ana/laptop] }}\n"
         ),
     );
-    let out = ensemble(&s, &["run", "team/heavy", "change", "a.txt"]);
+    let out = ensemble(
+        &s,
+        &["node", "agent", "run", "team/heavy", "change", "a.txt"],
+    );
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).starts_with("changed it there"),
@@ -3228,7 +3299,10 @@ fn an_agent_runs_on_a_node_and_what_it_changed_comes_back() {
             "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: work/reviewer, nodes: [kim/gpu-box] }}\n"
         ),
     );
-    let out = ensemble(&s, &["run", "team/heavy", "change", "a.txt"]);
+    let out = ensemble(
+        &s,
+        &["node", "agent", "run", "team/heavy", "change", "a.txt"],
+    );
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("kim/gpu-box is not connected"),
@@ -3244,7 +3318,7 @@ fn a_node_serves_its_models_through_the_hub_and_a_shared_node_lends_no_login() {
     let _hub = serve_hub(&s, &hub);
     let url = format!("ws://{address}");
     let out = command(&s)
-        .args(["login", &url, "--token", &token])
+        .args(["node", "login", &url, "--token", &token])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -3377,7 +3451,7 @@ fn an_agent_writes_a_team_that_runs_only_once_the_person_approves_it() {
     );
     assert_eq!(made["result"]["isError"], false, "{made}");
     assert!(
-        tool_text(&made).contains("ensemble team approve docs"),
+        tool_text(&made).contains("ensemble node team approve docs"),
         "{made}"
     );
     let broken = session.call(
@@ -3406,7 +3480,7 @@ fn an_agent_writes_a_team_that_runs_only_once_the_person_approves_it() {
     drop(session);
 
     // It runs nothing until the person approves it.
-    let check = ensemble(&s, &["check"]);
+    let check = ensemble(&s, &["node", "team", "check"]);
     assert!(check.status.success(), "{}", stderr_of(&check));
     assert!(
         !stdout_of(&check).contains("docs/coder"),
@@ -3418,14 +3492,14 @@ fn an_agent_writes_a_team_that_runs_only_once_the_person_approves_it() {
         "{}",
         stderr_of(&check)
     );
-    let approved = ensemble(&s, &["team", "approve", "docs", "--yes"]);
+    let approved = ensemble(&s, &["node", "team", "approve", "docs", "--yes"]);
     assert!(approved.status.success(), "{}", stderr_of(&approved));
     assert!(
         stdout_of(&approved).contains("coder: runs `true`"),
         "what it runs is shown first: {}",
         stdout_of(&approved)
     );
-    let check = ensemble(&s, &["check"]);
+    let check = ensemble(&s, &["node", "team", "check"]);
     assert!(
         stdout_of(&check).contains("docs/coder"),
         "{}",
@@ -3437,21 +3511,21 @@ fn an_agent_writes_a_team_that_runs_only_once_the_person_approves_it() {
     std::fs::create_dir_all(&elsewhere).unwrap();
     std::fs::write(elsewhere.join("config.yaml"), config_yaml("true", NOWHERE)).unwrap();
     let linked = command(&s)
-        .args(["team", "add", "pcb"])
+        .args(["node", "team", "link", "pcb"])
         .arg(&elsewhere)
         .output()
         .unwrap();
     assert!(linked.status.success(), "{}", stderr_of(&linked));
-    let teams = stdout_of(&ensemble(&s, &["teams"]));
+    let teams = stdout_of(&ensemble(&s, &["node", "team", "list"]));
     assert!(
         teams.contains(&format!("pcb  (linked to {})", elsewhere.display()))
             && teams.contains("  pcb/coder:"),
         "{teams}"
     );
-    let removed = ensemble(&s, &["team", "remove", "pcb", "--yes"]);
+    let removed = ensemble(&s, &["node", "team", "remove", "pcb", "--yes"]);
     assert!(removed.status.success(), "{}", stderr_of(&removed));
     assert!(elsewhere.join("config.yaml").is_file(), "the folder stays");
-    assert!(!stdout_of(&ensemble(&s, &["teams"])).contains("pcb"));
+    assert!(!stdout_of(&ensemble(&s, &["node", "team", "list"])).contains("pcb"));
     let _ = std::fs::remove_dir_all(&elsewhere);
 }
 
@@ -3471,7 +3545,7 @@ fn a_running_node_reloads_its_teams_and_tells_its_sessions_the_tools_changed() {
     std::fs::create_dir_all(&elsewhere).unwrap();
     std::fs::write(elsewhere.join("config.yaml"), config_yaml("true", NOWHERE)).unwrap();
     let added = command(&s)
-        .args(["team", "add", "pcb"])
+        .args(["node", "team", "link", "pcb"])
         .arg(&elsewhere)
         .output()
         .unwrap();
@@ -3607,9 +3681,11 @@ fn a_task_stopped_on_one_computer_is_carried_on_by_another_from_its_pushed_branc
         "desk",
         &url,
         &[
-            "submit",
-            "team/coder",
+            "task",
+            "new",
             "Two parts",
+            "--agent",
+            "team/coder",
             "--text",
             "do both parts",
         ],
@@ -3621,7 +3697,7 @@ fn a_task_stopped_on_one_computer_is_carried_on_by_another_from_its_pushed_branc
     );
     sigterm(&desk);
     desk.wait().unwrap();
-    let listed = stdout_of(&in_proj(&s, "desk", &url, &["tasks"]));
+    let listed = stdout_of(&in_proj(&s, "desk", &url, &["task", "list"]));
     assert!(listed.contains("queued (interrupted on desk)"), "{listed}");
     assert!(
         git_in(
@@ -3638,15 +3714,25 @@ fn a_task_stopped_on_one_computer_is_carried_on_by_another_from_its_pushed_branc
         &s,
         "laptop",
         &url,
-        &["assign", "0001-two-parts", "team/coder"],
+        &["task", "assign", "0001-two-parts", "team/coder"],
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
     let ended = || {
-        stdout_of(&in_proj(&s, "laptop", &url, &["task", "0001-two-parts"]))
-            .contains("\n---\nstatus: ")
+        stdout_of(&in_proj(
+            &s,
+            "laptop",
+            &url,
+            &["task", "show", "0001-two-parts"],
+        ))
+        .contains("\n---\nstatus: ")
     };
     assert!(wait_for(30, ended), "the laptop did not carry it on");
-    let shown = stdout_of(&in_proj(&s, "laptop", &url, &["task", "0001-two-parts"]));
+    let shown = stdout_of(&in_proj(
+        &s,
+        "laptop",
+        &url,
+        &["task", "show", "0001-two-parts"],
+    ));
     assert!(
         shown.contains("status: done") && shown.contains("both parts done"),
         "{shown}"
@@ -3661,7 +3747,7 @@ fn a_task_stopped_on_one_computer_is_carried_on_by_another_from_its_pushed_branc
     );
 
     // The desk's own branch, behind, is brought up to it to be looked at.
-    let review = in_proj(&s, "desk", &url, &["review", "0001-two-parts"]);
+    let review = in_proj(&s, "desk", &url, &["task", "review", "0001-two-parts"]);
     assert!(review.status.success(), "{}", stderr_of(&review));
     let text = stdout_of(&review);
     assert!(

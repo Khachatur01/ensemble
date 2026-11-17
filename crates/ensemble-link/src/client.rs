@@ -67,7 +67,7 @@ impl Connection {
         .map_err(|_| format!("cannot reach the hub {url}: it did not answer in time"))?;
         let (socket, _) = opened.map_err(|e| match e {
             tungstenite::Error::Http(resp) if resp.status() == 401 => format!(
-                "the hub {url} did not accept the token; `ensemble login {url}` with a new one"
+                "the hub {url} did not accept the token; `ensemble node login {url}` with a new one"
             ),
             e => format!("cannot reach the hub {url}: {e}"),
         })?;

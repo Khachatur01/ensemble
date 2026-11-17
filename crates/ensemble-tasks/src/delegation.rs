@@ -262,7 +262,7 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
             description:
                 "Look at the work of a finished task of an agent that works in a git worktree: \
                       its branch, what changed on it, and its result. It changes nothing, and \
-                      there is no tool that merges: the owner merges, with `ensemble merge`."
+                      there is no tool that merges: the owner merges, with `ensemble task merge`."
                     .into(),
             parameters: json!({
                 "type": "object",
@@ -313,7 +313,7 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                       name and its whole config.yaml (version 1, every setting written; \
                       `teams` with `sample` shows the form). It is checked, then kept \
                       waiting: it runs nothing until the person reads and approves it with \
-                      `ensemble team approve <name>` in a terminal; the node then uses it at once. \
+                      `ensemble node team approve <name>` in a terminal; the node then uses it at once. \
                       Say so to the person. It cannot change a team that exists."
             .into(),
         parameters: json!({
@@ -731,8 +731,8 @@ pub async fn call(
             if entries.is_empty() {
                 return ToolResult::ok(
                     "The node has no helper teams. Make one with `team_create` when the person asks, \
-                     or the person makes one with `ensemble team new` or pulls one with \
-                     `ensemble team pull`.",
+                     or the person makes one with `ensemble node team new` or pulls one with \
+                     `ensemble node team pull`.",
                 );
             }
             let mut lines = Vec::new();
@@ -785,7 +785,7 @@ pub async fn call(
             }) {
                 Ok(path) => ToolResult::ok(format!(
                     "Wrote the team '{name}' in {}. It runs nothing until the person approves it: \
-                     tell them to read it and run `ensemble team approve {name}`; the node uses it at once.",
+                     tell them to read it and run `ensemble node team approve {name}`; the node uses it at once.",
                     path.display()
                 )),
                 Err(e) => ToolResult::err(format!("{TEAM_CREATE}: {e}")),

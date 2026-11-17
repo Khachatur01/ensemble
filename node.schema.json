@@ -21,7 +21,7 @@
       "enum": ["private", "shared"]
     },
     "hub": {
-      "description": "The hub server it connects to, ws:// or wss://, signed in to with `ensemble login`: the hub's knowledge for its sessions, the tasks the hub has for you, and what it offers. Leave it out for no hub.",
+      "description": "The hub server it connects to, ws:// or wss://, signed in to with `ensemble node login`: the hub's knowledge for its sessions, the tasks the hub has for you, and what it offers. Leave it out for no hub.",
       "type": "string",
       "pattern": "^wss?://"
     },

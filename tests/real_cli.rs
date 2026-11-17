@@ -65,7 +65,7 @@ fn config(agent: &str, adapter: &str) -> String {
 
 fn check(agent: &str, adapter: &str) {
     let project = Project::new(&config(agent, adapter));
-    let health = project.ensemble(&["health"]);
+    let health = project.ensemble(&["node", "agent", "health"]);
     assert!(
         health.status.success(),
         "health failed: {}{}",
@@ -73,6 +73,8 @@ fn check(agent: &str, adapter: &str) {
         String::from_utf8_lossy(&health.stderr)
     );
     let run = project.ensemble(&[
+        "node",
+        "agent",
         "run",
         &format!("probe/{agent}"),
         "Reply with the single word ok and do nothing else.",

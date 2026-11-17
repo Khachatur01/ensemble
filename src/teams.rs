@@ -48,7 +48,7 @@ pub fn load_all(env_file: Option<&Path>, env: &dyn Env) -> Result<(Config, Vec<S
     for team in teams::list(&dir) {
         if team.pending {
             waiting.push(format!(
-                "team '{}' waits for your approval: ensemble team approve {}",
+                "team '{}' waits for your approval: ensemble node team approve {}",
                 team.name, team.name
             ));
             continue;
@@ -69,7 +69,7 @@ pub fn editable(name: &str) -> Result<PathBuf, String> {
     let team = teams::entry(&dir()?, name).ok_or_else(|| missing(name))?;
     match &team.origin {
         Origin::Pulled { url, .. } => Err(format!(
-            "team '{name}' is pulled from {url}, so it is read-only: clone it, change your copy, and `ensemble team add` that folder"
+            "team '{name}' is pulled from {url}, so it is read-only: clone it, change your copy, and `ensemble node team link` that folder"
         )),
         _ => Ok(team.config_dir().expect("a team made or linked here")),
     }
@@ -77,7 +77,9 @@ pub fn editable(name: &str) -> Result<PathBuf, String> {
 
 /// What to say when there is no team `name`.
 pub fn missing(name: &str) -> String {
-    format!("no team '{name}'. `ensemble teams` lists them; `ensemble team new {name}` makes one.")
+    format!(
+        "no team '{name}'. `ensemble node team list` lists them; `ensemble node team new {name}` makes one."
+    )
 }
 
 /// Make the team `name` here with `text` as its `config.yaml`.

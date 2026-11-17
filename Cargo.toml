@@ -18,6 +18,10 @@ serde_norway = "0.9"
 # Blocking HTTP client for short requests from code that may block: `health`,
 # the `direct` adapter (on a blocking thread), the CLI's calls to a hub.
 ureq = "3"
+# The command line: its commands, each with its own help, typo suggestions,
+# and completions for the shells.
+clap = { version = "4", features = ["derive", "wrap_help"] }
+clap_complete = "4"
 # Async HTTP for what streams for long: a node's model calls. Already in the
 # tree through harness-rs, with these features.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
@@ -93,6 +97,8 @@ serde_json.workspace = true
 serde_norway.workspace = true
 ureq.workspace = true
 tokio.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
 
 [dev-dependencies]
 # Only the test helpers of the workspace's own crates. The suites use the std

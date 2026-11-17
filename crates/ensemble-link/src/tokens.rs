@@ -1,5 +1,5 @@
 //! Where a node keeps its hub tokens: `~/.config/ensemble/node/hubs.json`
-//! (under `$XDG_CONFIG_HOME` when that is set), one token per hub URL. Only its user can read it, like an SSH key; `ensemble login` writes it.
+//! (under `$XDG_CONFIG_HOME` when that is set), one token per hub URL. Only its user can read it, like an SSH key; `ensemble node login` writes it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

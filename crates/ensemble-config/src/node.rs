@@ -34,7 +34,7 @@ pub struct Node {
     pub name: String,
     pub access: Access,
     /// The hub server it connects to, `ws://` or `wss://`, signed in to with
-    /// `ensemble login`. None: it uses no hub.
+    /// `ensemble node login`. None: it uses no hub.
     pub hub: Option<String>,
     pub offers: Offers,
     pub source: PathBuf,

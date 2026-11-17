@@ -37,7 +37,7 @@ const OPENAI_COMPATIBLE_PACKAGE: &str = "@ai-sdk/openai-compatible";
 /// when that is less.
 const MAX_OUTPUT_TOKENS: u32 = 32_768;
 
-/// Shown by `ensemble show` in place of an API key.
+/// Shown by `ensemble node agent show` in place of an API key.
 pub const REDACTED: &str = "<redacted>";
 
 /// Run an `opencode` agent on one task, in `workdir`. `backend` is the LLM
@@ -155,7 +155,7 @@ pub fn config(
     cfg
 }
 
-/// Shown by `ensemble show` in place of the file a run writes the prompt to.
+/// Shown by `ensemble node agent show` in place of the file a run writes the prompt to.
 pub const SHOWN_PROMPT_FILE: &str = "<the agent's prompt, in a file for the run>";
 
 /// The file an agent with `system_prompt: append` has its prompt in for one

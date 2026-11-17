@@ -258,7 +258,7 @@ pub fn risks(config: &Config) -> Vec<Finding> {
                     "{} has a token budget, which counts only the tokens its runs report",
                     a.name
                 ),
-                "`ensemble stats` shows `-` for an agent whose runs report none; its budget never fills",
+                "`ensemble node agent stats` shows `-` for an agent whose runs report none; its budget never fills",
             ));
         }
     }
@@ -271,7 +271,7 @@ pub fn structure(config: &Config, workdir: &Path) -> Vec<Finding> {
     if config.agents.is_empty() {
         out.push(Finding::bad(
             "the node has no helper team with agents",
-            "make one with `ensemble team new <name>`, pull one with `ensemble team pull <url>`, or ask your agent to make one",
+            "make one with `ensemble node team new <name>`, pull one with `ensemble node team pull <url>`, or ask your agent to make one",
         ));
     }
     let wants_git = config
@@ -330,13 +330,9 @@ pub fn health_finding(
     }
 }
 
-/// The command that takes `agent` out of its team: `web/coder` is the agent
-/// `coder` of the team `web`.
+/// The command that takes `agent`, such as `web/coder`, out of its team.
 fn remove_command(agent: &str) -> String {
-    match agent.split_once('/') {
-        Some((team, name)) => format!("ensemble remove-agent {name} --team {team}"),
-        None => format!("ensemble remove-agent {agent}"),
-    }
+    format!("ensemble node agent remove {agent}")
 }
 
 /// The directory `~` stands for.
@@ -433,7 +429,7 @@ mod tests {
         assert_eq!(finding.level, Level::Problem);
         let fix = finding.fix.unwrap();
         assert!(
-            fix.contains("ensemble remove-agent coder --team web"),
+            fix.contains("ensemble node agent remove web/coder"),
             "{fix}"
         );
     }
@@ -467,7 +463,7 @@ mod tests {
                 && f.what.contains("no helper team")
                 && f.fix
                     .as_deref()
-                    .is_some_and(|x| x.contains("ensemble team new <name>"))),
+                    .is_some_and(|x| x.contains("ensemble node team new <name>"))),
             "{findings:?}"
         );
     }

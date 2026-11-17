@@ -20,7 +20,7 @@ in
           The node's `node.yaml`, as Nix: `version`, `name`, `access`, and
           optionally `hub` and `offers`. `ensemble node init --stdout` prints
           every setting. Null leaves `~/.config/ensemble/node/node.yaml` alone,
-          for `ensemble setup` or your own hand.
+          for `ensemble node setup` or your own hand.
         '';
         example = lib.literalExpression ''
           {
@@ -41,7 +41,7 @@ in
                 type = types.nullOr yaml.type;
                 default = null;
                 description = ''
-                  The team's `config.yaml`, as Nix. `ensemble team new --stdout`
+                  The team's `config.yaml`, as Nix. `ensemble node team new --stdout`
                   prints every setting.
                 '';
               };
@@ -60,7 +60,7 @@ in
         description = ''
           The node's helper teams, by name; their agents are `<name>/<agent>`.
           Each is linked into `~/.config/ensemble/node/teams/`, beside the teams
-          made there by hand (`ensemble team new`, `pull`, `add`), which are
+          made there by hand (`ensemble node team new`, `pull`, `link`), which are
           left alone. A team declared here is read-only to `ensemble`.
         '';
         example = lib.literalExpression ''

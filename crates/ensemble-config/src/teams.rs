@@ -3,12 +3,12 @@
 //! in one of three ways:
 //!
 //! - **made here**: a folder with its `config.yaml`, written by a person
-//!   (`ensemble team new`) or by an agent at the person's request, which waits
+//!   (`ensemble node team new`) or by an agent at the person's request, which waits
 //!   for approval (a `pending` file beside it) until the person approves it;
 //! - **linked**: a symbolic link to a folder elsewhere, such as a checkout of
-//!   the team's repository (`ensemble team add`);
+//!   the team's repository (`ensemble node team link`);
 //! - **pulled**: a folder with `pulled.json`, naming a git repository and the
-//!   commit it is pinned to (`ensemble team pull`); the team itself is the
+//!   commit it is pinned to (`ensemble node team pull`); the team itself is the
 //!   clone in the cache, checked and trusted per commit.
 //!
 //! The node runs every team that is ready at once, as one [`Config`]: each
@@ -64,7 +64,7 @@ impl TeamEntry {
         };
         if self.pending {
             format!(
-                "{origin}, waiting for approval: ensemble team approve {}",
+                "{origin}, waiting for approval: ensemble node team approve {}",
                 self.name
             )
         } else {
@@ -162,7 +162,9 @@ pub fn create_pending(dir: &Path, name: &str, text: &str, by: &str) -> Result<Pa
     let written = std::fs::write(path.join(CONFIG_FILENAME), text).and_then(|()| {
         std::fs::write(
             path.join(PENDING_FILE),
-            format!("Written by {by}. It runs once you approve it: ensemble team approve {name}\n"),
+            format!(
+                "Written by {by}. It runs once you approve it: ensemble node team approve {name}\n"
+            ),
         )
     });
     if let Err(e) = written {

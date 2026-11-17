@@ -1,6 +1,6 @@
 //! A record of every run an agent made: when, how long, on what model, how many
 //! tokens, whether it worked. One line of JSON per run, appended to
-//! `records.jsonl` beside the usage counters, so `ensemble stats` can say what
+//! `records.jsonl` beside the usage counters, so `ensemble node agent stats` can say what
 //! the helper team costs and how it is doing.
 
 use serde::{Deserialize, Serialize};
