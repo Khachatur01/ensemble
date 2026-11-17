@@ -1,9 +1,9 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json
 
-# config.yaml — a helper team of agents, written by `ensemble init`. It is meant
-# to live in a directory (usually its own git repo) of its own, apart from any
-# project; the folder your agent opens is where the team works. It can be yours
-# alone, or one your company shares. API keys never go here: they come from the
+# config.yaml — a helper team of agents, written by `ensemble team new`. It lives
+# in a folder of its own (often its own git repo), apart from any project; the
+# folder your agent opens is where the team works. It can be yours alone, or one
+# your company shares and you pull. API keys never go here: they come from the
 # environment, or from a file passed with --env-file.
 #
 # Nothing has a default value: every setting is written here, and one that is
@@ -12,12 +12,12 @@
 # `api_key_env`.
 # This file is a map of what can be set rather than a team to keep as it is:
 # delete the agents you do not want and change the rest. Check it with
-# `ensemble check --team <dir>`, see how an agent is started with
-# `ensemble show <agent> --team <dir>`, and check that everything it needs is
-# there with `ensemble health --team <dir>`.
+# `ensemble check`, see how an agent is started with
+# `ensemble show <team>/<agent>`, and check that everything it needs is there
+# with `ensemble health`.
 #
-# Name this directory as `team:` in your node (`ensemble setup --team <dir>`
-# writes it), and the agent you talk to hands work to the team through the node.
+# Your node runs every team in its teams directory, where `ensemble team new`
+# writes this; the agent you talk to hands work to `<team>/<agent>` through it.
 
 version: 3
 

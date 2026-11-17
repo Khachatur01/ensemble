@@ -468,15 +468,11 @@ impl Store {
         let path = dir.join(TASK_FILE);
         let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut ticket = parse_ticket(id, &text).map_err(|e| format!("{}: {e}", path.display()))?;
-        // A ticket from before version 3 names its agent as `team/agent`; the
-        // team is gone, so the agent is the part after the slash.
-        let plain = |agent: &str| agent.rsplit('/').next().unwrap_or(agent).to_string();
-        ticket.agent = plain(&ticket.agent);
         // Who it is assigned to now, if it was assigned or handed on since.
         if let Ok(now) = fs::read_to_string(dir.join(ASSIGNEE_FILE))
             && !now.trim().is_empty()
         {
-            ticket.agent = plain(now.trim());
+            ticket.agent = now.trim().to_string();
         }
         Ok(ticket)
     }
@@ -1092,7 +1088,7 @@ mod tests {
     }
 
     #[test]
-    fn tasks_of_the_old_team_folders_are_moved_up_once_and_their_agents_lose_the_team() {
+    fn tasks_of_the_old_team_folders_are_moved_up_once_and_their_agents_keep_their_team() {
         let tmp = TempDir::new();
         let store = Store::new(&tmp.0);
         let write = |path: &str, agent: &str| {
@@ -1127,7 +1123,8 @@ mod tests {
         );
         let agent = |id: &str| store.read(id).unwrap().agent;
         assert_eq!(agent("0001-short"), "coder");
-        assert_eq!(agent("0003-board"), "checker");
+        // An agent is `<team>/<agent>` again, as the node names it.
+        assert_eq!(agent("0003-board"), "hardware/checker");
     }
 
     #[test]

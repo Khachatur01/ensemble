@@ -30,7 +30,7 @@ pub const CONFIG_FILENAME: &str = "config.yaml";
 /// prints it; the tests keep it in step with the structs below.
 pub const SCHEMA: &str = include_str!("../../../ensemble.schema.json");
 
-/// The config `ensemble init` writes: every setting at least once, with what
+/// The config `ensemble team new` writes: every setting at least once, with what
 /// it does. The tests keep it loading and complete.
 pub const SAMPLE: &str = include_str!("sample.yaml");
 
@@ -587,6 +587,19 @@ impl Config {
     pub fn gate(&self, name: &str) -> Option<&Gate> {
         self.gates.get(name)
     }
+
+    /// The gate a task of `agent` names `name`: of the agent's own team when
+    /// the helper team is several combined (`web/coder` names `web/test`), or
+    /// the one `name` names as `<team>/<gate>`.
+    pub fn gate_for(&self, agent: &str, name: &str) -> Option<&Gate> {
+        if name.contains('/') {
+            return self.gates.get(name);
+        }
+        match teams::team_of(agent) {
+            Some(team) => self.gates.get(&format!("{team}/{name}")),
+            None => self.gates.get(name),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -624,7 +637,7 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::NotFound { path } => write!(
                 f,
-                "no {CONFIG_FILENAME} at {}. Check the --team directory, or make one with `ensemble init --team <dir>`.",
+                "no {CONFIG_FILENAME} at {}. `ensemble teams` lists the teams; `ensemble team new <name>` makes one.",
                 path.display()
             ),
             ConfigError::HubNotFound { path } => write!(
@@ -657,6 +670,7 @@ pub mod hub;
 pub mod migrate;
 pub mod node;
 mod raw;
+pub mod teams;
 mod validate;
 
 pub use env::*;

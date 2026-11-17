@@ -240,7 +240,7 @@ impl Ensemble {
             None => self
                 .config
                 .source
-                .is_file()
+                .exists()
                 .then(|| ensemble_core::state::team_dir(&self.config.source).ok())
                 .flatten(),
         }

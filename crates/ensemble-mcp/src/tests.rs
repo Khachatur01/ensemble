@@ -357,8 +357,18 @@ fn tools_list_advertises_the_tools_with_the_real_agent_names() {
     assert_eq!(
         names,
         vec![
-            "delegate", "submit", "status", "wait", "cancel", "assign", "answer", "review",
-            "agents", "health"
+            "delegate",
+            "submit",
+            "status",
+            "wait",
+            "cancel",
+            "assign",
+            "answer",
+            "review",
+            "agents",
+            "teams",
+            "team_create",
+            "health"
         ]
     );
 

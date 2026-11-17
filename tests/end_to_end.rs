@@ -36,10 +36,12 @@ impl Scratch {
         &self.0
     }
 
-    /// The helper team directory, kept beside the project so it is not one of
-    /// the files a run changes.
+    /// The helper team: the team `team` in the scratch computer's teams
+    /// directory, so its agents are `team/<agent>`.
     fn org(&self) -> PathBuf {
-        self.0.with_extension("org")
+        self.0
+            .with_extension("xdg-data")
+            .join("ensemble/teams/team")
     }
 
     /// Where the project's tasks and runs go: its state directory, under
@@ -52,7 +54,7 @@ impl Scratch {
         .unwrap()
     }
 
-    /// This scratch computer's node file, `node.yaml`, running the helper team.
+    /// This scratch computer's node file, `node.yaml`: the node `desk`.
     fn node_yaml(&self) -> PathBuf {
         let config = self.0.with_extension("xdg-config").join("ensemble");
         std::fs::create_dir_all(&config).unwrap();
@@ -60,10 +62,7 @@ impl Scratch {
         if !path.exists() {
             std::fs::write(
                 &path,
-                format!(
-                    "version: 3\nname: desk\naccess: private\nteam: \"{}\"\noffers: {{}}\n",
-                    self.org().display()
-                ),
+                "version: 4\nname: desk\naccess: private\noffers: {}\n",
             )
             .unwrap();
         }
@@ -131,7 +130,7 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
         let _ = std::fs::remove_dir_all(self.0.with_extension("bin"));
-        let _ = std::fs::remove_dir_all(self.org());
+        let _ = std::fs::remove_dir_all(self.0.with_extension("xdg-data"));
         let _ = std::fs::remove_dir_all(self.0.with_extension("xdg-config"));
         let _ = std::fs::remove_dir_all(self.0.with_extension("machines"));
         let _ = std::fs::remove_dir_all(self.0.with_extension("xdg-state"));
@@ -204,8 +203,7 @@ fn command(scratch: &Scratch) -> Command {
         .env("XDG_STATE_HOME", scratch.0.with_extension("xdg-state"))
         .env("XDG_CACHE_HOME", scratch.0.with_extension("xdg-cache"))
         .env("XDG_CONFIG_HOME", scratch.0.with_extension("xdg-config"))
-        .arg("--team")
-        .arg(scratch.org())
+        .env("XDG_DATA_HOME", scratch.0.with_extension("xdg-data"))
         .env_remove("ENSEMBLE_TEST_LOCAL_URL")
         .env_remove("ENSEMBLE_TEST_LOCAL_KEY");
     let env_file = scratch.org().join(".env");
@@ -222,7 +220,8 @@ fn bare_command(scratch: &Scratch) -> Command {
     c.current_dir(scratch.path())
         .env("XDG_STATE_HOME", scratch.0.with_extension("xdg-state"))
         .env("XDG_CACHE_HOME", scratch.0.with_extension("xdg-cache"))
-        .env("XDG_CONFIG_HOME", scratch.0.with_extension("xdg-config"));
+        .env("XDG_CONFIG_HOME", scratch.0.with_extension("xdg-config"))
+        .env("XDG_DATA_HOME", scratch.0.with_extension("xdg-data"));
     c
 }
 
@@ -287,10 +286,10 @@ fn check_accepts_a_valid_config_and_reports_the_team() {
     let out = ensemble(&s, &["check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
-    assert!(text.contains("ok (version 3)"), "{text}");
+    assert!(text.contains("team: ok (made here)"), "{text}");
     assert!(text.contains("mcp: ready"), "{text}");
     assert!(
-        text.contains("coder  ->  opencode on openai-local / qwen3-coder"),
+        text.contains("team/coder  ->  opencode on team/openai-local / qwen3-coder"),
         "{text}"
     );
     assert!(text.contains("openai-compatible-api"), "{text}");
@@ -367,29 +366,27 @@ llm_backends:
 }
 
 #[test]
-fn nothing_is_found_without_an_org() {
+fn with_no_team_check_says_how_to_make_one() {
     let s = Scratch::new("no-org");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
     // The project folder holds a config of the old kind; it is not looked at.
     s.write("config.yaml", "version: 2\n");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
-
-    let out = Command::new(BIN)
-        .arg("check")
-        .current_dir(s.path())
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "no --team means no helper team");
-    assert!(stderr_of(&out).contains("--team"), "{}", stderr_of(&out));
+    let out = ensemble(&s, &["check"]);
+    assert!(!out.status.success(), "no team means no helper team");
+    assert!(
+        stderr_of(&out).contains("ensemble team new"),
+        "{}",
+        stderr_of(&out)
+    );
 }
 
 #[test]
-fn a_missing_config_says_so_rather_than_guessing() {
+fn a_broken_team_is_named_rather_than_skipped() {
     let s = Scratch::new("no-config");
+    s.write(".ensemble/config.yaml", "version: 3\n");
     let out = ensemble(&s, &["check"]);
     assert!(!out.status.success());
     assert!(
-        stderr_of(&out).contains("config.yaml"),
+        stderr_of(&out).contains("team 'team'"),
         "{}",
         stderr_of(&out)
     );
@@ -404,11 +401,11 @@ fn agents_prints_the_routing_table() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(
-        text.contains("coder\topencode on openai-local\tqwen3-coder"),
+        text.contains("team/coder\topencode on team/openai-local\tqwen3-coder"),
         "{text}"
     );
     assert!(
-        text.contains("reviewer\topencode\topencode/reviewer-model"),
+        text.contains("team/reviewer\topencode\topencode/reviewer-model"),
         "{text}"
     );
 }
@@ -438,7 +435,7 @@ fn run_starts_the_agents_cli_with_the_task_and_prints_its_answer() {
     let cli = s.opencode("the review is clean", "");
     s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
 
-    let out = ensemble(&s, &["run", "reviewer", "review", "this", "code"]);
+    let out = ensemble(&s, &["run", "team/reviewer", "review", "this", "code"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).starts_with("the review is clean"),
@@ -447,7 +444,7 @@ fn run_starts_the_agents_cli_with_the_task_and_prints_its_answer() {
     );
     // Provenance goes to stderr so stdout stays pipeable.
     assert!(
-        stderr_of(&out).contains("reviewer via opencode / opencode/reviewer-model"),
+        stderr_of(&out).contains("team/reviewer via opencode / opencode/reviewer-model"),
         "{}",
         stderr_of(&out)
     );
@@ -458,7 +455,7 @@ fn run_starts_the_agents_cli_with_the_task_and_prints_its_answer() {
     );
     let config: serde_json::Value = serde_json::from_str(&s.seen("config")).unwrap();
     assert_eq!(
-        config["agent"]["ensemble-reviewer"]["prompt"],
+        config["agent"]["ensemble-team-reviewer"]["prompt"],
         "Reviews code and reports findings."
     );
     assert!(config.get("provider").is_none(), "{config}");
@@ -474,16 +471,16 @@ fn an_agent_on_an_llm_backend_gets_its_endpoint_and_the_key_from_dotenv() {
     );
     s.write(".ensemble/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-from-dotenv\n");
 
-    let out = ensemble(&s, &["run", "coder", "do it"]);
+    let out = ensemble(&s, &["run", "team/coder", "do it"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         s.seen("args")
-            .contains("-m\nensemble-openai-local/qwen3-coder\n"),
+            .contains("-m\nensemble-team-openai-local/qwen3-coder\n"),
         "{}",
         s.seen("args")
     );
     let config: serde_json::Value = serde_json::from_str(&s.seen("config")).unwrap();
-    let provider = &config["provider"]["ensemble-openai-local"];
+    let provider = &config["provider"]["ensemble-team-openai-local"];
     assert_eq!(provider["options"]["baseURL"], "http://127.0.0.1:8888/v1");
     assert_eq!(provider["options"]["apiKey"], "sk-from-dotenv");
     assert_eq!(provider["models"]["qwen3-coder"]["limit"]["context"], 32768);
@@ -501,11 +498,11 @@ fn show_prints_how_an_agent_starts_with_the_key_hidden() {
         "ENSEMBLE_TEST_LOCAL_KEY=sk-secret-value\n",
     );
 
-    let out = ensemble(&s, &["show", "coder"]);
+    let out = ensemble(&s, &["show", "team/coder"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(
-        text.starts_with("opencode run --standalone --format json --agent ensemble-coder -m ensemble-openai-local/qwen3-coder -- '<task>'"),
+        text.starts_with("opencode run --standalone --format json --agent ensemble-team-coder -m ensemble-team-openai-local/qwen3-coder -- '<task>'"),
         "{text}"
     );
     assert!(
@@ -518,7 +515,7 @@ fn show_prints_how_an_agent_starts_with_the_key_hidden() {
     let out = ensemble(&s, &["show", "nobody"]);
     assert!(!out.status.success());
     assert!(
-        stderr_of(&out).contains("coder, reviewer"),
+        stderr_of(&out).contains("team/coder, team/reviewer"),
         "{}",
         stderr_of(&out)
     );
@@ -531,7 +528,7 @@ fn files_the_agent_changed_are_reported() {
     s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
 
-    let out = ensemble(&s, &["run", "coder", "rename foo to bar"]);
+    let out = ensemble(&s, &["run", "team/coder", "rename foo to bar"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(s.read("a.txt"), "bar\n");
 }
@@ -698,8 +695,18 @@ fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
     assert_eq!(
         names,
         vec![
-            "delegate", "submit", "status", "wait", "cancel", "assign", "answer", "review",
-            "agents", "health"
+            "delegate",
+            "submit",
+            "status",
+            "wait",
+            "cancel",
+            "assign",
+            "answer",
+            "review",
+            "agents",
+            "teams",
+            "team_create",
+            "health"
         ]
     );
 }
@@ -715,7 +722,7 @@ fn a_harness_can_delegate_in_the_background_and_collect_the_work() {
 
     let started = session.call(
         "delegate",
-        serde_json::json!({"agent": "coder", "task": "rename foo to bar", "background": true}),
+        serde_json::json!({"agent": "team/coder", "task": "rename foo to bar", "background": true}),
     );
     assert_eq!(started["result"]["isError"], false, "{started}");
     assert!(tool_text(&started).starts_with("adhoc-1 started"));
@@ -730,7 +737,7 @@ fn a_harness_can_delegate_in_the_background_and_collect_the_work() {
     assert!(text.contains("[files changed: a.txt (modified)]"), "{text}");
 
     let status = tool_text(&session.call("status", serde_json::json!({})));
-    assert!(status.contains("adhoc-1 · coder · done"), "{status}");
+    assert!(status.contains("adhoc-1 · team/coder · done"), "{status}");
     assert!(
         !s.path().join(".ensemble/tasks").exists(),
         "a background delegation writes no ticket"
@@ -748,7 +755,7 @@ fn a_harness_can_submit_a_task_and_collect_its_result_from_the_ticket() {
 
     let submitted = session.call(
         "submit",
-        serde_json::json!({"agent": "coder", "title": "Rename foo", "task": "rename foo to bar"}),
+        serde_json::json!({"agent": "team/coder", "title": "Rename foo", "task": "rename foo to bar"}),
     );
     assert_eq!(submitted["result"]["isError"], false, "{submitted}");
     assert!(tool_text(&submitted).starts_with("task 0001-rename-foo queued"));
@@ -780,13 +787,15 @@ fn a_harness_can_delegate_through_mcp_and_get_the_work_back() {
 
     let reply = session.call(
         "delegate",
-        serde_json::json!({"agent": "coder", "task": "rename foo to bar", "context": "in a.txt"}),
+        serde_json::json!({"agent": "team/coder", "task": "rename foo to bar", "context": "in a.txt"}),
     );
     assert_eq!(reply["result"]["isError"], false, "{reply}");
     let text = tool_text(&reply);
     assert!(text.starts_with("renamed it"), "{text}");
     assert!(
-        text.ends_with("[coder: 1 step(s), 0 tool call(s)]\n[files changed: a.txt (modified)]"),
+        text.ends_with(
+            "[team/coder: 1 step(s), 0 tool call(s)]\n[files changed: a.txt (modified)]"
+        ),
         "{text}"
     );
     // The task and its context reached the CLI.
@@ -833,11 +842,14 @@ fn an_agent_failure_reaches_the_model_as_a_readable_reason() {
 
     let reply = session.call(
         "delegate",
-        serde_json::json!({"agent": "coder", "task": "write a function"}),
+        serde_json::json!({"agent": "team/coder", "task": "write a function"}),
     );
     assert_eq!(reply["result"]["isError"], true);
     let text = tool_text(&reply);
-    assert!(text.contains("delegation failed (agent 'coder')"), "{text}");
+    assert!(
+        text.contains("delegation failed (agent 'team/coder')"),
+        "{text}"
+    );
     assert!(text.contains("Model unavailable"), "{text}");
     assert!(
         text.contains("Retrying"),
@@ -875,7 +887,7 @@ fn nothing_but_protocol_is_ever_written_to_stdout() {
     session.request("initialize", serde_json::json!({}));
     session.call(
         "delegate",
-        serde_json::json!({"agent": "reviewer", "task": "look"}),
+        serde_json::json!({"agent": "team/reviewer", "task": "look"}),
     );
     session.call("health", serde_json::json!({}));
     let last = session.request("ping", serde_json::json!({}));
@@ -930,9 +942,9 @@ fn an_invalid_team_stops_the_node_before_it_serves_anything() {
 }
 
 #[test]
-fn init_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_accident() {
+fn team_new_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_accident() {
     let s = Scratch::new("init");
-    let out = ensemble(&s, &["init"]);
+    let out = ensemble(&s, &["team", "new", "team"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let written = std::fs::read_to_string(s.org().join("config.yaml")).unwrap();
     assert!(written.contains("type: opencode"), "{written}");
@@ -950,13 +962,13 @@ fn init_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_accident
     let check = ensemble(&s, &["check"]);
     assert!(check.status.success(), "{}", stderr_of(&check));
     let text = stdout_of(&check);
-    assert!(text.contains("coder  ->"), "{text}");
+    assert!(text.contains("team/coder  ->"), "{text}");
 
     s.write(".ensemble/config.yaml", "mine");
-    let again = ensemble(&s, &["init"]);
+    let again = ensemble(&s, &["team", "new", "team"]);
     assert!(!again.status.success());
     assert!(
-        stderr_of(&again).contains("--force"),
+        stderr_of(&again).contains("already"),
         "{}",
         stderr_of(&again)
     );
@@ -965,13 +977,8 @@ fn init_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_accident
         "mine"
     );
 
-    let printed = ensemble(&s, &["init", "--stdout"]);
+    let printed = ensemble(&s, &["team", "new", "--stdout"]);
     assert_eq!(stdout_of(&printed), written);
-    assert!(ensemble(&s, &["init", "--force"]).status.success());
-    assert_eq!(
-        std::fs::read_to_string(s.org().join("config.yaml")).unwrap(),
-        written
-    );
 }
 
 #[test]
@@ -1000,12 +1007,12 @@ agents:
 "#;
         v1.to_string()
     });
-    let out = ensemble(&s, &["migrate", old.to_str().unwrap()]);
+    let out = ensemble(&s, &["migrate", old.to_str().unwrap(), "--team", "team"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let check = ensemble(&s, &["check"]);
     assert!(check.status.success(), "{}", stderr_of(&check));
     assert!(stdout_of(&check).contains("solo"), "{}", stdout_of(&check));
-    let again = ensemble(&s, &["migrate", old.to_str().unwrap()]);
+    let again = ensemble(&s, &["migrate", old.to_str().unwrap(), "--team", "team"]);
     assert!(!again.status.success(), "migrate does not overwrite");
 }
 
@@ -1014,7 +1021,7 @@ fn migrate_turns_the_version_2_sample_into_a_flat_helper_team() {
     let s = Scratch::new("migrate-v2");
     let old =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/config/v2.yaml");
-    let out = ensemble(&s, &["migrate", old.to_str().unwrap()]);
+    let out = ensemble(&s, &["migrate", old.to_str().unwrap(), "--team", "team"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let written = std::fs::read_to_string(s.org().join("config.yaml")).unwrap();
     assert!(written.contains("version: 3"), "{written}");
@@ -1026,7 +1033,7 @@ fn migrate_turns_the_version_2_sample_into_a_flat_helper_team() {
         assert!(
             stdout_of(&agents)
                 .lines()
-                .any(|l| l.starts_with(&format!("{name}\t"))),
+                .any(|l| l.starts_with(&format!("team/{name}\t"))),
             "{name}: {}",
             stdout_of(&agents)
         );
@@ -1060,7 +1067,7 @@ fn check_reports_a_task_that_could_not_run() {
     s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
     s.write(
         ".ensemble/tasks/0001-ok/task.md",
-        "---\ntitle: Ok\nagent: coder\n---\nDo it.\n",
+        "---\ntitle: Ok\nagent: team/coder\n---\nDo it.\n",
     );
     let out = ensemble(&s, &["check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -1094,15 +1101,15 @@ fn check_reports_a_task_that_can_never_start() {
     s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
     s.write(
         ".ensemble/tasks/0001-a/task.md",
-        "---\ntitle: a\nagent: coder\nafter: [0002-b]\n---\na\n",
+        "---\ntitle: a\nagent: team/coder\nafter: [0002-b]\n---\na\n",
     );
     s.write(
         ".ensemble/tasks/0002-b/task.md",
-        "---\ntitle: b\nagent: coder\nafter: [0001-a]\n---\nb\n",
+        "---\ntitle: b\nagent: team/coder\nafter: [0001-a]\n---\nb\n",
     );
     s.write(
         ".ensemble/tasks/0003-c/task.md",
-        "---\ntitle: c\nagent: coder\nafter: [0009]\n---\nc\n",
+        "---\ntitle: c\nagent: team/coder\nafter: [0009]\n---\nc\n",
     );
     let out = ensemble(&s, &["check"]);
     assert!(!out.status.success());
@@ -1129,7 +1136,7 @@ fn a_light_agent_is_one_request_to_its_backend() {
     );
     s.write(".ensemble/config.yaml", &config);
 
-    let out = ensemble(&s, &["run", "summariser", "sum", "it", "up"]);
+    let out = ensemble(&s, &["run", "team/summariser", "sum", "it", "up"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).starts_with("three bullets"),
@@ -1137,7 +1144,7 @@ fn a_light_agent_is_one_request_to_its_backend() {
         stdout_of(&out)
     );
 
-    let out = ensemble(&s, &["show", "summariser"]);
+    let out = ensemble(&s, &["show", "team/summariser"]);
     let text = stdout_of(&out);
     assert!(
         text.starts_with(&format!("POST {url}/chat/completions\n")),
@@ -1150,7 +1157,7 @@ fn a_light_agent_is_one_request_to_its_backend() {
 
     let check = stdout_of(&ensemble(&s, &["check"]));
     assert!(
-        check.contains("summariser  ->  direct on openai-local / small"),
+        check.contains("team/summariser  ->  direct on team/openai-local / small"),
         "{check}"
     );
 }
@@ -1189,6 +1196,7 @@ fn with_path(scratch: &Scratch, bin: &Path) -> Command {
         .env("XDG_STATE_HOME", scratch.0.with_extension("xdg-state"))
         .env("XDG_CONFIG_HOME", scratch.0.with_extension("xdg-config"))
         .env("XDG_CACHE_HOME", scratch.0.with_extension("xdg-cache"))
+        .env("XDG_DATA_HOME", scratch.0.with_extension("xdg-data"))
         .env("HOME", scratch.0.with_extension("home"));
     c
 }
@@ -1238,7 +1246,7 @@ fn connect_without_the_clients_cli_prints_the_command_and_fails() {
 }
 
 #[test]
-fn setup_writes_the_node_registers_it_and_checks_its_team() {
+fn setup_writes_the_node_registers_it_and_checks_its_teams() {
     let s = Scratch::new("setup");
     s.write(
         ".ensemble/config.yaml",
@@ -1254,8 +1262,6 @@ fn setup_writes_the_node_registers_it_and_checks_its_team() {
             "--name",
             "desk",
         ])
-        .arg("--team")
-        .arg(s.org())
         .output()
         .unwrap();
     let said = stdout_of(&out);
@@ -1264,7 +1270,7 @@ fn setup_writes_the_node_registers_it_and_checks_its_team() {
     let node = s.0.with_extension("xdg-config").join("ensemble/node.yaml");
     let written = std::fs::read_to_string(&node).unwrap();
     assert!(
-        written.contains("name: \"desk\"") && written.contains(&s.org().display().to_string()),
+        written.contains("name: \"desk\"") && written.contains("version: 4"),
         "{written}"
     );
     let args = std::fs::read_to_string(bin.join("claude.args")).unwrap();
@@ -1315,8 +1321,11 @@ fn doctor_says_what_is_wrong_and_how_to_fix_it() {
         "{text}"
     );
     assert!(text.contains("fix: install `opencode`"), "{text}");
-    assert!(text.contains("ensemble remove-agent coder"), "{text}");
-    assert!(text.contains("problem: openai-local"), "{text}");
+    assert!(
+        text.contains("ensemble remove-agent coder --team team"),
+        "{text}"
+    );
+    assert!(text.contains("problem: team/openai-local"), "{text}");
     assert!(text.contains("fix: start the model server"), "{text}");
 
     let s = Scratch::new("doctor-ok");
@@ -1339,6 +1348,8 @@ fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
         &[
             "add-agent",
             "tester",
+            "--team",
+            "team",
             "--adapter",
             "claude-code",
             "--prompt",
@@ -1348,12 +1359,22 @@ fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let agents = ensemble(&s, &["agents"]);
     assert!(
-        stdout_of(&agents).contains("tester\tclaude-code\tsonnet"),
+        stdout_of(&agents).contains("team/tester\tclaude-code\tsonnet"),
         "{}",
         stdout_of(&agents)
     );
 
-    let dup = ensemble(&s, &["add-agent", "tester", "--adapter", "claude-code"]);
+    let dup = ensemble(
+        &s,
+        &[
+            "add-agent",
+            "tester",
+            "--team",
+            "team",
+            "--adapter",
+            "claude-code",
+        ],
+    );
     assert!(!dup.status.success());
     assert!(
         stderr_of(&dup).contains("already has"),
@@ -1361,13 +1382,16 @@ fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
         stderr_of(&dup)
     );
 
-    let bad = ensemble(&s, &["add-agent", "x", "--adapter", "llm"]);
+    let bad = ensemble(
+        &s,
+        &["add-agent", "x", "--team", "team", "--adapter", "llm"],
+    );
     assert!(!bad.status.success(), "`llm` is no adapter any more");
 
-    let gone = ensemble(&s, &["remove-agent", "tester"]);
+    let gone = ensemble(&s, &["remove-agent", "tester", "--team", "team"]);
     assert!(gone.status.success(), "{}", stderr_of(&gone));
     assert!(!stdout_of(&ensemble(&s, &["agents"])).contains("tester"));
-    let missing = ensemble(&s, &["remove-agent", "tester"]);
+    let missing = ensemble(&s, &["remove-agent", "tester", "--team", "team"]);
     assert!(!missing.status.success());
 }
 
@@ -1405,84 +1429,28 @@ fn origin(scratch: &Scratch, config: &str) -> (String, String) {
     )
 }
 
-/// The binary with its state and cache kept in the scratch place.
-fn remote_cmd(scratch: &Scratch, bin: Option<&Path>) -> Command {
-    let mut c = Command::new(BIN);
-    c.current_dir(scratch.path())
-        .env("XDG_STATE_HOME", scratch.state())
-        .env("XDG_CACHE_HOME", scratch.0.with_extension("cache"))
-        .env("HOME", scratch.0.with_extension("home"));
-    if let Some(bin) = bin {
-        c.env(
-            "PATH",
-            format!(
-                "{}:{}",
-                bin.display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        );
-    }
-    c
+/// What `pulled.json` of the team `name` pins it to.
+fn pinned_commit(scratch: &Scratch, name: &str) -> String {
+    let file = scratch
+        .0
+        .with_extension("xdg-data")
+        .join("ensemble/teams")
+        .join(name)
+        .join("pulled.json");
+    let pulled: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+    pulled["commit"].as_str().unwrap().to_string()
 }
 
 #[test]
-fn a_remote_helper_team_is_pinned_trusted_and_then_used() {
+fn a_pulled_team_is_pinned_shown_trusted_and_then_used() {
     let s = Scratch::new("remote");
     let (url, sha) = origin(&s, &config_yaml("true", NOWHERE));
-    let pinned = format!("{url}#{sha}");
 
-    let out = remote_cmd(&s, None)
-        .args(["check", "--team", &pinned])
-        .output()
-        .unwrap();
-    assert!(
-        !out.status.success(),
-        "an untrusted helper team is not used"
-    );
-    assert!(
-        stderr_of(&out).contains("ensemble org trust"),
-        "{}",
-        stderr_of(&out)
-    );
-
-    let unpinned = remote_cmd(&s, None)
-        .args(["check", "--team", &format!("{url}@main")])
-        .output()
-        .unwrap();
-    assert!(!unpinned.status.success());
-    assert!(
-        stderr_of(&unpinned).contains("never follows a branch"),
-        "{}",
-        stderr_of(&unpinned)
-    );
-
-    let no_pin = remote_cmd(&s, None)
-        .args(["team", "trust", &url, "--yes"])
-        .output()
-        .unwrap();
-    assert!(!no_pin.status.success(), "trust needs the commit");
-
-    let trusted = remote_cmd(&s, None)
-        .args(["team", "trust", &pinned, "--yes"])
-        .output()
-        .unwrap();
-    assert!(trusted.status.success(), "{}", stderr_of(&trusted));
-    let said = stdout_of(&trusted);
-    assert!(said.contains("coder: runs `true`"), "{said}");
-    assert!(said.contains("Trusted"), "{said}");
-
-    let out = remote_cmd(&s, None)
-        .args(["check", "--team", &pinned])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(stdout_of(&out).contains("coder"), "{}", stdout_of(&out));
-
-    // Without a terminal and without --yes there is nobody to ask: a refusal.
-    let (url2, sha2) = origin(&s, &config_yaml("opencode", NOWHERE));
-    assert_eq!(url, url2);
-    let refused = remote_cmd(&s, None)
-        .args(["team", "trust", &format!("{url}#{sha2}")])
+    // Without a terminal and without --yes there is nobody to ask: a refusal,
+    // and nothing is kept.
+    let refused = command(&s)
+        .args(["team", "pull", &url, "--name", "web"])
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -1492,43 +1460,110 @@ fn a_remote_helper_team_is_pinned_trusted_and_then_used() {
         "{}",
         stderr_of(&refused)
     );
+    assert!(!stdout_of(&ensemble(&s, &["teams"])).contains("web"));
+
+    let pulled = command(&s)
+        .args([
+            "team",
+            "pull",
+            &format!("{url}@main"),
+            "--name",
+            "web",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert!(pulled.status.success(), "{}", stderr_of(&pulled));
+    let said = stdout_of(&pulled);
+    assert!(said.contains("coder: runs `true`"), "{said}");
+    assert!(
+        said.contains(&format!("pulled {url}#{sha} as the team 'web'")),
+        "{said}"
+    );
+    assert_eq!(pinned_commit(&s, "web"), sha);
+
+    let out = ensemble(&s, &["check"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(
+        text.contains(&format!("web: ok (pulled from {url}#{sha})")),
+        "{text}"
+    );
+    assert!(text.contains("web/coder"), "{text}");
+    let again = command(&s)
+        .args(["team", "pull", &url, "--name", "web", "--yes"])
+        .output()
+        .unwrap();
+    assert!(!again.status.success(), "a name is taken once");
+
+    // A pin nobody trusted is not used, and says how to trust it.
+    let (_, other) = origin(&s, &config_yaml("opencode", NOWHERE));
+    let teams = s.0.with_extension("xdg-data").join("ensemble/teams");
+    std::fs::create_dir_all(teams.join("sneaky")).unwrap();
+    std::fs::write(
+        teams.join("sneaky/pulled.json"),
+        serde_json::json!({"url": url, "commit": other}).to_string(),
+    )
+    .unwrap();
+    let out = ensemble(&s, &["check"]);
+    assert!(!out.status.success(), "an untrusted commit is not used");
+    assert!(
+        stderr_of(&out).contains("team 'sneaky'") && stderr_of(&out).contains("ensemble team pull"),
+        "{}",
+        stderr_of(&out)
+    );
 }
 
 #[test]
-fn team_update_shows_what_changed_and_pins_nothing_by_itself() {
+fn team_update_shows_what_changed_and_moves_only_once_trusted() {
     let s = Scratch::new("remote-update");
     let (url, old) = origin(&s, &config_yaml("true", NOWHERE));
+    let pulled = command(&s)
+        .args(["team", "pull", &url, "--name", "web", "--yes"])
+        .output()
+        .unwrap();
+    assert!(pulled.status.success(), "{}", stderr_of(&pulled));
     let (_, new) = origin(&s, &config_yaml("opencode", NOWHERE));
-    let out = remote_cmd(&s, None)
-        .args(["team", "update", &format!("{url}#{old}"), "--ref", "main"])
+
+    let refused = command(&s)
+        .args(["team", "update", "web", "--ref", "main"])
+        .stdin(Stdio::null())
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    let said = stdout_of(&out);
+    assert!(!refused.status.success(), "nobody trusted the new commit");
     assert!(
-        said.contains(&format!("The new pin is {url}#{new}")),
-        "{said}"
+        stdout_of(&refused).contains("command"),
+        "what changed is shown: {}",
+        stdout_of(&refused)
     );
-    assert!(
-        said.contains("-      command: \"true\"") || said.contains("command"),
-        "{said}"
-    );
-    assert!(said.contains("ensemble team trust"), "{said}");
-    let again = remote_cmd(&s, None)
-        .args(["team", "update", &format!("{url}#{new}"), "--ref", "main"])
+    assert_eq!(pinned_commit(&s, "web"), old, "the pin did not move");
+
+    let moved = command(&s)
+        .args(["team", "update", "web", "--ref", "main", "--yes"])
         .output()
         .unwrap();
+    assert!(moved.status.success(), "{}", stderr_of(&moved));
     assert!(
-        stdout_of(&again).contains("Already at"),
+        stdout_of(&moved).contains(&format!("'web' is at {url}#{new} now")),
+        "{}",
+        stdout_of(&moved)
+    );
+    assert_eq!(pinned_commit(&s, "web"), new);
+    let again = ensemble(&s, &["team", "update", "web", "--ref", "main"]);
+    assert!(
+        stdout_of(&again).contains("already"),
         "{}",
         stdout_of(&again)
     );
-    // Updating trusts nothing.
-    let used = remote_cmd(&s, None)
-        .args(["agents", "--team", &format!("{url}#{new}")])
-        .output()
-        .unwrap();
-    assert!(!used.status.success());
+
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    let made = ensemble(&s, &["team", "update", "team"]);
+    assert!(!made.status.success());
+    assert!(
+        stderr_of(&made).contains("was not pulled"),
+        "{}",
+        stderr_of(&made)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1553,7 +1588,7 @@ fn a_task_written_by_submit_is_listed_shown_and_run_by_a_session() {
         &s,
         &[
             "submit",
-            "coder",
+            "team/coder",
             "Rename foo",
             "--text",
             "rename foo to bar",
@@ -1572,7 +1607,7 @@ fn a_task_written_by_submit_is_listed_shown_and_run_by_a_session() {
 
     let listed = ensemble(&s, &["tasks"]);
     assert!(
-        stdout_of(&listed).contains("0001-rename-foo · coder · queued · Rename foo"),
+        stdout_of(&listed).contains("0001-rename-foo · team/coder · queued · Rename foo"),
         "{}",
         stdout_of(&listed)
     );
@@ -1622,20 +1657,44 @@ fn a_task_written_by_submit_is_listed_shown_and_run_by_a_session() {
 fn submit_refuses_what_a_task_cannot_be() {
     let s = Scratch::new("cli-submit-bad");
     s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
-    let no_text = ensemble(&s, &["submit", "coder", "T"]);
+    let no_text = ensemble(&s, &["submit", "team/coder", "T"]);
     assert!(!no_text.status.success());
     for (args, needle) in [
         (vec!["submit", "nobody", "T", "--text", "x"], "no agent"),
         (
-            vec!["submit", "coder", "T", "--text", "x", "--gate", "nope:2"],
+            vec![
+                "submit",
+                "team/coder",
+                "T",
+                "--text",
+                "x",
+                "--gate",
+                "nope:2",
+            ],
             "no gate",
         ),
         (
-            vec!["submit", "coder", "T", "--text", "x", "--gate", "test:0"],
+            vec![
+                "submit",
+                "team/coder",
+                "T",
+                "--text",
+                "x",
+                "--gate",
+                "test:0",
+            ],
             "attempts",
         ),
         (
-            vec!["submit", "coder", "T", "--text", "x", "--repo", "../out"],
+            vec![
+                "submit",
+                "team/coder",
+                "T",
+                "--text",
+                "x",
+                "--repo",
+                "../out",
+            ],
             "`repo`",
         ),
     ] {
@@ -1656,7 +1715,7 @@ fn answer_gives_a_waiting_task_its_answer() {
     s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
     s.write(
         ".ensemble/tasks/0001-ask/task.md",
-        "---\ntitle: ask\nagent: coder\n---\nask\n",
+        "---\ntitle: ask\nagent: team/coder\n---\nask\n",
     );
     s.write(
         ".ensemble/tasks/0001-ask/questions.md",
@@ -1726,7 +1785,7 @@ fn the_node_runs_a_submitted_task_without_a_session_and_stops_on_sigterm() {
         &s,
         &[
             "submit",
-            "coder",
+            "team/coder",
             "Rename foo",
             "--text",
             "rename foo to bar",
@@ -1790,7 +1849,10 @@ fn a_task_stopped_in_the_middle_is_run_again_when_the_node_starts_again() {
     let cli = s.opencode("done", &body);
     s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
     let mut first = start_node(&s, &[]);
-    let out = ensemble(&s, &["submit", "coder", "Slow", "--text", "take your time"]);
+    let out = ensemble(
+        &s,
+        &["submit", "team/coder", "Slow", "--text", "take your time"],
+    );
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(wait_for(30, || marker.exists()));
     let listed = ensemble(&s, &["tasks"]);
@@ -1839,7 +1901,7 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
     );
 
     for _ in 0..2 {
-        let out = ensemble(&s, &["run", "reviewer", "look"]);
+        let out = ensemble(&s, &["run", "team/reviewer", "look"]);
         assert!(out.status.success(), "{}", stderr_of(&out));
     }
     // A run that cannot start is a failure on the record.
@@ -1847,21 +1909,21 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
         ".ensemble/config.yaml",
         &config_yaml("/nonexistent/opencode", NOWHERE),
     );
-    let out = ensemble(&s, &["run", "reviewer", "look"]);
+    let out = ensemble(&s, &["run", "team/reviewer", "look"]);
     assert!(!out.status.success());
 
     let table = ensemble(&s, &["stats"]);
     let text = stdout_of(&table);
     let row = text
         .lines()
-        .find(|l| l.starts_with("reviewer"))
+        .find(|l| l.starts_with("team/reviewer"))
         .unwrap_or_else(|| panic!("{text}"));
     let cells: Vec<&str> = row.split_whitespace().collect();
     assert_eq!((cells[1], cells[2]), ("3", "1"), "3 runs, 1 failure: {row}");
 
     let json = ensemble(&s, &["stats", "--json", "--since", "1h"]);
     let parsed: serde_json::Value = serde_json::from_str(&stdout_of(&json)).unwrap();
-    assert_eq!(parsed[0]["agent"], "reviewer");
+    assert_eq!(parsed[0]["agent"], "team/reviewer");
     assert_eq!(parsed[0]["runs"], 3);
 
     let bad = ensemble(&s, &["stats", "--since", "soon"]);
@@ -1909,10 +1971,10 @@ fn a_backlog_task_waits_until_it_is_assigned_and_the_helper_team_says_when_it_is
 
     let bad = ensemble(&s, &["assign", "0001-rename-foo", "nobody"]);
     assert!(!bad.status.success());
-    let ok = ensemble(&s, &["assign", "0001-rename-foo", "coder"]);
+    let ok = ensemble(&s, &["assign", "0001-rename-foo", "team/coder"]);
     assert!(ok.status.success(), "{}", stderr_of(&ok));
     assert!(
-        stdout_of(&ok).contains("assigned to coder"),
+        stdout_of(&ok).contains("assigned to team/coder"),
         "{}",
         stdout_of(&ok)
     );
@@ -1957,6 +2019,8 @@ fn show_prints_how_a_codex_agent_starts() {
         &[
             "add-agent",
             "fixer",
+            "--team",
+            "team",
             "--adapter",
             "codex",
             "--prompt",
@@ -1965,7 +2029,7 @@ fn show_prints_how_a_codex_agent_starts() {
         ],
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let shown = ensemble(&s, &["show", "fixer"]);
+    let shown = ensemble(&s, &["show", "team/fixer"]);
     assert!(shown.status.success(), "{}", stderr_of(&shown));
     let text = stdout_of(&shown);
     assert!(
@@ -1994,6 +2058,8 @@ fn a_light_agent_on_an_anthropic_backend_shows_a_messages_request() {
         &[
             "add-agent",
             "helper",
+            "--team",
+            "team",
             "--adapter",
             "direct",
             "--backend",
@@ -2005,7 +2071,7 @@ fn a_light_agent_on_an_anthropic_backend_shows_a_messages_request() {
         ],
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let shown = ensemble(&s, &["show", "helper"]);
+    let shown = ensemble(&s, &["show", "team/helper"]);
     assert!(shown.status.success(), "{}", stderr_of(&shown));
     let text = stdout_of(&shown);
     assert!(
@@ -2057,7 +2123,7 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
         &s,
         &[
             "submit",
-            "coder",
+            "team/coder",
             "Rename foo",
             "--text",
             "rename foo to bar",
@@ -2143,7 +2209,7 @@ fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
             "version: 3\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"{central}\", timeout_seconds: 5 }}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ backend: home, model: small }}\n        - {{ backend: central, model: big }}\n      when_none: wait\n      max_tokens: 10\n"
         ),
     );
-    let out = ensemble(&s, &["show", "summariser"]);
+    let out = ensemble(&s, &["show", "team/summariser"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(
@@ -2151,12 +2217,12 @@ fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
         "{text}"
     );
     assert!(
-        text.contains("  1. home / small\n  2. central / big\n"),
+        text.contains("  1. team/home / small\n  2. team/central / big\n"),
         "{text}"
     );
     assert!(!text.contains("a run now"), "{text}");
 
-    let probed = ensemble(&s, &["show", "summariser", "--probe"]);
+    let probed = ensemble(&s, &["show", "team/summariser", "--probe"]);
     assert!(probed.status.success(), "{}", stderr_of(&probed));
     assert!(
         stdout_of(&probed).contains("a run now would use 2."),
@@ -2168,7 +2234,7 @@ fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
     assert!(!health.status.success(), "home is down");
     let said = stdout_of(&health);
     assert!(
-        said.contains("home: FAILED") && said.contains("central: ok"),
+        said.contains("team/home: FAILED") && said.contains("team/central: ok"),
         "{said}"
     );
 }
@@ -2888,7 +2954,7 @@ fn a_node_file_is_written_once_and_an_account_names_itself_in_the_tracker() {
     let out = command(&s).args(["node", "init"]).output().unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     let node = s.0.with_extension("xdg-config").join("ensemble/node.yaml");
-    assert!(std::fs::read_to_string(&node).unwrap().contains("team:"));
+    assert!(std::fs::read_to_string(&node).unwrap().contains("offers:"));
     let again = command(&s).args(["node", "init"]).output().unwrap();
     assert!(
         !again.status.success(),
@@ -2955,10 +3021,7 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_node_and_reported_back() {
     let config = s.0.with_extension("xdg-config").join("ensemble");
     std::fs::write(
         config.join("node.yaml"),
-        format!(
-            "version: 3\nname: laptop\naccess: private\nteam: \"{}\"\noffers: {{}}\n",
-            s.org().display()
-        ),
+        "version: 4\nname: laptop\naccess: private\noffers: {}\n",
     )
     .unwrap();
     let mut node = command(&s)
@@ -3002,7 +3065,7 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_node_and_reported_back() {
     let issue = hub.join("issues/7.md");
     std::fs::write(
         &issue,
-        format!("---\ntitle: Rename foo\nassignee: ana.p\nlabels: [ensemble, \"ensemble:coder\"]\nproject: {project}\nstatus: open\n---\nRename foo to bar in a.txt.\n"),
+        format!("---\ntitle: Rename foo\nassignee: ana.p\nlabels: [ensemble, \"ensemble:team/coder\"]\nproject: {project}\nstatus: open\n---\nRename foo to bar in a.txt.\n"),
     )
     .unwrap();
     assert!(
@@ -3173,8 +3236,22 @@ fn on_machine(scratch: &Scratch, machine: &str, node_yaml: &str) -> Command {
     c.current_dir(scratch.path())
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_STATE_HOME", home.join("state"))
+        .env("XDG_DATA_HOME", home.join("data"))
         .env("XDG_CACHE_HOME", scratch.0.with_extension("xdg-cache"));
     c
+}
+
+/// The team `team` of the computer `machine`, with `config` as its
+/// `config.yaml`.
+fn machine_team(scratch: &Scratch, machine: &str, team: &str, config: &str) {
+    let dir = scratch
+        .0
+        .with_extension("machines")
+        .join(machine)
+        .join("data/ensemble/teams")
+        .join(team);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config.yaml"), config).unwrap();
 }
 
 /// `ensemble node serve` on the computer `machine`, whose node is
@@ -3217,22 +3294,18 @@ fn an_agent_runs_on_a_node_and_what_it_changed_comes_back() {
 
     // Ana's node, with a helper team of its own whose `reviewer` changes a
     // file, adds one, and lists what it was given.
-    let team = s.0.with_extension("node-team");
-    std::fs::create_dir_all(&team).unwrap();
     let cli = s.opencode(
         "changed it there",
         "printf 'hello, changed' > a.txt\nprintf new > b.txt\nls -a > given.txt",
     );
-    std::fs::write(team.join("config.yaml"), config_yaml(&cli, NOWHERE)).unwrap();
-    let node_yaml = format!(
-        "version: 3\nname: laptop\naccess: private\nteam: \"{}\"\noffers:\n  runs: {{ agents: [reviewer] }}\n",
-        team.display()
-    );
-    let _node = serve_node(&s, &url, "laptop", &node_yaml);
+    machine_team(&s, "laptop", "work", &config_yaml(&cli, NOWHERE));
+    let node_yaml =
+        "version: 4\nname: laptop\naccess: private\noffers:\n  runs: { agents: [work/reviewer] }\n";
+    let _node = serve_node(&s, &url, "laptop", node_yaml);
     let out = command(&s).args(["nodes", "--hub", &url]).output().unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stdout_of(&out).contains("ana/laptop  (private, 0 running)\n  agents: reviewer"),
+        stdout_of(&out).contains("ana/laptop  (private, 0 running)\n  agents: work/reviewer"),
         "{}",
         stdout_of(&out)
     );
@@ -3245,10 +3318,10 @@ fn an_agent_runs_on_a_node_and_what_it_changed_comes_back() {
     s.write(
         ".ensemble/config.yaml",
         &format!(
-            "version: 3\nllm_backends: {{}}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: reviewer, nodes: [ana/laptop] }}\n"
+            "version: 3\nllm_backends: {{}}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: work/reviewer, nodes: [ana/laptop] }}\n"
         ),
     );
-    let out = ensemble(&s, &["run", "heavy", "change", "a.txt"]);
+    let out = ensemble(&s, &["run", "team/heavy", "change", "a.txt"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).starts_with("changed it there"),
@@ -3277,10 +3350,10 @@ fn an_agent_runs_on_a_node_and_what_it_changed_comes_back() {
     s.write(
         ".ensemble/config.yaml",
         &format!(
-            "version: 3\nllm_backends: {{}}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: reviewer, nodes: [kim/gpu-box] }}\n"
+            "version: 3\nllm_backends: {{}}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: work/reviewer, nodes: [kim/gpu-box] }}\n"
         ),
     );
-    let out = ensemble(&s, &["run", "heavy", "change", "a.txt"]);
+    let out = ensemble(&s, &["run", "team/heavy", "change", "a.txt"]);
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("kim/gpu-box is not connected"),
@@ -3302,7 +3375,7 @@ fn a_node_serves_its_models_through_the_hub_and_a_shared_node_lends_no_login() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let server = models_stub(r#"{"choices":[{"message":{"content":"hi from the node"}}]}"#);
     let node_yaml = |access: &str, offers: &str| {
-        format!("version: 3\nname: {access}-box\naccess: {access}\n{offers}")
+        format!("version: 4\nname: {access}-box\naccess: {access}\n{offers}")
     };
     let models = format!(
         "offers:\n  models: {{ base_url: \"{server}\", timeout_seconds: 5, names: [small] }}\n"
@@ -3327,19 +3400,11 @@ fn a_node_serves_its_models_through_the_hub_and_a_shared_node_lends_no_login() {
         stderr_of(&out)
     );
     // And a shared node never offers an agent on its CLI's own login.
-    let team = s.0.with_extension("node-team");
-    std::fs::create_dir_all(&team).unwrap();
-    std::fs::write(team.join("config.yaml"), config_yaml("opencode", NOWHERE)).unwrap();
+    machine_team(&s, "shared-box", "work", &config_yaml("opencode", NOWHERE));
     let out = on_machine(
         &s,
         "shared-box",
-        &node_yaml(
-            "shared",
-            &format!(
-                "team: \"{}\"\noffers:\n  runs: {{ agents: [reviewer] }}\n",
-                team.display()
-            ),
-        ),
+        &node_yaml("shared", "offers:\n  runs: { agents: [work/reviewer] }\n"),
     )
     .args(["node", "serve", "--hub", &url])
     .output()
@@ -3374,15 +3439,12 @@ fn a_session_reaches_the_node_from_its_folder_and_a_task_goes_on_after_it_ends()
         child.wait_with_output().unwrap()
     };
 
-    // With no node running, `mcp` without --team says how to start one.
+    // With no node running, `mcp` says how to start one.
     let config = s.0.with_extension("xdg-config").join("ensemble");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
         config.join("node.yaml"),
-        format!(
-            "version: 3\nname: desk\naccess: private\nteam: \"{}\"\noffers: {{}}\n",
-            s.org().display()
-        ),
+        "version: 4\nname: desk\naccess: private\noffers: {}\n",
     )
     .unwrap();
     let out = session(&[]);
@@ -3415,7 +3477,7 @@ fn a_session_reaches_the_node_from_its_folder_and_a_task_goes_on_after_it_ends()
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
         serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
             "name": "submit",
-            "arguments": {"agent": "coder", "title": "Rename foo", "task": "rename foo to bar"}
+            "arguments": {"agent": "team/coder", "title": "Rename foo", "task": "rename foo to bar"}
         }}),
     ]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -3428,4 +3490,98 @@ fn a_session_reaches_the_node_from_its_folder_and_a_task_goes_on_after_it_ends()
             .is_ok_and(|t| t == "bar\n")),
         "the task did not run after the session"
     );
+}
+
+#[test]
+fn an_agent_writes_a_team_that_runs_only_once_the_person_approves_it() {
+    let s = Scratch::new("team-create");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    let mut session = McpSession::start(&s);
+    session.request("initialize", serde_json::json!({}));
+
+    let sample = tool_text(&session.call("teams", serde_json::json!({"sample": true})));
+    assert!(sample.contains("agents:"), "{sample}");
+    let docs = config_yaml("true", NOWHERE);
+    let made = session.call(
+        "team_create",
+        serde_json::json!({"name": "docs", "config": docs}),
+    );
+    assert_eq!(made["result"]["isError"], false, "{made}");
+    assert!(
+        tool_text(&made).contains("ensemble team approve docs"),
+        "{made}"
+    );
+    let broken = session.call(
+        "team_create",
+        serde_json::json!({"name": "half", "config": "version: 3\n"}),
+    );
+    assert_eq!(
+        broken["result"]["isError"], true,
+        "a broken team is refused"
+    );
+    let taken = session.call(
+        "team_create",
+        serde_json::json!({"name": "team", "config": docs}),
+    );
+    assert_eq!(
+        taken["result"]["isError"], true,
+        "an existing team is not changed"
+    );
+    let listed = tool_text(&session.call("teams", serde_json::json!({})));
+    assert!(
+        listed.contains("docs (made here, waiting for approval")
+            && listed.contains("team (made here)")
+            && listed.contains("  team/coder:"),
+        "{listed}"
+    );
+    drop(session);
+
+    // It runs nothing until the person approves it.
+    let check = ensemble(&s, &["check"]);
+    assert!(check.status.success(), "{}", stderr_of(&check));
+    assert!(
+        !stdout_of(&check).contains("docs/coder"),
+        "{}",
+        stdout_of(&check)
+    );
+    assert!(
+        stderr_of(&check).contains("team 'docs' waits for your approval"),
+        "{}",
+        stderr_of(&check)
+    );
+    let approved = ensemble(&s, &["team", "approve", "docs", "--yes"]);
+    assert!(approved.status.success(), "{}", stderr_of(&approved));
+    assert!(
+        stdout_of(&approved).contains("coder: runs `true`"),
+        "what it runs is shown first: {}",
+        stdout_of(&approved)
+    );
+    let check = ensemble(&s, &["check"]);
+    assert!(
+        stdout_of(&check).contains("docs/coder"),
+        "{}",
+        stdout_of(&check)
+    );
+
+    // A folder elsewhere joins as a link, and leaves without being deleted.
+    let elsewhere = s.0.with_extension("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("config.yaml"), config_yaml("true", NOWHERE)).unwrap();
+    let linked = command(&s)
+        .args(["team", "add", "pcb"])
+        .arg(&elsewhere)
+        .output()
+        .unwrap();
+    assert!(linked.status.success(), "{}", stderr_of(&linked));
+    let teams = stdout_of(&ensemble(&s, &["teams"]));
+    assert!(
+        teams.contains(&format!("pcb  (linked to {})", elsewhere.display()))
+            && teams.contains("  pcb/coder:"),
+        "{teams}"
+    );
+    let removed = ensemble(&s, &["team", "remove", "pcb", "--yes"]);
+    assert!(removed.status.success(), "{}", stderr_of(&removed));
+    assert!(elsewhere.join("config.yaml").is_file(), "the folder stays");
+    assert!(!stdout_of(&ensemble(&s, &["teams"])).contains("pcb"));
+    let _ = std::fs::remove_dir_all(&elsewhere);
 }

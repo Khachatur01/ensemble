@@ -31,7 +31,8 @@ spread across them. MCP is how an agent CLI reaches a node. It is one binary,
   and model calls between nodes, and integrations (Telegram and others, to
   come). It runs as `ensemble hub serve` on a server for a team, or embedded
   in one person's own node.
-- **The helper team**: agents described in one `config.yaml`, each run by an
+- **The helper teams**: each a `config.yaml` in the node's teams directory,
+  its agents named `<team>/<agent>`, each run by an
   adapter (an agent CLI started headless, an agent loop of Ensemble's own, one
   chat request to a model, or a run on another node).
 - **The ways in**: the agent CLI a person already uses, which reaches its node
@@ -100,7 +101,7 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 | crate | what it is | files |
 | --- | --- | --- |
 | `ensemble-core` | what everything shares | the error vocabulary (`port.rs`); the per-user state, cache and config directories (`state.rs`); the working folder, a `repo` inside it and what a run changed (`workspace.rs`); the record of runs behind `ensemble stats` (`records.rs`); the one-worker lock (`lock.rs`); dates in UTC (`time.rs`); the files a run on a node carries there and back (`snapshot.rs`); the folders a node served, by project (`folders.rs`); the async runtime and its bridges to code that blocks (`runtime.rs`) |
-| `ensemble-config` | the three files a person writes | `config.yaml`: the document as written (`raw.rs`), the environment and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), versions 1 and 2 to 3 (`migrate.rs`), adding and removing an agent as text, comments kept (`edit.rs`); `hub.yaml` (`hub.rs`); `node.yaml` (`node.rs`) |
+| `ensemble-config` | the three files a person writes | `config.yaml`: the document as written (`raw.rs`), the environment and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), versions 1 and 2 to 3 (`migrate.rs`), adding and removing an agent as text, comments kept (`edit.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); `hub.yaml` (`hub.rs`); `node.yaml` (`node.rs`) |
 | `ensemble-backends` | talking to model servers | one chat request in the server's own format (`chat.rs`); which models a server serves (`models.rs`); the first usable model of a `try` list (`resolve.rs`); a stand-in server for tests (`testing.rs`) |
 | `ensemble-knowledge` | the hub's knowledge | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait a session uses (`lib.rs`) |
 | `ensemble-link` | the hub server and the link to it | accounts and hashed tokens (`users.rs`); the REST API (`api.rs`) over a small HTTP reader (`http.rs`); the frames of the link (`protocol.rs`); the hub's side, a task per connection (`server.rs`); connected nodes, runs and model calls, `/nodes/v1/` (`nodes.rs`); the node's side, `Connection` and `RemoteMemory` (`client.rs`); the token file (`tokens.rs`) |
@@ -109,7 +110,7 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 | `ensemble-inbox` | issues from a tracker into tasks | the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`); an issue made a task and what the task reports (`work.rs`); the embedded hub's inbox (`bridge.rs`); a hub server's (`relay.rs`); a member's computer's part in it (`node.rs`) |
 | `ensemble-node` | a node's link to a hub | `Worker`: runs and model calls for others (`lib.rs`) |
 | `ensemble-mcp` | MCP over stdio | the session loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`) |
-| `ensemble` (the root) | the binary | the commands (`src/main.rs`); the node's sessions and the bridge (`src/daemon.rs`); `setup`, `connect`, `doctor` (`src/setup.rs`); session hooks (`src/hooks.rs`); remote helper teams (`src/remote.rs`) |
+| `ensemble` (the root) | the binary | the commands (`src/main.rs`); the node's sessions and the bridge (`src/daemon.rs`); `setup`, `connect`, `doctor` (`src/setup.rs`); session hooks (`src/hooks.rs`); the node's teams, loaded, made, linked, pulled and approved (`src/teams.rs`), over git repositories pinned and trusted per commit (`src/remote.rs`) |
 
 Two rules keep the layers apart. The MCP session knows the tools and the
 router, not which CLIs exist. The router knows agents; only the adapters know
@@ -118,13 +119,14 @@ how a CLI is started and read.
 ## Configuration and state
 
 What a person writes is **configuration**, reviewed and never changed by
-Ensemble except on request (`add-agent`, `migrate`):
+Ensemble except on request (`add-agent`, `migrate`, `team new`, an approved
+`team_create`):
 
 | file | where | holds |
 | --- | --- | --- |
-| `config.yaml` | the helper team's directory (`--team`), often a git repository; or a remote one, `<url>#<commit>` | `llm_backends`, `limits`, `gates`, `tracker`, `agents` |
+| `config.yaml` | a helper team's folder in the node's teams directory (`~/.local/share/ensemble/teams/<name>/`), a folder linked there, or a pulled repository's clone | `llm_backends`, `limits`, `gates`, `tracker`, `agents` |
 | `hub.yaml` | the hub's directory (`--hub`) | `owner`, the hub's own `llm_backends`, `knowledge`, `tasks`, and for a server `server` and `roles` |
-| `node.yaml` | `~/.config/ensemble/node.yaml`, one per computer | `name`, `access`, `team`, `offers` |
+| `node.yaml` | `~/.config/ensemble/node.yaml`, one per computer | `name`, `access`, `offers` |
 
 No setting has a default: every one is written, and a missing one is refused by
 name. A block that is absent means its module is off. No file holds a secret:
@@ -138,12 +140,13 @@ or a config directory:
 | path | holds |
 | --- | --- |
 | `~/.local/state/ensemble/workdirs/<folder>-<hash>/` | a working folder's `tasks/`, `runs/`, `worktrees/`, `state.json` and `worker.lock` |
-| `~/.local/state/ensemble/orgs/<team>-<hash>/` | a helper team's `usage.json` (budgets) and `records.jsonl` (`ensemble stats`), shared by every folder |
+| `~/.local/state/ensemble/orgs/teams-<hash>/` | the teams' `usage.json` (budgets) and `records.jsonl` (`ensemble stats`), by `<team>/<agent>`, shared by every folder |
 | `~/.local/state/ensemble/hubs/<hub>-<hash>/` | an embedded inbox's `inbox.json`; a hub server's `users.json` and `deliveries.json` |
 | `~/.local/state/ensemble/node/` | the node's lock, `folders.json` (the folder last used for each project), `runs/` for others, `inbox/node.json` |
 | `$XDG_RUNTIME_DIR/ensemble/<hash>.sock` | a node's socket, in a folder only its user may enter (`/tmp/ensemble-<user>/` without `XDG_RUNTIME_DIR`) |
 | `~/.config/ensemble/hubs.json` | hub tokens, one per URL, mode 0600 |
-| `~/.cache/ensemble/` | clones of remote helper teams |
+| `~/.local/share/ensemble/teams/` | the node's helper teams: a folder per team, its `config.yaml`, a link to a folder elsewhere, or `pulled.json` (repository and commit); `pending` beside a team an agent wrote |
+| `~/.cache/ensemble/` | clones of pulled teams, checked against their commit each time |
 
 `<hash>` is a hash of the whole path, so two folders of one name are kept
 apart. The knowledge vault is the one thing a hub keeps in its own directory:
@@ -184,9 +187,40 @@ What a node keeps for a folder, and what a hub server's connections borrow, is
 made once and lives as long as the process, so it is leaked on purpose
 (`Box::leak`) and borrowed as `'static`.
 
+## Teams
+
+The node runs every team in its teams directory at once. When it starts it
+reads each one (`src/teams.rs`): a folder made here, a link to a folder
+elsewhere, or a pulled repository, whose clone in the cache is checked against
+its pinned commit and must be trusted. A team an agent wrote is skipped, with a
+line saying it waits for approval; a team that cannot be loaded stops the node,
+naming it. The teams are then combined into one helper team
+(`ensemble_config::teams::combine`): each name of a team, its agents, model
+servers, limits and gates, becomes `<team>/<name>`, and every reference inside
+it (an agent's `limit`, its models' backends) is renamed with it. So the
+router, the queue, budgets, records and tasks work as with one team, with
+agents named `web/coder`; a task's `gate: { name: test }` means the gate
+`test` of its agent's team.
+
+- **Made**: `team new` writes the sample; `add-agent` and `remove-agent` edit
+  it as text, comments kept.
+- **Linked**: `team add` makes a symbolic link to a folder with a
+  `config.yaml`, such as a checkout a company keeps.
+- **Pulled**: `team pull` resolves a tag or branch to a commit, clones it into
+  the cache, shows what it would run, and records the trust and
+  `pulled.json`; `team update` moves the pin the same way. A branch is never
+  followed at run time.
+- **Written by an agent**: `team_create` checks the config and writes it with
+  a `pending` file; `team approve` shows what it would run and removes the
+  file. The agent has no tool to change a team that exists.
+
+The commands that read teams (`check`, `agents`, `show`, `health`, `run`,
+`doctor`, `stats`, `submit`) load them the same way. A running node does not
+watch the directory: a change is used once it restarts.
+
 ## A delegation
 
-Your agent calls `delegate` with an agent's name and a task:
+Your agent calls `delegate` with an agent's name, `<team>/<agent>`, and a task:
 
 1. The session hands the call to `delegation::call` (`ensemble-tasks`), as a
    future of the session's task. The client's `progressToken` names it in the
@@ -378,11 +412,14 @@ and is written to be read by the model that will see it.
 
 - **Helper team**: the agents a user works with, described in one `config.yaml`
   (config version 3). It is flat: a list of professional agents, such as a
-  coder, a reviewer, a PCB designer or an RF engineer, with no teams and no
-  hierarchy. A user connects exactly one helper team, from a local directory or
-  a git repository; a company may share one, or each user may keep their own.
-  The description is strict YAML, never natural language. This replaced the
-  version 2 "organization of teams".
+  coder, a reviewer, a PCB designer or an RF engineer, with no hierarchy. A
+  node holds any number of them in its teams directory and runs them all, its
+  agents named `<team>/<agent>`: teams the person makes, links or pulls from a
+  git repository like an image, and teams an agent writes at the person's
+  request, which run once the person approves them. (Decided 2026-11-17; a
+  user connected exactly one helper team before.) The description is strict
+  YAML, never natural language. This replaced the version 2 "organization of
+  teams".
 - **Hub**: the services: identities, task tracking and the inbox, knowledge
   vaults and the pipeline, integrations (Telegram and others), routing work
   between nodes, model access. The word "organization" is not used for it,
@@ -783,8 +820,11 @@ crate holds it today.
 7. One node per computer, and the node as the only way in: no session that
    runs a team itself (`mcp --team`), no `ensemble serve`, no `--node` or
    `--state`; `setup` and `connect` register the bridge with the client.
-   (Done.) Next: teams kept in a directory of the node, pulled like images
-   or made on request with your approval; then the hub's accounts in Turso.
+   (Done.)
+8. Teams in a directory of the node: made, linked, pulled from git pinned
+   to a trusted commit, or written by an agent and approved by the person;
+   all run at once as `<team>/<agent>`; `node.yaml` version 4 without
+   `team`. (Done.) Next: the hub's accounts and deliveries in Turso.
 
 What remains is the "Not yet" of steps 4 and 5, and the modules marked not
 built above.

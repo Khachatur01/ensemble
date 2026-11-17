@@ -147,17 +147,14 @@ pub fn registration(client: &str, ensemble: &str, global: bool) -> Result<Regist
     Ok(Registration { program, args })
 }
 
-/// The text of a node file: the node `name`, private, running the helper team
-/// in `team` when there is one, offering nothing. Checked by loading it.
-pub fn node_file(name: &str, team: Option<&Path>) -> Result<String, String> {
+/// The text of a node file: the node `name`, private, offering nothing.
+/// Checked by loading it.
+pub fn node_file(name: &str) -> Result<String, String> {
     let quoted = |s: &str| serde_json::Value::String(s.to_string()).to_string();
     let mut text = format!(
         "{NODE_SCHEMA_URL_LINE}\n\n# This computer's node, which `ensemble node serve` runs. `ensemble node init\n# --stdout` prints every setting.\n\nversion: {NODE_SUPPORTED_VERSION}\n\nname: {}\naccess: private\n",
         quoted(name)
     );
-    if let Some(team) = team {
-        text.push_str(&format!("team: {}\n", quoted(&team.display().to_string())));
-    }
     text.push_str("offers: {}\n");
     crate::config::parse_node(&text, Path::new(NODE_FILENAME)).map_err(|e| e.to_string())?;
     Ok(text)
@@ -269,15 +266,12 @@ pub fn risks(config: &Config) -> Vec<Finding> {
 }
 
 /// Checks that need no running agent: the structure of the helper team.
-pub fn structure(config: &Config, team: &Path, workdir: &Path) -> Vec<Finding> {
+pub fn structure(config: &Config, workdir: &Path) -> Vec<Finding> {
     let mut out = Vec::new();
     if config.agents.is_empty() {
         out.push(Finding::bad(
-            "the helper team has no agents",
-            format!(
-                "ensemble add-agent <name> --adapter opencode --team {}",
-                team.display()
-            ),
+            "the node has no helper team with agents",
+            "make one with `ensemble team new <name>`, pull one with `ensemble team pull <url>`, or ask your agent to make one",
         ));
     }
     let wants_git = config
@@ -305,7 +299,6 @@ pub fn health_finding(
     name: &str,
     result: &Result<(), crate::port::Error>,
     config: &Config,
-    team: &Path,
 ) -> Finding {
     match result {
         Ok(()) => Finding::ok(format!("{name}: ok")),
@@ -320,7 +313,7 @@ pub fn health_finding(
                 .collect();
             let remove = users
                 .iter()
-                .map(|u| format!("ensemble remove-agent {u} --team {}", team.display()))
+                .map(|u| remove_command(u))
                 .collect::<Vec<_>>()
                 .join("; ");
             let fix = if kind == CLAUDE_CODE_AGENT || kind == OPENCODE_AGENT {
@@ -334,6 +327,15 @@ pub fn health_finding(
             };
             Finding::bad(what, fix)
         }
+    }
+}
+
+/// The command that takes `agent` out of its team: `web/coder` is the agent
+/// `coder` of the team `web`.
+fn remove_command(agent: &str) -> String {
+    match agent.split_once('/') {
+        Some((team, name)) => format!("ensemble remove-agent {name} --team {team}"),
+        None => format!("ensemble remove-agent {agent}"),
     }
 }
 
@@ -409,23 +411,39 @@ mod tests {
 
     #[test]
     fn a_node_file_is_written_complete_and_loads() {
-        let text = node_file("desk-2", Some(Path::new("/home/me/my team"))).unwrap();
+        let text = node_file("desk-2").unwrap();
         let node = crate::config::parse_node(&text, Path::new("node.yaml")).unwrap();
         assert_eq!(node.name, "desk-2");
         assert_eq!(node.access, crate::config::Access::Private);
-        assert_eq!(node.team.as_deref(), Some(Path::new("/home/me/my team")));
         assert!(node.offers.runs.is_none() && node.offers.models.is_none());
-        let bare =
-            crate::config::parse_node(&node_file("desk", None).unwrap(), Path::new("node.yaml"))
-                .unwrap();
-        assert!(bare.team.is_none());
+        assert!(node_file("a/b").is_err(), "a name is checked");
+    }
+
+    #[test]
+    fn a_failed_health_check_names_the_agents_to_drop_by_their_team() {
+        let c = crate::config::teams::combine(
+            vec![("web".into(), loads(&team()))],
+            PathBuf::from("/teams"),
+        );
+        let failed = Err(crate::port::Error::Spawn {
+            backend: "opencode".into(),
+            program: "opencode".into(),
+            detail: "not installed".into(),
+        });
+        let finding = health_finding("opencode (opencode)", &failed, &c);
+        assert_eq!(finding.level, Level::Problem);
+        let fix = finding.fix.unwrap();
+        assert!(
+            fix.contains("ensemble remove-agent coder --team web"),
+            "{fix}"
+        );
     }
 
     #[test]
     fn the_structure_check_names_what_is_wrong() {
         let c = loads(&team());
         let tmp = crate::workspace::testing::TempDir::new();
-        let findings = structure(&c, Path::new("/org"), &tmp.0);
+        let findings = structure(&c, &tmp.0);
         assert!(
             findings
                 .iter()
@@ -433,7 +451,7 @@ mod tests {
             "{findings:?}"
         );
         std::fs::create_dir(tmp.0.join(".git")).unwrap();
-        let findings = structure(&c, Path::new("/org"), &tmp.0);
+        let findings = structure(&c, &tmp.0);
         assert!(
             findings.iter().all(|f| f.level == Level::Ok),
             "{findings:?}"
@@ -444,13 +462,13 @@ mod tests {
             "reviewer",
         )
         .unwrap();
-        let findings = structure(&loads(&bare), Path::new("/org"), &tmp.0);
+        let findings = structure(&loads(&bare), &tmp.0);
         assert!(
             findings.iter().any(|f| f.level == Level::Problem
-                && f.what.contains("no agents")
+                && f.what.contains("no helper team")
                 && f.fix
                     .as_deref()
-                    .is_some_and(|x| x.contains("add-agent <name>"))),
+                    .is_some_and(|x| x.contains("ensemble team new <name>"))),
             "{findings:?}"
         );
     }

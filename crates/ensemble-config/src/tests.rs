@@ -1804,15 +1804,14 @@ fn a_hub_servers_inbox_takes_no_person_and_an_embedded_one_needs_one() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_node_runs_a_team_offers_some_of_it_and_its_sample_and_schema_agree() {
+fn a_node_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
     let node = parse_node(node::NODE_SAMPLE, Path::new("node.yaml")).unwrap();
-    assert_eq!(node.team, Some(PathBuf::from("/home/you/ensemble-team")));
     assert_eq!(
         (node.name.as_str(), node.access),
         ("laptop", node::Access::Private)
     );
     let runs = node.offers.runs.as_ref().expect("the sample offers runs");
-    assert_eq!(runs.agents, vec!["coder"]);
+    assert_eq!(runs.agents, vec!["web/coder"]);
     let models = node
         .offers
         .models
@@ -1827,10 +1826,9 @@ fn a_node_runs_a_team_offers_some_of_it_and_its_sample_and_schema_agree() {
             .to_string()
     };
     let said = problems(
-        "version: 3\nname: a/b\naccess: shared\nteam: code/team\noffers:\n  runs: { agents: [] }\n  models: { base_url: localhost, timeout_seconds: 0, names: [] }\n",
+        "version: 4\nname: a/b\naccess: shared\noffers:\n  runs: { agents: [] }\n  models: { base_url: localhost, timeout_seconds: 0, names: [] }\n",
     );
     for wanted in [
-        "team: needs the absolute directory",
         "name: 'a/b'",
         "offers.runs.agents: name at least one",
         "offers.models.base_url",
@@ -1840,8 +1838,13 @@ fn a_node_runs_a_team_offers_some_of_it_and_its_sample_and_schema_agree() {
         assert!(said.contains(wanted), "{wanted}: {said}");
     }
     let said =
-        problems("version: 3\nname: box\naccess: shared\noffers:\n  runs: { agents: [coder] }\n");
-    assert!(said.contains("there is no `team`"), "{said}");
+        problems("version: 4\nname: box\naccess: shared\noffers:\n  runs: { agents: [coder] }\n");
+    assert!(said.contains("as `<team>/<agent>`"), "{said}");
+    let said = problems("version: 3\nname: box\naccess: private\nteam: /t\noffers: {}\n");
+    assert!(
+        said.contains("version: 3 is no longer read") && said.contains("ensemble team add"),
+        "{said}"
+    );
     let said = problems("version: 1\nprojects: { shop: /code/shop }\n");
     assert!(
         said.contains("version: 1 is no longer read") && said.contains("access: private"),
@@ -1851,15 +1854,14 @@ fn a_node_runs_a_team_offers_some_of_it_and_its_sample_and_schema_agree() {
         "version: 2\nname: box\naccess: private\nprojects: {}\noffers:\n  runs: { team: /t, agents: [a] }\n",
     );
     assert!(
-        said.contains("version: 2 is no longer read") && said.contains("up to `team:`"),
+        said.contains("version: 2 is no longer read") && said.contains("teams directory"),
         "{said}"
     );
     let bare = parse_node(
-        "version: 3\nname: box\naccess: shared\noffers: {}\n",
+        "version: 4\nname: box\naccess: shared\noffers: {}\n",
         Path::new("node.yaml"),
     )
     .unwrap();
-    assert_eq!(bare.team, None);
     assert_eq!(
         bare.offers,
         node::Offers {
@@ -1874,9 +1876,7 @@ fn a_node_runs_a_team_offers_some_of_it_and_its_sample_and_schema_agree() {
     );
     let schema: serde_json::Value = serde_json::from_str(node::NODE_SCHEMA).unwrap();
     assert_eq!(schema_keys(&schema), accepted_keys::<node::RawNode>());
-    let mut required = accepted_keys::<node::RawNode>();
-    required.retain(|k| k != "team");
-    assert_eq!(schema_required(&schema), required);
+    assert_eq!(schema_required(&schema), accepted_keys::<node::RawNode>());
     let defs = &schema["definitions"];
     assert_eq!(
         schema_keys(&schema["properties"]["offers"]),

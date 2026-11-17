@@ -28,6 +28,8 @@ const DEFAULT_WAIT_SECONDS: u64 = 30;
 const MAX_WAIT_SECONDS: u64 = 300;
 pub const AGENTS: &str = "agents";
 pub const HEALTH: &str = "health";
+pub const TEAMS: &str = "teams";
+pub const TEAM_CREATE: &str = "team_create";
 
 /// One tool: its name, what it is for, and the schema of its arguments.
 pub struct Tool {
@@ -101,10 +103,9 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
             name: SUBMIT,
             description: format!(
                 "Write a task for an agent to the project's task list (the state directory's tasks/, \
-                 committed like a ticket) and return its id at once. Agents work through \
-                 tasks while this session runs, as many at a time as each agent allows; a \
-                 task this session does not finish runs in the next one. Available agents: \
-                 {agent_list}. Follow it with `status`, collect its result with `wait`."
+                 kept like a ticket) and return its id at once. Agents work through \
+                 tasks while the node runs, as many at a time as each agent allows, and \
+                 go on after this session ends. Available agents: {agent_list}. Follow it with `status`, collect its result with `wait`."
             ),
             parameters: json!({
                 "type": "object",
@@ -282,6 +283,52 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
         parameters: json!({
             "type": "object",
             "properties": {},
+            "additionalProperties": false
+        }),
+    });
+
+    out.push(Tool {
+        name: TEAMS,
+        description: "List the helper teams of the node, where each comes from, and their \
+                      agents, named `<team>/<agent>`. A team written with `team_create` is \
+                      listed as waiting for approval until the person approves it. With \
+                      `sample`, return instead a sample config.yaml with every setting, the \
+                      form `team_create` takes."
+            .into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "sample": {
+                    "type": "boolean",
+                    "description": "Return the sample config.yaml instead of the list."
+                }
+            },
+            "additionalProperties": false
+        }),
+    });
+
+    out.push(Tool {
+        name: TEAM_CREATE,
+        description: "Write a new helper team for the node, when the person asks for one: its \
+                      name and its whole config.yaml (version 3, every setting written; \
+                      `teams` with `sample` shows the form). It is checked, then kept \
+                      waiting: it runs nothing until the person reads and approves it with \
+                      `ensemble team approve <name>` in a terminal, and the node restarts. \
+                      Say so to the person. It cannot change a team that exists."
+            .into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The team's name: letters, digits, '-', '_' or '.', such as web or pcb-design."
+                },
+                "config": {
+                    "type": "string",
+                    "description": "The team's config.yaml, whole."
+                }
+            },
+            "required": ["name", "config"],
             "additionalProperties": false
         }),
     });
@@ -537,7 +584,7 @@ pub async fn call(
                             "{SUBMIT}: `gate.attempts` must be at least 1"
                         ));
                     }
-                    Ok(g) if ensemble.config().gate(&g.name).is_none() => {
+                    Ok(g) if ensemble.config().gate_for(role, &g.name).is_none() => {
                         let known: Vec<&str> =
                             ensemble.config().gates.keys().map(String::as_str).collect();
                         return ToolResult::err(format!(
@@ -674,6 +721,76 @@ pub async fn call(
             ToolResult::ok(lines.join("\n"))
         }
 
+        TEAMS => {
+            if args.get("sample").and_then(Value::as_bool) == Some(true) {
+                return ToolResult::ok(ensemble_config::SAMPLE);
+            }
+            let config = ensemble.config();
+            let entries = ensemble_config::teams::list(&config.source);
+            if entries.is_empty() {
+                return ToolResult::ok(
+                    "The node has no helper teams. Make one with `team_create` when the person asks, \
+                     or the person makes one with `ensemble team new` or pulls one with \
+                     `ensemble team pull`.",
+                );
+            }
+            let mut lines = Vec::new();
+            for team in &entries {
+                lines.push(format!("{} ({})", team.name, team.describe()));
+                let prefix = format!("{}/", team.name);
+                let agents: Vec<&str> = config
+                    .agent_names()
+                    .into_iter()
+                    .filter(|a| a.starts_with(&prefix))
+                    .collect();
+                if agents.is_empty() && !team.pending {
+                    lines.push(
+                        "  (not running: added since the node started, or it has no agents)".into(),
+                    );
+                }
+                for agent in agents {
+                    let purpose = config
+                        .agent(agent)
+                        .and_then(|a| a.prompt.as_deref())
+                        .map(first_line)
+                        .unwrap_or_else(|| "(no description configured)".to_string());
+                    lines.push(format!("  {agent}: {purpose}"));
+                }
+            }
+            ToolResult::ok(lines.join("\n"))
+        }
+
+        TEAM_CREATE => {
+            let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("");
+            let (name, yaml) = (text("name").trim(), text("config"));
+            if name.is_empty() || yaml.trim().is_empty() {
+                return ToolResult::err(format!(
+                    "{TEAM_CREATE}: needs the team's `name` and its whole `config`"
+                ));
+            }
+            let dir = &ensemble.config().source;
+            if !dir.is_dir() {
+                return ToolResult::err(format!(
+                    "{TEAM_CREATE}: this helper team is not a node's teams, so no team can be added to it"
+                ));
+            }
+            match blocking(|| {
+                ensemble_config::teams::create_pending(
+                    dir,
+                    name,
+                    yaml,
+                    "an agent, at the person's request",
+                )
+            }) {
+                Ok(path) => ToolResult::ok(format!(
+                    "Wrote the team '{name}' in {}. It runs nothing until the person approves it: \
+                     tell them to read it and run `ensemble team approve {name}`, then restart the node.",
+                    path.display()
+                )),
+                Err(e) => ToolResult::err(format!("{TEAM_CREATE}: {e}")),
+            }
+        }
+
         HEALTH => {
             let mut lines = Vec::new();
             let mut any_bad = false;
@@ -696,7 +813,7 @@ pub async fn call(
 
         other => ToolResult::err(format!(
             "no such tool: '{other}'. This server provides: \
-             {DELEGATE}, {SUBMIT}, {STATUS}, {WAIT}, {CANCEL}, {ANSWER}, {ASSIGN}, {REVIEW}, {AGENTS}, {HEALTH}."
+             {DELEGATE}, {SUBMIT}, {STATUS}, {WAIT}, {CANCEL}, {ANSWER}, {ASSIGN}, {REVIEW}, {AGENTS}, {TEAMS}, {TEAM_CREATE}, {HEALTH}."
         )),
     }
 }
@@ -867,7 +984,7 @@ mod tests {
         // An enum with nothing in it is an invitation to a call that cannot
         // succeed.
         let names: Vec<&str> = tools(&[]).iter().map(|t| t.name).collect();
-        assert_eq!(names, vec![AGENTS, HEALTH]);
+        assert_eq!(names, vec![AGENTS, TEAMS, TEAM_CREATE, HEALTH]);
     }
 
     #[test]
@@ -876,7 +993,18 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                DELEGATE, SUBMIT, STATUS, WAIT, CANCEL, ASSIGN, ANSWER, REVIEW, AGENTS, HEALTH
+                DELEGATE,
+                SUBMIT,
+                STATUS,
+                WAIT,
+                CANCEL,
+                ASSIGN,
+                ANSWER,
+                REVIEW,
+                AGENTS,
+                TEAMS,
+                TEAM_CREATE,
+                HEALTH
             ]
         );
     }

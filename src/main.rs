@@ -12,6 +12,7 @@ use ensemble::router::Ensemble;
 use ensemble::setup;
 use ensemble::state;
 use ensemble::tasks;
+use ensemble::teams;
 
 mod daemon;
 use std::io::IsTerminal;
@@ -31,16 +32,36 @@ COMMANDS:
                             folder you work in; not meant to be run by hand. It
                             carries MCP between the agent and the running node
                             (`node serve`), whose tasks go on after the session.
-    init [--force|--stdout] Write a sample helper team: config.yaml in the --team
-                            directory, with every setting. Refuses to overwrite
-                            it unless --force; --stdout prints it instead.
-    migrate <FILE>          Rewrite a version 1 or 2 config as a version 3
-                            helper team in --team: every agent in one flat list.
-    setup [--client C] [--name N] [--team DIR] [--yes]
+    teams                   The node's helper teams: where each comes from, and
+                            its agents, named <team>/<agent>.
+    team new NAME [--stdout]
+                            Make a team: a sample config.yaml with every setting
+                            in the teams directory (~/.local/share/ensemble/
+                            teams/NAME). --stdout prints the sample instead.
+    team add NAME DIR       Link a folder with a config.yaml, such as a checkout
+                            of your company's team, as the team NAME.
+    team pull URL[@REF|#COMMIT] [--name N] [--yes]
+                            Pull a team from a git repository, pinned to the
+                            commit REF (or its default branch) is at: shows what
+                            it would run on this machine and asks you to trust
+                            that commit. Named for the repository unless --name.
+    team update NAME [--ref R] [--yes]
+                            Move a pulled team to the commit R is at now: shows
+                            what changed and asks you to trust the new commit.
+    team approve NAME [--yes]
+                            Read a team an agent wrote (`team_create`) and let
+                            it run.
+    team remove NAME [--yes]
+                            Take a team out of the node. A linked folder and a
+                            pulled clone are left where they are.
+    migrate <FILE> --team NAME
+                            Rewrite a version 1 or 2 config as the new team
+                            NAME: every agent in one flat list.
+    setup [--client C] [--name N] [--yes]
                             Set this computer up: find the agent CLIs, write
                             its node (~/.config/ensemble/node.yaml) if there is
                             none, register Ensemble with the agent you talk to,
-                            and check the node's team. Asks what it needs.
+                            and check the node's teams. Asks what it needs.
     connect --client C [--hub DIR] [--env-file F] [--global] [--hooks]
                             Register Ensemble with the agent you talk to:
                             claude-code, opencode or codex, so its sessions
@@ -59,8 +80,8 @@ COMMANDS:
                             Write this computer's node: ~/.config/ensemble/node.yaml.
                             It names the node, says whom it works for (private:
                             you; shared: also those whose role has `compute`),
-                            the helper team it runs, and what it offers through
-                            a hub: agents of that team, models.
+                            and what it offers through a hub: agents of its
+                            teams, models.
     node serve [--hub HUB]
                             Run that node until stopped (Ctrl-C or SIGTERM):
                             `ensemble mcp` sessions from any folder reach its
@@ -98,7 +119,7 @@ COMMANDS:
     logout URL              Forget a hub server's token.
     inbox [--once]          The issues assigned to you in the --hub tracker
                             with its label, where each stands and the task it
-                            became. --once (needs --team) first makes new
+                            became. --once first makes new
                             issues into tasks and reports tasks back, as a
                             running node does.
     recall TOPIC            Print the notes of the --hub vault about TOPIC, as
@@ -114,17 +135,12 @@ COMMANDS:
     knowledge rebuild [--yes]
                             Delete the notes and make them again from every
                             share, in one commit.
-    doctor                  Say what is wrong with the helper team and the
-                            agents it needs, and how to fix each thing.
-    add-agent NAME --adapter A [--model M] [--backend B] [--prompt P] [--writes]
-                            Add an agent to the team, every setting written.
-    remove-agent NAME       Remove an agent from the team.
-    team trust URL#COMMIT [--yes]
-                            Read what a remote helper team would run on this
-                            machine and, if you approve, trust that commit.
-    team update URL#COMMIT [--ref R]
-                            Show what changed in a remote helper team since
-                            COMMIT and print its new pin. Trusts nothing.
+    doctor                  Say what is wrong with the node's teams and the
+                            agents they need, and how to fix each thing.
+    add-agent NAME --team T --adapter A [--model M] [--backend B] [--prompt P] [--writes]
+                            Add an agent to the team T, every setting written.
+    remove-agent NAME --team T
+                            Remove an agent from the team T.
     review ID               The branch, the change and the result of a task that
                             worked in a git worktree. Changes nothing.
     diff ID                 The whole change on that branch.
@@ -152,21 +168,20 @@ COMMANDS:
                             the config handed to its CLI, API keys hidden, and
                             its models in order. --probe asks their backends
                             which one a run would use now.
-    check                   Load and validate the config, then report the helper
-                            team.
+    check                   Load and validate the node's teams, then report them
+                            as one helper team.
     schema                  Print the JSON Schema for config.yaml, so an editor
                             can complete and check it. Needs no config.
     agents                  List the agents and what runs each.
     health                  Check that every agent CLI starts and every LLM
                             backend in use answers and serves its models.
-    run <AGENT> <TASK>      Send one task to one agent and print the answer.
+    run <AGENT> <TASK>      Send one task to one agent, such as web/coder, and
+                            print the answer.
 
 OPTIONS:
-    -t, --team <DIR|URL>    The helper team: the directory with config.yaml, its
-                            llm_backends and agents. Nothing is searched for. A
-                            git repository is github.com/acme/team#COMMIT (a
-                            pin, which it must be and be trusted), or @TAG for
-                            `connect`, which pins it. --org is its old name.
+    -t, --team <NAME>       The team a command changes, by its name in the
+                            teams directory. Every other command reads all the
+                            node's teams, whose agents are <team>/<agent>.
         --hub <DIR|URL>     The hub: the directory with hub.yaml, which keeps
                             your knowledge, or a hub server's ws:// or wss://
                             URL after `ensemble login`. Without it there is no
@@ -207,8 +222,6 @@ struct Args {
     team: Option<String>,
     /// The hub's directory, with `hub.yaml`. None: no hub, so no knowledge.
     hub: Option<PathBuf>,
-    /// Where usage counters live, when the helper team is remote.
-    usage: Option<PathBuf>,
     env_file: Option<PathBuf>,
     dir: Option<PathBuf>,
     context: Option<String>,
@@ -276,7 +289,6 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             rest,
             team,
             hub,
-            usage: None,
             env_file,
             dir,
             context,
@@ -286,7 +298,7 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
 }
 
 fn run() -> Result<ExitCode, String> {
-    let Some(mut args) = parse_args(std::env::args().skip(1).collect())? else {
+    let Some(args) = parse_args(std::env::args().skip(1).collect())? else {
         return Ok(ExitCode::SUCCESS);
     };
 
@@ -303,9 +315,6 @@ fn run() -> Result<ExitCode, String> {
             .map_err(|e| format!("cannot read the current directory: {e}"))?,
     };
 
-    if args.command == "init" {
-        return cmd_init(&args);
-    }
     if args.command == "migrate" {
         return cmd_migrate(&args);
     }
@@ -374,11 +383,15 @@ fn run() -> Result<ExitCode, String> {
         return cmd_logout(&args);
     }
 
-    let resolved = resolve_team(&args, &args.command)?;
-    args.usage = resolved.usage.clone();
-    let config_path = config::config_path(&resolved.dir);
-    let config = config::load(&config_path, args.env_file.as_deref(), &SystemEnv)
-        .map_err(|e| e.to_string())?;
+    if args.command == "teams" {
+        return cmd_teams(&args);
+    }
+
+    // Every other command reads the node's teams, as one helper team.
+    let (config, waiting) = teams::load_all(args.env_file.as_deref(), &SystemEnv)?;
+    for line in &waiting {
+        eprintln!("ensemble: {line}");
+    }
 
     match args.command.as_str() {
         "check" => cmd_check(config, &dir),
@@ -394,29 +407,12 @@ fn run() -> Result<ExitCode, String> {
     }
 }
 
-/// The helper team's directory, which every command but `init`, `migrate` and
-/// `schema` needs. It is named, never found.
+/// The team `--team` names, whose `config.yaml` a command changes.
 fn team_of(args: &Args, command: &str) -> Result<PathBuf, String> {
-    let spec = args.team.as_deref().ok_or_else(|| missing_team(command))?;
-    match remote::parse_source(spec)? {
-        remote::Source::Local(dir) => Ok(dir),
-        remote::Source::Remote { .. } => Err(format!(
-            "{command}: a remote helper team is read-only. Clone it, edit your copy, and give {command} that directory."
-        )),
-    }
-}
-
-fn missing_team(command: &str) -> String {
-    format!(
-        "{command}: no helper team given. Pass --team <dir>, the directory with config.yaml. `ensemble init --team <dir>` makes one."
-    )
-}
-
-/// The helper team to run: a directory, or a remote one that is pinned,
-/// fetched and trusted.
-fn resolve_team(args: &Args, command: &str) -> Result<remote::Resolved, String> {
-    let spec = args.team.as_deref().ok_or_else(|| missing_team(command))?;
-    remote::use_source(&remote::parse_source(spec)?)
+    let name = args.team.as_deref().ok_or_else(|| {
+        format!("{command}: name the team with --team <name>; `ensemble teams` lists them")
+    })?;
+    teams::editable(name).map_err(|e| format!("{command}: {e}"))
 }
 
 /// The hub's directory, for a command that needs one.
@@ -776,17 +772,8 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
                 path.display()
             )
         })?;
-    let team = match &node.team {
-        Some(dir) => Some(
-            config::load(
-                &config::config_path(dir),
-                args.env_file.as_deref(),
-                &SystemEnv,
-            )
-            .map_err(|e| format!("node serve: team: {e}"))?,
-        ),
-        None => None,
-    };
+    let (team, waiting) = teams::load_all(args.env_file.as_deref(), &SystemEnv)
+        .map_err(|e| format!("node serve: {e}"))?;
     let dir = state::node_dir()?;
     let _lock = ensemble::lock::acquire(&dir).map_err(|pid| {
         format!(
@@ -800,6 +787,9 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
     }
     let say = |line: &str| eprintln!("ensemble: {line}");
+    for line in &waiting {
+        say(line);
+    }
     let daemon = daemon::Daemon::new(args, node.clone(), team.clone(), &dir, &say);
 
     // With a hub server: the link that offers what the node offers, and the
@@ -823,7 +813,7 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
                     url,
                     token,
                     node.clone(),
-                    team.clone(),
+                    Some(team.clone()),
                     dir.join("runs"),
                 )
                 .map_err(|e| format!("node serve: {e}"))?,
@@ -831,8 +821,8 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
         }
         _ => None,
     };
-    let inbox = match (&url, &token, &team) {
-        (Some(url), Some(token), Some(team)) => Some(ensemble::inbox::NodeInbox::new(
+    let inbox = match (&url, &token) {
+        (Some(url), Some(token)) => Some(ensemble::inbox::NodeInbox::new(
             url,
             token,
             daemon.folders().clone(),
@@ -842,10 +832,7 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
         _ => None,
     };
     // An embedded hub's own workers: shares into notes, issues into tasks.
-    let agents: Vec<String> = team
-        .as_ref()
-        .map(|t| t.agent_names().into_iter().map(String::from).collect())
-        .unwrap_or_default();
+    let agents: Vec<String> = team.agent_names().into_iter().map(String::from).collect();
     let local_inbox = inbox_for(args, agents)?;
     let distill = match hub_url(args) {
         None => memory_for(args, &dir)?,
@@ -1190,13 +1177,9 @@ fn confirm(question: &str, args: &Args) -> Result<bool, String> {
     Ok(matches!(answer.to_lowercase().as_str(), "y" | "yes"))
 }
 
-/// An `Ensemble` for `config`, its usage counted where a remote team's is.
-fn ensemble_for(config: Config, dir: PathBuf, args: &Args) -> Ensemble {
-    let mut ensemble = Ensemble::new(config, Some(dir));
-    if let Some(usage) = &args.usage {
-        ensemble = ensemble.with_usage_dir(usage.clone());
-    }
-    ensemble
+/// An `Ensemble` for `config`, working in `dir`.
+fn ensemble_for(config: Config, dir: PathBuf, _args: &Args) -> Ensemble {
+    Ensemble::new(config, Some(dir))
 }
 
 /// Where tasks and runs are kept for the work done in `dir`.
@@ -1204,67 +1187,26 @@ fn state_for(dir: &Path) -> Result<PathBuf, String> {
     state::dir_for(dir)
 }
 
-/// Write the sample helper team, or print it.
-fn cmd_init(args: &Args) -> Result<ExitCode, String> {
-    let has = |flag: &str| args.rest.iter().any(|a| a == flag);
-    if let Some(other) = args
-        .rest
-        .iter()
-        .find(|a| !["--force", "--stdout"].contains(&a.as_str()))
-    {
-        return Err(format!("init: unknown argument '{other}'. Try --help."));
-    }
-    if has("--stdout") {
-        print!("{}", config::SAMPLE);
-        return Ok(ExitCode::SUCCESS);
-    }
-    let team = team_of(args, "init")?;
-    let path = config::config_path(&team);
-    if path.exists() && !has("--force") {
-        return Err(format!(
-            "{} already exists. Pass --force to overwrite it, or --stdout to print the sample.",
-            path.display()
-        ));
-    }
-    std::fs::create_dir_all(&team).map_err(|e| format!("cannot create {}: {e}", team.display()))?;
-    std::fs::write(&path, config::SAMPLE)
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    println!(
-        "wrote {}: a sample helper team with every setting",
-        path.display()
-    );
-    println!(
-        "Edit the agents, then run `ensemble check --team {}`. API keys go in the\n\
-         environment, or in a file you pass with --env-file; never in this directory.",
-        team.display()
-    );
-    Ok(ExitCode::SUCCESS)
-}
-
-/// Rewrite an older config as a version 3 helper team in `--team`.
+/// Rewrite an older config as a version 3 helper team: the new team `--team`
+/// names, in the node's teams directory.
 fn cmd_migrate(args: &Args) -> Result<ExitCode, String> {
     let source = args
         .rest
         .first()
-        .ok_or("migrate: needs the old config file, e.g. `ensemble migrate ~/my-org/config.yaml --team ~/my-team`")?;
-    let team = team_of(args, "migrate")?;
+        .ok_or("migrate: needs the old config file, e.g. `ensemble migrate ~/my-org/config.yaml --team web`")?;
+    let name = args
+        .team
+        .as_deref()
+        .ok_or("migrate: name the new team with --team <name>")?;
     let text = std::fs::read_to_string(source).map_err(|e| format!("migrate: {source}: {e}"))?;
     let v3 = config::migrate::to_v3(&text).map_err(|e| format!("migrate: {source}: {e}"))?;
-    let path = config::config_path(&team);
-    if path.exists() && !args.rest.iter().any(|a| a == "--force") {
-        return Err(format!(
-            "{} already exists. Pass --force to overwrite it.",
-            path.display()
-        ));
-    }
     // Loading it now says what, if anything, the old file got wrong.
-    config::parse(&v3, &path, &SystemEnv)
+    config::parse(&v3, Path::new(config::CONFIG_FILENAME), &SystemEnv)
         .map_err(|e| format!("migrate: the result is not valid: {e}"))?;
-    std::fs::create_dir_all(&team).map_err(|e| format!("cannot create {}: {e}", team.display()))?;
-    std::fs::write(&path, v3).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    let dir = teams::make(name, &v3).map_err(|e| format!("migrate: {e}"))?;
     println!(
-        "wrote {}: one helper team with every agent. Comments were not kept; an agent or gate that two teams both had is now `<team>-<name>`.",
-        path.display()
+        "wrote {}: the team '{name}' with every agent. Comments were not kept; an agent or gate that two teams both had is now `<team>-<name>`.",
+        config::config_path(&dir).display()
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -1323,13 +1265,7 @@ fn cmd_inbox(args: &Args) -> Result<ExitCode, String> {
     let once = has(args, "--once");
     // `<label>:<agent>` names an agent of the helper team, so a pass needs it.
     let agents = if once {
-        let resolved = resolve_team(args, "inbox --once")?;
-        let config = config::load(
-            &config::config_path(&resolved.dir),
-            args.env_file.as_deref(),
-            &SystemEnv,
-        )
-        .map_err(|e| e.to_string())?;
+        let (config, _) = teams::load_all(args.env_file.as_deref(), &SystemEnv)?;
         config.agent_names().into_iter().map(String::from).collect()
     } else {
         Vec::new()
@@ -1475,13 +1411,17 @@ fn cmd_share(args: &Args, dir: &Path) -> Result<ExitCode, String> {
 }
 
 fn cmd_check(config: Config, dir: &Path) -> Result<ExitCode, String> {
-    // Reaching here means the config already loaded and validated; `load`
-    // returns an error otherwise.
-    println!(
-        "{}: ok (version {})",
-        config.source.display(),
-        config.version
-    );
+    // Reaching here means every team already loaded and validated; loading
+    // returns an error that names the team otherwise.
+    if config.agents.is_empty() {
+        return Err(format!(
+            "check: no team in {} has agents. Make one with `ensemble team new <name>`, or pull one with `ensemble team pull <url>`.",
+            config.source.display()
+        ));
+    }
+    for team in teams::list()?.iter().filter(|t| !t.pending) {
+        println!("{}: ok ({})", team.name, team.describe());
+    }
     println!();
     println!("llm_backends:");
     for (name, b) in &config.llm_backends {
@@ -1555,7 +1495,7 @@ fn cmd_check(config: Config, dir: &Path) -> Result<ExitCode, String> {
             tasks::Entry::Task(t, None)
                 if t.gate
                     .as_ref()
-                    .is_some_and(|g| config.gate(&g.name).is_none()) =>
+                    .is_some_and(|g| config.gate_for(&t.agent, &g.name).is_none()) =>
             {
                 bad.push(format!(
                     "{}: gate '{}' is not configured under `gates`; it would fail at once",
@@ -1952,7 +1892,7 @@ fn host_name() -> Option<String> {
 }
 
 /// `ensemble setup`: find the agent CLIs, write this computer's node if there
-/// is none, register Ensemble with the client, and check the node's team.
+/// is none, register Ensemble with the client, and check the node's teams.
 fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
     let interactive = std::io::stdin().is_terminal() && !has(args, "--yes");
     let found = setup::detect(true);
@@ -2019,12 +1959,7 @@ fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
                 return Err("setup: name this computer's node with --name <name>.".into());
             }
         };
-        let team = args
-            .team
-            .as_deref()
-            .map(|t| absolute(Path::new(t)))
-            .transpose()?;
-        let text = setup::node_file(&name, team.as_deref())?;
+        let text = setup::node_file(&name)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
@@ -2038,26 +1973,20 @@ fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
         println!("{e}");
     }
     println!();
-    let node = config::load_node(&path)
+    config::load_node(&path)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("setup: {} went away", path.display()))?;
-    let healthy = match &node.team {
-        Some(team) => {
-            let config = config::load(
-                &config::config_path(team),
-                args.env_file.as_deref(),
-                &SystemEnv,
-            )
-            .map_err(|e| e.to_string())?;
-            report_doctor(&config, team, dir, args)?
-        }
-        None => {
-            println!(
-                "The node runs no helper team yet: name its directory with `team:` in {}.",
-                path.display()
-            );
-            false
-        }
+    let (team, waiting) = teams::load_all(args.env_file.as_deref(), &SystemEnv)?;
+    for line in &waiting {
+        println!("{line}");
+    }
+    let healthy = if team.agents.is_empty() {
+        println!(
+            "The node has no helper team yet. Make one with `ensemble team new <name>`, pull one with `ensemble team pull <url>`, or ask your agent to make one once the node runs."
+        );
+        true
+    } else {
+        report_doctor(&team, dir, args)?
     };
     println!();
     if registered.is_ok() && healthy {
@@ -2074,8 +2003,7 @@ fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
 }
 
 fn cmd_doctor(config: Config, dir: &Path, args: &Args) -> Result<ExitCode, String> {
-    let team = absolute(&team_of(args, "doctor")?)?;
-    Ok(if report_doctor(&config, &team, dir, args)? {
+    Ok(if report_doctor(&config, dir, args)? {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -2083,11 +2011,11 @@ fn cmd_doctor(config: Config, dir: &Path, args: &Args) -> Result<ExitCode, Strin
 }
 
 /// Print what is wrong, each with its fix, and say whether nothing was.
-fn report_doctor(config: &Config, team: &Path, dir: &Path, args: &Args) -> Result<bool, String> {
-    let mut findings = setup::structure(config, team, dir);
+fn report_doctor(config: &Config, dir: &Path, args: &Args) -> Result<bool, String> {
+    let mut findings = setup::structure(config, dir);
     let ensemble = ensemble_for(config.clone(), dir.to_path_buf(), args);
     for (name, result) in ensemble.health() {
-        findings.push(setup::health_finding(&name, &result, config, team));
+        findings.push(setup::health_finding(&name, &result, config));
     }
     let mut all_ok = true;
     for f in &findings {
@@ -2188,8 +2116,47 @@ fn approve(url: &str, sha: &str, args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-/// `ensemble team trust <url>#<sha>` and `ensemble team update <url>#<sha>`.
-/// `org` is the command's old name.
+/// What to say after a team is added, changed or removed.
+const RESTART_NOTE: &str = "A running node reads its teams when it starts: restart it (`ensemble node serve`) to use this.";
+
+/// `ensemble teams`: the node's teams, where each comes from, and its agents.
+fn cmd_teams(args: &Args) -> Result<ExitCode, String> {
+    let list = teams::list()?;
+    if list.is_empty() {
+        println!(
+            "No teams in {}. Make one with `ensemble team new <name>`, or pull one with `ensemble team pull <url>`.",
+            teams::dir()?.display()
+        );
+    }
+    for team in &list {
+        println!("{}  ({})", team.name, team.describe());
+        let loaded = teams::config_dir(team).and_then(|dir| {
+            config::load(
+                &config::config_path(&dir),
+                args.env_file.as_deref(),
+                &SystemEnv,
+            )
+            .map_err(|e| e.to_string())
+        });
+        match loaded {
+            Ok(config) => {
+                for agent in config.agents.values() {
+                    let about = agent
+                        .prompt
+                        .as_deref()
+                        .map(ensemble::harness::delegation::first_line)
+                        .unwrap_or_default();
+                    println!("  {}/{}: {about}", team.name, agent.name);
+                }
+            }
+            Err(e) => println!("  cannot be read: {e}"),
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `ensemble team new|add|pull|update|approve|remove`: the teams of this
+/// computer's node. `org` is the command's old name.
 fn cmd_team(args: &Args) -> Result<ExitCode, String> {
     if args.command == "org" {
         eprintln!("ensemble: `org` is now `team`; `org` stops working in the next release.");
@@ -2198,60 +2165,147 @@ fn cmd_team(args: &Args) -> Result<ExitCode, String> {
         .rest
         .first()
         .map(String::as_str)
-        .ok_or("team: needs trust or update. Try --help.")?;
-    let spec = args
+        .ok_or("team: needs new, add, pull, update, approve or remove. Try --help.")?;
+    let words: Vec<&str> = args
         .rest
         .iter()
         .skip(1)
-        .find(|a| !a.starts_with("--"))
-        .ok_or(format!(
-            "team {what}: needs the helper team, such as github.com/acme/team#<commit>"
-        ))?;
-    let (url, sha, git_ref) = match remote::parse_source(spec)? {
-        remote::Source::Remote { url, sha, git_ref } => (url, sha, git_ref),
-        remote::Source::Local(_) => {
-            return Err(format!(
-                "team {what}: a directory needs no trust; this is for git repositories"
-            ));
-        }
+        .filter(|a| !a.starts_with("--"))
+        .map(String::as_str)
+        .collect();
+    let name = || {
+        words
+            .first()
+            .copied()
+            .ok_or(format!("team {what}: needs the team's name"))
     };
     match what {
-        "trust" => {
-            let sha = sha.ok_or(format!(
-                "team trust: pin the commit: {spec}#<commit>. `ensemble team update {spec} --ref <branch>` prints the pin a branch or tag is at now."
-            ))?;
-            approve(&url, &sha, args)?;
-            Ok(ExitCode::SUCCESS)
-        }
-        "update" => {
-            let old = sha;
-            let git_ref = git_ref.or_else(|| opt(args, "--ref").map(str::to_string));
-            let new = remote::resolve(&url, git_ref.as_deref())?;
-            if old.as_deref() == Some(new.as_str()) {
-                println!("Already at {new}.");
+        "new" => {
+            if has(args, "--stdout") {
+                print!("{}", config::SAMPLE);
                 return Ok(ExitCode::SUCCESS);
             }
-            let dir = remote::fetch(&url, &new)?;
-            match &old {
-                Some(old) => match remote::diff(&dir, old, &new) {
-                    Ok(diff) if diff.trim().is_empty() => {
-                        println!("config.yaml did not change between {old} and {new}.")
-                    }
-                    Ok(diff) => println!("{diff}"),
-                    Err(e) => println!("cannot show what changed since {old}: {e}"),
-                },
-                None => println!("Nothing to compare with: no commit was given to update from."),
-            }
+            let name = name()?;
+            let dir = teams::make(name, config::SAMPLE).map_err(|e| format!("team new: {e}"))?;
             println!(
-                "\nThe new pin is {}.\nRead the changes above, then: ensemble team trust {}\nand use it with --team {}",
-                remote::pinned(&url, &new),
-                remote::pinned(&url, &new),
-                remote::pinned(&url, &new)
+                "wrote {}: the team '{name}', a sample with every setting. Edit its agents, then check it with `ensemble check`. API keys go in the environment, or in a file you pass with --env-file; never in this directory.",
+                config::config_path(&dir).display()
             );
-            Ok(ExitCode::SUCCESS)
+            println!("{RESTART_NOTE}");
         }
-        other => Err(format!("team: unknown '{other}'. Use trust or update.")),
+        "add" => {
+            let name = name()?;
+            let target = words.get(1).ok_or(
+                "team add: needs the team's name and its folder, the one with config.yaml",
+            )?;
+            let target = absolute(Path::new(target))?;
+            teams::link(name, &target).map_err(|e| format!("team add: {e}"))?;
+            println!("linked {} as the team '{name}'.", target.display());
+            println!("{RESTART_NOTE}");
+        }
+        "pull" => {
+            let spec = words
+                .first()
+                .ok_or("team pull: needs the repository, such as github.com/acme/team, @v1.2 for a tag or a branch")?;
+            let (url, sha, git_ref) = match remote::parse_source(spec)? {
+                remote::Source::Remote { url, sha, git_ref } => (url, sha, git_ref),
+                remote::Source::Local(_) => {
+                    return Err(format!(
+                        "team pull: {spec} is a folder; link it with `ensemble team add <name> {spec}`"
+                    ));
+                }
+            };
+            let name = opt(args, "--name")
+                .map(str::to_string)
+                .unwrap_or_else(|| teams::name_of(&url));
+            config::teams::check_new(&teams::dir()?, &name)
+                .map_err(|e| format!("team pull: {e}"))?;
+            // Pinned to the commit it is now, and shown, before it is kept.
+            let sha = match sha {
+                Some(sha) => sha,
+                None => remote::resolve(&url, git_ref.as_deref())?,
+            };
+            approve(&url, &sha, args)?;
+            teams::pin(&name, &url, &sha, true)?;
+            println!(
+                "pulled {} as the team '{name}'.",
+                remote::pinned(&url, &sha)
+            );
+            println!("{RESTART_NOTE}");
+        }
+        "update" => {
+            let name = name()?;
+            let team =
+                config::teams::entry(&teams::dir()?, name).ok_or_else(|| teams::missing(name))?;
+            let config::teams::Origin::Pulled { url, commit } = &team.origin else {
+                return Err(format!(
+                    "team update: '{name}' was not pulled; change its config.yaml where it is"
+                ));
+            };
+            let new = remote::resolve(url, opt(args, "--ref"))?;
+            if *commit == new {
+                println!("'{name}' is at {new} already.");
+                return Ok(ExitCode::SUCCESS);
+            }
+            let fetched = remote::fetch(url, &new)?;
+            match remote::diff(&fetched, commit, &new) {
+                Ok(diff) if diff.trim().is_empty() => {
+                    println!("config.yaml did not change between {commit} and {new}.")
+                }
+                Ok(diff) => println!("{diff}"),
+                Err(e) => println!("cannot show what changed since {commit}: {e}"),
+            }
+            approve(url, &new, args)?;
+            teams::pin(name, url, &new, false)?;
+            println!("'{name}' is at {} now.", remote::pinned(url, &new));
+            println!("{RESTART_NOTE}");
+        }
+        "approve" => {
+            let name = name()?;
+            let team =
+                config::teams::entry(&teams::dir()?, name).ok_or_else(|| teams::missing(name))?;
+            if !team.pending {
+                println!("'{name}' does not wait for approval.");
+                return Ok(ExitCode::SUCCESS);
+            }
+            let config = config::load(
+                &config::config_path(&team.path),
+                args.env_file.as_deref(),
+                &SystemEnv,
+            )
+            .map_err(|e| format!("team approve: {e}"))?;
+            println!(
+                "{} (written by an agent)\n",
+                config::config_path(&team.path).display()
+            );
+            print!("{}", remote::describe(&config));
+            println!();
+            if !confirm(
+                "Approve this team? It will run the commands above on this machine.",
+                args,
+            )? {
+                return Err("not approved, so it does not run.".into());
+            }
+            teams::approve(name)?;
+            println!("approved '{name}'.");
+            println!("{RESTART_NOTE}");
+        }
+        "remove" => {
+            let name = name()?;
+            if !confirm(&format!("Remove the team '{name}' from this node?"), args)? {
+                return Err("nothing was removed.".into());
+            }
+            teams::remove(name)?;
+            println!("removed '{name}'.");
+            println!("{RESTART_NOTE}");
+        }
+        other => {
+            return Err(format!(
+                "team: unknown '{other}'. Use new, add, pull, update, approve or remove."
+            ));
+        }
     }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// The task store of the working folder.
@@ -2395,7 +2449,7 @@ fn cmd_submit(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, Stri
                 .ok()
                 .filter(|n| *n >= 1)
                 .ok_or("submit: --gate is name:attempts, with attempts at least 1")?;
-            if config.gate(name).is_none() {
+            if config.gate_for(&agent, name).is_none() {
                 return Err(format!("submit: no gate '{name}' under `gates`"));
             }
             Some(tasks::GateRef {

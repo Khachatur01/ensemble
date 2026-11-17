@@ -28,6 +28,7 @@ pub mod harness;
 pub mod hooks;
 pub mod remote;
 pub mod setup;
+pub mod teams;
 
 pub use ensemble_agents::{external, router, runtime, worktree};
 pub use ensemble_backends as backends;

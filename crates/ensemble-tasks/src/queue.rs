@@ -850,7 +850,7 @@ impl<'e> Queue<'e> {
             return (delegate(&base).await, Vec::new());
         };
         let config = self.ensemble.config();
-        let Some(check) = config.gate(&gate.name) else {
+        let Some(check) = config.gate_for(&ticket.agent, &gate.name) else {
             return (
                 ToolResult::err(format!(
                     "gate '{}' is not defined under `gates` in config.yaml, so the task did not run.",

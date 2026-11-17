@@ -34,6 +34,26 @@ pub fn cache_root() -> Result<PathBuf, String> {
     Ok(base.join("ensemble"))
 }
 
+/// `$XDG_DATA_HOME/ensemble`, or `~/.local/share/ensemble`: what a person keeps
+/// on this computer, such as its helper teams.
+pub fn data_root() -> Result<PathBuf, String> {
+    let base = match std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            let home = std::env::var_os("HOME")
+                .filter(|v| !v.is_empty())
+                .ok_or("cannot find a data directory: neither XDG_DATA_HOME nor HOME is set")?;
+            PathBuf::from(home).join(".local/share")
+        }
+    };
+    Ok(base.join("ensemble"))
+}
+
+/// The node's helper teams: a folder per team, named for it.
+pub fn teams_dir() -> Result<PathBuf, String> {
+    Ok(data_root()?.join("teams"))
+}
+
 /// `$XDG_CONFIG_HOME/ensemble`, or `~/.config/ensemble`: what a person sets
 /// up on this computer, such as hub tokens and `node.yaml`.
 pub fn config_root() -> Result<PathBuf, String> {

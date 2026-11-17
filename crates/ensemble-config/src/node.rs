@@ -3,10 +3,11 @@
 //! node.yaml`. A computer runs one node.
 //!
 //! A node says who it works for (its owner alone, or also the others whose
-//! role has `compute`), the helper team it runs, and what it offers: agents of
-//! that team that run tasks sent to it, and the models a server here serves.
-//! It is tied to no project: your agent CLI's sessions reach its team from any
-//! folder through `ensemble mcp`, and a task from a hub goes to the folder of
+//! role has `compute`) and what it offers: agents of its teams that run tasks
+//! sent to it, named `<team>/<agent>`, and the models a server here serves.
+//! Its teams are the folders of its teams directory (`teams`). It is tied to
+//! no project: your agent CLI's sessions reach its teams from any folder
+//! through `ensemble mcp`, and a task from a hub goes to the folder of
 //! its project's name where a session last ran.
 
 use super::validate::explain;
@@ -14,7 +15,7 @@ use super::*;
 use serde::Deserialize;
 
 pub const NODE_FILENAME: &str = "node.yaml";
-pub const NODE_SUPPORTED_VERSION: u32 = 3;
+pub const NODE_SUPPORTED_VERSION: u32 = 4;
 
 /// The JSON Schema for `node.yaml`.
 pub const NODE_SCHEMA: &str = include_str!("../../../node.schema.json");
@@ -32,9 +33,6 @@ pub struct Node {
     /// Its name, which a hub knows as `<owner>/<name>`.
     pub name: String,
     pub access: Access,
-    /// The helper team it runs: the directory with its `config.yaml`. None: it
-    /// runs no agents, and only serves models.
-    pub team: Option<PathBuf>,
     pub offers: Offers,
     pub source: PathBuf,
 }
@@ -66,11 +64,11 @@ pub struct Offers {
     pub models: Option<OfferedModels>,
 }
 
-/// Agents of the node's helper team, which run tasks sent to the node in a
-/// folder of their own and send back what they changed.
+/// Agents of the node's teams, which run tasks sent to the node in a folder
+/// of their own and send back what they changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfferedRuns {
-    /// Which of the team's agents others may run.
+    /// Which agents of its teams others may run, as `<team>/<agent>`.
     pub agents: Vec<String>,
 }
 
@@ -92,7 +90,6 @@ pub(crate) struct RawNode {
     pub(crate) version: u32,
     pub(crate) name: String,
     pub(crate) access: Access,
-    pub(crate) team: Option<String>,
     pub(crate) offers: RawOffers,
 }
 
@@ -150,12 +147,17 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
         match v.get("version").and_then(serde_norway::Value::as_u64) {
             Some(1) => {
                 return old(&format!(
-                    "version: 1 is no longer read. Make it `version: {NODE_SUPPORTED_VERSION}`, remove `projects`, and add `name:` (this node's name), `access: private`, `team:` (your helper team's directory) and `offers: {{}}`; `ensemble node init --stdout` prints every setting"
+                    "version: 1 is no longer read. Make it `version: {NODE_SUPPORTED_VERSION}`, remove `projects`, and add `name:` (this node's name), `access: private` and `offers: {{}}`; `ensemble node init --stdout` prints every setting"
                 ));
             }
             Some(2) => {
                 return old(&format!(
-                    "version: 2 is no longer read. Make it `version: {NODE_SUPPORTED_VERSION}`, remove `projects` (a task now goes to the folder of its project's name where a session last ran), and move `offers.runs.team` up to `team:`, the helper team the node runs"
+                    "version: 2 is no longer read. Make it `version: {NODE_SUPPORTED_VERSION}`, remove `projects` (a task now goes to the folder of its project's name where a session last ran), and remove `offers.runs.team`: the node runs every team in its teams directory, and offers agents as `<team>/<agent>`"
+                ));
+            }
+            Some(3) => {
+                return old(&format!(
+                    "version: 3 is no longer read. Make it `version: {NODE_SUPPORTED_VERSION}` and remove `team`: the node runs every team in its teams directory, so link yours there with `ensemble team add <name> <dir>`. Name offered agents as `<team>/<agent>`"
                 ));
             }
             _ => {}
@@ -178,25 +180,15 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
             "name: '{name}' must be letters, digits, '-', '_' or '.', such as laptop or gpu-box"
         ));
     }
-    let team = raw.team.as_ref().map(|t| {
-        let team = PathBuf::from(t.trim());
-        if !team.is_absolute() {
-            problems.push(
-                "team: needs the absolute directory of a helper team, such as /home/ana/team"
-                    .into(),
-            );
-        }
-        team
-    });
     let runs = raw.offers.runs.as_ref().map(|r| {
-        if team.is_none() {
-            problems.push(
-                "offers.runs: offers agents of the node's team, but there is no `team`".into(),
-            );
-        }
         let agents: Vec<String> = r.agents.iter().map(|a| a.trim().to_string()).collect();
         if agents.is_empty() {
-            problems.push("offers.runs.agents: name at least one agent of the team".into());
+            problems.push("offers.runs.agents: name at least one agent of its teams".into());
+        }
+        for a in agents.iter().filter(|a| crate::teams::team_of(a).is_none()) {
+            problems.push(format!(
+                "offers.runs.agents: '{a}' needs its team, as `<team>/<agent>`, such as web/{a}"
+            ));
         }
         let mut seen = std::collections::BTreeSet::new();
         for a in &agents {
@@ -236,7 +228,6 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
             version: raw.version,
             name,
             access: raw.access,
-            team,
             offers: Offers { runs, models },
             source: path.to_path_buf(),
         })

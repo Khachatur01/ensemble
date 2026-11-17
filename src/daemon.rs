@@ -43,7 +43,8 @@ struct Folder {
 pub struct Daemon<'a> {
     args: &'a Args,
     node: Node,
-    team: Option<Config>,
+    /// Its teams, as one helper team: `<team>/<agent>`.
+    team: Config,
     folders: Folders,
     open: Mutex<HashMap<PathBuf, Arc<Folder>>>,
     /// The folders' workers, which stopping waits for.
@@ -52,11 +53,12 @@ pub struct Daemon<'a> {
 }
 
 impl<'a> Daemon<'a> {
-    /// A node from `node`, its `team` loaded, keeping its state in `dir`.
+    /// A node from `node`, its teams loaded as `team`, keeping its state in
+    /// `dir`.
     pub fn new(
         args: &'a Args,
         node: Node,
-        team: Option<Config>,
+        team: Config,
         dir: &Path,
         say: &'a (dyn Fn(&str) + Sync),
     ) -> Self {
@@ -78,11 +80,9 @@ impl<'a> Daemon<'a> {
     /// Serve sessions on `socket` until [`STOP`] is set, after starting the
     /// workers of the folders served before.
     pub async fn serve(&self, socket: &Path) -> Result<(), String> {
-        if self.team.is_some() {
-            for folder in self.folders.all().into_values().filter(|f| f.is_dir()) {
-                if let Err(e) = self.folder(&folder) {
-                    (self.say)(&format!("{}: {e}", folder.display()));
-                }
+        for folder in self.folders.all().into_values().filter(|f| f.is_dir()) {
+            if let Err(e) = self.folder(&folder) {
+                (self.say)(&format!("{}: {e}", folder.display()));
             }
         }
         let listener = listen(socket)?;
@@ -162,13 +162,7 @@ impl<'a> Daemon<'a> {
         if let Some(open) = self.open.lock().unwrap().get(&dir) {
             return Ok(open.clone());
         }
-        let config = self.team.clone().ok_or_else(|| {
-            format!(
-                "node '{}' has no `team` in {}, so it runs no agents",
-                self.node.name,
-                self.node.source.display()
-            )
-        })?;
+        let config = self.team.clone();
         // Each folder keeps its own state: `--state` would put every folder's
         // tasks in one place.
         let ensemble: &'static Ensemble =

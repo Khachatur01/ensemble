@@ -30,7 +30,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -62,8 +62,8 @@ pub struct Worker {
 
 impl Worker {
     /// A worker for `node`, reaching the hub at `url` with `token`. `team` is
-    /// its helper team, loaded; each agent offered
-    /// must be in it, and on a shared node run on `llm_backends`.
+    /// its teams, loaded as one; each agent offered must be in it, and on a
+    /// shared node run on `llm_backends`.
     pub fn new(
         url: &str,
         token: &str,
@@ -76,8 +76,7 @@ impl Worker {
                 for name in &runs.agents {
                     let Some(agent) = config.agent(name) else {
                         return Err(format!(
-                            "offers.runs: the team {} has no agent '{name}'. Its agents: {}.",
-                            node.team.as_deref().unwrap_or(Path::new("?")).display(),
+                            "offers.runs: no team of this node has the agent '{name}'. Its agents: {}.",
                             config.agent_names().join(", ")
                         ));
                     };
