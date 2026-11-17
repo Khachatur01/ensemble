@@ -1,6 +1,5 @@
 //! The hub server's state that changes while it runs: its accounts and their
-//! tokens (`users`), the tasks and plans it keeps for them
-//! (`ensemble_tasks::board`),
+//! tokens (`users`), the tasks it keeps for them (`ensemble_tasks::board`),
 //! and which issue of the tracker became which task (the inbox). One Turso database,
 //! `database.db`, in the hub's folder (`~/.config/ensemble/hub/`), which only
 //! whoever runs the hub may enter.
@@ -43,14 +42,6 @@ CREATE TABLE IF NOT EXISTS tokens (
     made TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tasks (
-    owner TEXT NOT NULL,
-    project TEXT NOT NULL,
-    id TEXT NOT NULL,
-    number INTEGER NOT NULL,
-    data TEXT NOT NULL,
-    PRIMARY KEY (owner, project, id)
-);
-CREATE TABLE IF NOT EXISTS plans (
     owner TEXT NOT NULL,
     project TEXT NOT NULL,
     id TEXT NOT NULL,

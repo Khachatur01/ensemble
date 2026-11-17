@@ -47,23 +47,8 @@ pub const TASK_ASSIGN: &str = "task_assign";
 /// Cancel a task: `{project, id}`, answered with `{cancel}`: `before` it
 /// started, `running` (its node stops it) or `ended` already.
 pub const TASK_CANCEL: &str = "task_cancel";
-/// Every plan of the project: `{project}`, answered with `{plans}`.
-pub const PLANS: &str = "plans";
-/// One plan: `{project, id}`, answered with `{plan}`, null when there is none.
-pub const PLAN: &str = "plan";
-/// A new plan, waiting for the person's approval: `{project, draft}`,
-/// answered with `{id}`.
-pub const PLAN_PROPOSE: &str = "plan_propose";
-/// A plan changed: `{project, id, draft}`, answered with `{revision}`.
-pub const PLAN_REVISE: &str = "plan_revise";
-/// The person approves a plan, whose steps become tasks: `{project, id}`,
-/// answered with `{plan}`.
-pub const PLAN_APPROVE: &str = "plan_approve";
-/// The person cancels a plan and its unfinished tasks: `{project, id}`,
-/// answered with `{plan}`.
-pub const PLAN_CANCEL: &str = "plan_cancel";
-/// Every task and plan method, for the server to pass on.
-pub const TASK_METHODS: [&str; 16] = [
+/// Every task method, for the server to pass on.
+pub const TASK_METHODS: [&str; 10] = [
     TASKS,
     TASK,
     TASK_CREATE,
@@ -74,12 +59,6 @@ pub const TASK_METHODS: [&str; 16] = [
     TASK_ANSWER,
     TASK_ASSIGN,
     TASK_CANCEL,
-    PLANS,
-    PLAN,
-    PLAN_PROPOSE,
-    PLAN_REVISE,
-    PLAN_APPROVE,
-    PLAN_CANCEL,
 ];
 
 /// This connection is a node: `{name, access, agents: [{name, about}],

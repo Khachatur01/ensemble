@@ -683,8 +683,6 @@ fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
         vec![
             "delegate",
             "submit",
-            "plan",
-            "plans",
             "status",
             "wait",
             "cancel",
@@ -3670,69 +3668,4 @@ fn a_task_stopped_on_one_computer_is_carried_on_by_another_from_its_pushed_branc
         text.contains("part1.txt") && text.contains("part2.txt"),
         "{text}"
     );
-}
-
-#[test]
-fn a_plan_the_agent_proposes_runs_once_the_person_approves_it_in_a_terminal() {
-    let s = Scratch::new("plan");
-    let cli = s.opencode("did the step", "");
-    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
-    let _hub = with_hub(&s);
-    let mut session = McpSession::start(&s);
-    session.request("initialize", serde_json::json!({}));
-    let proposed = session.call(
-        "plan",
-        serde_json::json!({
-            "title": "Panorama rig",
-            "goal": "A video app with rotating cameras.",
-            "steps": [
-                {"key": "rig", "agent": "team/coder", "title": "Build the rig", "task": "Drive the motors."},
-                {"key": "review", "agent": "team/reviewer", "title": "Review the rig", "task": "Review it.", "after": ["rig"]}
-            ]
-        }),
-    );
-    assert_eq!(proposed["result"]["isError"], false, "{proposed}");
-    let id = "plan-0001-panorama-rig";
-    assert!(
-        tool_text(&proposed).starts_with(id),
-        "{}",
-        tool_text(&proposed)
-    );
-
-    let listed = stdout_of(&ensemble(&s, &["plans"]));
-    assert!(
-        listed.contains(&format!("{id} · waiting for approval")),
-        "{listed}"
-    );
-    // Only the person approves, and asked without a terminal it says how.
-    let unasked = ensemble(&s, &["plan", "approve", id]);
-    assert!(!unasked.status.success());
-    assert!(
-        stderr_of(&unasked).contains("--yes"),
-        "{}",
-        stderr_of(&unasked)
-    );
-    assert!(stdout_of(&ensemble(&s, &["tasks"])).contains("No tasks"));
-
-    let approved = ensemble(&s, &["plan", "approve", id, "--yes"]);
-    assert!(approved.status.success(), "{}", stderr_of(&approved));
-    let said = stdout_of(&approved);
-    assert!(
-        said.contains("rig: task 0001-build-the-rig")
-            && said.contains("review: task 0002-review-the-rig"),
-        "{said}"
-    );
-    assert!(
-        wait_for(30, || ended(&s, "0002-review-the-rig")),
-        "the plan's tasks did not run"
-    );
-    let shown = stdout_of(&ensemble(&s, &["plan", id]));
-    assert!(shown.starts_with(&format!("{id} · done")), "{shown}");
-    assert!(
-        shown.contains("0001-build-the-rig · team/coder · done"),
-        "{shown}"
-    );
-    let again = ensemble(&s, &["plan", "approve", id, "--yes"]);
-    assert!(!again.status.success(), "approved once");
-    drop(session);
 }

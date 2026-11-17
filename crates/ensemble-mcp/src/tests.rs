@@ -369,8 +369,6 @@ fn tools_list_advertises_the_tools_with_the_real_agent_names() {
         vec![
             "delegate",
             "submit",
-            "plan",
-            "plans",
             "status",
             "wait",
             "cancel",
@@ -1968,90 +1966,4 @@ fn a_task_of_an_agent_with_recall_is_given_the_notes_about_it() {
     );
     assert!(prompt.contains("We deploy on Fridays."), "{prompt}");
     assert!(!prompt.contains("[...]"), "within its size: {prompt}");
-}
-
-#[test]
-fn a_plan_runs_nothing_until_the_person_approves_it_then_its_steps_run_in_order() {
-    // Each run notes which step it was, so their order shows.
-    let body = r#"printf '%s\n' "$*" | grep -o 'Step [a-z]*' | head -1 >> order.txt
-printf '{"type":"text","part":{"text":"did it"}}\n'
-"#;
-    let (e, tmp) = team(&[("coder", "read, edit", body), ("scout", "read", body)]);
-    let steps = json!([
-        {"key": "rig", "agent": "coder", "title": "Build the rig", "task": "Step rig: drive the motors."},
-        {"key": "calib", "agent": "scout", "title": "Calibrate", "task": "Step calib: line the cameras up.", "after": ["rig"]},
-    ]);
-    session(&e, |ask| {
-        let r = ask(
-            "plan",
-            json!({"title": "Panorama rig", "goal": "A video app with rotating cameras.", "steps": steps}),
-        );
-        assert!(
-            r.starts_with("plan-0001-panorama-rig · waiting for approval"),
-            "{r}"
-        );
-        assert!(r.contains("2. calib (scout): Calibrate, after rig"), "{r}");
-        assert!(
-            r.contains("ensemble plan approve plan-0001-panorama-rig"),
-            "{r}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-        let status = ask("status", json!({}));
-        assert!(
-            status.starts_with("Idle: no active tasks"),
-            "nothing runs before approval: {status}"
-        );
-
-        // The person approves it, in a terminal.
-        let plan = board(&tmp).approve_now("plan-0001-panorama-rig").unwrap();
-        let calib = plan.tasks["calib"].clone();
-        let r = ask("wait", json!({"task": calib, "timeout_seconds": 20}));
-        assert!(r.contains("status: done"), "{r}");
-        let shown = ask("plans", json!({"plan": "plan-0001-panorama-rig"}));
-        assert!(
-            shown.starts_with("plan-0001-panorama-rig · done"),
-            "{shown}"
-        );
-        assert_eq!(ask("plans", json!({})).lines().count(), 1);
-
-        // A step for an agent the team does not have is refused before the hub.
-        let r = ask(
-            "plan",
-            json!({"title": "x", "goal": "y", "steps": [{"key": "a", "agent": "architect", "title": "t", "task": "t"}]}),
-        );
-        assert!(r.contains("plan: step 'a': no agent 'architect'"), "{r}");
-        let r = ask(
-            "plan",
-            json!({"title": "x", "goal": "y", "steps": [{"key": "a", "agent": "coder", "title": "t", "task": "t", "after": ["b"]}]}),
-        );
-        assert!(r.contains("not a step before it"), "{r}");
-    });
-    assert_eq!(
-        std::fs::read_to_string(project(&tmp).join("order.txt")).unwrap(),
-        "Step rig\nStep calib\n"
-    );
-}
-
-#[test]
-fn without_a_hub_there_are_no_tasks_and_no_plans() {
-    let (e, _tmp) = working();
-    for (tool, args) in [
-        (
-            "submit",
-            json!({"agent": "coder", "title": "t", "task": "t"}),
-        ),
-        (
-            "plan",
-            json!({"title": "t", "goal": "g", "steps": [{"key": "a", "agent": "coder", "title": "t", "task": "t"}]}),
-        ),
-        ("plans", json!({})),
-    ] {
-        let r = call(&e, tool, args);
-        assert_eq!(r["result"]["isError"], true, "{tool}");
-        assert!(
-            text_of(&r).contains("tasks are kept on a hub"),
-            "{tool}: {}",
-            text_of(&r)
-        );
-    }
 }

@@ -108,7 +108,7 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 | `ensemble-knowledge` | the hub's knowledge | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait a session uses (`lib.rs`) |
 | `ensemble-link` | the hub server and the link to it | accounts and hashed tokens (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db`, a Turso database (`store.rs`); the REST API (`api.rs`) over a small HTTP reader (`http.rs`); the frames of the link (`protocol.rs`); the hub's side, a task per connection (`server.rs`); connected nodes, runs and model calls, `/nodes/v1/` (`nodes.rs`); the node's side, `Connection`, `Link` (one reconnecting) and `RemoteMemory` (`client.rs`); the token file (`tokens.rs`) |
 | `ensemble-agents` | running one agent once | the adapters (`external/`): `claude_code.rs`, `opencode.rs`, `codex.rs`, `builtin.rs`, `direct.rs`, `node.rs`, the subprocess runner (`process.rs`) and gates (`gate.rs`); a git worktree per task (`worktree.rs`); the router: agents to adapters, models, records, `health` (`router.rs`) |
-| `ensemble-tasks` | work handed to the team | tickets and tasks as the hub has them (`tasks.rs`); where they are kept and leased: the `Board` trait, the hub's `DbBoard` and the `Service` that answers the link, a node's `RemoteBoard` (`board.rs`); plans, their steps, check and rendering (`plans.rs`); what a node keeps of its runs (`runs.rs`); the queue that runs tasks and background delegations within slots and budgets (`queue.rs`); the MCP tools (`delegation.rs`); review and merge of a worktree task (`review.rs`) |
+| `ensemble-tasks` | work handed to the team | tickets and tasks as the hub has them (`tasks.rs`); where they are kept and leased: the `Board` trait, the hub's `DbBoard` and the `Service` that answers the link, a node's `RemoteBoard` (`board.rs`); what a node keeps of its runs (`runs.rs`); the queue that runs tasks and background delegations within slots and budgets (`queue.rs`); the MCP tools (`delegation.rs`); review and merge of a worktree task (`review.rs`) |
 | `ensemble-inbox` | issues from a tracker into tasks | the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`); an issue made a task and what the task reports (`work.rs`); the hub's inbox (`relay.rs`) |
 | `ensemble-node` | a node's link to a hub | `Worker`: runs and model calls for others (`lib.rs`) |
 | `ensemble-mcp` | MCP over stdio | the session loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`) |
@@ -318,23 +318,6 @@ another computer, and move a local one that is behind it up to it.
 What a run does as it goes (its activity lines) is in `runs/<id>/` on the node
 that runs it, which is how `status` shows what an agent is doing there.
 
-## A plan
-
-A plan is kept on the hub beside the tasks: a title, a goal, the issue it
-breaks down if any, and its steps, each a key and the ticket of its task,
-whose `after` names earlier steps. The calling agent proposes one
-(`plan_propose`, through the `plan` tool), and the hub checks it: keys
-unique, each step after only steps before it, so the steps cannot wait on each
-other in a circle. It runs nothing. The person approves it in a terminal
-(`ensemble plan approve`, `plan_approve`); the hub then makes each step a task,
-`after` the tasks of its steps, with the plan in its context, so the leases of
-"A task" release each as the ones before it are done. A revision
-(`plan_revise`) waits for approval again; approving it keeps the task of every
-step that, with the steps it comes after, did not change, and cancels the
-others that have not ended (refused while one of them runs). The plan keeps
-each step as it was when its task was made, which is how a revision tells what
-changed.
-
 ## Knowledge
 
 ```text
@@ -421,7 +404,7 @@ what it offers, and one per run it sends elsewhere.
 | for | the node asks | the hub sends |
 | --- | --- | --- |
 | knowledge | `hello` (who am I, which permissions), `share`, `recall` | |
-| tasks | each with its `project`: `tasks`, `task`, `task_create`, `task_claim`, `task_renew`, `task_release`, `task_finish`, `task_answer`, `task_assign`, `task_cancel`; `plans`, `plan`, `plan_propose`, `plan_revise`, `plan_approve`, `plan_cancel` | |
+| tasks | each with its `project`: `tasks`, `task`, `task_create`, `task_claim`, `task_renew`, `task_release`, `task_finish`, `task_answer`, `task_assign`, `task_cancel` | |
 | nodes | `node` (I am a node: name, access, agents, models), `nodes` (which may I use), `run`, `run_cancel`, and as a node `run_progress`, `run_done`, `model_reply` | `run`, `run_cancel` and `model_call` events to a node; `run_progress` and `run_done` events to whoever asked for a run (a `run_done` that failed when the node went away) |
 
 Every request is checked against the token's permissions (its role, narrowed by
@@ -654,12 +637,12 @@ limits. (Decided 2026-11-10.)
 
 ## Tasks
 
-Two kinds of work, kept apart (decided 2026-11-17):
+Two kinds of work (decided 2026-11-17):
 
 - An **issue** is a person's: high-level, such as "a panorama video app with
   rotating cameras", in a tracker (Jira, GitLab, markdown files), assigned to
   the person, who stays accountable. Ensemble is never the source of truth
-  for issues, and never writes a low-level one.
+  for issues.
 - A **task** is an agent's: one agent, one goal, one check, such as "the
   camera calibration module in `calib/`; `cargo test` passes". Tasks are kept
   on the hub, per account and project, so that a task outlives the node that
@@ -691,14 +674,11 @@ An issue carries an explicit signal that agents may take it: a label, such as
 5. The result is reported in the tracker; I remain the assignee.
 6. The outcome goes to the knowledge pipeline. (Not built yet.)
 
-An issue too big for one agent is broken down into a **plan**: the agent-level
-tasks, which agent does each, in what order, and how each is checked. The
-person's own agent drafts the plan with them, in conversation, and the person
-approves it before any of it runs; agents never add tasks to a plan on their
-own, and a changed plan is approved again. A very large issue is split into
-smaller issues first, which is people's work. (Decided 2026-11-17; built: see
-"A plan" in part one. Not yet: the inbox reporting a plan's progress on the
-issue it names.)
+Planning is a conversation, not an object (decided 2026-11-18). The person
+talks the work through with their own agent, with an issue of theirs or
+without one, and the agent then delegates parts directly to the helper team,
+makes tasks, both, or neither, as the work needs. Ensemble keeps no plan and
+offers no planning tool: a task's `after` is all the order it needs.
 
 Ensemble never merges on its own: a merge happens only when the user asks.
 
@@ -907,11 +887,8 @@ crate holds it today.
 14. A task's work on a pushed branch, so the node that takes a task over
     carries on from where the first got to; a task whose work cannot move
     is pinned to its node. (Done.)
-15. Plans: an issue broken down into tasks with the person's agent, approved
-    by the person, released by the hub as the tasks before them end. (Done.)
-
-What remains is the "Not yet" of steps 4 and 5, the inbox reporting a plan's
-progress on its issue, and the modules marked not built above.
+What remains is the "Not yet" of steps 4 and 5, and the modules marked not
+built above.
 
 ## Open questions
 

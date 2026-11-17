@@ -61,17 +61,13 @@ pub(super) fn instructions(config: &ensemble_config::Config) -> String {
          use `delegate` with `background`, or `submit` a task, then follow it with `status` and \
          `wait`. When the folder you work in holds several repositories, pass `repo` to work \
          in one of them.\n\n\
-         The person you talk to owns the work and need not know who does what. \
-         Agents work only on tasks assigned to them and stay idle otherwise. Plan work with the \
-         owner into tasks: `submit` with an `agent` assigns one, `submit` with no agent puts it \
-         in the backlog, and `assign` gives a backlog task to an agent. An agent may hand a task \
-         on to another. `status` says when nothing is active; then the team waits for the next \
-         planning with the owner.\n\n\
-         Work too big for one task, such as an issue of the person's, is a `plan`: talk it \
-         through with the person, then propose its steps, each a task for one agent with one \
-         goal, and which comes after which. Nothing of it runs until the person approves it \
-         in a terminal with `ensemble plan approve <id>`; say so. `plans` shows how far each \
-         has got. Never give the person a step-sized task to do themselves.",
+         The person you talk to owns the work and need not know who does what. Plan it with \
+         them however suits the work, with or without an issue of theirs: then delegate parts \
+         directly, make tasks, or both, or neither. Tasks are for work that goes on without \
+         you: `submit` with an `agent` assigns one, `submit` with no agent puts it in the \
+         backlog, and `assign` gives a backlog task to an agent. A task runs only once it has \
+         an agent, and an agent may hand a task on to another. `status` says when no task is \
+         active.",
     );
     out
 }

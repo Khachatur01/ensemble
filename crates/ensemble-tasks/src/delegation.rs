@@ -22,8 +22,6 @@ pub const CANCEL: &str = "cancel";
 pub const ANSWER: &str = "answer";
 pub const ASSIGN: &str = "assign";
 pub const REVIEW: &str = "review";
-pub const PLAN: &str = "plan";
-pub const PLANS: &str = "plans";
 
 /// Seconds `wait` waits when the caller names no time, and the most it may.
 const DEFAULT_WAIT_SECONDS: u64 = 30;
@@ -107,8 +105,7 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                 "Make a task for an agent, kept on the hub for this project, and return its id at \
                  once. Your nodes work through tasks while they run, as many at a time as each \
                  agent allows, and go on after this session ends. Available agents: \
-                 {agent_list}. Follow it with `status`, collect its result with `wait`. For work \
-                 that needs several tasks, propose a `plan` instead."
+                 {agent_list}. Follow it with `status`, collect its result with `wait`."
             ),
             parameters: json!({
                 "type": "object",
@@ -169,89 +166,6 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                     }
                 },
                 "required": ["title", "task"],
-                "additionalProperties": false
-            }),
-        });
-
-        let step = json!({
-            "type": "object",
-            "properties": {
-                "key": {
-                    "type": "string",
-                    "description": "A short name for the step, one word, which later steps name in `after`."
-                },
-                "agent": { "type": "string", "enum": agents, "description": "Who does it." },
-                "title": { "type": "string", "description": "One line naming the step's task." },
-                "task": { "type": "string", "description": "The step, stated so its agent can act on it without further questions." },
-                "context": { "type": "string" },
-                "goal": { "type": "string" },
-                "constraints": { "type": "array", "items": { "type": "string" } },
-                "files": { "type": "array", "items": { "type": "string" } },
-                "done_when": { "type": "array", "items": { "type": "string" } },
-                "after": {
-                    "type": "array", "items": { "type": "string" },
-                    "description": "Keys of earlier steps that must be done first."
-                },
-                "repo": { "type": "string", "description": REPO_DESCRIPTION },
-                "gate": {
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string" },
-                        "attempts": { "type": "integer", "minimum": 1 }
-                    },
-                    "required": ["name", "attempts"],
-                    "additionalProperties": false
-                }
-            },
-            "required": ["key", "agent", "title", "task"],
-            "additionalProperties": false
-        });
-
-        out.push(Tool {
-            name: PLAN,
-            description: format!(
-                "Propose a plan for work too big for one agent, such as one issue of the \
-                 person's: its steps, each a task for one agent ({agent_list}) with one goal \
-                 and, where it can be checked, a gate, and which steps come after which. Draft \
-                 it with the person first. It is kept on the hub, and nothing of it runs until \
-                 the person approves it with `ensemble plan approve <id>`; then its steps become \
-                 tasks, each starting once the ones before it are done. To change a plan, call \
-                 this again with `revise`: the person approves the new revision, and the tasks \
-                 of steps that did not change go on."
-            ),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string", "description": "One line naming the work." },
-                    "goal": {
-                        "type": "string",
-                        "description": "What the work is for, as the person put it."
-                    },
-                    "issue": {
-                        "type": "string",
-                        "description": "Optional: the tracker issue the plan breaks down."
-                    },
-                    "steps": { "type": "array", "items": step, "minItems": 1 },
-                    "revise": {
-                        "type": "string",
-                        "description": "Optional: the id of a plan this changes."
-                    }
-                },
-                "required": ["title", "goal", "steps"],
-                "additionalProperties": false
-            }),
-        });
-
-        out.push(Tool {
-            name: PLANS,
-            description: "Show the plans of this project and how far each has got; with \
-                          `plan`, one plan with each step and its task."
-                .into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "plan": { "type": "string", "description": "One plan id; omit for all." }
-                },
                 "additionalProperties": false
             }),
         });
@@ -613,20 +527,105 @@ pub async fn call(
             }
         }
 
-        SUBMIT => match ticket_from(ensemble, args, SUBMIT) {
-            Ok(ticket) => queue.submit(&ticket).await,
-            Err(e) => ToolResult::err(e),
-        },
-
-        PLAN => match draft_from(ensemble, args) {
-            Ok(draft) => {
-                let revise = args.get("revise").and_then(Value::as_str).map(str::trim);
-                queue.plan(&draft, revise.filter(|r| !r.is_empty())).await
+        SUBMIT => {
+            let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::trim);
+            let (Some(title), Some(task)) = (text("title"), text("task")) else {
+                return ToolResult::err(format!(
+                    "{SUBMIT}: `title` and `task` are required and must be strings"
+                ));
+            };
+            if title.is_empty() || task.is_empty() {
+                return ToolResult::err(format!("{SUBMIT}: `title` and `task` cannot be empty"));
             }
-            Err(e) => ToolResult::err(e),
-        },
-
-        PLANS => queue.plans(args.get("plan").and_then(Value::as_str)).await,
+            if title.contains('\n') {
+                return ToolResult::err(format!("{SUBMIT}: `title` is one line"));
+            }
+            // With an agent the task is assigned; without one it goes to the
+            // backlog, for the calling agent to assign.
+            let role = match text("agent").filter(|a| !a.is_empty()) {
+                Some(agent) => match ensemble.config().agent(agent) {
+                    Some(a) => a.name.clone(),
+                    None => {
+                        return ToolResult::err(format!(
+                            "{SUBMIT}: no agent '{agent}'. Agents: {}.",
+                            ensemble.config().agent_names().join(", ")
+                        ));
+                    }
+                },
+                None => String::new(),
+            };
+            let role = &role;
+            let mut lists = Vec::new();
+            for key in ["constraints", "files", "done_when", "after"] {
+                match args.get(key) {
+                    None | Some(Value::Null) => lists.push(Vec::new()),
+                    Some(Value::Array(items)) if items.iter().all(Value::is_string) => lists.push(
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                    ),
+                    Some(_) => {
+                        return ToolResult::err(format!(
+                            "{SUBMIT}: `{key}` must be a list of strings"
+                        ));
+                    }
+                }
+            }
+            let [constraints, files, done_when, after] =
+                <[Vec<String>; 4]>::try_from(lists).expect("four lists");
+            let gate = match args.get("gate") {
+                None | Some(Value::Null) => None,
+                Some(g) => match serde_json::from_value::<crate::tasks::GateRef>(g.clone()) {
+                    Ok(g) if g.attempts == 0 => {
+                        return ToolResult::err(format!(
+                            "{SUBMIT}: `gate.attempts` must be at least 1"
+                        ));
+                    }
+                    Ok(g) if ensemble.config().gate_for(role, &g.name).is_none() => {
+                        let config = ensemble.config();
+                        let known: Vec<&str> = config.gates.keys().map(String::as_str).collect();
+                        return ToolResult::err(format!(
+                            "{SUBMIT}: no gate '{}' is configured under `gates`. Gates: {}.",
+                            g.name,
+                            if known.is_empty() {
+                                "(none)".to_string()
+                            } else {
+                                known.join(", ")
+                            }
+                        ));
+                    }
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        return ToolResult::err(format!(
+                            "{SUBMIT}: `gate` must be {{name, attempts}}: {e}"
+                        ));
+                    }
+                },
+            };
+            let optional = |key: &str| text(key).filter(|s| !s.is_empty()).map(str::to_string);
+            if let Err(e) = repo_of(ensemble, args) {
+                return ToolResult::err(format!("{SUBMIT}: {e}"));
+            }
+            queue
+                .submit(&crate::tasks::Ticket {
+                    title: title.to_string(),
+                    agent: role.to_string(),
+                    context: optional("context"),
+                    goal: optional("goal"),
+                    repo: optional("repo"),
+                    constraints,
+                    files,
+                    done_when,
+                    after,
+                    gate,
+                    text: task.to_string(),
+                    ..Default::default()
+                })
+                .await
+        }
 
         STATUS => match args.get("task") {
             None | Some(Value::Null) => queue.status(None).await,
@@ -827,142 +826,6 @@ const REPO_DESCRIPTION: &str = "Optional: a folder of the working directory to w
 
 /// The `repo` argument as a directory inside the working directory, or why it
 /// is not one. `None` when there is none.
-/// The ticket a `submit` call, or a step of a `plan`, describes: checked
-/// against the team (the agent, the gate, the repo), with `tool` naming what
-/// asked in what is refused. Its `after` is taken as written.
-fn ticket_from(
-    ensemble: &Ensemble,
-    args: &Value,
-    tool: &str,
-) -> Result<crate::tasks::Ticket, String> {
-    let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::trim);
-    let (Some(title), Some(task)) = (text("title"), text("task")) else {
-        return Err(format!(
-            "{tool}: `title` and `task` are required and must be strings"
-        ));
-    };
-    if title.is_empty() || task.is_empty() {
-        return Err(format!("{tool}: `title` and `task` cannot be empty"));
-    }
-    if title.contains('\n') {
-        return Err(format!("{tool}: `title` is one line"));
-    }
-    // With an agent the task is assigned; without one it goes to the
-    // backlog, for the calling agent to assign.
-    let role = match text("agent").filter(|a| !a.is_empty()) {
-        Some(agent) => match ensemble.config().agent(agent) {
-            Some(a) => a.name.clone(),
-            None => {
-                return Err(format!(
-                    "{tool}: no agent '{agent}'. Agents: {}.",
-                    ensemble.config().agent_names().join(", ")
-                ));
-            }
-        },
-        None => String::new(),
-    };
-    let role = &role;
-    let mut lists = Vec::new();
-    for key in ["constraints", "files", "done_when", "after"] {
-        match args.get(key) {
-            None | Some(Value::Null) => lists.push(Vec::new()),
-            Some(Value::Array(items)) if items.iter().all(Value::is_string) => lists.push(
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect(),
-            ),
-            Some(_) => {
-                return Err(format!("{tool}: `{key}` must be a list of strings"));
-            }
-        }
-    }
-    let [constraints, files, done_when, after] =
-        <[Vec<String>; 4]>::try_from(lists).expect("four lists");
-    let gate = match args.get("gate") {
-        None | Some(Value::Null) => None,
-        Some(g) => match serde_json::from_value::<crate::tasks::GateRef>(g.clone()) {
-            Ok(g) if g.attempts == 0 => {
-                return Err(format!("{tool}: `gate.attempts` must be at least 1"));
-            }
-            Ok(g) if ensemble.config().gate_for(role, &g.name).is_none() => {
-                let config = ensemble.config();
-                let known: Vec<&str> = config.gates.keys().map(String::as_str).collect();
-                return Err(format!(
-                    "{tool}: no gate '{}' is configured under `gates`. Gates: {}.",
-                    g.name,
-                    if known.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        known.join(", ")
-                    }
-                ));
-            }
-            Ok(g) => Some(g),
-            Err(e) => {
-                return Err(format!("{tool}: `gate` must be {{name, attempts}}: {e}"));
-            }
-        },
-    };
-    let optional = |key: &str| text(key).filter(|s| !s.is_empty()).map(str::to_string);
-    if let Err(e) = repo_of(ensemble, args) {
-        return Err(format!("{tool}: {e}"));
-    }
-    Ok(crate::tasks::Ticket {
-        title: title.to_string(),
-        agent: role.to_string(),
-        context: optional("context"),
-        goal: optional("goal"),
-        repo: optional("repo"),
-        constraints,
-        files,
-        done_when,
-        after,
-        gate,
-        text: task.to_string(),
-        ..Default::default()
-    })
-}
-
-/// The plan a `plan` call describes, each step checked as `submit` checks a
-/// task; a step's `after` names steps of the plan.
-fn draft_from(ensemble: &Ensemble, args: &Value) -> Result<crate::plans::Draft, String> {
-    let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::trim);
-    let (Some(title), Some(goal)) = (text("title"), text("goal")) else {
-        return Err(format!(
-            "{PLAN}: `title` and `goal` are required and must be strings"
-        ));
-    };
-    let Some(Value::Array(steps)) = args.get("steps") else {
-        return Err(format!("{PLAN}: `steps` is required and must be a list"));
-    };
-    let steps = steps
-        .iter()
-        .map(|step| {
-            let key = step
-                .get("key")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .unwrap_or("");
-            let ticket = ticket_from(ensemble, step, &format!("{PLAN}: step '{key}'"))?;
-            Ok(crate::plans::Step {
-                key: key.to_string(),
-                ticket,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let draft = crate::plans::Draft {
-        title: title.to_string(),
-        goal: goal.to_string(),
-        issue: text("issue").filter(|i| !i.is_empty()).map(str::to_string),
-        steps,
-    };
-    draft.check().map_err(|e| format!("{PLAN}: {e}"))?;
-    Ok(draft)
-}
-
 fn repo_of(ensemble: &Ensemble, args: &Value) -> Result<Option<std::path::PathBuf>, String> {
     let repo = match args.get("repo") {
         None | Some(Value::Null) => return Ok(None),
@@ -1133,8 +996,6 @@ mod tests {
             vec![
                 DELEGATE,
                 SUBMIT,
-                PLAN,
-                PLANS,
                 STATUS,
                 WAIT,
                 CANCEL,
