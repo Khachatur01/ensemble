@@ -1,12 +1,18 @@
 //! A git worktree of its own for a task, so agents working at the same time
 //! do not change each other's files. The task's work is committed on a branch
 //! named after it; Ensemble never merges it.
+//!
+//! With a remote, `origin`, the branch is pushed there whenever a run stops,
+//! so that another computer that takes the task over fetches it and carries on
+//! from there.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const WORKTREES_DIR: &str = "worktrees";
 const BRANCH_PREFIX: &str = "ensemble/";
+/// The remote a task's branch is pushed to, and fetched from.
+pub const REMOTE: &str = "origin";
 
 /// Where a task works, and the branch its work goes on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,15 +39,59 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// The branch task `id`'s work goes on.
+pub fn branch_of(id: &str) -> String {
+    format!("{BRANCH_PREFIX}{id}")
+}
+
+/// Whether the repository `project` has the remote a task's branch is pushed
+/// to, so that another computer can carry its work on.
+pub fn has_remote(project: &Path) -> bool {
+    git(project, &["remote", "get-url", REMOTE]).is_ok()
+}
+
 /// The worktree of task `id`, under `ensemble_dir` (the project's
 /// state directory). Made from the project's `HEAD` on the branch
 /// `ensemble/<id>` the first time; found again after that, so a task that is
 /// run again, or was interrupted, carries on where it was.
 pub fn prepare(project: &Path, ensemble_dir: &Path, id: &str) -> Result<Worktree, String> {
+    prepare_from(project, ensemble_dir, id, None)
+}
+
+/// [`prepare`], carrying on from `carried`, the commit the task's branch was
+/// pushed at when it last stopped, perhaps on another computer: the branch is
+/// fetched from the remote, and a worktree here that is not at that commit is
+/// moved to it.
+pub fn prepare_from(
+    project: &Path,
+    ensemble_dir: &Path,
+    id: &str,
+    carried: Option<&str>,
+) -> Result<Worktree, String> {
     let root = ensemble_dir.join(WORKTREES_DIR);
     let dir = root.join(id);
-    let branch = format!("{BRANCH_PREFIX}{id}");
+    let branch = branch_of(id);
+    // Fetched into a ref every worktree of the repository sees.
+    let fetched = format!("refs/remotes/{REMOTE}/{branch}");
+    let fetch = || {
+        git(
+            project,
+            &[
+                "fetch",
+                "--quiet",
+                REMOTE,
+                &format!("+refs/heads/{branch}:{fetched}"),
+            ],
+        )
+        .map_err(|e| format!("cannot fetch the task's branch from {REMOTE}: {e}"))
+    };
     if dir.join(".git").exists() {
+        if let Some(commit) = carried
+            && !git(&dir, &["rev-parse", "HEAD"]).is_ok_and(|head| head.starts_with(commit))
+        {
+            fetch()?;
+            git(&dir, &["reset", "--quiet", "--hard", &fetched])?;
+        }
         return Ok(Worktree { dir, branch });
     }
     git(project, &["rev-parse", "--verify", "--quiet", "HEAD"]).map_err(|_| {
@@ -56,6 +106,14 @@ pub fn prepare(project: &Path, ensemble_dir: &Path, id: &str) -> Result<Worktree
             .map_err(|e| format!("cannot write {}: {e}", ignore.display()))?;
     }
     let path = dir.to_string_lossy().to_string();
+    if carried.is_some() {
+        fetch()?;
+        git(
+            project,
+            &["worktree", "add", "-B", &branch, &path, &fetched],
+        )?;
+        return Ok(Worktree { dir, branch });
+    }
     let exists = git(
         project,
         &[
@@ -86,6 +144,20 @@ pub fn commit(wt: &Worktree, message: &str) -> Result<Option<String>, String> {
         &["commit", "--quiet", "--no-verify", "-m", message],
     )?;
     git(&wt.dir, &["rev-parse", "--short", "HEAD"]).map(Some)
+}
+
+/// Push the worktree's branch to the remote, and return the commit it is at.
+pub fn push(wt: &Worktree) -> Result<String, String> {
+    git(
+        &wt.dir,
+        &[
+            "push",
+            "--quiet",
+            REMOTE,
+            &format!("{}:refs/heads/{}", wt.branch, wt.branch),
+        ],
+    )?;
+    git(&wt.dir, &["rev-parse", "--short", "HEAD"])
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -162,6 +234,60 @@ mod tests {
         .unwrap();
         let again = prepare(&tmp.0, &ens, "0001-a").unwrap();
         assert!(again.dir.join("new.txt").is_file());
+    }
+
+    #[test]
+    fn a_branch_pushed_on_one_computer_is_carried_on_from_on_another() {
+        let tmp = TempDir::new();
+        let origin = tmp.0.join("origin.git");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(
+            &origin,
+            &["init", "--quiet", "--bare", "--initial-branch=main"],
+        )
+        .unwrap();
+        let desk = tmp.0.join("desk");
+        std::fs::create_dir_all(&desk).unwrap();
+        testing::repo(&desk);
+        assert!(!has_remote(&desk));
+        git(
+            &desk,
+            &["remote", "add", "origin", &origin.to_string_lossy()],
+        )
+        .unwrap();
+        git(&desk, &["push", "--quiet", "origin", "main"]).unwrap();
+        assert!(has_remote(&desk));
+        let laptop = tmp.0.join("laptop");
+        git(
+            &tmp.0,
+            &["clone", "--quiet", &origin.to_string_lossy(), "laptop"],
+        )
+        .unwrap();
+        git(&laptop, &["config", "user.email", "test@example.com"]).unwrap();
+        git(&laptop, &["config", "user.name", "Test"]).unwrap();
+
+        // The desk starts the task and stops: its work so far is pushed.
+        let on_desk = prepare(&desk, &desk.join(".ensemble"), "0001-a").unwrap();
+        std::fs::write(on_desk.dir.join("part1.txt"), "1").unwrap();
+        commit(&on_desk, "0001-a: work so far").unwrap();
+        let pushed = push(&on_desk).unwrap();
+
+        // The laptop takes it over from there.
+        let on_laptop =
+            prepare_from(&laptop, &laptop.join(".ensemble"), "0001-a", Some(&pushed)).unwrap();
+        assert!(on_laptop.dir.join("part1.txt").is_file());
+        std::fs::write(on_laptop.dir.join("part2.txt"), "2").unwrap();
+        commit(&on_laptop, "0001-a: done").unwrap();
+        let done = push(&on_laptop).unwrap();
+
+        // The desk's own worktree, behind, is moved to where the laptop left it.
+        let again = prepare_from(&desk, &desk.join(".ensemble"), "0001-a", Some(&done)).unwrap();
+        assert_eq!(again, on_desk);
+        assert!(again.dir.join("part2.txt").is_file());
+        // A carried commit that was never pushed says so.
+        let err =
+            prepare_from(&desk, &desk.join(".ensemble"), "0002-b", Some("abc123")).unwrap_err();
+        assert!(err.contains("cannot fetch"), "{err}");
     }
 
     #[test]

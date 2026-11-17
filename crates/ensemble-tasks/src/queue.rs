@@ -24,7 +24,7 @@
 //! its agent first, so `max_concurrent` means what it says.
 
 use super::delegation::{ToolResult, run_delegation};
-use crate::board::{Board, Cancelled, Claim, End, LEASE, Renewal};
+use crate::board::{Board, Cancelled, Claim, End, LEASE, Progress, Renewal};
 use crate::runs::Runs;
 use crate::tasks::{
     ASK_MARKER, Detail, HANDOFF_MARKER, Status, Task, Ticket, entry_line, handoff_in, idle_line,
@@ -765,7 +765,11 @@ impl<'e> Queue<'e> {
         let mut claimed = Vec::new();
         for (ticket, slot, cancel) in picked {
             let Some(board) = board else { break };
-            match board.claim(&ticket.id, &self.node, self.lease).await {
+            let movable = self.movable(&ticket);
+            match board
+                .claim(&ticket.id, &self.node, self.lease, movable)
+                .await
+            {
                 Ok(Claim::Taken) => {
                     let mut inner = self.lock();
                     // Checked under the lock above; a run that started since
@@ -820,15 +824,81 @@ impl<'e> Queue<'e> {
         }
     }
 
+    /// The repository `ticket` works in: the working folder, or its `repo`.
+    fn project_of(&self, ticket: &Ticket) -> Result<PathBuf, String> {
+        let workdir = self
+            .ensemble
+            .workdir()
+            .map_err(|e| format!("no project directory to work in: {e}"))?;
+        match ticket.repo.as_deref() {
+            Some(repo) => ensemble_core::workspace::resolve_repo(&workdir, repo),
+            None => Ok(workdir),
+        }
+    }
+
+    /// Whether a run of `ticket` here could be carried on elsewhere: its agent
+    /// works on a branch of its own, which can be pushed to the repository's
+    /// remote. Anything else changes this computer's folder, so the task stays
+    /// with this node once it has run.
+    fn movable(&self, ticket: &Ticket) -> bool {
+        let worktree = self
+            .ensemble
+            .config()
+            .agent(&ticket.agent)
+            .is_some_and(|a| a.isolation == Isolation::Worktree);
+        worktree
+            && self
+                .project_of(ticket)
+                .is_ok_and(|project| blocking(|| worktree::has_remote(&project)))
+    }
+
+    /// Push the task's branch, when its repository has a remote, and say
+    /// where it is for the next run, wherever that is.
+    fn push(&self, ticket: &Ticket, wt: &worktree::Worktree) -> Option<Progress> {
+        if !blocking(|| worktree::has_remote(&wt.dir)) {
+            return None;
+        }
+        match blocking(|| worktree::push(wt)) {
+            Ok(commit) => {
+                self.note(
+                    &ticket.id,
+                    &format!("pushed {} at {commit} to {}", wt.branch, worktree::REMOTE),
+                );
+                Some(Progress {
+                    node: self.node.clone(),
+                    branch: wt.branch.clone(),
+                    commit,
+                })
+            }
+            Err(e) => {
+                self.note(
+                    &ticket.id,
+                    &format!("{} could not be pushed: {e}", wt.branch),
+                );
+                None
+            }
+        }
+    }
+
     /// Tell the board how a run of `id` ended, trying again when the hub
     /// cannot be reached; a run whose end is never told is run again once its
     /// claim runs out.
-    async fn tell(&self, board: &dyn Board, id: &str, end: Option<End>) {
+    async fn tell(
+        &self,
+        board: &dyn Board,
+        id: &str,
+        end: Option<End>,
+        progress: Option<Progress>,
+    ) {
         let mut said = String::new();
         for attempt in 1..=FINISH_ATTEMPTS {
             let told = match &end {
-                Some(end) => board.finish(id, &self.node, end.clone()).await,
-                None => board.release(id, &self.node).await,
+                Some(end) => {
+                    board
+                        .finish(id, &self.node, end.clone(), progress.clone())
+                        .await
+                }
+                None => board.release(id, &self.node, progress.clone()).await,
             };
             match told {
                 Ok(()) => return,
@@ -857,34 +927,33 @@ impl<'e> Queue<'e> {
         cancel: &AtomicBool,
     ) {
         let since = SystemTime::now();
-        // What it asked and was answered, and what earlier agents handed on.
+        // What it asked and was answered, what earlier agents handed on, and
+        // where the work of an earlier run was pushed.
         let detail = board.get(&ticket.id).await.ok().flatten();
-        let place = self
-            .ensemble
-            .workdir()
-            .map_err(|e| format!("no project directory to work in: {e}"))
-            .and_then(|workdir| match ticket.repo.as_deref() {
-                Some(repo) => ensemble_core::workspace::resolve_repo(&workdir, repo),
-                None => Ok(workdir),
-            })
-            .and_then(
-                |project| match self.ensemble.config().agent(&ticket.agent) {
-                    Some(a) if a.isolation == Isolation::Worktree => {
-                        self.note(
-                            &ticket.id,
-                            &format!("{}: preparing a git worktree", ticket.agent),
-                        );
-                        let root = self
-                            .runs
-                            .as_ref()
-                            .map(|r| r.root().to_path_buf())
-                            .ok_or("no state directory for a worktree")?;
-                        blocking(|| worktree::prepare(&project, &root, &ticket.id))
-                            .map(|wt| (wt.dir.clone(), Some(wt)))
-                    }
-                    _ => Ok((project, None)),
-                },
-            );
+        let carried = detail
+            .as_ref()
+            .and_then(|d| d.progress.as_ref())
+            .map(|p| p.commit.clone());
+        let place = self.project_of(&ticket).and_then(|project| {
+            match self.ensemble.config().agent(&ticket.agent) {
+                Some(a) if a.isolation == Isolation::Worktree => {
+                    self.note(
+                        &ticket.id,
+                        &format!("{}: preparing a git worktree", ticket.agent),
+                    );
+                    let root = self
+                        .runs
+                        .as_ref()
+                        .map(|r| r.root().to_path_buf())
+                        .ok_or("no state directory for a worktree")?;
+                    blocking(|| {
+                        worktree::prepare_from(&project, &root, &ticket.id, carried.as_deref())
+                    })
+                    .map(|wt| (wt.dir.clone(), Some(wt)))
+                }
+                _ => Ok((project, None)),
+            }
+        });
         let lost = AtomicBool::new(false);
         let work = async {
             match &place {
@@ -956,6 +1025,23 @@ impl<'e> Queue<'e> {
             };
             result.text = format!("{}\n{note}", result.text);
         }
+        // A run that stops unfinished keeps what it did so far on its branch,
+        // and the branch goes to the remote, for the next run wherever it is.
+        let progress = match &place {
+            Ok((_, Some(wt))) if !lost => {
+                if interrupted_now || question.is_some() || handoff.is_some() {
+                    let message = format!("{}: work so far", ticket.id);
+                    if let Err(e) = blocking(|| worktree::commit(wt, &message)) {
+                        self.note(
+                            &ticket.id,
+                            &format!("the work so far was not committed: {e}"),
+                        );
+                    }
+                }
+                self.push(&ticket, wt)
+            }
+            _ => None,
+        };
         let end = if lost {
             // Another node runs it now; what this run did stays here.
             self.note(
@@ -1002,7 +1088,7 @@ impl<'e> Queue<'e> {
             }))
         };
         if let Some(end) = end {
-            self.tell(board, &ticket.id, end).await;
+            self.tell(board, &ticket.id, end, progress).await;
         }
         self.lock().live.remove(&ticket.id);
         self.changed.notify_waiters();
@@ -1025,6 +1111,15 @@ impl<'e> Queue<'e> {
                 "\n\nYou stopped earlier to ask. The questions and their answers:\n\n{}\n\nYour reply when you last stopped:\n{}\n\nGo on from there.",
                 questions.trim(),
                 reply.trim()
+            ));
+        }
+        if let Some(p) = detail
+            .and_then(|d| d.progress.as_ref())
+            .filter(|p| p.node != self.node)
+        {
+            base.push_str(&format!(
+                "\n\nThis task was started on {}: its work so far is in this folder, committed on {} at {}. Go on from there; do not start over.",
+                p.node, p.branch, p.commit
             ));
         }
         if let Some(earlier) = detail.and_then(|d| d.handoffs.as_ref()) {
@@ -1133,9 +1228,15 @@ impl<'e> Queue<'e> {
         match board.create(ticket).await {
             Ok(id) => {
                 self.changed.notify_waiters();
+                let stays = if ticket.agent.is_empty() || self.movable(ticket) {
+                    ""
+                } else {
+                    " Its agent changes this folder directly (or its repository has no \
+                     remote), so once it starts it stays with this computer."
+                };
                 ToolResult::ok(format!(
                     "task {id} queued. `status` shows where it is; `wait` with task {id} \
-                     returns its result."
+                     returns its result.{stays}"
                 ))
             }
             Err(e) => ToolResult::err(format!("cannot keep the task on {}: {e}", board.place())),

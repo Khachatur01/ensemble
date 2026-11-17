@@ -709,8 +709,17 @@ outlive the node that runs it:
 - A node with no hub keeps no tasks: `submit` says so, and only background
   delegations run.
 
-A run that moves to another node starts again from the task, not from where
-the first run got to: what the first changed is in the first node's folder.
+**Where the work is decides who goes on with it.** A task of an agent with
+`isolation: worktree`, in a repository with a remote `origin`, works on a
+branch of its own, and that branch can move: whenever a run of it stops (put
+back, asking, handed on, or ended), the node commits what it did so far on the
+branch and pushes it to `origin`. The next run, on any of your nodes, fetches
+the branch and carries on from there, and its agent is told the task was
+started elsewhere and to go on, not start over. Any other task changes one
+computer's folder, so once it has run there it stays with that node: when the
+node stops, the task shows `queued (interrupted on desk, where its work is)`
+and waits for it. `submit` says so when it makes such a task. A task never
+pushes anywhere but `origin`, and only its own branch, `ensemble/<id>`.
 
 A task's fields; only `title`, the agent and the text are needed, and `submit`
 takes them all:
@@ -778,8 +787,11 @@ Take it in with `ensemble merge <id>`, which only you run: it refuses a task tha
 is not done, a repository with uncommitted changes, and a merge that conflicts
 (which it undoes, naming the files). `--squash` makes one commit; `--cleanup`
 then removes the task's worktree and branch, and nothing is deleted without it. A task run again on the
-same computer, or one the node's stop interrupted, carries on in the worktree it had. The working folder, or
-the task's `repo`, must be a git repository with at least one commit.
+same computer, or one the node's stop interrupted, carries on in the worktree it had; one carried on
+elsewhere since is brought to where that left it. `review`, `diff` and `merge` work on any of your
+computers with the repository: a branch pushed from another computer is fetched, and a branch here
+that is behind it is moved up to it first. The working folder, or the task's `repo`, must be a git
+repository with at least one commit.
 
 ### A helper team that works on its own
 
@@ -1764,7 +1776,7 @@ scripts stand in for the CLIs.
 | `crates/ensemble-tasks/` | tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the node holding the lease, questions, hand-offs, cancelling; over the link as the signed-in account; run logs; review and merge |
 | `crates/ensemble-mcp/src/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session, notes recalled for agents with `recall` |
 | `tests/workspace.rs` | the crates depend on each other in one direction only |
-| `tests/end_to_end.rs` | the real binary: CLI, `show`, `health` against a stub server, MCP over real pipes, an agent changing a file; session hooks; an agent run on a node and its changes back; a node's models through the hub; a session through a node, its task going on after the session; a hub task worked by a node |
+| `tests/end_to_end.rs` | the real binary: CLI, `show`, `health` against a stub server, MCP over real pipes, an agent changing a file; session hooks; an agent run on a node and its changes back; a node's models through the hub; a session through a node, its task going on after the session; a task stopped on one computer and carried on by another from its pushed branch; a hub task worked by a node |
 | `crates/ensemble-agents/tests/fixtures/` | saved event streams per CLI version, replayed through each adapter's parser (see its README) |
 | `tests/real_cli.rs` | the real `claude`, `opencode` and `codex` CLIs: `health` and one trivial run. Ignored; run with `ENSEMBLE_REAL_CLI=1 cargo test --test real_cli -- --ignored`. |
 | `nix/example.nix` | `nix flake check` evaluates the NixOS module with it, and builds the hub's and the node's units |
@@ -1790,8 +1802,11 @@ scripts stand in for the CLIs.
   when they name the same one. Budgets are shared by every project that uses the
   helper team. A token budget counts what runs report, which not every CLI does.
 - **Tasks run only while one of your nodes runs.** One node per computer, and
-  one worker runs a folder's tasks at a time. A task moved to another node
-  starts again there; it does not carry on from the first node's work.
+  one worker runs a folder's tasks at a time. Only a worktree task in a
+  repository with a remote moves between nodes, carrying its work on its
+  pushed branch; any other task waits for the node whose folder it changed.
+  What a node that dies did since its run last stopped is not pushed, so the
+  next run starts from the last push.
 - **A task of an agent whose team was removed** fails when it starts: the
   agent is no longer there.
 - **A session's working folder is fixed:** the folder `ensemble mcp` was

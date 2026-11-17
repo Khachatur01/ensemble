@@ -179,9 +179,11 @@ pub struct Task {
     pub question: Option<String>,
     /// The node running it now.
     pub running_on: Option<String>,
-    /// The node that was running it when it stopped unfinished; any node runs
+    /// The node that was running it when it stopped unfinished; a node runs
     /// it again.
     pub interrupted_on: Option<String>,
+    /// The node whose folder its work is in, which alone may go on with it.
+    pub pinned_to: Option<String>,
 }
 
 impl Task {
@@ -199,6 +201,8 @@ pub struct Detail {
     /// The questions and answers so far, and the reply that last asked.
     pub conversation: Option<(String, String)>,
     pub handoffs: Option<String>,
+    /// Where its work was pushed when a run of it last stopped.
+    pub progress: Option<crate::board::Progress>,
 }
 
 /// One line about a task: its id, agent, where it stands and its title.
@@ -223,7 +227,12 @@ pub fn entry_line(task: &Task, all: &[Task], budget_wait: Option<u64>) -> String
     } else if !blockers.is_empty() {
         format!("blocked by {}", blockers.join(", "))
     } else if let Some(node) = &task.interrupted_on {
-        format!("queued (interrupted on {node})")
+        match &task.pinned_to {
+            Some(pinned) if pinned == node => {
+                format!("queued (interrupted on {node}, where its work is)")
+            }
+            _ => format!("queued (interrupted on {node})"),
+        }
     } else {
         "queued".into()
     };
@@ -395,6 +404,7 @@ pub(crate) mod tests {
             question: None,
             running_on: None,
             interrupted_on: None,
+            pinned_to: None,
         }
     }
 
@@ -468,6 +478,10 @@ pub(crate) mod tests {
         assert_eq!(entry_line(&t, &[], None), "0001-a · coder · queued · t");
         t.interrupted_on = Some("laptop".into());
         assert!(entry_line(&t, &[], None).contains("queued (interrupted on laptop)"));
+        t.pinned_to = Some("laptop".into());
+        assert!(
+            entry_line(&t, &[], None).contains("queued (interrupted on laptop, where its work is)")
+        );
         assert!(
             entry_line(&t, &[], Some(90)).contains("over its agent's budget for 2 more minutes")
         );

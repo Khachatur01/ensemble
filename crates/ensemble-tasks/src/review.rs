@@ -44,7 +44,9 @@ pub struct Task {
 }
 
 /// Find task `id`, as the hub has it (`detail`, none when it has no such
-/// task), and its branch in the repository it worked in under `workdir`.
+/// task), and its branch in the repository it worked in under `workdir`,
+/// brought from the remote to where the task's work was last pushed, when
+/// that was on another computer.
 pub fn find(detail: Option<Detail>, workdir: &Path, id: &str) -> Result<Task, String> {
     let Some(detail) = detail else {
         return Err(format!("no task '{id}'. `ensemble tasks` lists them."));
@@ -55,11 +57,32 @@ pub fn find(detail: Option<Detail>, workdir: &Path, id: &str) -> Result<Task, St
         None => workdir.to_path_buf(),
     };
     let branch = format!("{BRANCH_PREFIX}{id}");
-    git(
-        &repo,
-        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")],
-    )
-    .map_err(|_| {
+    let local = format!("refs/heads/{branch}");
+    let here = || git(&repo, &["rev-parse", "--verify", "--quiet", &local]);
+    // Its work was last pushed, perhaps from another computer: the branch here
+    // is brought to it, unless it has work of its own beyond it.
+    if let Some(progress) = &detail.progress {
+        let remote = ensemble_agents::worktree::REMOTE;
+        let fetched = format!("refs/remotes/{remote}/{branch}");
+        let behind = |at: &str| {
+            git(&repo, &["merge-base", "--is-ancestor", at, &fetched]).is_ok()
+                && git(
+                    &repo,
+                    &["merge-base", "--is-ancestor", &progress.commit, at],
+                )
+                .is_err()
+        };
+        if git(
+            &repo,
+            &["fetch", "--quiet", remote, &format!("+{local}:{fetched}")],
+        )
+        .is_ok()
+            && here().map_or(true, |at| behind(&at))
+        {
+            git(&repo, &["update-ref", &local, &fetched])?;
+        }
+    }
+    here().map_err(|_| {
         format!(
             "task {id} has no branch '{branch}' in {}: only tasks of an agent with `isolation: worktree` keep their work on one",
             repo.display()
@@ -273,7 +296,7 @@ mod tests {
         std::fs::write(wt.join("a.txt"), change).unwrap();
         run(&wt, &["add", "--all"]);
         run(&wt, &["commit", "--quiet", "-m", "work"]);
-        board.take(&id, "laptop", 60).unwrap();
+        board.take(&id, "laptop", 60, true).unwrap();
         board
             .end(
                 &id,
@@ -285,6 +308,7 @@ mod tests {
                     extra: Vec::new(),
                     text: "did it".into(),
                 },
+                None,
             )
             .unwrap();
         Fixture {

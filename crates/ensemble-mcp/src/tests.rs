@@ -1084,7 +1084,7 @@ fn a_queued_task_can_be_cancelled_and_an_ended_one_does_not_run_again() {
     write_task(&tmp, "0001-a", "scout", "a");
     write_task(&tmp, "0002-b", "scout", "b");
     write_task(&tmp, "0003-c", "scout", "c");
-    board(&tmp).take("0003-c", "laptop", 60).unwrap();
+    board(&tmp).take("0003-c", "laptop", 60, true).unwrap();
     board(&tmp)
         .end(
             "0003-c",
@@ -1096,6 +1096,7 @@ fn a_queued_task_can_be_cancelled_and_an_ended_one_does_not_run_again() {
                 extra: Vec::new(),
                 text: "already".into(),
             },
+            None,
         )
         .unwrap();
     session(&e, |ask| {

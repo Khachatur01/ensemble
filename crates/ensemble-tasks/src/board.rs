@@ -9,6 +9,13 @@
 //! again. A node whose lease ran out and was taken cannot write a result, so a
 //! task is never done twice.
 //!
+//! Where the work is decides who may go on with it. A task whose run works on
+//! a branch that is pushed (a worktree agent, a repository with a remote) is
+//! **movable**: when its run stops, the node says where its branch is
+//! ([`Progress`]), and the next node fetches it and carries on. Any other task
+//! changes one computer's folder, so once it has run there it is **pinned**
+//! to that node, and waits for it.
+//!
 //! [`Board`] is what the queue and the tools use. The hub keeps its tasks in
 //! its database ([`DbBoard`]) and answers the link's task methods with them
 //! ([`Service`]); a node reaches them over the link ([`RemoteBoard`]).
@@ -52,6 +59,15 @@ pub enum Renewal {
     Cancel,
     /// The lease ran out and the task is another's now: stop, and say nothing.
     Lost,
+}
+
+/// Where a task's work was pushed when a run of it last stopped.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Progress {
+    /// The node that pushed it.
+    pub node: String,
+    pub branch: String,
+    pub commit: String,
 }
 
 /// What cancelling a task did.
@@ -102,14 +118,29 @@ pub trait Board: Send + Sync {
     async fn get(&self, id: &str) -> Result<Option<Detail>, String>;
     /// Keep `ticket` as a new task, and return its id. Its own id is not used.
     async fn create(&self, ticket: &Ticket) -> Result<String, String>;
-    /// Run task `id` on `node` for `lease`, if it may start.
-    async fn claim(&self, id: &str, node: &str, lease: Duration) -> Result<Claim, String>;
+    /// Run task `id` on `node` for `lease`, if it may start. Unless the run is
+    /// `movable`, the task stays with `node` from now on.
+    async fn claim(
+        &self,
+        id: &str,
+        node: &str,
+        lease: Duration,
+        movable: bool,
+    ) -> Result<Claim, String>;
     /// Keep running it for another `lease`.
     async fn renew(&self, id: &str, node: &str, lease: Duration) -> Result<Renewal, String>;
-    /// Stop running it, unfinished: any node runs it again.
-    async fn release(&self, id: &str, node: &str) -> Result<(), String>;
-    /// Say how a run of it ended.
-    async fn finish(&self, id: &str, node: &str, end: End) -> Result<(), String>;
+    /// Stop running it, unfinished, with its work pushed as `progress`: a
+    /// node runs it again.
+    async fn release(&self, id: &str, node: &str, progress: Option<Progress>)
+    -> Result<(), String>;
+    /// Say how a run of it ended, with its work pushed as `progress`.
+    async fn finish(
+        &self,
+        id: &str,
+        node: &str,
+        end: End,
+        progress: Option<Progress>,
+    ) -> Result<(), String>;
     /// Answer the question it waits on.
     async fn answer(&self, id: &str, text: &str) -> Result<(), String>;
     /// Give it to `agent`, from the backlog or from whoever has it.
@@ -133,6 +164,10 @@ struct Record {
     handoffs: String,
     lease: Option<Lease>,
     interrupted_on: Option<String>,
+    /// The node whose folder its work is in, when that work cannot move.
+    pinned_to: Option<String>,
+    /// Where its work was pushed when a run last stopped.
+    progress: Option<Progress>,
     /// Asked to stop while it ran.
     cancel: bool,
     result: Option<Outcome>,
@@ -180,6 +215,7 @@ impl Record {
                 (None, Some(node)) if self.result.is_none() => Some(node.clone()),
                 _ => None,
             },
+            pinned_to: self.pinned_to.clone(),
         }
     }
 
@@ -204,6 +240,7 @@ impl Record {
             outcome: self.result.clone(),
             conversation,
             handoffs: (!self.handoffs.is_empty()).then(|| self.handoffs.clone()),
+            progress: self.progress.clone(),
         }
     }
 }
@@ -355,6 +392,8 @@ impl DbBoard {
             handoffs: String::new(),
             lease: None,
             interrupted_on: None,
+            pinned_to: None,
+            progress: None,
             cancel: false,
             result: None,
         };
@@ -373,10 +412,11 @@ impl DbBoard {
     }
 
     /// Lease task `id` to `node` for `seconds`, if it may start: assigned,
-    /// not ended, not waiting on an answer or another task, and not running
-    /// on another node. A node that claims a task it held before, such as
-    /// after it started again, gets it back.
-    pub fn take(&self, id: &str, node: &str, seconds: u64) -> Result<Claim, String> {
+    /// not ended, not waiting on an answer or another task, not running on
+    /// another node, and not pinned to one. A node that claims a task it held
+    /// before, such as after it started again, gets it back. Unless the run
+    /// is `movable`, the task is pinned to `node`.
+    pub fn take(&self, id: &str, node: &str, seconds: u64, movable: bool) -> Result<Claim, String> {
         let done: Vec<String> = self
             .records()?
             .into_iter()
@@ -402,11 +442,19 @@ impl DbBoard {
             {
                 return refused(&format!("it runs on {holder}"));
             }
+            if let Some(pinned) = r.pinned_to.as_ref().filter(|p| *p != node) {
+                return refused(&format!(
+                    "its work is in {pinned}'s folder, so it waits for {pinned}"
+                ));
+            }
             r.lease = Some(Lease {
                 node: node.to_string(),
                 until: now + seconds,
             });
             r.interrupted_on = None;
+            if !movable {
+                r.pinned_to = Some(node.to_string());
+            }
             Ok(Claim::Taken)
         })
     }
@@ -431,14 +479,17 @@ impl DbBoard {
         })
     }
 
-    /// `node` stops running task `id`, unfinished. One that was cancelled
-    /// meanwhile ends as cancelled.
-    pub fn put_back(&self, id: &str, node: &str) -> Result<(), String> {
+    /// `node` stops running task `id`, unfinished, its work pushed as
+    /// `progress`. One that was cancelled meanwhile ends as cancelled.
+    pub fn put_back(&self, id: &str, node: &str, progress: Option<Progress>) -> Result<(), String> {
         self.change(id, |r, _| {
             if r.lease.as_ref().is_none_or(|l| l.node != node) {
                 return Ok(());
             }
             r.lease = None;
+            if progress.is_some() {
+                r.progress = progress;
+            }
             if r.cancel {
                 r.result = Some(outcome(
                     Status::Cancelled,
@@ -454,9 +505,15 @@ impl DbBoard {
         })
     }
 
-    /// How `node`'s run of task `id` ended. Refused when the task is not
-    /// `node`'s any more.
-    pub fn end(&self, id: &str, node: &str, end: End) -> Result<(), String> {
+    /// How `node`'s run of task `id` ended, its work pushed as `progress`.
+    /// Refused when the task is not `node`'s any more.
+    pub fn end(
+        &self,
+        id: &str,
+        node: &str,
+        end: End,
+        progress: Option<Progress>,
+    ) -> Result<(), String> {
         self.change(id, |r, _| {
             match &r.lease {
                 Some(l) if l.node == node && r.result.is_none() => {}
@@ -466,6 +523,9 @@ impl DbBoard {
                 _ => return Err(format!("{id} is not running on {node}")),
             }
             r.lease = None;
+            if progress.is_some() {
+                r.progress = progress;
+            }
             match end {
                 End::Result {
                     status,
@@ -602,17 +662,34 @@ impl Board for DbBoard {
     async fn create(&self, ticket: &Ticket) -> Result<String, String> {
         blocking(|| self.add(ticket))
     }
-    async fn claim(&self, id: &str, node: &str, lease: Duration) -> Result<Claim, String> {
-        blocking(|| self.take(id, node, lease.as_secs().max(1)))
+    async fn claim(
+        &self,
+        id: &str,
+        node: &str,
+        lease: Duration,
+        movable: bool,
+    ) -> Result<Claim, String> {
+        blocking(|| self.take(id, node, lease.as_secs().max(1), movable))
     }
     async fn renew(&self, id: &str, node: &str, lease: Duration) -> Result<Renewal, String> {
         blocking(|| self.keep(id, node, lease.as_secs().max(1)))
     }
-    async fn release(&self, id: &str, node: &str) -> Result<(), String> {
-        blocking(|| self.put_back(id, node))
+    async fn release(
+        &self,
+        id: &str,
+        node: &str,
+        progress: Option<Progress>,
+    ) -> Result<(), String> {
+        blocking(|| self.put_back(id, node, progress))
     }
-    async fn finish(&self, id: &str, node: &str, end: End) -> Result<(), String> {
-        blocking(|| self.end(id, node, end))
+    async fn finish(
+        &self,
+        id: &str,
+        node: &str,
+        end: End,
+        progress: Option<Progress>,
+    ) -> Result<(), String> {
+        blocking(|| self.end(id, node, end, progress))
     }
     async fn answer(&self, id: &str, text: &str) -> Result<(), String> {
         blocking(|| self.reply(id, text))
@@ -661,6 +738,14 @@ impl TaskService for Service {
                 .and_then(Value::as_u64)
                 .unwrap_or(LEASE.as_secs())
         };
+        let progress = || -> Result<Option<Progress>, String> {
+            match params.get("progress") {
+                None | Some(Value::Null) => Ok(None),
+                Some(p) => serde_json::from_value(p.clone())
+                    .map(Some)
+                    .map_err(|e| format!("{method}: `progress` is not where work is: {e}")),
+            }
+        };
         let project = text("project")?;
         if project.contains(['/', '\\']) {
             return Err(format!("{method}: '{project}' is not a project name"));
@@ -675,7 +760,11 @@ impl TaskService for Service {
                 Ok(json!({ "id": board.add(&ticket)? }))
             }
             TASK_CLAIM => {
-                let claim = board.take(text("id")?, text("node")?, seconds())?;
+                let movable = params
+                    .get("movable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let claim = board.take(text("id")?, text("node")?, seconds(), movable)?;
                 Ok(json!({ "claim": claim }))
             }
             TASK_RENEW => {
@@ -683,13 +772,13 @@ impl TaskService for Service {
                 Ok(json!({ "renewal": renewal }))
             }
             TASK_RELEASE => {
-                board.put_back(text("id")?, text("node")?)?;
+                board.put_back(text("id")?, text("node")?, progress()?)?;
                 Ok(json!({ "released": true }))
             }
             TASK_FINISH => {
                 let end: End = serde_json::from_value(parsed("end")?)
                     .map_err(|e| format!("{method}: `end` is not how a run ends: {e}"))?;
-                board.end(text("id")?, text("node")?, end)?;
+                board.end(text("id")?, text("node")?, end, progress()?)?;
                 Ok(json!({ "finished": true }))
             }
             TASK_ANSWER => {
@@ -754,23 +843,43 @@ impl Board for RemoteBoard {
             "id",
         )
     }
-    async fn claim(&self, id: &str, node: &str, lease: Duration) -> Result<Claim, String> {
-        let params = json!({ "id": id, "node": node, "seconds": lease.as_secs().max(1) });
+    async fn claim(
+        &self,
+        id: &str,
+        node: &str,
+        lease: Duration,
+        movable: bool,
+    ) -> Result<Claim, String> {
+        let params = json!({
+            "id": id,
+            "node": node,
+            "seconds": lease.as_secs().max(1),
+            "movable": movable,
+        });
         read(&self.ask(TASK_CLAIM, params).await?, "claim")
     }
     async fn renew(&self, id: &str, node: &str, lease: Duration) -> Result<Renewal, String> {
         let params = json!({ "id": id, "node": node, "seconds": lease.as_secs().max(1) });
         read(&self.ask(TASK_RENEW, params).await?, "renewal")
     }
-    async fn release(&self, id: &str, node: &str) -> Result<(), String> {
-        self.ask(TASK_RELEASE, json!({ "id": id, "node": node }))
-            .await
-            .map(|_| ())
+    async fn release(
+        &self,
+        id: &str,
+        node: &str,
+        progress: Option<Progress>,
+    ) -> Result<(), String> {
+        let params = json!({ "id": id, "node": node, "progress": progress });
+        self.ask(TASK_RELEASE, params).await.map(|_| ())
     }
-    async fn finish(&self, id: &str, node: &str, end: End) -> Result<(), String> {
-        self.ask(TASK_FINISH, json!({ "id": id, "node": node, "end": end }))
-            .await
-            .map(|_| ())
+    async fn finish(
+        &self,
+        id: &str,
+        node: &str,
+        end: End,
+        progress: Option<Progress>,
+    ) -> Result<(), String> {
+        let params = json!({ "id": id, "node": node, "end": end, "progress": progress });
+        self.ask(TASK_FINISH, params).await.map(|_| ())
     }
     async fn answer(&self, id: &str, text: &str) -> Result<(), String> {
         self.ask(TASK_ANSWER, json!({ "id": id, "text": text }))
@@ -891,13 +1000,13 @@ mod tests {
         let tmp = TempDir::new();
         let b = board(&tmp);
         let id = b.add(&draft("A", "web/coder", "t")).unwrap();
-        assert_eq!(b.take(&id, "laptop", 60).unwrap(), Claim::Taken);
+        assert_eq!(b.take(&id, "laptop", 60, true).unwrap(), Claim::Taken);
         assert_eq!(
-            b.take(&id, "gpu-box", 60).unwrap(),
+            b.take(&id, "gpu-box", 60, true).unwrap(),
             Claim::Refused("it runs on laptop".into())
         );
         assert_eq!(
-            b.take(&id, "laptop", 60).unwrap(),
+            b.take(&id, "laptop", 60, true).unwrap(),
             Claim::Taken,
             "its own again"
         );
@@ -917,12 +1026,12 @@ mod tests {
             (None, Some("laptop"))
         );
         assert!(entry_line(t, &[], None).contains("queued (interrupted on laptop)"));
-        assert_eq!(b.take(&id, "gpu-box", 60).unwrap(), Claim::Taken);
+        assert_eq!(b.take(&id, "gpu-box", 60, true).unwrap(), Claim::Taken);
         // The laptop comes back: the task is not its any more.
         assert_eq!(b.keep(&id, "laptop", 60).unwrap(), Renewal::Lost);
-        let err = b.end(&id, "laptop", result("late")).unwrap_err();
+        let err = b.end(&id, "laptop", result("late"), None).unwrap_err();
         assert!(err.contains("runs on gpu-box"), "{err}");
-        b.end(&id, "gpu-box", result("All done.")).unwrap();
+        b.end(&id, "gpu-box", result("All done."), None).unwrap();
         let d = b.detail(&id).unwrap().unwrap();
         assert_eq!(d.task.status, Some(Status::Done));
         let outcome = d.outcome.unwrap();
@@ -930,7 +1039,7 @@ mod tests {
         assert_eq!(outcome.field("branch"), Some("ensemble/0001-a"));
         assert_eq!(outcome.field("started"), Some("2026-10-31T12:00:00Z"));
         assert_eq!(
-            b.take(&id, "gpu-box", 60).unwrap(),
+            b.take(&id, "gpu-box", 60, true).unwrap(),
             Claim::Refused("it has ended".into())
         );
     }
@@ -940,21 +1049,64 @@ mod tests {
         let tmp = TempDir::new();
         let b = board(&tmp);
         let id = b.add(&draft("A", "web/coder", "t")).unwrap();
-        b.take(&id, "laptop", 60).unwrap();
-        b.put_back(&id, "gpu-box").unwrap();
+        b.take(&id, "laptop", 60, true).unwrap();
+        b.put_back(&id, "gpu-box", None).unwrap();
         assert_eq!(
             b.list().unwrap()[0].running_on.as_deref(),
             Some("laptop"),
             "not gpu-box's to put back"
         );
-        b.put_back(&id, "laptop").unwrap();
+        b.put_back(&id, "laptop", None).unwrap();
         let t = &b.list().unwrap()[0];
         assert_eq!(
             (t.running_on.as_deref(), t.interrupted_on.as_deref()),
             (None, Some("laptop"))
         );
-        assert_eq!(b.take(&id, "gpu-box", 60).unwrap(), Claim::Taken);
+        assert_eq!(b.take(&id, "gpu-box", 60, true).unwrap(), Claim::Taken);
         assert_eq!(b.list().unwrap()[0].interrupted_on, None);
+    }
+
+    #[test]
+    fn work_that_cannot_move_waits_for_its_node_and_work_that_can_is_carried_on() {
+        let tmp = TempDir::new();
+        let b = board(&tmp);
+        // In the desk's folder: it stays with the desk.
+        let here = b.add(&draft("Here", "web/coder", "t")).unwrap();
+        assert_eq!(b.take(&here, "desk", 60, false).unwrap(), Claim::Taken);
+        b.put_back(&here, "desk", None).unwrap();
+        let t = &b.list().unwrap()[0];
+        assert_eq!(t.pinned_to.as_deref(), Some("desk"));
+        assert!(
+            entry_line(t, &[], None).contains("interrupted on desk, where its work is"),
+            "{}",
+            entry_line(t, &[], None)
+        );
+        assert_eq!(
+            b.take(&here, "laptop", 60, true).unwrap(),
+            Claim::Refused("its work is in desk's folder, so it waits for desk".into())
+        );
+        assert_eq!(b.take(&here, "desk", 60, false).unwrap(), Claim::Taken);
+
+        // On a pushed branch: the laptop carries on where the desk stopped.
+        let moving = b.add(&draft("Moving", "web/coder", "t")).unwrap();
+        b.take(&moving, "desk", 60, true).unwrap();
+        let pushed = Progress {
+            node: "desk".into(),
+            branch: "ensemble/0002-moving".into(),
+            commit: "abc1234".into(),
+        };
+        b.put_back(&moving, "desk", Some(pushed.clone())).unwrap();
+        let d = b.detail(&moving).unwrap().unwrap();
+        assert_eq!((d.progress, d.task.pinned_to), (Some(pushed), None));
+        assert_eq!(b.take(&moving, "laptop", 60, true).unwrap(), Claim::Taken);
+        let done = Progress {
+            node: "laptop".into(),
+            commit: "def5678".into(),
+            ..b.detail(&moving).unwrap().unwrap().progress.unwrap()
+        };
+        b.end(&moving, "laptop", result("done"), Some(done.clone()))
+            .unwrap();
+        assert_eq!(b.detail(&moving).unwrap().unwrap().progress, Some(done));
     }
 
     #[test]
@@ -970,19 +1122,19 @@ mod tests {
             .unwrap();
         let backlog = b.add(&draft("Later", "", "t")).unwrap();
         assert_eq!(
-            b.take(&second, "laptop", 60).unwrap(),
+            b.take(&second, "laptop", 60, true).unwrap(),
             Claim::Refused(format!("it waits for {first}"))
         );
         assert_eq!(
-            b.take(&backlog, "laptop", 60).unwrap(),
+            b.take(&backlog, "laptop", 60, true).unwrap(),
             Claim::Refused("it is in the backlog".into())
         );
         b.give(&backlog, "web/coder").unwrap();
-        assert_eq!(b.take(&backlog, "laptop", 60).unwrap(), Claim::Taken);
+        assert_eq!(b.take(&backlog, "laptop", 60, true).unwrap(), Claim::Taken);
         let err = b.give(&backlog, "web/reviewer").unwrap_err();
         assert!(err.contains("is running"), "{err}");
 
-        b.take(&first, "laptop", 60).unwrap();
+        b.take(&first, "laptop", 60, true).unwrap();
         b.end(
             &first,
             "laptop",
@@ -990,6 +1142,7 @@ mod tests {
                 question: "Which parser?".into(),
                 reply: "I found two.\nNEEDS INPUT: Which parser?".into(),
             },
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -997,7 +1150,7 @@ mod tests {
             Some("Which parser?")
         );
         assert_eq!(
-            b.take(&first, "laptop", 60).unwrap(),
+            b.take(&first, "laptop", 60, true).unwrap(),
             Claim::Refused("it waits for an answer".into())
         );
         b.reply(&first, "The new one.").unwrap();
@@ -1009,9 +1162,9 @@ mod tests {
             "{questions}"
         );
         assert!(reply.ends_with("NEEDS INPUT: Which parser?"), "{reply}");
-        assert_eq!(b.take(&first, "laptop", 60).unwrap(), Claim::Taken);
-        b.end(&first, "laptop", result("done")).unwrap();
-        assert_eq!(b.take(&second, "laptop", 60).unwrap(), Claim::Taken);
+        assert_eq!(b.take(&first, "laptop", 60, true).unwrap(), Claim::Taken);
+        b.end(&first, "laptop", result("done"), None).unwrap();
+        assert_eq!(b.take(&second, "laptop", 60, true).unwrap(), Claim::Taken);
         let err = b.give(&first, "web/reviewer").unwrap_err();
         assert!(err.contains("has ended"), "{err}");
     }
@@ -1021,7 +1174,7 @@ mod tests {
         let tmp = TempDir::new();
         let b = board(&tmp);
         let id = b.add(&draft("A", "web/coder", "t")).unwrap();
-        b.take(&id, "laptop", 60).unwrap();
+        b.take(&id, "laptop", 60, true).unwrap();
         b.end(
             &id,
             "laptop",
@@ -1031,6 +1184,7 @@ mod tests {
                 note: "check the tests".into(),
                 reply: "coded it".into(),
             },
+            None,
         )
         .unwrap();
         let d = b.detail(&id).unwrap().unwrap();
@@ -1045,7 +1199,7 @@ mod tests {
             handoffs.contains("What web/coder had said:\ncoded it"),
             "{handoffs}"
         );
-        assert_eq!(b.take(&id, "gpu-box", 60).unwrap(), Claim::Taken);
+        assert_eq!(b.take(&id, "gpu-box", 60, true).unwrap(), Claim::Taken);
     }
 
     #[test]
@@ -1058,13 +1212,13 @@ mod tests {
         assert_eq!(b.stop(&waiting).unwrap(), Cancelled::Ended);
 
         let running = b.add(&draft("B", "web/coder", "t")).unwrap();
-        b.take(&running, "laptop", 60).unwrap();
+        b.take(&running, "laptop", 60, true).unwrap();
         assert_eq!(
             b.stop(&running).unwrap(),
             Cancelled::Running("laptop".into())
         );
         assert_eq!(b.keep(&running, "laptop", 60).unwrap(), Renewal::Cancel);
-        b.put_back(&running, "laptop").unwrap();
+        b.put_back(&running, "laptop", None).unwrap();
         let d = b.detail(&running).unwrap().unwrap();
         assert_eq!(d.task.status, Some(Status::Cancelled));
         assert_eq!(d.outcome.unwrap().reply(), "Cancelled while it ran.\n");
@@ -1080,11 +1234,11 @@ mod tests {
         let id = laptop.create(&draft("A", "web/coder", "t")).await.unwrap();
         assert_eq!(id, "0001-a");
         assert_eq!(
-            laptop.claim(&id, "laptop", LEASE).await.unwrap(),
+            laptop.claim(&id, "laptop", LEASE, true).await.unwrap(),
             Claim::Taken
         );
         assert_eq!(
-            laptop.claim(&id, "gpu-box", LEASE).await.unwrap(),
+            laptop.claim(&id, "gpu-box", LEASE, true).await.unwrap(),
             Claim::Refused("it runs on laptop".into())
         );
         assert_eq!(
@@ -1092,7 +1246,7 @@ mod tests {
             Renewal::Kept
         );
         laptop
-            .finish(&id, "laptop", result("All done."))
+            .finish(&id, "laptop", result("All done."), None)
             .await
             .unwrap();
         let tasks = laptop.scan().await.unwrap();

@@ -1815,7 +1815,7 @@ fn a_task_stopped_in_the_middle_is_run_again_when_the_node_starts_again() {
     assert!(!ended(&s, "0001-slow"), "a stopped task has no result");
     let listed = ensemble(&s, &["tasks"]);
     assert!(
-        stdout_of(&listed).contains("queued (interrupted on desk)"),
+        stdout_of(&listed).contains("queued (interrupted on desk, where its work is)"),
         "{}",
         stdout_of(&listed)
     );
@@ -2496,12 +2496,25 @@ fn node_with_hub(scratch: &Scratch, url: &str, token: &str) {
     assert!(out.status.success(), "{}", stderr_of(&out));
 }
 
+/// A port for a hub to listen on, free now. Taken below the range the system
+/// gives out for outgoing connections, so that no test's connection takes it
+/// before the hub binds it, and counted up per process, so that no two tests
+/// pick the same one.
+fn free_port() -> u16 {
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let base = 20_000 + (std::process::id() % 400) as u16 * 25;
+    loop {
+        let port = base + NEXT.fetch_add(1, Ordering::Relaxed) % 10_000;
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+}
+
 fn hub_server(scratch: &Scratch) -> (PathBuf, String, String) {
     let hub = hub_server_of(scratch);
-    let port = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().port()
-    };
+    let port = free_port();
     let address = format!("127.0.0.1:{port}");
     let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
     std::fs::write(
@@ -3499,4 +3512,160 @@ fn a_running_node_reloads_its_teams_and_tells_its_sessions_the_tools_changed() {
         .to_string();
     assert!(tools.contains("pcb/coder"), "{tools}");
     let _ = std::fs::remove_dir_all(&elsewhere);
+}
+
+/// The node of the computer `machine`, named for it, with the hub at `url`:
+/// started and waited for until it is ready.
+fn machine_node(scratch: &Scratch, machine: &str, url: &str) -> Served {
+    let yaml =
+        format!("version: 1\nname: {machine}\naccess: private\nhub: \"{url}\"\noffers: {{}}\n");
+    let mut node = on_machine(scratch, machine, &yaml)
+        .args(["node", "serve"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut said = BufReader::new(node.stderr.take().unwrap());
+    let mut line = String::new();
+    while !line.contains("ready for `ensemble mcp` sessions") {
+        line.clear();
+        assert!(said.read_line(&mut line).unwrap() > 0, "the node stopped");
+    }
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut said, &mut std::io::sink());
+    });
+    Served(node)
+}
+
+/// A command on the computer `machine`, in its folder `proj`.
+fn in_proj(scratch: &Scratch, machine: &str, url: &str, args: &[&str]) -> std::process::Output {
+    let yaml =
+        format!("version: 1\nname: {machine}\naccess: private\nhub: \"{url}\"\noffers: {{}}\n");
+    let proj = scratch
+        .0
+        .with_extension("machines")
+        .join(machine)
+        .join("proj");
+    on_machine(scratch, machine, &yaml)
+        .current_dir(&proj)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_task_stopped_on_one_computer_is_carried_on_by_another_from_its_pushed_branch() {
+    let s = Scratch::new("carry-on");
+    let (hub, address, token) = hub_server(&s);
+    let _hub = serve_hub(&s, &hub);
+    let url = format!("ws://{address}");
+    node_with_hub(&s, &url, &token);
+
+    // One repository on a remote, cloned as `proj` on the desk and the laptop.
+    let origin = s.0.with_extension("origin.git");
+    std::fs::create_dir_all(&origin).unwrap();
+    git_in(
+        &origin,
+        &["init", "--quiet", "--bare", "--initial-branch=main"],
+    );
+    s.write("README", "hello\n");
+    git_in(s.path(), &["init", "--quiet", "-b", "main"]);
+    git_in(s.path(), &["add", "README"]);
+    git_in(s.path(), &["commit", "--quiet", "-m", "start"]);
+    git_in(
+        s.path(),
+        &["push", "--quiet", &origin.to_string_lossy(), "main"],
+    );
+    // The first run does part 1, then is slow; the run after it, wherever it
+    // is, finds part 1 and does part 2.
+    let marker = s.0.with_extension("bin").join("started");
+    let cli = s.opencode(
+        "both parts done",
+        &format!(
+            "if [ -e part1.txt ]; then echo 2 > part2.txt; else echo 1 > part1.txt; touch '{}'; sleep 60; fi",
+            marker.display()
+        ),
+    );
+    let team = config_yaml(&cli, NOWHERE).replace("isolation: shared", "isolation: worktree");
+    for machine in ["desk", "laptop"] {
+        let home = s.0.with_extension("machines").join(machine);
+        std::fs::create_dir_all(&home).unwrap();
+        git_in(
+            &home,
+            &["clone", "--quiet", &origin.to_string_lossy(), "proj"],
+        );
+        git_in(&home.join("proj"), &["config", "user.name", "T"]);
+        git_in(&home.join("proj"), &["config", "user.email", "t@t"]);
+        machine_team(&s, machine, "team", &team);
+    }
+
+    let mut desk = machine_node(&s, "desk", &url);
+    let out = in_proj(
+        &s,
+        "desk",
+        &url,
+        &[
+            "submit",
+            "team/coder",
+            "Two parts",
+            "--text",
+            "do both parts",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        wait_for(30, || marker.exists()),
+        "the desk did not start it"
+    );
+    sigterm(&desk);
+    desk.wait().unwrap();
+    let listed = stdout_of(&in_proj(&s, "desk", &url, &["tasks"]));
+    assert!(listed.contains("queued (interrupted on desk)"), "{listed}");
+    assert!(
+        git_in(
+            &origin,
+            &["ls-tree", "--name-only", "ensemble/0001-two-parts"]
+        )
+        .contains("part1.txt"),
+        "the desk pushed its work so far"
+    );
+
+    // The laptop, which has served a folder named `proj`, takes it over.
+    let _laptop = machine_node(&s, "laptop", &url);
+    let out = in_proj(
+        &s,
+        "laptop",
+        &url,
+        &["assign", "0001-two-parts", "team/coder"],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let ended = || {
+        stdout_of(&in_proj(&s, "laptop", &url, &["task", "0001-two-parts"]))
+            .contains("\n---\nstatus: ")
+    };
+    assert!(wait_for(30, ended), "the laptop did not carry it on");
+    let shown = stdout_of(&in_proj(&s, "laptop", &url, &["task", "0001-two-parts"]));
+    assert!(
+        shown.contains("status: done") && shown.contains("both parts done"),
+        "{shown}"
+    );
+    let files = git_in(
+        &origin,
+        &["ls-tree", "--name-only", "ensemble/0001-two-parts"],
+    );
+    assert!(
+        files.contains("part1.txt") && files.contains("part2.txt"),
+        "{files}"
+    );
+
+    // The desk's own branch, behind, is brought up to it to be looked at.
+    let review = in_proj(&s, "desk", &url, &["review", "0001-two-parts"]);
+    assert!(review.status.success(), "{}", stderr_of(&review));
+    let text = stdout_of(&review);
+    assert!(
+        text.contains("part1.txt") && text.contains("part2.txt"),
+        "{text}"
+    );
 }

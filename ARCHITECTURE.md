@@ -284,7 +284,7 @@ one link that opens again when it breaks), and:
 3. **claims** the task for a minute (`task_claim`); another node that was first
    wins, and the task is left;
 4. for `isolation: worktree`, makes or reuses a git worktree on the branch
-   `ensemble/<id>`;
+   `ensemble/<id>`, from where its work was last pushed when it has been;
 5. recalls notes once, if the agent has `recall`;
 6. runs the agent as a delegation, then the task's **gate** if it names one,
    running the agent again with the gate's output until it passes or
@@ -300,9 +300,20 @@ one link that opens again when it breaks), and:
 A node that stops puts its running tasks back (`task_release`); one that dies
 stops renewing, and the hub treats its claim as gone once it runs out. Either
 way the task is `queued (interrupted on <node>)`, and the next node to look
-runs it again, from the start, in its own folder. A node whose claim ran out,
-and whose task another took, is refused when it says how its run ended, so a
-task never ends twice. The hub's clock alone decides when a claim runs out.
+runs it again. A node whose claim ran out, and whose task another took, is
+refused when it says how its run ended, so a task never ends twice. The hub's
+clock alone decides when a claim runs out.
+
+Where the work is decides who goes on with it. A claim says whether the run
+is **movable**: its agent works in a worktree, and the repository has a remote
+`origin`. Whenever a movable run stops, the node commits what it did on the
+task's branch, pushes the branch, and tells the hub where it is (`progress`:
+node, branch, commit, with `task_release` or `task_finish`); the next run, on
+any node, fetches it and makes or moves its worktree there, and its agent is
+told to go on from it. A run that is not movable changes one computer's
+folder, so the hub **pins** the task to that node from its first claim, and
+no other node may claim it. `review` and `merge` fetch a branch pushed from
+another computer, and move a local one that is behind it up to it.
 
 What a run does as it goes (its activity lines) is in `runs/<id>/` on the node
 that runs it, which is how `status` shows what an agent is doing there.
@@ -876,13 +887,14 @@ crate holds it today.
     task of one that stopped; the hub's inbox makes issues into tasks there.
     (Done; decided 2026-11-17.)
 14. A task's work on a pushed branch, so the node that takes a task over
-    carries on from where the first got to. (Not yet.)
+    carries on from where the first got to; a task whose work cannot move
+    is pinned to its node. (Done.)
 15. Plans: an issue broken down into tasks with the person's agent, approved
     by the person, released by the hub as the tasks before them end. (Not
     yet.)
 
-What remains is the "Not yet" of steps 4, 5, 14 and 15, and the modules
-marked not built above.
+What remains is the "Not yet" of steps 4, 5 and 15, and the modules marked
+not built above.
 
 ## Open questions
 

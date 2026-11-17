@@ -446,7 +446,7 @@ mod tests {
         assert_eq!(w.board().list().unwrap().len(), 1, "made once");
 
         assert_eq!(
-            w.board().take(&ticket.id, "laptop", 60).unwrap(),
+            w.board().take(&ticket.id, "laptop", 60, true).unwrap(),
             Claim::Taken
         );
         w.inbox.pass().unwrap();
@@ -464,7 +464,7 @@ mod tests {
         w.issue("1", "ana.p", "shop");
         w.inbox.pass().unwrap();
         let id = w.board().list().unwrap()[0].ticket.id.clone();
-        w.board().take(&id, "laptop", 60).unwrap();
+        w.board().take(&id, "laptop", 60, true).unwrap();
         w.board()
             .end(
                 &id,
@@ -473,6 +473,7 @@ mod tests {
                     question: "Which page?".into(),
                     reply: "r".into(),
                 },
+                None,
             )
             .unwrap();
         w.inbox.pass().unwrap();
@@ -505,7 +506,7 @@ mod tests {
             "{questions}"
         );
 
-        w.board().take(&id, "laptop", 60).unwrap();
+        w.board().take(&id, "laptop", 60, true).unwrap();
         w.board()
             .end(
                 &id,
@@ -517,6 +518,7 @@ mod tests {
                     extra: Vec::new(),
                     text: "Fixed in auth.rs.".into(),
                 },
+                None,
             )
             .unwrap();
         w.inbox.pass().unwrap();
