@@ -1,33 +1,31 @@
-//! The task inbox on a hub server. It watches the tracker, and the work
-//! happens on members' computers:
+//! The task inbox on a hub server. It watches the tracker, and keeps a task on
+//! the hub for each issue it takes:
 //!
 //! 1. An open issue with the label, assigned to someone who is an account's
-//!    tracker name and whose role may receive `tasks`, becomes a **delivery**
-//!    for that account, and the issue says it waits for their computer. With
-//!    no such account the issue is blocked, saying why, once.
-//! 2. The delivery is pushed over the link to every computer of that account
-//!    that subscribed. The first to make it a task accepts it; the issue goes
-//!    to `in-progress`. A computer with no folder for the project refuses, and
-//!    the issue says so once; the delivery waits for another.
+//!    tracker name and whose role may receive `tasks`, and naming its project
+//!    (a working folder's name), becomes a **task** of that account, for the
+//!    agent its `<label>:<team>/<agent>` label names or in the backlog. The
+//!    issue says so. With no such account, or no project, the issue is
+//!    blocked, saying why, once.
+//! 2. The task waits on the hub until one of the account's nodes with the
+//!    agent, and a folder of the project's name, claims it; the issue goes to
+//!    `in-progress`, naming the node.
 //! 3. What the task says comes back: a question (the issue goes to `blocked`,
-//!    and the assignee's next comment goes back as an answer), then its result
+//!    and the assignee's next comment is the answer), then its result
 //!    (`review` or `blocked`). Ensemble never closes an issue.
-//! 4. An issue closed, or without the label, drops its delivery.
+//! 4. An issue closed, or without the label, cancels a task that has not
+//!    ended, and is forgotten.
 //!
-//! The deliveries are kept in the hub's database (`ensemble_link::store`), in
-//! its state directory.
+//! Which issue became which task is kept in the hub's database
+//! (`ensemble_link::store`), as **deliveries**.
 
 use crate::tracker::{Issue, IssueTracker, Status};
 use crate::work::{self, AUTHOR, Update, reply_after};
 use ensemble_config::{Permission, Tasks};
 use ensemble_link::Users;
-use ensemble_link::protocol::{
-    ANSWER_EVENT, ANSWER_TAKEN, Event, TASK_ACCEPT, TASK_EVENT, TASK_REFUSE, TASK_UPDATE, TaskRelay,
-};
 use ensemble_link::store;
-use ensemble_tasks::tasks::Status as TaskStatus;
+use ensemble_tasks::board::DbBoard;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -38,33 +36,34 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Stage {
-    /// No account takes it; the issue says why.
+    /// No task: no account takes it, or it names no project; the issue says
+    /// why.
     Unassigned,
-    /// Waiting for one of the account's computers.
+    /// A task, waiting for a node.
     Queued,
-    /// A task on one of them.
-    Accepted,
+    /// A node runs it.
+    Running,
     /// The task asked a question, posted on the issue.
     Asking,
     /// The task ended, and its result is on the issue.
     Done,
 }
 
-/// One issue's way to a member's computer and back.
+/// One issue's task, and what was said about it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delivery {
     pub issue: String,
-    /// The account it is for; empty while unassigned.
+    /// The account the task is for; empty while unassigned.
     pub account: String,
+    /// The project the task is in.
+    pub project: String,
     pub stage: Stage,
-    /// The task it became, once accepted.
+    /// The task it became.
     pub task: Option<String>,
     /// How many comments the issue had after the hub's last one.
     pub comments: usize,
-    /// The assignee's answer, until the computer says it passed it on.
-    pub answer: Option<String>,
-    /// Whether a refusal was already said on the issue.
-    pub refused: bool,
+    /// The question last posted, so it is posted once.
+    pub asked: Option<String>,
 }
 
 /// The deliveries kept in `dir`, by issue.
@@ -88,11 +87,11 @@ pub struct ServerInbox {
     tasks: Tasks,
     tracker: Box<dyn IssueTracker + Send>,
     roles: BTreeMap<String, Vec<Permission>>,
-    /// The hub's state directory, with its database: its users, and the
-    /// deliveries.
+    /// The hub's state directory, with its database: its users, their tasks,
+    /// and the deliveries.
     dir: PathBuf,
-    /// Held for every pass and every request, so the tracker and the
-    /// deliveries change one step at a time.
+    /// Held for every pass, so the tracker and the deliveries change one step
+    /// at a time.
     deliveries: Mutex<BTreeMap<String, Delivery>>,
 }
 
@@ -147,7 +146,12 @@ impl ServerInbox {
             .then(|| user.name.clone())
     }
 
-    /// One look at the tracker. Returns a line for each thing it did.
+    fn board(&self, d: &Delivery) -> DbBoard {
+        DbBoard::new(&self.dir, &d.account, &d.project)
+    }
+
+    /// One look at the tracker and at the tasks. Returns a line for each
+    /// thing it did.
     pub fn pass(&self) -> Result<Vec<String>, String> {
         let users = ensemble_link::Users::load(&self.dir).map_err(String::from)?;
         let mut deliveries = self.deliveries.lock().unwrap_or_else(|e| e.into_inner());
@@ -163,55 +167,164 @@ impl ServerInbox {
                 Some(d) => d.stage == Stage::Unassigned && issue.status == Status::Open,
             };
             if fresh {
-                let delivery = match self.account_for(&users, issue) {
-                    Some(account) => {
-                        let mut d = new_delivery(&issue.id, &account, Stage::Queued);
-                        self.say(
-                            issue,
-                            &format!("Waiting for {account}'s computer: the task starts when it is connected."),
-                            Status::Open,
-                            &mut d,
-                        )?;
-                        said.push(format!("issue {} -> {account}", issue.id));
-                        d
-                    }
-                    None => {
-                        let mut d = new_delivery(&issue.id, "", Stage::Unassigned);
-                        self.say(
-                            issue,
-                            &format!(
-                                "Ensemble cannot take this issue: no account on the hub is {} in the tracker with a role that may receive tasks. Set the account's tracker name, then set the status back to open.",
-                                issue.assignee
-                            ),
-                            Status::Blocked,
-                            &mut d,
-                        )?;
-                        said.push(format!("issue {}: no account", issue.id));
-                        d
-                    }
-                };
-                deliveries.insert(issue.id.clone(), delivery);
+                let d = self.take(&users, issue, &mut said)?;
+                deliveries.insert(issue.id.clone(), d);
                 continue;
             }
-            if let Some(d) = deliveries.get_mut(&issue.id)
-                && d.stage == Stage::Asking
-                && d.answer.is_none()
-            {
-                let comments = self.tracker.comments(&issue.id)?;
-                if let Some(answer) = reply_after(&comments, d.comments, &issue.assignee) {
-                    d.answer = Some(answer);
-                    d.comments = comments.len();
-                    said.push(format!("issue {}: answered", issue.id));
-                }
+            if let Some(d) = deliveries.get_mut(&issue.id) {
+                self.follow(issue, d, &mut said)?;
             }
         }
-        deliveries.retain(|id, _| {
-            issues
-                .iter()
-                .any(|i| &i.id == id && i.status != Status::Done)
-        });
+        // Closed, or without the label: an unfinished task stops.
+        let open: Vec<&str> = issues
+            .iter()
+            .filter(|i| i.status != Status::Done)
+            .map(|i| i.id.as_str())
+            .collect();
+        for d in deliveries
+            .values()
+            .filter(|d| !open.contains(&d.issue.as_str()))
+        {
+            if let (Some(task), Stage::Queued | Stage::Running | Stage::Asking) = (&d.task, d.stage)
+            {
+                self.board(d).stop(task)?;
+                said.push(format!("issue {} closed: task {task} cancelled", d.issue));
+            }
+        }
+        deliveries.retain(|id, _| open.contains(&id.as_str()));
         self.save(&deliveries)?;
         Ok(said)
+    }
+
+    /// Make `issue` a task of the account it is for, or say on it why not.
+    fn take(
+        &self,
+        users: &Users,
+        issue: &Issue,
+        said: &mut Vec<String>,
+    ) -> Result<Delivery, String> {
+        let mut d = Delivery {
+            issue: issue.id.clone(),
+            account: String::new(),
+            project: String::new(),
+            stage: Stage::Unassigned,
+            task: None,
+            comments: 0,
+            asked: None,
+        };
+        let Some(account) = self.account_for(users, issue) else {
+            self.say(
+                issue,
+                &format!(
+                    "Ensemble cannot take this issue: no account on the hub is {} in the tracker with a role that may receive tasks. Set the account's tracker name, then set the status back to open.",
+                    issue.assignee
+                ),
+                Status::Blocked,
+                &mut d,
+            )?;
+            said.push(format!("issue {}: no account", issue.id));
+            return Ok(d);
+        };
+        let Some(project) = issue
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty() && !p.contains(['/', '\\']))
+        else {
+            self.say(
+                issue,
+                "Ensemble cannot take this issue: it names no project, the name of the folder its work is in. Set its project, then set the status back to open.",
+                Status::Blocked,
+                &mut d,
+            )?;
+            said.push(format!("issue {}: no project", issue.id));
+            return Ok(d);
+        };
+        d.account = account.clone();
+        d.project = project.to_string();
+        let ticket = work::ticket_for(issue, &self.tasks.label);
+        let task = self.board(&d).add(&ticket)?;
+        let whom = if ticket.agent.is_empty() {
+            "in the backlog, for the helper team to assign".to_string()
+        } else {
+            format!("for {}", ticket.agent)
+        };
+        self.say(
+            issue,
+            &format!(
+                "Picked up as task {task}, {whom}. It runs on the first of {account}'s computers that has the agent and a folder named {project}."
+            ),
+            Status::Open,
+            &mut d,
+        )?;
+        said.push(format!("issue {} -> task {task} of {account}", issue.id));
+        d.stage = Stage::Queued;
+        d.task = Some(task);
+        Ok(d)
+    }
+
+    /// Say on `issue` what its task did since the last look, and pass the
+    /// assignee's answer to a question on.
+    fn follow(
+        &self,
+        issue: &Issue,
+        d: &mut Delivery,
+        said: &mut Vec<String>,
+    ) -> Result<(), String> {
+        let Some(task) = d.task.clone() else {
+            return Ok(());
+        };
+        if d.stage == Stage::Done {
+            return Ok(());
+        }
+        let Some(detail) = self.board(d).detail(&task)? else {
+            return Ok(());
+        };
+        if let Some(outcome) = &detail.outcome {
+            let update = Update::Result {
+                status: outcome.status,
+                reply: outcome.reply().trim().to_string(),
+            };
+            let (comment, status) = work::on_issue(&task, &update);
+            self.say(issue, &comment, status, d)?;
+            d.stage = Stage::Done;
+            said.push(format!("task {task} {}", outcome.status.as_str()));
+            return Ok(());
+        }
+        if let Some(q) = &detail.task.question {
+            if d.asked.as_ref() != Some(q) {
+                let (comment, status) = work::on_issue(&task, &Update::Question(q.clone()));
+                self.say(issue, &comment, status, d)?;
+                d.asked = Some(q.clone());
+                d.stage = Stage::Asking;
+                said.push(format!("task {task} asked a question"));
+                return Ok(());
+            }
+            let comments = self.tracker.comments(&issue.id)?;
+            if let Some(answer) = reply_after(&comments, d.comments, &issue.assignee) {
+                self.board(d).reply(&task, &answer)?;
+                d.comments = comments.len();
+                d.stage = Stage::Queued;
+                if issue.status != Status::InProgress {
+                    self.tracker.set_status(&issue.id, Status::InProgress)?;
+                }
+                said.push(format!("issue {}: answered", issue.id));
+            }
+            return Ok(());
+        }
+        if let Some(node) = &detail.task.running_on
+            && d.stage != Stage::Running
+        {
+            self.say(
+                issue,
+                &format!("Task {task} runs on {}'s computer {node}.", d.account),
+                Status::InProgress,
+                d,
+            )?;
+            d.stage = Stage::Running;
+            said.push(format!("task {task} runs on {node}"));
+        }
+        Ok(())
     }
 
     /// Comment on an issue and set its status, then note how many comments it
@@ -231,99 +344,6 @@ impl ServerInbox {
         Ok(())
     }
 
-    fn request(&self, user: &str, method: &str, params: &Value) -> Result<Value, String> {
-        let id = params
-            .get("delivery")
-            .and_then(Value::as_str)
-            .ok_or("`delivery` is required")?;
-        let mut deliveries = self.deliveries.lock().unwrap_or_else(|e| e.into_inner());
-        let d = deliveries
-            .get_mut(id)
-            .filter(|d| d.account == user)
-            .ok_or_else(|| format!("no delivery {id} for you"))?;
-        let issue = self.tracker.issue(&d.issue)?;
-        let out = match method {
-            TASK_ACCEPT => {
-                let task = params
-                    .get("task")
-                    .and_then(Value::as_str)
-                    .ok_or("`task` is required")?;
-                match (d.stage, d.task.as_deref()) {
-                    (Stage::Queued, _) => {
-                        d.stage = Stage::Accepted;
-                        d.task = Some(task.to_string());
-                        self.say(
-                            &issue,
-                            &format!("Picked up as task {task} on {user}'s computer."),
-                            Status::InProgress,
-                            d,
-                        )?;
-                        json!({ "accepted": true })
-                    }
-                    (_, Some(t)) if t == task => json!({ "accepted": true }),
-                    _ => return Err("taken already by another computer".into()),
-                }
-            }
-            TASK_REFUSE => {
-                let why = params.get("why").and_then(Value::as_str).unwrap_or("");
-                if !d.refused && d.stage == Stage::Queued {
-                    d.refused = true;
-                    self.say(
-                        &issue,
-                        &format!("One of {user}'s computers cannot take this: {why}"),
-                        issue.status,
-                        d,
-                    )?;
-                }
-                json!({ "refused": true })
-            }
-            TASK_UPDATE => {
-                let task = d.task.clone().ok_or("this delivery was not accepted")?;
-                let update = if let Some(q) = params.get("question").and_then(Value::as_str) {
-                    Update::Question(q.to_string())
-                } else {
-                    let result = params
-                        .get("result")
-                        .ok_or("`question` or `result` is required")?;
-                    let status = result
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .and_then(TaskStatus::parse)
-                        .ok_or("`result.status` must be done, failed or cancelled")?;
-                    let reply = result.get("text").and_then(Value::as_str).unwrap_or("");
-                    Update::Result {
-                        status,
-                        reply: reply.trim().to_string(),
-                    }
-                };
-                if d.stage == Stage::Done {
-                    return Ok(json!({ "noted": true }));
-                }
-                let (comment, status) = work::on_issue(&task, &update);
-                self.say(&issue, &comment, status, d)?;
-                d.stage = match update {
-                    Update::Question(_) => Stage::Asking,
-                    Update::Result { .. } => Stage::Done,
-                };
-                d.answer = None;
-                json!({ "noted": true })
-            }
-            ANSWER_TAKEN => {
-                if d.stage == Stage::Asking && d.answer.is_some() {
-                    d.answer = None;
-                    d.stage = Stage::Accepted;
-                    if issue.status != Status::InProgress {
-                        self.tracker.set_status(&issue.id, Status::InProgress)?;
-                    }
-                }
-                json!({ "taken": true })
-            }
-            other => return Err(format!("no method `{other}`")),
-        };
-        self.save(&deliveries)?;
-        Ok(out)
-    }
-
     /// Look at the tracker every `poll_seconds` until `stop` is set.
     pub fn work(&self, stop: &AtomicBool, say: &(dyn Fn(&str) + Sync)) {
         let every = Duration::from_secs(u64::from(self.tasks.poll_seconds));
@@ -340,68 +360,13 @@ impl ServerInbox {
     }
 }
 
-fn new_delivery(issue: &str, account: &str, stage: Stage) -> Delivery {
-    Delivery {
-        issue: issue.to_string(),
-        account: account.to_string(),
-        stage,
-        task: None,
-        comments: 0,
-        answer: None,
-        refused: false,
-    }
-}
-
-impl TaskRelay for ServerInbox {
-    fn pending(&self, user: &str) -> Vec<(String, Event)> {
-        let deliveries = self.deliveries.lock().unwrap_or_else(|e| e.into_inner());
-        let mut out = Vec::new();
-        for d in deliveries.values().filter(|d| d.account == user) {
-            match (d.stage, &d.answer) {
-                (Stage::Queued, _) => {
-                    let Ok(issue) = self.tracker.issue(&d.issue) else {
-                        continue;
-                    };
-                    out.push((
-                        format!("task:{}", d.issue),
-                        Event {
-                            event: TASK_EVENT.into(),
-                            data: json!({
-                                "delivery": d.issue,
-                                "issue": issue.id,
-                                "title": issue.title,
-                                "body": issue.body,
-                                "project": issue.project,
-                                "labels": issue.labels,
-                                "label": self.tasks.label,
-                                "assignee": issue.assignee,
-                            }),
-                        },
-                    ));
-                }
-                (Stage::Asking, Some(answer)) => out.push((
-                    format!("answer:{}:{}", d.issue, d.comments),
-                    Event {
-                        event: ANSWER_EVENT.into(),
-                        data: json!({ "delivery": d.issue, "text": answer }),
-                    },
-                )),
-                _ => {}
-            }
-        }
-        out
-    }
-
-    fn handle(&self, user: &str, method: &str, params: &Value) -> Result<Value, String> {
-        self.request(user, method, params)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ensemble_config::IssueTracker as Kind;
     use ensemble_core::workspace::testing::TempDir;
+    use ensemble_tasks::board::{Claim, End};
+    use ensemble_tasks::tasks::Status as TaskStatus;
 
     struct World {
         tmp: TempDir,
@@ -434,34 +399,11 @@ mod tests {
         World { tmp, inbox }
     }
 
-    #[test]
-    fn deliveries_are_kept_in_the_database_and_those_from_before_are_taken_in_once() {
-        let w = world();
-        let state = w.tmp.0.join("state");
-        let mut kept = BTreeMap::new();
-        kept.insert(
-            "7".to_string(),
-            Delivery {
-                issue: "7".into(),
-                account: "ana".into(),
-                stage: Stage::Queued,
-                task: None,
-                comments: 0,
-                answer: None,
-                refused: false,
-            },
-        );
-        w.inbox.save(&kept).unwrap();
-        let roles = w.inbox.roles.clone();
-        let again = ServerInbox::new(&w.inbox.tasks, &roles, state.clone()).unwrap();
-        assert_eq!(again.deliveries(), kept);
-    }
-
     impl World {
-        fn issue(&self, id: &str, assignee: &str) {
+        fn issue(&self, id: &str, assignee: &str, project: &str) {
             std::fs::write(
                 self.tmp.0.join("issues").join(format!("{id}.md")),
-                format!("---\ntitle: Fix the login redirect\nassignee: {assignee}\nlabels: [ensemble, \"ensemble:coder\"]\nproject: shop\nstatus: open\n---\nIt redirects to /home.\n"),
+                format!("---\ntitle: Fix the login redirect\nassignee: {assignee}\nlabels: [ensemble, \"ensemble:web/coder\"]\nproject: {project}\nstatus: open\n---\nIt redirects to /home.\n"),
             )
             .unwrap();
         }
@@ -475,61 +417,65 @@ mod tests {
             comments.last().map(|c| c.text.clone()).unwrap_or_default()
         }
 
-        fn ask(&self, user: &str, method: &str, params: Value) -> Result<Value, String> {
-            self.inbox.handle(user, method, &params)
+        /// Ana's tasks in the project shop.
+        fn board(&self) -> DbBoard {
+            DbBoard::new(&self.tmp.0.join("state"), "ana", "shop")
         }
     }
 
     #[test]
-    fn an_issue_waits_for_its_assignees_computer_and_goes_there() {
+    fn an_issue_becomes_a_task_of_its_assignee_that_their_node_takes() {
         let w = world();
-        w.issue("1", "ana.p");
+        w.issue("1", "ana.p", "shop");
         w.inbox.pass().unwrap();
-        assert!(w.last_comment("1").contains("Waiting for ana's computer"));
+        assert!(
+            w.last_comment("1")
+                .contains("Picked up as task 0001-fix-the-login-redirect, for web/coder"),
+            "{}",
+            w.last_comment("1")
+        );
         assert_eq!(w.status("1"), Status::Open);
-        let pending = w.inbox.pending("ana");
-        assert_eq!(pending.len(), 1);
-        let (_, event) = &pending[0];
-        assert_eq!(event.event, TASK_EVENT);
-        assert_eq!(event.data["project"], "shop");
-        assert_eq!(event.data["label"], "ensemble");
-        assert!(w.inbox.pending("rex").is_empty());
+        let tasks = w.board().list().unwrap();
+        assert_eq!(tasks.len(), 1);
+        let ticket = &tasks[0].ticket;
+        assert_eq!(
+            (ticket.agent.as_str(), ticket.text.as_str()),
+            ("web/coder", "It redirects to /home.")
+        );
         assert!(w.inbox.pass().unwrap().is_empty(), "said once");
+        assert_eq!(w.board().list().unwrap().len(), 1, "made once");
 
-        w.ask("ana", TASK_ACCEPT, json!({"delivery": "1", "task": "3"}))
-            .unwrap();
+        assert_eq!(
+            w.board().take(&ticket.id, "laptop", 60).unwrap(),
+            Claim::Taken
+        );
+        w.inbox.pass().unwrap();
         assert_eq!(w.status("1"), Status::InProgress);
-        assert!(w.last_comment("1").contains("task 3 on ana's computer"));
-        assert!(w.inbox.pending("ana").is_empty(), "taken");
         assert!(
-            w.ask("ana", TASK_ACCEPT, json!({"delivery": "1", "task": "3"}))
-                .is_ok(),
-            "the same computer again"
+            w.last_comment("1")
+                .contains("runs on ana's computer laptop")
         );
-        let other = w
-            .ask("ana", TASK_ACCEPT, json!({"delivery": "1", "task": "9"}))
-            .unwrap_err();
-        assert!(other.contains("taken already"), "{other}");
-        assert!(
-            w.ask("rex", TASK_ACCEPT, json!({"delivery": "1", "task": "3"}))
-                .is_err(),
-            "not rex's"
-        );
+        assert!(w.inbox.deliveries().contains_key("1"));
     }
 
     #[test]
     fn a_question_goes_on_the_issue_and_the_assignees_comment_comes_back() {
         let w = world();
-        w.issue("1", "ana.p");
+        w.issue("1", "ana.p", "shop");
         w.inbox.pass().unwrap();
-        w.ask("ana", TASK_ACCEPT, json!({"delivery": "1", "task": "3"}))
+        let id = w.board().list().unwrap()[0].ticket.id.clone();
+        w.board().take(&id, "laptop", 60).unwrap();
+        w.board()
+            .end(
+                &id,
+                "laptop",
+                End::Ask {
+                    question: "Which page?".into(),
+                    reply: "r".into(),
+                },
+            )
             .unwrap();
-        w.ask(
-            "ana",
-            TASK_UPDATE,
-            json!({"delivery": "1", "question": "Which page?"}),
-        )
-        .unwrap();
+        w.inbox.pass().unwrap();
         assert_eq!(w.status("1"), Status::Blocked);
         assert!(w.last_comment("1").contains("Which page?"));
         w.inbox
@@ -538,7 +484,7 @@ mod tests {
             .unwrap();
         w.inbox.pass().unwrap();
         assert!(
-            w.inbox.pending("ana").is_empty(),
+            w.board().list().unwrap()[0].question.is_some(),
             "only the assignee answers"
         );
         w.inbox
@@ -546,32 +492,47 @@ mod tests {
             .comment("1", "ana.p", "The one they came from.")
             .unwrap();
         w.inbox.pass().unwrap();
-        let pending = w.inbox.pending("ana");
-        assert_eq!(pending[0].1.event, ANSWER_EVENT);
-        assert_eq!(pending[0].1.data["text"], "The one they came from.");
-        w.ask("ana", ANSWER_TAKEN, json!({"delivery": "1"}))
-            .unwrap();
         assert_eq!(w.status("1"), Status::InProgress);
-        assert!(w.inbox.pending("ana").is_empty());
+        let (questions, _) = w
+            .board()
+            .detail(&id)
+            .unwrap()
+            .unwrap()
+            .conversation
+            .unwrap();
+        assert!(
+            questions.contains("### Answer\nThe one they came from."),
+            "{questions}"
+        );
 
-        w.ask(
-            "ana",
-            TASK_UPDATE,
-            json!({"delivery": "1", "result": {"status": "done", "text": "Fixed in auth.rs."}}),
-        )
-        .unwrap();
+        w.board().take(&id, "laptop", 60).unwrap();
+        w.board()
+            .end(
+                &id,
+                "laptop",
+                End::Result {
+                    status: TaskStatus::Done,
+                    agent: "web/coder".into(),
+                    started: "2026-11-17T00:00:00Z".into(),
+                    extra: Vec::new(),
+                    text: "Fixed in auth.rs.".into(),
+                },
+            )
+            .unwrap();
+        w.inbox.pass().unwrap();
         assert_eq!(w.status("1"), Status::Review);
         assert!(
             w.last_comment("1")
-                .contains("Task 3 is done:\n\nFixed in auth.rs.")
+                .contains(&format!("Task {id} is done:\n\nFixed in auth.rs."))
         );
     }
 
     #[test]
-    fn nobody_or_a_computer_without_the_folder_is_said_once() {
+    fn nobody_or_no_project_is_said_once_and_a_closed_issue_cancels_its_task() {
         let w = world();
-        w.issue("1", "someone.else");
-        w.issue("2", "rex");
+        w.issue("1", "someone.else", "shop");
+        w.issue("2", "rex", "shop");
+        w.issue("3", "ana.p", "a/b");
         w.inbox.pass().unwrap();
         assert_eq!(w.status("1"), Status::Blocked);
         assert!(
@@ -579,31 +540,29 @@ mod tests {
                 .contains("no account on the hub is someone.else")
         );
         assert_eq!(w.status("2"), Status::Blocked, "rex may not receive tasks");
+        assert!(w.last_comment("3").contains("names no project"));
         assert!(w.inbox.pass().unwrap().is_empty(), "said once");
+        assert!(w.board().list().unwrap().is_empty());
 
-        w.issue("3", "ana.p");
+        w.issue("4", "ana.p", "shop");
         w.inbox.pass().unwrap();
-        for _ in 0..2 {
-            w.ask(
-                "ana",
-                TASK_REFUSE,
-                json!({"delivery": "3", "why": "no folder for project shop"}),
-            )
-            .unwrap();
-        }
-        let refusals = w
-            .inbox
-            .tracker()
-            .comments("3")
-            .unwrap()
-            .iter()
-            .filter(|c| c.text.contains("cannot take this"))
-            .count();
-        assert_eq!(refusals, 1);
-        assert_eq!(w.inbox.pending("ana").len(), 1, "it still waits");
+        w.inbox.tracker().set_status("4", Status::Done).unwrap();
+        w.inbox.pass().unwrap();
+        assert!(!w.inbox.deliveries().contains_key("4"), "closed, forgotten");
+        assert_eq!(
+            w.board().list().unwrap()[0].status,
+            Some(TaskStatus::Cancelled)
+        );
+    }
 
-        w.inbox.tracker().set_status("3", Status::Done).unwrap();
+    #[test]
+    fn deliveries_are_kept_in_the_database() {
+        let w = world();
+        w.issue("1", "ana.p", "shop");
         w.inbox.pass().unwrap();
-        assert!(!w.inbox.deliveries().contains_key("3"), "closed, forgotten");
+        let roles = w.inbox.roles.clone();
+        let again = ServerInbox::new(&w.inbox.tasks, &roles, w.tmp.0.join("state")).unwrap();
+        assert_eq!(again.deliveries(), w.inbox.deliveries());
+        assert_eq!(again.deliveries()["1"].stage, Stage::Queued);
     }
 }

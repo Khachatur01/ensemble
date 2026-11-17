@@ -4,7 +4,7 @@
 //! `ensemble/<id>`, until a person decides. `review` and `diff` only look.
 //! `merge` is for a person to type; the calling agent gets no tool for it.
 
-use crate::tasks::{Status, Store};
+use crate::tasks::{Detail, Status};
 use ensemble_core::workspace;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -38,18 +38,18 @@ pub struct Task {
     /// The repository the task worked in.
     pub repo: PathBuf,
     pub branch: String,
-    /// The task's own `result.md`, once it has ended.
+    /// Its result, once it has ended.
     pub result: Option<String>,
     pub status: Option<Status>,
 }
 
-/// Find task `id` and its branch in the repository it worked in under
-/// `workdir`.
-pub fn find(store: &Store, workdir: &Path, id: &str) -> Result<Task, String> {
-    if !store.exists(id) {
+/// Find task `id`, as the hub has it (`detail`, none when it has no such
+/// task), and its branch in the repository it worked in under `workdir`.
+pub fn find(detail: Option<Detail>, workdir: &Path, id: &str) -> Result<Task, String> {
+    let Some(detail) = detail else {
         return Err(format!("no task '{id}'. `ensemble tasks` lists them."));
-    }
-    let ticket = store.read(id)?;
+    };
+    let ticket = detail.task.ticket;
     let repo = match ticket.repo.as_deref() {
         Some(repo) => workspace::resolve_repo(workdir, repo)?,
         None => workdir.to_path_buf(),
@@ -65,7 +65,7 @@ pub fn find(store: &Store, workdir: &Path, id: &str) -> Result<Task, String> {
             repo.display()
         )
     })?;
-    let outcome = store.outcome(id);
+    let outcome = detail.outcome;
     Ok(Task {
         id: id.to_string(),
         agent: ticket.agent,
@@ -203,6 +203,7 @@ pub fn merge(task: &Task, worktree_dir: &Path, options: MergeOptions) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::{DbBoard, End};
     use crate::tasks::Ticket;
     use ensemble_core::workspace::testing::TempDir;
 
@@ -225,8 +226,13 @@ mod tests {
     struct Fixture {
         _tmp: TempDir,
         repo: PathBuf,
-        store: Store,
+        board: DbBoard,
         wt: PathBuf,
+    }
+
+    /// Task `id` of the fixture's board, in its repository.
+    fn find_in(f: &Fixture, id: &str) -> Result<Task, String> {
+        find(f.board.detail(id).unwrap(), &f.repo, id)
     }
 
     fn fixture(status: Status, change: &str) -> Fixture {
@@ -242,9 +248,9 @@ mod tests {
         run(&repo, &["commit", "--quiet", "-m", "start"]);
 
         let state = tmp.0.join("state");
-        let store = Store::new(&state);
-        let id = store
-            .create(&Ticket {
+        let board = DbBoard::new(&tmp.0.join("hub"), "ana", "repo");
+        let id = board
+            .add(&Ticket {
                 title: "Edit".into(),
                 agent: "coder".into(),
                 text: "edit".into(),
@@ -267,20 +273,24 @@ mod tests {
         std::fs::write(wt.join("a.txt"), change).unwrap();
         run(&wt, &["add", "--all"]);
         run(&wt, &["commit", "--quiet", "-m", "work"]);
-        store
-            .write_result(
+        board.take(&id, "laptop", 60).unwrap();
+        board
+            .end(
                 &id,
-                "coder",
-                status,
-                std::time::SystemTime::now(),
-                &[],
-                "did it",
+                "laptop",
+                End::Result {
+                    status,
+                    agent: "coder".into(),
+                    started: crate::tasks::utc(std::time::SystemTime::now()),
+                    extra: Vec::new(),
+                    text: "did it".into(),
+                },
             )
             .unwrap();
         Fixture {
             _tmp: tmp,
             repo,
-            store,
+            board,
             wt,
         }
     }
@@ -288,7 +298,7 @@ mod tests {
     #[test]
     fn review_shows_the_branch_the_change_and_the_result_and_changes_nothing() {
         let f = fixture(Status::Done, "two\n");
-        let task = find(&f.store, &f.repo, "0001-edit").unwrap();
+        let task = find_in(&f, "0001-edit").unwrap();
         let text = review(&task).unwrap();
         assert!(text.contains("task 0001-edit · coder · done"), "{text}");
         assert!(text.contains("branch ensemble/0001-edit"), "{text}");
@@ -302,33 +312,29 @@ mod tests {
             std::fs::read_to_string(f.repo.join("a.txt")).unwrap(),
             "one\n"
         );
-        assert!(
-            find(&f.store, &f.repo, "0009")
-                .unwrap_err()
-                .contains("no task")
-        );
+        assert!(find_in(&f, "0009").unwrap_err().contains("no task"));
     }
 
     #[test]
     fn a_task_without_a_branch_says_why() {
         let f = fixture(Status::Done, "two\n");
         let id = f
-            .store
-            .create(&Ticket {
+            .board
+            .add(&Ticket {
                 title: "Plain".into(),
                 agent: "coder".into(),
                 text: "t".into(),
                 ..Ticket::default()
             })
             .unwrap();
-        let err = find(&f.store, &f.repo, &id).err().unwrap();
+        let err = find_in(&f, &id).err().unwrap();
         assert!(err.contains("isolation: worktree"), "{err}");
     }
 
     #[test]
     fn merging_takes_the_work_in_and_keeps_the_branch_unless_asked() {
         let f = fixture(Status::Done, "two\n");
-        let task = find(&f.store, &f.repo, "0001-edit").unwrap();
+        let task = find_in(&f, "0001-edit").unwrap();
         let said = merge(&task, &f.wt, MergeOptions::default()).unwrap();
         assert!(said.contains("merged ensemble/0001-edit"), "{said}");
         assert_eq!(
@@ -345,7 +351,7 @@ mod tests {
     #[test]
     fn a_squash_with_cleanup_leaves_one_commit_and_no_worktree_or_branch() {
         let f = fixture(Status::Done, "two\n");
-        let task = find(&f.store, &f.repo, "0001-edit").unwrap();
+        let task = find_in(&f, "0001-edit").unwrap();
         let before = run(&f.repo, &["rev-list", "--count", "HEAD"]);
         let said = merge(
             &task,
@@ -375,7 +381,7 @@ mod tests {
     #[test]
     fn a_task_that_is_not_done_a_dirty_tree_and_a_conflict_are_refused_and_nothing_changes() {
         let f = fixture(Status::Failed, "two\n");
-        let task = find(&f.store, &f.repo, "0001-edit").unwrap();
+        let task = find_in(&f, "0001-edit").unwrap();
         assert!(
             merge(&task, &f.wt, MergeOptions::default())
                 .unwrap_err()
@@ -383,7 +389,7 @@ mod tests {
         );
 
         let f = fixture(Status::Done, "two\n");
-        let task = find(&f.store, &f.repo, "0001-edit").unwrap();
+        let task = find_in(&f, "0001-edit").unwrap();
         std::fs::write(f.repo.join("a.txt"), "dirty\n").unwrap();
         let err = merge(&task, &f.wt, MergeOptions::default()).unwrap_err();
         assert!(err.contains("uncommitted changes"), "{err}");
@@ -394,7 +400,7 @@ mod tests {
 
         // The repository moves on the same line the branch changed.
         let f = fixture(Status::Done, "two\n");
-        let task = find(&f.store, &f.repo, "0001-edit").unwrap();
+        let task = find_in(&f, "0001-edit").unwrap();
         std::fs::write(f.repo.join("a.txt"), "other\n").unwrap();
         run(&f.repo, &["commit", "--quiet", "-am", "other"]);
         for squash in [false, true] {

@@ -69,8 +69,9 @@ With a hub server for a team:
   member's node                              ensemble hub serve
   ─────────────                              ──────────────────
   RemoteMemory (a session's knowledge) ══╗   accounts, sessions, tokens (database.db)
-  NodeInbox (your tasks)               ══╬══ the knowledge vault and its distiller
-  Worker (runs and models it offers)   ══╝   the tracker relay (database.db)
+  RemoteBoard (a folder's tasks)       ══╬══ the tasks, leased to nodes (database.db)
+  Worker (runs and models it offers)   ══╝   the knowledge vault and its distiller
+                                             the tracker inbox (database.db)
   `node` adapter (a run elsewhere)     ══    the connected nodes, runs, /nodes/v1/
                                              REST /api/v1/
      ══ one WebSocket each, opened by the node, signed in with a bearer token
@@ -83,12 +84,13 @@ Every process is the same binary. What runs in each:
 | command | what it runs | ends |
 | --- | --- | --- |
 | `ensemble mcp` | a bridge: it connects to the node's socket, sends `{"dir": "<folder>"}`, and copies bytes between stdio and the socket | when the node closes the session |
-| `ensemble node serve` | the node, one per computer: a socket for sessions, a worker per folder, and with the hub its `node.yaml` names, a link that offers runs and models (`Worker`) and one that takes your tasks (`NodeInbox`) | on SIGINT or SIGTERM |
-| `ensemble hub serve` | the hub, from `~/.config/ensemble/hub/`: one port for the link, the REST API and `/nodes/v1/`; the vault's distiller; the tracker relay | on SIGINT or SIGTERM |
-| everything else | one command: read the config and the state, do one thing, print; `submit`, `assign` and `answer` also tell the node about the folder, so that its worker runs there | at once |
+| `ensemble node serve` | the node, one per computer: a socket for sessions, a worker per folder that runs the tasks the hub keeps for its project, and with the hub its `node.yaml` names, a link that offers runs and models (`Worker`) | on SIGINT or SIGTERM |
+| `ensemble hub serve` | the hub, from `~/.config/ensemble/hub/`: one port for the link, the REST API and `/nodes/v1/`; the tasks; the vault's distiller; the tracker inbox | on SIGINT or SIGTERM |
+| everything else | one command: read the config and the state, or ask the hub, do one thing, print; `submit`, `assign` and `answer` also tell the node about the folder, so that its worker runs there | at once |
 
-A folder's tasks are run by one worker at a time: whoever holds the lock file
-(`worker.lock`) in the folder's state directory. A node that finds the lock
+A folder's tasks are run by one worker of the computer at a time: whoever
+holds the lock file (`worker.lock`) in the folder's state directory; across
+computers, a lease on the hub keeps one node on a task. A node that finds the lock
 taken serves sessions there but starts no tasks. A lock left by a dead process
 is taken over. The same lock keeps one node per computer, one distiller per
 vault and one inbox per hub.
@@ -104,10 +106,10 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 | `ensemble-config` | the three files a person writes | `config.yaml`: the document as written (`raw.rs`), the environment, `.env` files and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), adding and removing an agent as text, comments kept (`edit.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); `hub.yaml` (`hub.rs`); `node.yaml` (`node.rs`) |
 | `ensemble-backends` | talking to model servers | one chat request in the server's own format (`chat.rs`); which models a server serves (`models.rs`); the first usable model of a `try` list (`resolve.rs`); a stand-in server for tests (`testing.rs`) |
 | `ensemble-knowledge` | the hub's knowledge | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait a session uses (`lib.rs`) |
-| `ensemble-link` | the hub server and the link to it | accounts and hashed tokens (`users.rs`), kept with the relay's deliveries in `database.db`, a Turso database (`store.rs`); the REST API (`api.rs`) over a small HTTP reader (`http.rs`); the frames of the link (`protocol.rs`); the hub's side, a task per connection (`server.rs`); connected nodes, runs and model calls, `/nodes/v1/` (`nodes.rs`); the node's side, `Connection` and `RemoteMemory` (`client.rs`); the token file (`tokens.rs`) |
+| `ensemble-link` | the hub server and the link to it | accounts and hashed tokens (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db`, a Turso database (`store.rs`); the REST API (`api.rs`) over a small HTTP reader (`http.rs`); the frames of the link (`protocol.rs`); the hub's side, a task per connection (`server.rs`); connected nodes, runs and model calls, `/nodes/v1/` (`nodes.rs`); the node's side, `Connection`, `Link` (one reconnecting) and `RemoteMemory` (`client.rs`); the token file (`tokens.rs`) |
 | `ensemble-agents` | running one agent once | the adapters (`external/`): `claude_code.rs`, `opencode.rs`, `codex.rs`, `builtin.rs`, `direct.rs`, `node.rs`, the subprocess runner (`process.rs`) and gates (`gate.rs`); a git worktree per task (`worktree.rs`); the router: agents to adapters, models, records, `health` (`router.rs`) |
-| `ensemble-tasks` | work handed to the team | tasks as files in the folder's state directory (`tasks.rs`); the queue that runs tasks and background delegations within slots and budgets (`queue.rs`); the MCP tools (`delegation.rs`); review and merge of a worktree task (`review.rs`) |
-| `ensemble-inbox` | issues from a tracker into tasks | the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`); an issue made a task and what the task reports (`work.rs`); the hub's inbox (`relay.rs`); a node's part in it (`node.rs`) |
+| `ensemble-tasks` | work handed to the team | tickets and tasks as the hub has them (`tasks.rs`); where they are kept and leased: the `Board` trait, the hub's `DbBoard` and the `Service` that answers the link, a node's `RemoteBoard` (`board.rs`); what a node keeps of its runs (`runs.rs`); the queue that runs tasks and background delegations within slots and budgets (`queue.rs`); the MCP tools (`delegation.rs`); review and merge of a worktree task (`review.rs`) |
+| `ensemble-inbox` | issues from a tracker into tasks | the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`); an issue made a task and what the task reports (`work.rs`); the hub's inbox (`relay.rs`) |
 | `ensemble-node` | a node's link to a hub | `Worker`: runs and model calls for others (`lib.rs`) |
 | `ensemble-mcp` | MCP over stdio | the session loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`) |
 | `ensemble` (the root) | the binary | the commands (`src/main.rs`); the node's sessions and the bridge (`src/daemon.rs`); `setup`, `connect`, `doctor` (`src/setup.rs`); session hooks (`src/hooks.rs`); the node's teams, loaded, made, linked, pulled and approved (`src/teams.rs`), over git repositories pinned and trusted per commit (`src/remote.rs`) |
@@ -143,9 +145,9 @@ or a config directory:
 
 | path | holds |
 | --- | --- |
-| `~/.local/state/ensemble/workdirs/<folder>-<hash>/` | a working folder's `tasks/`, `runs/`, `worktrees/`, `state.json` and `worker.lock` |
+| `~/.local/state/ensemble/workdirs/<folder>-<hash>/` | a working folder's `runs/`, `worktrees/`, `state.json` and `worker.lock` |
 | `~/.local/state/ensemble/orgs/teams-<hash>/` | the teams' `usage.json` (budgets) and `records.jsonl` (`ensemble stats`), by `<team>/<agent>`, shared by every folder |
-| `~/.local/state/ensemble/node/` | the node's lock, `folders.json` (the folder last used for each project), `runs/` for others, `inbox/node.json` |
+| `~/.local/state/ensemble/node/` | the node's lock, `folders.json` (the folder last used for each project), `runs/` for others |
 | `$XDG_RUNTIME_DIR/ensemble/<hash>.sock` | a node's socket, in a folder only its user may enter (`/tmp/ensemble-<user>/` without `XDG_RUNTIME_DIR`) |
 | `~/.config/ensemble/node/hubs.json` | the node's hub tokens, one per URL, mode 0600 |
 | `~/.config/ensemble/node/.env`, `~/.config/ensemble/hub/.env` | the keys the node's teams and the hub's backends name, written by you, mode 0600 |
@@ -267,30 +269,43 @@ task; `status`, `wait` and `cancel` follow it.
 
 ## A task
 
-A task is a folder in the state directory, `tasks/<id>/`, with a `task.md`
-written once. It comes from `submit`, `ensemble submit`, a person's editor, or
-an inbox. On each scan the queue:
+A task is kept on the hub, in its database, for one account and one project
+(a working folder's name): its ticket, its assignee, its questions and
+answers, what agents handed on, its result, and its **lease**. It comes from
+`submit`, `ensemble submit`, or the hub's inbox. The hub never runs one; a
+node leases it. Each folder's worker, every two seconds and whenever
+something changes, asks the hub for its project's tasks (`RemoteBoard`, over
+one link that opens again when it breaks), and:
 
-1. skips tasks with a `result.md` (over), with no assignee (backlog), waiting
-   for an answer, or `after` tasks not yet `done`;
+1. skips tasks that ended, with no assignee (backlog), waiting for an answer,
+   with `after` tasks not yet `done`, or running on another node;
 2. waits while the agent is over budget, its slots are busy, or (with
    `when_none: wait`) no model of its `try` list can be used;
-3. for `isolation: worktree`, makes or reuses a git worktree on the branch
+3. **claims** the task for a minute (`task_claim`); another node that was first
+   wins, and the task is left;
+4. for `isolation: worktree`, makes or reuses a git worktree on the branch
    `ensemble/<id>`;
-4. recalls notes once, if the agent has `recall`;
-5. runs the agent as a delegation, then the task's **gate** if it names one,
+5. recalls notes once, if the agent has `recall`;
+6. runs the agent as a delegation, then the task's **gate** if it names one,
    running the agent again with the gate's output until it passes or
-   `attempts` are used;
-6. reads the end of the reply: `NEEDS INPUT: <question>` adds the question to
-   `questions.md` and waits for `answer`; `HAND OFF: <agent> <what remains>`
-   reassigns the task with a note in `handoffs.md`;
-7. otherwise writes `result.md` (`done`, `failed` or `cancelled`), and in a
-   worktree commits everything on the task's branch. Nothing is merged: that
-   is `ensemble merge`, which only a person runs.
+   `attempts` are used, all the while renewing the claim every 15 seconds
+   (`task_renew`), which also says when someone cancelled the task;
+7. says how the run ended (`task_finish`): `NEEDS INPUT: <question>` keeps the
+   question and the task waits for `answer`; `HAND OFF: <agent> <what
+   remains>` reassigns it with a note; otherwise its result (`done`, `failed`
+   or `cancelled`), after committing everything on the task's branch in a
+   worktree. Nothing is merged: that is `ensemble merge`, which only a person
+   runs.
 
-What a run does as it goes (its activity lines, its state) is in `runs/<id>/`,
-which is how `status` shows what an agent is doing. A task stopped when the
-node stops has no result, so it runs again next time.
+A node that stops puts its running tasks back (`task_release`); one that dies
+stops renewing, and the hub treats its claim as gone once it runs out. Either
+way the task is `queued (interrupted on <node>)`, and the next node to look
+runs it again, from the start, in its own folder. A node whose claim ran out,
+and whose task another took, is refused when it says how its run ended, so a
+task never ends twice. The hub's clock alone decides when a claim runs out.
+
+What a run does as it goes (its activity lines) is in `runs/<id>/` on the node
+that runs it, which is how `status` shows what an agent is doing there.
 
 ## Knowledge
 
@@ -331,15 +346,14 @@ helper team never calls a tracker. A tracker is the `IssueTracker` trait; a
 folder of markdown issues is the one implementation so far.
 
 - **The hub** (`ServerInbox`, `relay.rs`) polls the tracker every
-  `poll_seconds`, and an issue becomes a
-  **delivery** for the account whose tracker name is its assignee, kept in
-  the hub's database. The server pushes it over the link, as a `task` event, to
-  every node of that account that subscribed. On the member's computer,
-  `NodeInbox` makes it a task in the folder of the project's name that a
-  session of the node last ran in, and answers `task_accept` (or
-  `task_refuse`, when it has no such folder). Every two seconds it sends each
-  task's new question or result (`task_update`), and passes `answer` events to
-  their tasks.
+  `poll_seconds`. An open issue with the label, assigned to an account's
+  tracker name and naming a project, becomes a task of that account in that
+  project, kept like any other (for the agent its `<label>:<team>/<agent>`
+  label names, or in the backlog), and which issue became which task is a
+  **delivery** in the hub's database. Then each poll looks at the task: the
+  node that runs it, its question (posted, and the assignee's next comment is
+  the answer), its result (posted once). An issue closed cancels its task.
+  Nodes know nothing of trackers: they run the task like any other.
 
 ## Nodes
 
@@ -373,13 +387,13 @@ The node opens one WebSocket and signs in with `Authorization: Bearer <token>`
 during the upgrade (401 without a valid one). Frames are JSON text: requests
 `{id, method, params}`, replies `{id, result}` or `{id, error}`, and events
 `{event, data}` the hub sends unasked. A node may open several links: one for
-the hub's knowledge in each folder it serves, one for its tasks, one for what
-it offers, and one per run it sends elsewhere.
+the hub's knowledge and one for the tasks in each folder it serves, one for
+what it offers, and one per run it sends elsewhere.
 
 | for | the node asks | the hub sends |
 | --- | --- | --- |
 | knowledge | `hello` (who am I, which permissions), `share`, `recall` | |
-| tasks | `subscribe`, `task_accept`, `task_refuse`, `task_update`, `answer_taken` | `task` and `answer` events, each once per connection and again after a reconnect |
+| tasks | each with its `project`: `tasks`, `task`, `task_create`, `task_claim`, `task_renew`, `task_release`, `task_finish`, `task_answer`, `task_assign`, `task_cancel` | |
 | nodes | `node` (I am a node: name, access, agents, models), `nodes` (which may I use), `run`, `run_cancel`, and as a node `run_progress`, `run_done`, `model_reply` | `run`, `run_cancel` and `model_call` events to a node; `run_progress` and `run_done` events to whoever asked for a run (a `run_done` that failed when the node went away) |
 
 Every request is checked against the token's permissions (its role, narrowed by
@@ -490,7 +504,7 @@ team and runs no agents: it keeps knowledge, hands out tasks, keeps accounts,
 and connects nodes, which do the work. It is always `ensemble hub serve`, with
 its files in `~/.config/ensemble/hub/`; one person runs it on their own
 computer, a team on a server. A node reaches it only over the link: its
-sessions' knowledge (`RemoteMemory`), its tasks (`NodeInbox`), and what it
+sessions' knowledge (`RemoteMemory`), its folders' tasks (`RemoteBoard`), and what it
 offers (`Worker`). A developer who wants access from elsewhere moves the hub's
 folder to a server.
 
@@ -612,25 +626,33 @@ limits. (Decided 2026-11-10.)
 
 ## Tasks
 
-Tasks live in a task tracker: Jira, GitLab, Anning, or markdown files. Ensemble
-never becomes the source of truth for tasks.
+Two kinds of work, kept apart (decided 2026-11-17):
 
-The helper team never calls a tracker itself. A tracker's item is an **issue**,
-assigned to a person; a **task** is an agent's ticket. Each tracker implements
-one trait, `IssueTracker`: the issues assigned to this user that carry the
-signal, and statuses and comments written back. The inbox makes issues into
-tasks and reports the tasks back on the issues. Behind it, tracker adapters do
-the tracker work: webhooks where the tracker has them, polling where it does
-not, account mapping, the signal, deduplication. With a hub server, the inbox
-runs there, with one set of credentials, a reachable address for webhooks, and
-on while nodes are off; a `task` event is pushed to the member's node.
-Standalone, the same inbox runs in the node with the user's own token. (Built:
-both, polling a folder of markdown issues.)
+- An **issue** is a person's: high-level, such as "a panorama video app with
+  rotating cameras", in a tracker (Jira, GitLab, markdown files), assigned to
+  the person, who stays accountable. Ensemble is never the source of truth
+  for issues, and never writes a low-level one.
+- A **task** is an agent's: one agent, one goal, one check, such as "the
+  camera calibration module in `calib/`; `cargo test` passes". Tasks are kept
+  on the hub, per account and project, so that a task outlives the node that
+  runs it: nodes **lease** them (see "A task" in part one), and when a node
+  stops or dies another of the person's nodes with the agent takes the task
+  up. Without a hub there are no tasks, only background delegations, as there
+  is no knowledge without one.
 
-Tasks are assigned to a **user**, never to an agent: the tracker knows people,
-and the person stays accountable. A task carries an explicit signal that agents
-may take it: a label, such as `ensemble`, which every tracker has and which
-needs no extra account. (Decided 2026-11-10.) The flow:
+The helper team never calls a tracker itself. Each tracker implements one
+trait, `IssueTracker`: the issues assigned to this user that carry the
+signal, and statuses and comments written back. The hub's inbox makes such an
+issue a task of the account it is assigned to and reports the task back on
+the issue. Behind it, tracker adapters do the tracker work: webhooks where the
+tracker has them, polling where it does not, account mapping, the signal,
+deduplication. The inbox runs on the hub, with one set of credentials, a
+reachable address for webhooks, and on while nodes are off. (Built: polling a
+folder of markdown issues.)
+
+An issue carries an explicit signal that agents may take it: a label, such as
+`ensemble`, which every tracker has and which needs no extra account.
+(Decided 2026-11-10.) The flow:
 
 1. The inbox sees an issue assigned to me with the signal and makes it a task
    for the helper agent its label names, or puts it in my backlog.
@@ -640,6 +662,14 @@ needs no extra account. (Decided 2026-11-10.) The flow:
 4. It works, checks gates, and may hand parts on to other agents of my team.
 5. The result is reported in the tracker; I remain the assignee.
 6. The outcome goes to the knowledge pipeline. (Not built yet.)
+
+An issue too big for one agent is broken down into a **plan**: the agent-level
+tasks, which agent does each, in what order, and how each is checked. The
+person's own agent drafts the plan with them, in conversation, and the person
+approves it before any of it runs; agents never add tasks to a plan on their
+own, and a changed plan is approved again. A very large issue is split into
+smaller issues first, which is people's work. (Decided 2026-11-17; not built
+yet.)
 
 Ensemble never merges on its own: a merge happens only when the user asks.
 
@@ -789,7 +819,7 @@ crate holds it today.
 | backends | endpoints, the chat client, format translation, health, quotas | core | `ensemble-backends` (no quotas yet) |
 | agents | CLI adapters, `direct`, `builtin`, workspace, worktrees, gates | backends | `ensemble-agents` |
 | team | the helper team, fallback resolver | agents, identity | `ensemble-agents` (`router.rs`), `ensemble-backends` (`resolve.rs`) |
-| tasks | the inbox, `IssueTracker` adapters, hand-off | identity, team | `ensemble-tasks`, `ensemble-inbox` |
+| tasks | tasks kept on the hub and leased, the inbox, `IssueTracker` adapters, hand-off | identity, team | `ensemble-tasks`, `ensemble-inbox` |
 | vault | vault repositories, schema, index, visibility | identity | `ensemble-knowledge` (no visibility yet) |
 | pipeline | ingest, filter, extract, integrate, review | vault, backends | `ensemble-knowledge` |
 | recall | context packages | vault | `ensemble-knowledge`, `src/hooks.rs` |
@@ -842,9 +872,17 @@ crate holds it today.
     system service, this computer's node as a user service (systemd, or
     launchd on macOS), with `node.yaml`, `hub.yaml` and the teams written
     from Nix. (Done.)
+13. Tasks kept on the hub and leased by nodes, so another node takes up the
+    task of one that stopped; the hub's inbox makes issues into tasks there.
+    (Done; decided 2026-11-17.)
+14. A task's work on a pushed branch, so the node that takes a task over
+    carries on from where the first got to. (Not yet.)
+15. Plans: an issue broken down into tasks with the person's agent, approved
+    by the person, released by the hub as the tasks before them end. (Not
+    yet.)
 
-What remains is the "Not yet" of steps 4 and 5, and the modules marked not
-built above.
+What remains is the "Not yet" of steps 4, 5, 14 and 15, and the modules
+marked not built above.
 
 ## Open questions
 

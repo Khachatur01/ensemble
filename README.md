@@ -88,9 +88,8 @@ ask becomes notes in a git vault, and later work recalls them. See
 
 - **Your node runs the work.** A computer runs one node, `ensemble node
   serve`, a process you keep running. It holds your helper teams for every folder you work in, runs each
-  folder's tasks, and goes on after your agent's session ends. With a hub
-  server, it also takes the tasks the hub has for you and lends what it offers
-  to others.
+  folder's tasks, which the hub keeps, and goes on after your agent's session
+  ends. It also lends what it offers to others through the hub.
 - **Your agent reaches it over MCP.** `ensemble mcp`, which your agent CLI
   starts, is a bridge to the node: your agent sees the helper team as tools.
   It calls `delegate` and gets the work back, or `submit`s a task and follows
@@ -100,11 +99,14 @@ ask becomes notes in a git vault, and later work recalls them. See
   node through the hub, and a node's model servers can serve the whole team
   through the hub as an OpenAI-compatible endpoint.
 - **The hub provides the services.** `ensemble hub serve`, on a server for a
-  team or on your own computer, keeps the accounts and knowledge, turns
-  tracker issues into tasks on the right person's node, and connects the
-  nodes. Each node names its hub in its `node.yaml`.
-- **Work is kept outside your projects**, in a per-user state directory: tasks
-  as markdown tickets, run logs, git worktrees, usage and run records.
+  team or on your own computer, keeps the accounts, the knowledge and the
+  tasks, turns tracker issues into tasks for the right person, and connects
+  the nodes. Each node names its hub in its `node.yaml`.
+- **Tasks outlive the node that runs them.** They are kept on the hub; a node
+  leases one while it runs it, and when that node stops, another of yours
+  with the agent takes it up.
+- **Work is kept outside your projects**, in a per-user state directory: run
+  logs, git worktrees, usage and run records.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) is the full map: the processes, the crates,
 where everything is kept, and the life of a delegation, a task, a share, an
@@ -144,8 +146,8 @@ Afterwards, `ensemble doctor` says what is wrong and how to fix each thing, and
 yours: comments and order are kept, and every setting is written out).
 
 The folder your agent opens is where the team works, and it can be a parent of
-several repositories. Ensemble keeps nothing in it: tasks, run logs and
-worktrees go in a per-user state directory (`$XDG_STATE_HOME/ensemble`, by
+several repositories. Ensemble keeps nothing in it: run logs and worktrees go
+in a per-user state directory (`$XDG_STATE_HOME/ensemble`, by
 default `~/.local/state/ensemble`), one per folder. A tool takes a `repo`
 argument, a path inside the folder, to work in one repository of several; a
 path that leaves the folder is refused.
@@ -206,8 +208,7 @@ user, outside every project:
 
 | where | |
 | --- | --- |
-| `$XDG_STATE_HOME/ensemble/workdirs/<folder>-<hash>/tasks/` | the tasks for the agents to work through, one directory each |
-| `.../runs/` | what tasks and background delegations did as they ran |
+| `$XDG_STATE_HOME/ensemble/workdirs/<folder>-<hash>/runs/` | what tasks and background delegations did as they ran on this computer |
 | `.../worktrees/` | a git worktree per task of an agent with `isolation: worktree` |
 | `$XDG_STATE_HOME/ensemble/orgs/teams-<hash>/usage.json` | how many runs each agent started, shared by every project |
 
@@ -657,13 +658,13 @@ tool call after about a minute, whatever progress notifications arrive). On a
 slow machine every delegation to a local model can hit that. Two ways around
 it both answer at once:
 
-- **`submit`** writes a **task**: a ticket in the state directory, `tasks/<id>/task.md`. Ids are numbered across the folder, so an id names one task.
-  While your node runs, agents work through the tasks without a result,
-  oldest id first, each agent at most `max_concurrent` at a time, and write
-  `result.md` beside the ticket when one ends. You can write a `task.md` by
-  hand too; it is picked up within a few seconds.
+- **`submit`** makes a **task**: a ticket kept on your node's hub, for the
+  working folder's project (its name). Ids are numbered within the project,
+  so an id names one task. While your node runs, agents work through the
+  tasks that may start, oldest id first, each agent at most `max_concurrent`
+  at a time, and the hub keeps each one's result.
 - **`delegate` with `background: true`** is a one-off: it returns an id such as
-  `adhoc-3` and writes no ticket.
+  `adhoc-3` and makes no task. It needs no hub, and it ends with the node.
 
 Then, for either:
 
@@ -671,61 +672,68 @@ Then, for either:
   failed / cancelled, seconds run) with each running one's last few steps and
   tool calls, or shows one with `task`. This is the only way the calling agent
   can see what an agent is doing.
-- `wait` with `task` returns the result: for a task, its `result.md`; for a
-  background delegation, the reply in the same form as a blocking `delegate`.
-  It waits up to `timeout_seconds` (default 30, at most 300); one still queued
-  or running by then is reported, not failed, and the calling agent calls `wait`
-  again.
+- `wait` with `task` returns the result: for a task, the one the hub keeps; for
+  a background delegation, the reply in the same form as a blocking
+  `delegate`. It waits up to `timeout_seconds` (default 30, at most 300); one
+  still queued or running by then is reported, not failed, and the calling
+  agent calls `wait` again.
 - `cancel` with `task` kills the agent's CLI and its process tree. A task that
-  has not started gets a `cancelled` result and never runs.
+  has not started gets a `cancelled` result and never runs; one that runs on
+  another of your nodes is stopped by that node.
 
 You can do the same from the terminal, with no agent in between: `ensemble
-tasks` and `ensemble task <id>` read the state directory and show what
-`status` and `wait` would, `ensemble submit` writes a ticket and `ensemble
-answer` answers a question. They start no worker: whatever worker runs for
-the same working folder runs the tasks, and the folder is the current
-directory or `--dir`.
+tasks` and `ensemble task <id>` show what `status` and `wait` would,
+`ensemble submit` makes a task and `ensemble answer` answers a question. They
+ask the hub, and start no worker: your nodes run the tasks. The project is the
+current directory's name, or `--dir`'s.
 
-A task looks like this. Only `title` and `agent` are required; `submit` takes
-the same fields:
+**Tasks are kept on the hub, and nodes lease them.** That is what lets a task
+outlive the node that runs it:
 
-```markdown
----
-title: Add retry to the fetcher
-agent: coder
-context: The fetcher is src/fetch.rs; it uses ureq.
-goal: A request survives one dropped connection.
-constraints: [No new dependency]
-files: [src/fetch.rs]
-done_when: [cargo test passes]
-after: [0001-add-ureq]
-gate: { name: test, attempts: 3 }
----
-Retry a failed request three times, waiting 1s, 2s, 4s.
-```
+- A node **claims** a task that may start (assigned, not ended, not waiting for
+  an answer or another task) for a minute, renews the claim every 15 seconds
+  while its agent works, and tells the hub how the run ended. While it holds
+  the claim, `status` shows the task as `running on <node>`, and no other node
+  runs it.
+- A node that **stops** puts its running tasks back: they show as `queued
+  (interrupted on <node>)`, and the next node to look runs them again. A node
+  that **dies** stops renewing, and its claim runs out within a minute, with
+  the same effect.
+- Any of your nodes takes a task whose agent it has, in a folder of the
+  project's name it has served (of two such folders, the one used last). So a
+  task you submit at your desk runs on your laptop if the desk is off and the
+  laptop has the team.
+- A node whose claim ran out, and whose task another node took meanwhile,
+  cannot say how it ended: the task is never done twice. What that run did
+  stays in its folder.
+- A node with no hub keeps no tasks: `submit` says so, and only background
+  delegations run.
 
-What each field is for:
+A run that moves to another node starts again from the task, not from where
+the first run got to: what the first changed is in the first node's folder.
+
+A task's fields; only `title`, the agent and the text are needed, and `submit`
+takes them all:
 
 | field | |
 | --- | --- |
-| `title` | required. A short name; it makes the task's folder name (`0002-add-retry-to-the-fetcher`) |
-| `agent` | required. Which agent of the team does it |
-| the text below the `---` | what to do |
+| `title` | required. A short name; it makes the task's id (`0002-add-retry-to-the-fetcher`) |
+| `agent` | which agent does it, `<team>/<agent>`. Without one the task is in the backlog |
+| `task` | required. What to do |
 | `context` | background the agent needs, sent as the delegation's context |
 | `goal` | the outcome wanted, in a sentence, as opposed to the steps |
 | `constraints` | what the agent must not do or must keep |
 | `files` | where to look or work |
 | `done_when` | conditions that mean it is finished. The agent is told to check its work against them. They are advice to the agent; nothing runs them (that is what `gate` is for) |
-| `after` | ids of tasks that must end `done` first |
+| `after` | ids of tasks that must end `done` first; each must exist already |
+| `repo` | a folder of the working directory to work in, when it holds several repositories |
 | `gate` | `name`: a check defined under `gates` in `config.yaml`. `attempts`: how many runs the agent gets in all, the first included, so `1` means no retry |
 
 The agent is sent the text, then the goal, constraints, files and
 `done_when` as sections it can check its work against. A task with `after`
 waits until every task it names has ended `done`; `status` shows it as
 `blocked by 0001-add-ureq (not done yet)`. If one of them failed or was
-cancelled, it stays blocked until that task is run again. `ensemble check`
-reports an `after` that names no task, and tasks whose `after` leads back to
-themselves.
+cancelled, it stays blocked until it is submitted again.
 
 **Using a gate.** `done_when` tells the agent what finished means; `gate`
 makes Ensemble check it. With `gate`, the named command from `config.yaml`
@@ -738,39 +746,39 @@ runs once the agent is done:
    Then the task is `failed`.
 
 Each retry takes a run from the agent's `budget`; over it, no retry is made.
-`result.md` records `gate`, `gate_result` (`passed`, `failed`, or `not run`
+The result records `gate`, `gate_result` (`passed`, `failed`, or `not run`
 when the agent itself failed) and `attempts`. A gate that is not defined in
 `config.yaml` fails the task at once, and `ensemble check` reports it before
 that.
 
-Its `result.md` starts with `status` (`done`, `failed` or `cancelled`),
-`agent`, `started` and `ended`, then the agent's reply. A task with a result is
-over; delete `result.md` to run it again. What a run does as it goes (its
-activity log, its state) is in `runs/<id>/` beside `tasks/`. `ensemble check` reports a `task.md` that cannot be read or names an agent
-that does not exist.
+A result starts with `status` (`done`, `failed` or `cancelled`), `agent`,
+`started` and `ended`, then the agent's reply. A task with a result is over;
+submit it again to run it again. What a run does as it goes, its activity
+log, is in `runs/<id>/` in the state directory of the computer that ran it.
+`ensemble check` reports the tasks on the hub this node cannot run as they
+are: a gate it has not got, or an agent that is another node's.
 
 A task's agent may stop to ask. It is told that, when it cannot finish without
 a decision only the person who asked can make, it should end its reply with a
-line `NEEDS INPUT: <question>`. The question is added to `questions.md` beside
-the ticket, the task shows as `needs input:
-<question>` in `status`, and `wait` returns the question. `answer` adds the
-answer under it, and the task runs again, given the questions and answers so
-far and its reply when it stopped. A gate does not run on a reply that asks,
-and a worktree is not committed until the task ends.
+line `NEEDS INPUT: <question>`. The hub keeps the question with the task, the
+task shows as `needs input: <question>` in `status`, and `wait` returns the
+question. `answer` adds the answer, and the task runs again, given the
+questions and answers so far and its reply when it stopped. A gate does not
+run on a reply that asks, and a worktree is not committed until the task ends.
 
 An agent with `isolation: worktree` runs each task in a git worktree of its
 own, `worktrees/<id>` in the state directory, on the branch `ensemble/<id>` made
 from the repository's `HEAD`. The repository's own files are not touched, so such tasks can run
 side by side. The gate runs in the worktree too. When the task ends, everything
 it changed is committed on its branch (`--no-verify`, your git identity), and
-`result.md` records `branch` and `commit`. Ensemble never merges on its own, and the calling agent has no tool that does. Look at
+the result records `branch` and `commit`. Ensemble never merges on its own, and the calling agent has no tool that does. Look at
 the work with `ensemble review <id>` (the branch, what changed on it, the result;
 the calling agent has a read-only `review` tool for the same) and `ensemble diff <id>`.
 Take it in with `ensemble merge <id>`, which only you run: it refuses a task that
 is not done, a repository with uncommitted changes, and a merge that conflicts
 (which it undoes, naming the files). `--squash` makes one commit; `--cleanup`
-then removes the task's worktree and branch, and nothing is deleted without it. A task run again, or one the
-session's end interrupted, carries on in the worktree it had. The working folder, or
+then removes the task's worktree and branch, and nothing is deleted without it. A task run again on the
+same computer, or one the node's stop interrupted, carries on in the worktree it had. The working folder, or
 the task's `repo`, must be a git repository with at least one commit.
 
 ### A helper team that works on its own
@@ -782,14 +790,13 @@ not have to.
 - **Tasks have an assignee**, an agent. A task with none is in the
   **backlog**: `submit` with no `agent` (or `ensemble submit TITLE --backlog`)
   puts it there, and `assign` (the tool, or `ensemble assign ID AGENT`) gives it
-  to an agent. The assignee is kept in `assignee.txt` beside the ticket, which is
-  never rewritten.
+  to an agent.
 - **An agent works only on tasks assigned to it** and stays idle until one
   appears for it. Nothing pulls from the backlog on its own: your agent, with
   you, decides who gets what.
 - **An agent may finish a task or hand it on**: it ends its reply with `HAND OFF:
   <agent> <what remains>`. The task goes to that agent, who is shown the note
-  and what was done (`handoffs.md`); a worktree stays as it is. A hand-off to a
+  and what was done; a worktree stays as it is. A hand-off to a
   name that is no agent fails the task and says so.
 - **When nothing is active** (no task is assigned, unfinished and not waiting for
   your answer) the team says so, and what waits: `Idle: no active tasks (2
@@ -805,8 +812,9 @@ your agent or `ensemble answer`.
 `ensemble node serve` runs this computer's node until it gets Ctrl-C or
 SIGTERM. It keeps a worker for every folder a session of it has opened, or
 that `ensemble submit`, `assign` or `answer` told it about, and starts them
-again when it starts. On a stop, running tasks are stopped (they have no
-result, so they run again next time) and the rest stay queued. A computer runs
+again when it starts; each runs the tasks the hub keeps for its folder's
+project. On a stop, running tasks are stopped and put back on the hub, for
+this node or another to run again, and the rest stay queued. A computer runs
 one node, so a second `node serve` refuses. One worker runs a folder's tasks:
 its lock is a file in the folder's state directory, and one left by a process
 that died is taken over. When a session ends, nothing stops: the node's
@@ -1002,7 +1010,7 @@ Its files are in `~/.config/ensemble/hub/`:
 ~/.config/ensemble/hub/
   hub.yaml       its settings
   .env           the keys its backends name (NAME=value), readable only by you
-  database.db    its accounts, tokens and deliveries (Turso), readable only by you
+  database.db    its accounts, tokens, tasks, and which issue became which task (Turso), readable only by you
   vault/         its knowledge vault, a git repository
 ```
 
@@ -1231,10 +1239,10 @@ run.
 
 ## Tasks from a tracker
 
-Tasks live in a tracker and are assigned to **people**. When an issue is
-assigned to you and carries the hub's label, the hub's inbox hands it to one of
-your nodes, which makes it a task for your helper teams, and writes what happens
-back on the issue. Your helper team never touches the tracker itself. The first
+Issues live in a tracker and are assigned to **people**. When an issue is
+assigned to you and carries the hub's label, the hub's inbox makes it a task of
+yours, which the hub keeps like any other, and writes what happens back on the
+issue. Your helper team never touches the tracker itself. The first
 tracker is a folder of markdown files, on the hub's computer (`tasks` in
 `hub.yaml`, above); GitLab, GitHub and Jira come later.
 
@@ -1255,26 +1263,26 @@ After logging in, it redirects to /home instead of back to where you were.
   assignee: the account's `tracker_user` when set (`PUT /api/v1/me`, an admin's
   `PUT /api/v1/users/{name}`, or `ensemble hub user tracker ana ana.petrosyan`),
   else the account's own name. Its role needs the `tasks` permission.
-- **Which folder.** Each of that person's [nodes](#nodes) that names the hub
-  takes their tasks: each goes to the folder of its project's name where a
-  session of the node last ran. A project is a folder's name, so
-  `project: shop` is worked in the `shop` folder you last opened a session in.
+- **Which folder.** The issue's `project` is a folder's name: the task runs
+  on the first of that person's [nodes](#nodes) with its agent that has served
+  a folder of that name, in that folder. So `project: shop` is worked in the
+  `shop` folder you last opened a session in. An issue with no project is
+  blocked, saying so.
 - **Which agent.** A second label `ensemble:<team>/<agent>` names the agent;
   without one the task goes to the backlog, for your agent to assign.
 
 What the hub does, every `poll_seconds`:
 
-- **An open issue becomes a delivery** for that account, and the issue says it
-  waits for their computer. When one of their nodes takes it: "picked up as task
-  3 on ana's computer", and `in-progress`. A node that has not served a folder of
-  that name says so on the issue, once, and another may still take it.
+- **An open issue becomes a task** of that account, and the issue says so:
+  "picked up as task 0003-fix-the-login-redirect, for web/coder". When one of
+  their nodes runs it: "runs on ana's computer laptop", and `in-progress`.
 - **A question** the task stops to ask is posted as a comment, and the issue
   goes to `blocked`. Your next comment on the issue is the answer.
 - **The result** is posted as a comment, once. The issue goes to `review` when
   the task is done, or to `blocked` when it failed. You close it: Ensemble
   never sets `done`.
-- **An issue you close or take the label off** is forgotten; its task is left
-  alone. An issue whose assignee is nobody's tracker name, or whose account may
+- **An issue you close or take the label off** cancels its task, if it has not
+  ended, and is forgotten. An issue whose assignee is nobody's tracker name, or whose account may
   not receive tasks, is blocked with a comment saying why.
 
 Ensemble changes only an issue's `status:` line and appends comments
@@ -1304,7 +1312,8 @@ on after the session that submitted them ends, and start again when the node
 does.
 
 With the hub its `node.yaml` names, a node also keeps a link to it: the
-knowledge its sessions share and recall, the tasks the hub sends you (see [Tasks from a tracker](#tasks-from-a-tracker)), and what it lends. A
+knowledge its sessions share and recall, the tasks it runs for you (see
+[Tasks and background delegations](#tasks-and-background-delegations)), and what it lends. A
 node is **private**, working for its owner alone, or **shared**, working also
 for everyone whose role has `compute`; connecting a shared one needs `host`.
 The hub connects them, and keeps no node once it is gone.
@@ -1681,7 +1690,7 @@ $ ensemble remove-agent <name> --team T
 $ ensemble review <id>            # a worktree task: its branch, what changed, its result
 $ ensemble diff <id>              # the whole change
 $ ensemble merge <id> [--squash] [--cleanup]   # only you run this; undone on a conflict
-$ ensemble tasks [--status S]      # the tasks of this working folder and where each stands
+$ ensemble tasks [--status S]      # the tasks of this working folder's project, on the hub, and where each stands
 $ ensemble task <id>               # one task: ticket, state, question or result
 $ ensemble submit <agent> <title> --text T   # write a task (also --goal --context --repo --gate --after ...)
 $ ensemble submit <title> --backlog --text T # write a task with no assignee yet
@@ -1750,9 +1759,9 @@ scripts stand in for the CLIs.
 | `crates/ensemble-agents/src/router.rs`, `crates/ensemble-backends/` | routing, `health` and its model check, the chat request in both formats |
 | `crates/ensemble-knowledge/` | shares kept as they arrived, notes and the log, commits by the lock holder, the secret check; the pipeline against a stub model: new notes, merges, chatter skipped, unusable answers to review, waiting for a model, rebuild |
 | `crates/ensemble-link/` | sign-up, approval and the REST API's codes, tokens kept as hashes and revoked at once, roles checked per request, shares under the signed-in name, a reader offered only `recall`, the token file 0600, the link opened again when it breaks; runs sent to a node that may be used and offers the agent, each side told when the other goes away, model calls streamed from a node |
-| `crates/ensemble-inbox/` | markdown issues read and written with only the status line changed; a hub server's deliveries: matched by tracker name, accepted once, refused, asked and answered, reported; issues to tasks, questions and answers through comments, results posted once, one inbox per hub |
+| `crates/ensemble-inbox/` | markdown issues read and written with only the status line changed; issues to tasks of the account matched by tracker name, questions and answers through comments, results posted once, a closed issue cancelling its task |
 | `crates/ensemble-core/` | the state directories and their hashes, the worker lock, run records, a snapshot of a folder and its changes written back |
-| `crates/ensemble-tasks/` | ticket files: reading, ids, results written once, run logs; review and merge |
+| `crates/ensemble-tasks/` | tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the node holding the lease, questions, hand-offs, cancelling; over the link as the signed-in account; run logs; review and merge |
 | `crates/ensemble-mcp/src/tests.rs` | the protocol: handshake, tool schemas, notifications, parallel calls, cancellation, tasks run within `max_concurrent`, the end of a session, notes recalled for agents with `recall` |
 | `tests/workspace.rs` | the crates depend on each other in one direction only |
 | `tests/end_to_end.rs` | the real binary: CLI, `show`, `health` against a stub server, MCP over real pipes, an agent changing a file; session hooks; an agent run on a node and its changes back; a node's models through the hub; a session through a node, its task going on after the session; a hub task worked by a node |
@@ -1780,14 +1789,15 @@ scripts stand in for the CLIs.
 - **Limits are per agent unless shared.** Agents on one server share a limit only
   when they name the same one. Budgets are shared by every project that uses the
   helper team. A token budget counts what runs report, which not every CLI does.
-- **Tasks run only while your node runs.** One node per computer, and one
-  worker runs a folder's tasks at a time.
+- **Tasks run only while one of your nodes runs.** One node per computer, and
+  one worker runs a folder's tasks at a time. A task moved to another node
+  starts again there; it does not carry on from the first node's work.
 - **A task of an agent whose team was removed** fails when it starts: the
   agent is no longer there.
 - **A session's working folder is fixed:** the folder `ensemble mcp` was
   started in. A call can work in a folder inside it with `repo`, but not
   outside.
-- **A hub server shares knowledge, hands out tasks and connects nodes.** A chat API, a web UI
+- **A hub server shares knowledge, keeps tasks and connects nodes.** A chat API, a web UI
   and single sign-on are not built. People sign up through the REST API
   and wait for an admin; there is no password reset by mail, and no second
   factor. The API sends no CORS headers, so a UI is served from the hub's own
@@ -1807,6 +1817,5 @@ scripts stand in for the CLIs.
   node keeps what it holds for a folder until it stops, and works within the
   folder a session started in.
 - **One tracker so far.** The inbox reads a folder of markdown issues; GitLab,
-  GitHub and Jira adapters are not built. A member's computer takes a hub
-  server's tasks only while their node runs, and only for projects it has
-  served a folder of.
+  GitHub and Jira adapters are not built. A member's node runs a hub's tasks
+  only while it runs, and only for projects it has served a folder of.

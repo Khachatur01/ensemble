@@ -13,9 +13,8 @@
 use crate::http::{self, Replay};
 use crate::nodes::Routes;
 use crate::protocol::{
-    ANSWER_TAKEN, Event, HELLO, MODEL_REPLY, NODE, NODES, RECALL, RUN, RUN_CANCEL, RUN_DONE,
-    RUN_PROGRESS, Reply, Request, SHARE, SUBSCRIBE, TASK_ACCEPT, TASK_REFUSE, TASK_UPDATE,
-    TaskRelay,
+    Event, HELLO, MODEL_REPLY, NODE, NODES, RECALL, RUN, RUN_CANCEL, RUN_DONE, RUN_PROGRESS, Reply,
+    Request, SHARE, TASK_METHODS, TaskService,
 };
 use crate::users::Users;
 use ensemble_config::Permission;
@@ -24,7 +23,7 @@ use ensemble_knowledge::Memory;
 use futures_util::SinkExt;
 use futures_util::stream::{SplitSink, StreamExt};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -38,8 +37,6 @@ use tokio_tungstenite::tungstenite::{self, Message};
 
 /// How long a connection may take to send its request's head.
 const HEAD_WAIT: Duration = Duration::from_secs(10);
-/// How often a subscribed node's waiting events are looked for.
-const LOOK_EVERY: Duration = Duration::from_secs(1);
 
 /// The sending half of a node's link.
 type Sender = SplitSink<WebSocketStream<http::Replay<TcpStream>>, Message>;
@@ -59,9 +56,8 @@ pub struct Server<'a> {
     pub(crate) changing: Mutex<()>,
     /// Failed logins by name: how many, and until when the name is refused.
     pub(crate) failures: Mutex<HashMap<String, (u32, Option<Instant>)>>,
-    /// The task inbox, when the hub has one: what subscribed nodes are told,
-    /// and who hears what they say about their tasks.
-    relay: Option<&'a dyn TaskRelay>,
+    /// The tasks it keeps for its accounts.
+    tasks: Option<&'a dyn TaskService>,
     /// The connected nodes, and the runs and model calls between them.
     pub(crate) routes: Routes,
 }
@@ -86,14 +82,14 @@ impl<'a> Server<'a> {
             users,
             changing: Mutex::new(()),
             failures: Mutex::new(HashMap::new()),
-            relay: None,
+            tasks: None,
             routes: Routes::default(),
         }
     }
 
-    /// Carry the tasks of `relay` to subscribed nodes.
-    pub fn with_relay(mut self, relay: &'a dyn TaskRelay) -> Self {
-        self.relay = Some(relay);
+    /// Keep its accounts' tasks in `tasks`.
+    pub fn with_tasks(mut self, tasks: &'a dyn TaskService) -> Self {
+        self.tasks = Some(tasks);
         self
     }
 
@@ -195,11 +191,6 @@ impl<'a> Server<'a> {
         stop: &AtomicBool,
         say: &(dyn Fn(&str) + Sync),
     ) -> Result<(), String> {
-        // Once the node subscribes, the events waiting for its account, each
-        // sent once on this connection, looked for about once a second.
-        let mut subscribed = false;
-        let mut sent: HashSet<String> = HashSet::new();
-        let mut look = tokio::time::interval(LOOK_EVERY);
         loop {
             let message = tokio::select! {
                 () = runtime::until_set(stop) => return Ok(()),
@@ -209,27 +200,17 @@ impl<'a> Server<'a> {
                     push(sender, &event).await?;
                     continue;
                 }
-                _ = look.tick(), if subscribed && self.relay.is_some() => {
-                    let pending = blocking(|| {
-                        self.permissions(session)
-                            .map(|_| self.relay.map(|r| r.pending(&session.user)))
-                    });
-                    let Ok(pending) = pending else {
-                        return Ok(());
-                    };
-                    for (id, event) in pending.unwrap_or_default() {
-                        if sent.insert(id) {
-                            push(sender, &event).await?;
-                        }
-                    }
-                    continue;
-                }
                 message = receiver.next() => message,
             };
             let text = match message {
+                // A command that asked once and exited goes without a goodbye.
                 None
                 | Some(Err(
-                    tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed,
+                    tungstenite::Error::ConnectionClosed
+                    | tungstenite::Error::AlreadyClosed
+                    | tungstenite::Error::Protocol(
+                        tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+                    ),
                 )) => return Ok(()),
                 Some(Err(e)) => return Err(e.to_string()),
                 Some(Ok(Message::Text(t))) => t.to_string(),
@@ -238,18 +219,14 @@ impl<'a> Server<'a> {
             };
             let reply = match serde_json::from_str::<Request>(&text) {
                 Ok(req) => {
-                    // A run's progress and a model's chunks would drown the rest.
-                    if !matches!(req.method.as_str(), RUN_PROGRESS | MODEL_REPLY) {
+                    // A run's progress, a model's chunks and the tasks a node
+                    // looks at every few seconds would drown the rest.
+                    if !matches!(req.method.as_str(), RUN_PROGRESS | MODEL_REPLY)
+                        && !TASK_METHODS.contains(&req.method.as_str())
+                    {
                         say(&format!("{}: {}", session.user, req.method));
                     }
-                    let subscribing = req.method == SUBSCRIBE;
-                    let reply = blocking(|| self.answer(session, conn, req));
-                    if subscribing && reply.error.is_none() {
-                        subscribed = true;
-                        // The first look comes at once.
-                        look.reset_immediately();
-                    }
-                    reply
+                    blocking(|| self.answer(session, conn, req))
                 }
                 Err(e) => Reply::err(0, format!("not a request: {e}")),
             };
@@ -347,15 +324,12 @@ impl<'a> Server<'a> {
             }),
             RECALL => may(Permission::Recall)
                 .and_then(|()| Ok(json!({ "text": self.memory.recall(text("query")?) }))),
-            SUBSCRIBE => may(Permission::Tasks).and_then(|()| match self.relay {
-                Some(_) => Ok(json!({ "subscribed": true })),
-                None => Err("this hub has no task inbox".into()),
-            }),
-            TASK_ACCEPT | TASK_REFUSE | TASK_UPDATE | ANSWER_TAKEN => may(Permission::Tasks)
-                .and_then(|()| match self.relay {
-                    Some(relay) => relay.handle(&session.user, &req.method, &req.params),
-                    None => Err("this hub has no task inbox".into()),
-                }),
+            method if TASK_METHODS.contains(&method) => {
+                may(Permission::Tasks).and_then(|()| match self.tasks {
+                    Some(tasks) => tasks.handle(&session.user, method, &req.params),
+                    None => Err("this hub keeps no tasks".into()),
+                })
+            }
             NODE => self.routes.register(
                 conn,
                 &session.user,
@@ -408,25 +382,25 @@ async fn send(sender: &mut Sender, reply: &Reply) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+/// A hub server for tests, here and in the crates above.
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing {
     use super::*;
     use ensemble_core::workspace::testing::TempDir;
     use std::sync::atomic::Ordering;
-    use tungstenite::client::IntoClientRequest;
 
     /// The password of every account of the test hub.
-    pub(crate) const PASSWORD: &str = "correct horse battery";
+    pub const PASSWORD: &str = "correct horse battery";
 
     /// A hub server on loopback, with `ana` a member, `rex` a reader and
     /// `root` an admin, each with a token and [`PASSWORD`]. It locks a name
     /// after 3 failed logins, and takes 2 sign-ups at a time.
-    pub(crate) struct Running {
-        pub(crate) tmp: TempDir,
-        pub(crate) url: String,
-        pub(crate) ana: String,
-        pub(crate) rex: String,
-        pub(crate) root: String,
+    pub struct Running {
+        pub tmp: TempDir,
+        pub url: String,
+        pub ana: String,
+        pub rex: String,
+        pub root: String,
         stop: &'static AtomicBool,
     }
 
@@ -436,12 +410,17 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn start() -> Running {
+    pub fn start() -> Running {
         start_with(None)
     }
 
-    /// The test hub, carrying the tasks of `relay` when given.
-    pub(crate) fn start_with(relay: Option<&'static dyn TaskRelay>) -> Running {
+    /// The test hub, keeping its accounts' tasks in `tasks`.
+    pub fn start_with_tasks(tasks: &'static dyn TaskService) -> Running {
+        start_with(Some(tasks))
+    }
+
+    /// The test hub, keeping tasks in `tasks` when given.
+    pub fn start_with(tasks: Option<&'static dyn TaskService>) -> Running {
         let tmp = TempDir::new();
         let yaml = format!(
             "version: 1\nowner: Acme\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: approval, max_pending: 2 }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles:\n  admin: [admin, recall, host]\n  member: [share, recall, tasks, compute]\n  reader: [recall]\n",
@@ -481,8 +460,8 @@ pub(crate) mod tests {
         let memory: &'static Memory = Box::leak(Box::new(memory));
         let hub: &'static ensemble_config::Hub = Box::leak(Box::new(hub));
         let mut server = Server::new(memory, &hub.roles, hub.server, tmp.0.join("state"));
-        if let Some(relay) = relay {
-            server = server.with_relay(relay);
+        if let Some(tasks) = tasks {
+            server = server.with_tasks(tasks);
         }
         let server: &'static Server<'static> = Box::leak(Box::new(server));
         runtime::shared().spawn(server.run(listener, stop, &|_| {}));
@@ -495,6 +474,13 @@ pub(crate) mod tests {
             stop,
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::testing::*;
+    use super::*;
+    use tungstenite::client::IntoClientRequest;
 
     type Client = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
 

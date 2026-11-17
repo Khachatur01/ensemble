@@ -2,7 +2,18 @@ use super::*;
 use ensemble_config as config;
 use ensemble_core::workspace::testing::{TempDir, executable};
 use ensemble_knowledge::Memory;
+use ensemble_tasks::board::{DbBoard, End};
+use ensemble_tasks::tasks::{GateRef, Status as TaskStatus, Ticket};
 use std::collections::BTreeMap;
+
+/// The node every session here runs as.
+const NODE: &str = "desk";
+
+/// The tasks of the project whose state is in `state`, as its hub keeps them:
+/// ana's, in a database beside it.
+fn board_at(state: &std::path::Path) -> DbBoard {
+    DbBoard::new(&state.join("hub"), "ana", "project")
+}
 
 /// What a session's hub brings in these tests: its knowledge.
 #[derive(Clone, Copy, Default)]
@@ -30,11 +41,11 @@ fn serve_with(
     let state = e.state_dir()?;
     // As on a node: only the worker that holds the folder runs its tasks.
     let lock = ensemble_tasks::lock::acquire(&state);
-    let mut store = Store::new(&state);
+    let mut runs = Runs::new(&state);
     if let Some(usage) = e.usage_dir() {
-        store = store.with_usage_dir(usage);
+        runs = runs.with_usage_dir(usage);
     }
-    let queue = queue_for(e, Some(store), hub.knowledge);
+    let queue = queue_for(e, Some(runs), hub.knowledge).with_board(board_at(&state), NODE);
     runtime::block_on(async {
         let session = serve_session(e, hub.knowledge, &queue, input, output, true, None);
         tokio::join!(session, queue.work(lock.is_ok())).0
@@ -885,22 +896,40 @@ fn project(tmp: &TempDir) -> std::path::PathBuf {
     tmp.0.join("project")
 }
 
-fn tasks(tmp: &TempDir) -> std::path::PathBuf {
-    project(tmp).join(".ensemble/tasks")
+/// The project's tasks, as its hub keeps them.
+fn board(tmp: &TempDir) -> DbBoard {
+    board_at(&project(tmp).join(".ensemble"))
 }
 
+/// Keep task `id` for `agent`, titled what follows its number: tasks are
+/// numbered in the order they are made.
 fn write_task(tmp: &TempDir, id: &str, agent: &str, text: &str) {
-    let dir = tasks(tmp).join(id);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("task.md"),
-        format!("---\ntitle: Task {id}\nagent: {agent}\n---\n{text}\n"),
-    )
-    .unwrap();
+    add_task(
+        tmp,
+        id,
+        Ticket {
+            agent: agent.into(),
+            text: text.into(),
+            ..Ticket::default()
+        },
+    );
 }
 
-fn store(tmp: &TempDir) -> Store {
-    Store::new(&project(tmp).join(".ensemble"))
+/// Keep `ticket` as task `id`, titled what follows its number unless it has
+/// a title.
+fn add_task(tmp: &TempDir, id: &str, ticket: Ticket) {
+    let title = if ticket.title.is_empty() {
+        id.split_once('-').map_or("", |(_, t)| t).to_string()
+    } else {
+        ticket.title.clone()
+    };
+    let made = board(tmp).add(&Ticket { title, ..ticket }).unwrap();
+    assert_eq!(made, id);
+}
+
+/// The result of task `id`, once it has one.
+fn outcome(tmp: &TempDir, id: &str) -> Option<ensemble_tasks::tasks::Outcome> {
+    board(tmp).detail(id).unwrap().unwrap().outcome
 }
 
 /// Answers `alone`, or `overlap` when another run of it is going on in the
@@ -917,11 +946,9 @@ fn sleeper() -> String {
 }
 
 #[test]
-fn a_task_written_by_hand_is_run_and_its_result_written_once() {
+fn a_task_kept_on_the_hub_is_run_and_its_result_kept_there() {
     let (e, tmp) = team(&[("scout", "read", &emit(&step(vec![text("found it")])))]);
     write_task(&tmp, "0001-look", "scout", "Find the parser.");
-    std::fs::create_dir_all(tasks(&tmp).join("0002-bad")).unwrap();
-    std::fs::write(tasks(&tmp).join("0002-bad/task.md"), "no front matter").unwrap();
     session(&e, |ask| {
         let result = ask("wait", json!({"task": "0001-look", "timeout_seconds": 20}));
         assert!(
@@ -934,13 +961,13 @@ fn a_task_written_by_hand_is_run_and_its_result_written_once() {
         );
         let status = ask("status", json!({}));
         assert!(
-            status.contains("0001-look · scout · done · Task 0001-look"),
+            status.contains("0001-look · scout · done · look"),
             "{status}"
         );
-        assert!(status.contains("0002-bad · unreadable"), "{status}");
     });
-    let written = std::fs::read_to_string(tasks(&tmp).join("0001-look/result.md")).unwrap();
-    assert!(written.contains("found it"), "{written}");
+    let written = outcome(&tmp, "0001-look").unwrap();
+    assert!(written.reply().contains("found it"), "{}", written.text);
+    assert_eq!(board(&tmp).list().unwrap()[0].running_on, None);
     let ignore = project(&tmp).join(".ensemble/runs/.gitignore");
     assert_eq!(std::fs::read_to_string(ignore).unwrap(), "*\n");
     assert!(
@@ -951,7 +978,7 @@ fn a_task_written_by_hand_is_run_and_its_result_written_once() {
 }
 
 #[test]
-fn a_submitted_task_is_a_ticket_on_disk_whose_result_wait_returns() {
+fn a_submitted_task_is_kept_on_the_hub_and_wait_returns_its_result() {
     let (e, tmp) = team(&[("scout", "read", &emit(&step(vec![text("found it")])))]);
     session(&e, |ask| {
         let r = ask(
@@ -979,10 +1006,20 @@ fn a_submitted_task_is_a_ticket_on_disk_whose_result_wait_returns() {
         let r = ask("submit", json!({"agent": "scout", "task": "y"}));
         assert!(r.contains("`title`"), "{r}");
     });
-    let ticket = std::fs::read_to_string(tasks(&tmp).join("0001-find-the-parser/task.md")).unwrap();
+    let ticket = board(&tmp)
+        .detail("0001-find-the-parser")
+        .unwrap()
+        .unwrap()
+        .task
+        .ticket;
     assert_eq!(
-        ticket,
-        "---\ntitle: \"Find the parser\"\nagent: \"scout\"\ncontext: \"src/\"\n---\nLook.\n"
+        (
+            ticket.title.as_str(),
+            ticket.agent.as_str(),
+            ticket.context.as_deref(),
+            ticket.text.as_str()
+        ),
+        ("Find the parser", "scout", Some("src/"), "Look.")
     );
 }
 
@@ -1031,10 +1068,14 @@ fn the_end_of_a_session_interrupts_running_tasks_and_leaves_queued_ones() {
         assert!(status.contains("0002-b · scout · queued"), "{status}");
     });
     assert!(started.elapsed() < std::time::Duration::from_secs(15));
-    let s = store(&tmp);
-    assert!(s.outcome("0001-a").is_none() && s.outcome("0002-b").is_none());
-    assert_eq!(s.state("0001-a").as_deref(), Some("interrupted"));
-    assert_eq!(s.state("0002-b"), None);
+    let tasks = board(&tmp).list().unwrap();
+    assert!(
+        tasks
+            .iter()
+            .all(|t| t.status.is_none() && t.running_on.is_none())
+    );
+    assert_eq!(tasks[0].interrupted_on.as_deref(), Some(NODE), "put back");
+    assert_eq!(tasks[1].interrupted_on, None, "never started");
 }
 
 #[test]
@@ -1043,11 +1084,20 @@ fn a_queued_task_can_be_cancelled_and_an_ended_one_does_not_run_again() {
     write_task(&tmp, "0001-a", "scout", "a");
     write_task(&tmp, "0002-b", "scout", "b");
     write_task(&tmp, "0003-c", "scout", "c");
-    std::fs::write(
-        tasks(&tmp).join("0003-c/result.md"),
-        "---\nstatus: done\n---\nalready\n",
-    )
-    .unwrap();
+    board(&tmp).take("0003-c", "laptop", 60).unwrap();
+    board(&tmp)
+        .end(
+            "0003-c",
+            "laptop",
+            End::Result {
+                status: TaskStatus::Done,
+                agent: "scout".into(),
+                started: "2026-11-17T00:00:00Z".into(),
+                extra: Vec::new(),
+                text: "already".into(),
+            },
+        )
+        .unwrap();
     session(&e, |ask| {
         until(ask, json!({"task": "0001-a"}), "running");
         let r = ask("cancel", json!({"task": "0002-b"}));
@@ -1061,32 +1111,33 @@ fn a_queued_task_can_be_cancelled_and_an_ended_one_does_not_run_again() {
         let r = ask("wait", json!({"task": "0003-c"}));
         assert!(r.contains("already"), "{r}");
     });
-    let s = store(&tmp);
+    let b = outcome(&tmp, "0002-b").unwrap();
+    assert_eq!(b.status, TaskStatus::Cancelled);
     assert_eq!(
-        s.outcome("0002-b").unwrap().status,
-        ensemble_tasks::tasks::Status::Cancelled
+        b.reply(),
+        "Cancelled before it started.\n",
+        "it never started"
     );
-    assert_eq!(s.state("0002-b"), None, "it never started");
-    assert_eq!(s.state("0003-c"), None, "it never ran again");
+    assert_eq!(
+        outcome(&tmp, "0003-c").unwrap().reply(),
+        "already\n",
+        "it never ran again"
+    );
 }
 #[test]
 fn a_task_starts_only_once_every_task_it_is_after_is_done() {
     let (e, tmp) = team(&[("coder", "read", BUSY)]);
     write_task(&tmp, "0001-a", "coder", "a");
-    let dir = tasks(&tmp).join("0002-b");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("task.md"),
-        "---\ntitle: b\nagent: coder\nafter: [0001-a]\n---\nb\n",
-    )
-    .unwrap();
-    let dir = tasks(&tmp).join("0003-c");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("task.md"),
-        "---\ntitle: c\nagent: coder\nafter: [0009-gone]\n---\nc\n",
-    )
-    .unwrap();
+    add_task(
+        &tmp,
+        "0002-b",
+        Ticket {
+            agent: "coder".into(),
+            after: vec!["0001-a".into()],
+            text: "b".into(),
+            ..Ticket::default()
+        },
+    );
     session(&e, |ask| {
         let status = until(ask, json!({"task": "0002-b"}), "blocked by 0001-a");
         assert!(status.contains("not done yet"), "{status}");
@@ -1094,8 +1145,6 @@ fn a_task_starts_only_once_every_task_it_is_after_is_done() {
             let r = ask("wait", json!({"task": id, "timeout_seconds": 20}));
             assert_eq!(r.lines().nth(6), Some("alone"), "{id}: {r}");
         }
-        let c = ask("status", json!({"task": "0003-c"}));
-        assert!(c.contains("blocked by 0009-gone (no such task)"), "{c}");
         let r = ask(
             "submit",
             json!({"agent": "coder", "title": "d", "task": "d", "after": ["0042"]}),
@@ -1106,9 +1155,9 @@ fn a_task_starts_only_once_every_task_it_is_after_is_done() {
             json!({"agent": "coder", "title": "e", "task": "e", "after": ["0001-a"],
                        "goal": "g", "done_when": ["x"]}),
         );
-        assert!(r.starts_with("task 0004-e queued"), "{r}");
+        assert!(r.starts_with("task 0003-e queued"), "{r}");
     });
-    let e = store(&tmp).read("0004-e").unwrap();
+    let e = board(&tmp).detail("0003-e").unwrap().unwrap().task.ticket;
     assert_eq!(
         (e.after, e.goal, e.done_when),
         (
@@ -1127,13 +1176,19 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
 "#;
     let (e, tmp) = team(&[("coder", "read, edit", fixer)]);
     let write = |id: &str, attempts: u32| {
-        let dir = tasks(&tmp).join(id);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-                dir.join("task.md"),
-                format!("---\ntitle: {id}\nagent: coder\ngate: {{name: done-file, attempts: {attempts}}}\n---\nMake done.txt.\n"),
-            )
-            .unwrap();
+        add_task(
+            &tmp,
+            id,
+            Ticket {
+                agent: "coder".into(),
+                gate: Some(GateRef {
+                    name: "done-file".into(),
+                    attempts,
+                }),
+                text: "Make done.txt.".into(),
+                ..Ticket::default()
+            },
+        );
     };
     write("0001-once", 1);
     session(&e, |ask| {
@@ -1186,13 +1241,20 @@ printf '{"type":"text","part":{"text":"edited"}}\n'
 "#;
     let (e, tmp) = team_with(&[("coder", "read, edit", writer)], 2, "worktree");
     ensemble_agents::worktree::testing::repo(&project(&tmp));
-    let dir = tasks(&tmp).join("0001-edit");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("task.md"),
-        "---\ntitle: Edit a.txt\nagent: coder\ngate: {name: done-file, attempts: 1}\n---\nEdit.\n",
-    )
-    .unwrap();
+    add_task(
+        &tmp,
+        "0001-edit",
+        Ticket {
+            title: "Edit".into(),
+            agent: "coder".into(),
+            gate: Some(GateRef {
+                name: "done-file".into(),
+                attempts: 1,
+            }),
+            text: "Edit.".into(),
+            ..Ticket::default()
+        },
+    );
     session(&e, |ask| {
         let r = ask("wait", json!({"task": "0001-edit", "timeout_seconds": 20}));
         assert!(r.starts_with("---\nstatus: done\n"), "{r}");
@@ -1232,7 +1294,7 @@ printf '{"type":"text","part":{"text":"edited"}}\n'
     };
     assert_eq!(
         git(&["log", "--format=%s", "-1", "ensemble/0001-edit"]).trim(),
-        "0001-edit: Edit a.txt"
+        "0001-edit: Edit"
     );
     let status = git(&["status", "--porcelain"]);
     assert!(!status.contains("worktrees"), "{status}");
@@ -1279,7 +1341,12 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
         let r = ask("answer", json!({"task": "0009", "answer": "x"}));
         assert!(r.contains("no task '0009'"), "{r}");
     });
-    let questions = std::fs::read_to_string(tasks(&tmp).join("0001-look/questions.md")).unwrap();
+    let (questions, _) = board(&tmp)
+        .detail("0001-look")
+        .unwrap()
+        .unwrap()
+        .conversation
+        .unwrap();
     assert!(
         questions.contains("Which parser?\n\n### Answer\nThe new one.\n"),
         "{questions}"
@@ -1309,8 +1376,8 @@ fn an_agent_over_its_budget_is_refused_and_its_tasks_wait() {
         let s = until(ask, json!({"task": "0001-a"}), "over its agent's budget");
         assert!(s.contains("0001-a · scout · queued"), "{s}");
     });
-    assert!(store(&tmp).outcome("0001-a").is_none());
-    let usage = store(&tmp).usage();
+    assert!(outcome(&tmp, "0001-a").is_none());
+    let usage = Runs::new(&project(&tmp).join(".ensemble")).usage();
     assert_eq!(usage["scout"].len(), 1, "{usage:?}");
 }
 
@@ -1348,7 +1415,10 @@ fn a_repo_outside_the_project_is_refused_by_delegate_and_submit() {
         );
         assert_eq!(r["result"]["isError"], true, "{repo}: {}", text_of(&r));
     }
-    assert!(!tasks(&tmp).exists(), "a refused task writes no ticket");
+    assert!(
+        board(&tmp).list().unwrap().is_empty(),
+        "a refused task is not kept"
+    );
 }
 
 #[test]
@@ -1395,7 +1465,7 @@ fn a_session_runs_no_tasks_while_another_worker_holds_the_folder() {
         let status = ask("status", json!({"task": "0001-look"}));
         assert!(status.contains("queued"), "no worker ran it: {status}");
     });
-    assert!(store(&tmp).outcome("0001-look").is_none());
+    assert!(outcome(&tmp, "0001-look").is_none());
 }
 
 #[test]
@@ -1512,11 +1582,13 @@ fn a_backlog_task_waits_for_an_assignee_and_then_runs_for_that_agent() {
         );
         assert!(none.contains("no agent"), "{none}");
     });
-    let ticket = std::fs::read_to_string(tasks(&tmp).join("0001-look-around/task.md")).unwrap();
-    assert!(
-        !ticket.contains("agent:"),
-        "task.md is never rewritten: {ticket}"
-    );
+    let ticket = board(&tmp)
+        .detail("0001-look-around")
+        .unwrap()
+        .unwrap()
+        .task
+        .ticket;
+    assert_eq!(ticket.agent, "scout");
 }
 
 #[test]
@@ -1537,7 +1609,12 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
         );
         assert!(r.contains("scout"), "the result names who finished it: {r}");
     });
-    let notes = std::fs::read_to_string(tasks(&tmp).join("0001-plan/handoffs.md")).unwrap();
+    let notes = board(&tmp)
+        .detail("0001-plan")
+        .unwrap()
+        .unwrap()
+        .handoffs
+        .unwrap();
     assert!(
         notes.contains("coder handed this to scout")
             && notes.contains("now check it against the code")
@@ -1678,9 +1755,12 @@ fn a_task_whose_agent_has_no_usable_model_waits_and_says_why() {
             "{status}"
         );
         assert!(
-            !project
-                .join(".ensemble/tasks/0001-sum-it/result.md")
-                .exists()
+            board_at(&project.join(".ensemble"))
+                .detail("0001-sum-it")
+                .unwrap()
+                .unwrap()
+                .outcome
+                .is_none()
         );
     });
 }

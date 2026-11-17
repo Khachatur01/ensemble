@@ -4,8 +4,8 @@
 //!
 //! - The node asks: `{"id": 1, "method": "share", "params": {...}}`.
 //! - The hub answers: `{"id": 1, "result": {...}}` or `{"id": 1, "error": "..."}`.
-//! - The hub may also tell: `{"event": "...", "data": {...}}`, unasked: how
-//!   tasks reach a node that has subscribed to them.
+//! - The hub may also tell: `{"event": "...", "data": {...}}`, unasked: a run
+//!   or a model call for a node that offers them.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -18,24 +18,48 @@ pub const SHARE: &str = "share";
 /// The notes about a topic: `{query}`.
 pub const RECALL: &str = "recall";
 
-/// Start receiving this account's tasks as events. Needs the `tasks`
-/// permission.
-pub const SUBSCRIBE: &str = "subscribe";
-/// A task was made for a delivery: `{delivery, task}`.
-pub const TASK_ACCEPT: &str = "task_accept";
-/// This computer cannot take a delivery: `{delivery, why}`.
-pub const TASK_REFUSE: &str = "task_refuse";
-/// A task has something to say: `{delivery, question}` or
-/// `{delivery, result: {status, text}}`.
-pub const TASK_UPDATE: &str = "task_update";
-/// An answer event was passed to its task: `{delivery}`.
-pub const ANSWER_TAKEN: &str = "answer_taken";
-
-/// Event: a task for this account, `{delivery, issue, title, body, project,
-/// labels, assignee}`.
-pub const TASK_EVENT: &str = "task";
-/// Event: the person answered a task's question, `{delivery, text}`.
-pub const ANSWER_EVENT: &str = "answer";
+/// The tasks the hub keeps for the signed-in account, by project (a working
+/// folder's name). Each of these takes `{project, ...}` and needs the `tasks`
+/// permission; `ensemble_tasks::board` says what each does.
+///
+/// Every task of the project: `{project}`, answered with `{tasks}`.
+pub const TASKS: &str = "tasks";
+/// One task, with its result, questions and hand-offs: `{project, id}`,
+/// answered with `{task}`, null when there is none.
+pub const TASK: &str = "task";
+/// A new task: `{project, ticket}`, answered with `{id}`.
+pub const TASK_CREATE: &str = "task_create";
+/// Run a task on this node, for a while: `{project, id, node, seconds}`,
+/// answered with `{claimed}` and, when not, `{why}`.
+pub const TASK_CLAIM: &str = "task_claim";
+/// Keep running it: `{project, id, node, seconds}`, answered with `{renewal}`:
+/// `kept`, `cancel` (someone cancelled it) or `lost` (another node has it).
+pub const TASK_RENEW: &str = "task_renew";
+/// Stop running it, unfinished, for any node to run again: `{project, id,
+/// node}`.
+pub const TASK_RELEASE: &str = "task_release";
+/// How a run ended: `{project, id, node, end}`.
+pub const TASK_FINISH: &str = "task_finish";
+/// Answer the question a task asked: `{project, id, text}`.
+pub const TASK_ANSWER: &str = "task_answer";
+/// Give a task to an agent: `{project, id, agent}`.
+pub const TASK_ASSIGN: &str = "task_assign";
+/// Cancel a task: `{project, id}`, answered with `{cancel}`: `before` it
+/// started, `running` (its node stops it) or `ended` already.
+pub const TASK_CANCEL: &str = "task_cancel";
+/// Every task method, for the server to pass on.
+pub const TASK_METHODS: [&str; 10] = [
+    TASKS,
+    TASK,
+    TASK_CREATE,
+    TASK_CLAIM,
+    TASK_RENEW,
+    TASK_RELEASE,
+    TASK_FINISH,
+    TASK_ANSWER,
+    TASK_ASSIGN,
+    TASK_CANCEL,
+];
 
 /// This connection is a node: `{name, access, agents: [{name, about}],
 /// models: [names]}`. A shared node needs the `host` permission. Answered
@@ -86,15 +110,10 @@ pub struct Event {
     pub data: Value,
 }
 
-/// What a hub server's task inbox offers the link, so the link knows nothing
-/// of trackers: the events waiting for an account's computers, and what a node
-/// says about its tasks.
-pub trait TaskRelay: Sync {
-    /// Events waiting for `user`'s computers, each with an id that names it
-    /// across connections, so a connection sends each one once.
-    fn pending(&self, user: &str) -> Vec<(String, Event)>;
-    /// A node's request about its tasks: `task_accept`, `task_refuse`,
-    /// `task_update` or `answer_taken`.
+/// The hub's tasks, as the link passes requests to them, so the link knows
+/// nothing of how they are kept.
+pub trait TaskService: Sync {
+    /// One of [`TASK_METHODS`], for `user`'s own tasks.
     fn handle(&self, user: &str, method: &str, params: &Value) -> Result<Value, String>;
 }
 

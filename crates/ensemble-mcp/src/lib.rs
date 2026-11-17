@@ -29,7 +29,7 @@ use ensemble_agents::router::Ensemble;
 use ensemble_knowledge::{KnowledgeAccess, RECALL, RECALL_HEADER, recalled_within};
 use ensemble_tasks::delegation;
 use ensemble_tasks::queue::Queue;
-use ensemble_tasks::tasks::Store;
+use ensemble_tasks::runs::Runs;
 use serde_json::{Value, json};
 
 use ensemble_agents::runtime;
@@ -378,10 +378,10 @@ pub async fn serve_session(
 /// `memory`, when the session has a hub that keeps knowledge.
 pub fn queue_for<'s>(
     ensemble: &'s Ensemble,
-    store: Option<Store>,
+    runs: Option<Runs>,
     memory: Option<&'s dyn KnowledgeAccess>,
 ) -> Queue<'s> {
-    let queue = Queue::new(ensemble, store);
+    let queue = Queue::new(ensemble, runs);
     let Some(memory) = memory else {
         return queue;
     };

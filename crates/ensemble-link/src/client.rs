@@ -1,7 +1,7 @@
-//! The node's side of the link: one WebSocket to a hub server ([`Connection`]),
-//! and a hub server's knowledge over it, used by an agent session as if the vault
-//! were here ([`RemoteMemory`]), opened when it is first needed and opened
-//! again once when it breaks.
+//! The node's side of the link: one WebSocket to a hub server ([`Connection`]);
+//! a link that opens one when it is first needed, and again once when it breaks
+//! ([`Link`]); and a hub server's knowledge over it, used by an agent session as
+//! if the vault were here ([`RemoteMemory`]).
 
 use crate::protocol::{Event, HELLO, RECALL, Reply, Request, SHARE};
 use async_trait::async_trait;
@@ -179,26 +179,20 @@ pub struct Hello {
     pub instructions: String,
 }
 
-/// A hub server's knowledge, over the link.
-pub struct RemoteMemory {
+/// A hub server, asked one request at a time over one WebSocket, opened when
+/// it is first needed and once more when it broke since.
+pub struct Link {
     url: String,
     token: String,
-    /// The working folder's name, never its path.
-    project: Option<String>,
-    client: Mutex<Option<String>>,
     socket: tokio::sync::Mutex<Option<Connection>>,
-    hello: Mutex<Option<Hello>>,
 }
 
-impl RemoteMemory {
-    pub fn new(url: &str, token: &str, project: Option<String>) -> Self {
-        RemoteMemory {
+impl Link {
+    pub fn new(url: &str, token: &str) -> Self {
+        Link {
             url: crate::tokens::normal(url),
             token: token.trim().to_string(),
-            project,
-            client: Mutex::new(None),
             socket: tokio::sync::Mutex::new(None),
-            hello: Mutex::new(None),
         }
     }
 
@@ -206,20 +200,8 @@ impl RemoteMemory {
         &self.url
     }
 
-    /// Who the node is on the hub; asked once, then remembered.
-    pub async fn hello(&self) -> Result<Hello, String> {
-        if let Some(hello) = self.hello.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-            return Ok(hello);
-        }
-        let v = self.ask(HELLO, json!({})).await?;
-        let hello = hello_from(&v);
-        *self.hello.lock().unwrap_or_else(|e| e.into_inner()) = Some(hello.clone());
-        Ok(hello)
-    }
-
-    /// Ask the hub, opening the link when it is not open, and once more when
-    /// it broke since.
-    async fn ask(&self, method: &str, params: Value) -> Result<Value, String> {
+    /// Ask the hub and wait for its answer.
+    pub async fn ask(&self, method: &str, params: Value) -> Result<Value, String> {
         let mut socket = self.socket.lock().await;
         for attempt in 0..2 {
             if socket.is_none() {
@@ -238,6 +220,52 @@ impl RemoteMemory {
             }
         }
         unreachable!("the loop returns")
+    }
+
+    /// Close the connection, if one is open; the next request opens another.
+    pub async fn close(&self) {
+        if let Some(mut link) = self.socket.lock().await.take() {
+            link.close().await;
+        }
+    }
+}
+
+/// A hub server's knowledge, over the link.
+pub struct RemoteMemory {
+    link: Link,
+    /// The working folder's name, never its path.
+    project: Option<String>,
+    client: Mutex<Option<String>>,
+    hello: Mutex<Option<Hello>>,
+}
+
+impl RemoteMemory {
+    pub fn new(url: &str, token: &str, project: Option<String>) -> Self {
+        RemoteMemory {
+            link: Link::new(url, token),
+            project,
+            client: Mutex::new(None),
+            hello: Mutex::new(None),
+        }
+    }
+
+    pub fn url(&self) -> &str {
+        self.link.url()
+    }
+
+    /// Who the node is on the hub; asked once, then remembered.
+    pub async fn hello(&self) -> Result<Hello, String> {
+        if let Some(hello) = self.hello.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            return Ok(hello);
+        }
+        let v = self.ask(HELLO, json!({})).await?;
+        let hello = hello_from(&v);
+        *self.hello.lock().unwrap_or_else(|e| e.into_inner()) = Some(hello.clone());
+        Ok(hello)
+    }
+
+    async fn ask(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.link.ask(method, params).await
     }
 }
 
@@ -312,7 +340,7 @@ impl KnowledgeAccess for RemoteMemory {
                         format!(
                             "Shared as {} on the hub {}. It turns it into notes in the background.",
                             v["id"].as_str().unwrap_or("?"),
-                            self.url
+                            self.url()
                         )
                     }),
                 )
@@ -337,7 +365,7 @@ impl KnowledgeAccess for RemoteMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::tests::start;
+    use crate::server::testing::start;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_members_session_shares_and_recalls_on_the_hub() {
@@ -394,7 +422,7 @@ mod tests {
         let m = RemoteMemory::new(&hub.url, &hub.ana, None);
         m.hello().await.unwrap();
         // Break it from this side: the next request opens a new one.
-        if let Some(link) = m.socket.lock().await.as_mut() {
+        if let Some(link) = m.link.socket.lock().await.as_mut() {
             link.close().await;
         }
         let notes = m.call("recall", &json!({"query": "deploy"})).await.unwrap();
@@ -403,114 +431,61 @@ mod tests {
 }
 
 #[cfg(test)]
-mod relay_tests {
+mod task_tests {
     use super::*;
-    use crate::protocol::{SUBSCRIBE, TASK_ACCEPT, TaskRelay};
-    use crate::server::tests::start_with;
+    use crate::protocol::{TASK_METHODS, TASKS, TaskService};
+    use crate::server::testing::start_with;
 
-    /// Events for ana, and what nodes told it.
+    /// What nodes asked of the tasks.
     #[derive(Default)]
-    struct FakeRelay {
-        events: Mutex<Vec<(String, Event)>>,
+    struct FakeTasks {
         heard: Mutex<Vec<(String, String, Value)>>,
     }
 
-    impl TaskRelay for FakeRelay {
-        fn pending(&self, user: &str) -> Vec<(String, Event)> {
-            if user == "ana" {
-                self.events.lock().unwrap().clone()
-            } else {
-                Vec::new()
-            }
-        }
+    impl TaskService for FakeTasks {
         fn handle(&self, user: &str, method: &str, params: &Value) -> Result<Value, String> {
             self.heard
                 .lock()
                 .unwrap()
                 .push((user.into(), method.into(), params.clone()));
-            Ok(json!({ "ok": true }))
+            Ok(json!({ "tasks": [] }))
         }
-    }
-
-    fn event(id: &str) -> (String, Event) {
-        (
-            id.into(),
-            Event {
-                event: "task".into(),
-                data: json!({ "delivery": id }),
-            },
-        )
-    }
-
-    /// The next event within `wait`, if one comes.
-    async fn within(link: &mut Connection, wait: Duration) -> Option<Event> {
-        tokio::time::timeout(wait, link.next_event())
-            .await
-            .ok()
-            .map(Result::unwrap)
-    }
-
-    /// The deliveries of the events that come within `wait`.
-    async fn deliveries(link: &mut Connection, wait: Duration) -> Vec<String> {
-        let mut out = Vec::new();
-        while let Some(e) = within(link, wait).await {
-            out.push(e.data["delivery"].as_str().unwrap().to_string());
-        }
-        out
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_subscribed_node_gets_each_event_once_and_again_after_reconnecting() {
-        let relay: &'static FakeRelay = Box::leak(Box::default());
-        relay.events.lock().unwrap().push(event("d1"));
-        let hub = start_with(Some(relay));
-        let wait = Duration::from_millis(1500);
-        let mut link = Connection::open(&hub.url, &hub.ana).await.unwrap();
-        assert!(
-            within(&mut link, wait).await.is_none(),
-            "nothing before subscribing"
-        );
-        link.call(SUBSCRIBE, json!({})).await.unwrap();
-        assert_eq!(deliveries(&mut link, wait).await, vec!["d1"]);
-        relay.events.lock().unwrap().push(event("d2"));
-        assert_eq!(
-            deliveries(&mut link, wait).await,
-            vec!["d2"],
-            "d1 is not sent twice on one connection"
-        );
-        link.call(TASK_ACCEPT, json!({"delivery": "d1", "task": "3"}))
+    async fn task_requests_reach_the_service_as_the_signed_in_account() {
+        let tasks: &'static FakeTasks = Box::leak(Box::default());
+        let hub = start_with(Some(tasks));
+        let link = Link::new(&hub.url, &hub.ana);
+        let v = link
+            .ask(TASKS, json!({"project": "shop", "owner": "mallory"}))
             .await
             .unwrap();
-        let heard = relay.heard.lock().unwrap().clone();
+        assert_eq!(v, json!({ "tasks": [] }));
+        let heard = tasks.heard.lock().unwrap().clone();
         assert_eq!(
             heard,
             vec![(
                 "ana".to_string(),
-                TASK_ACCEPT.to_string(),
-                json!({"delivery": "d1", "task": "3"})
-            )]
+                TASKS.to_string(),
+                json!({"project": "shop", "owner": "mallory"})
+            )],
+            "the account is the token's, never one the node sends"
         );
-
-        let mut again = Connection::open(&hub.url, &hub.ana).await.unwrap();
-        again.call(SUBSCRIBE, json!({})).await.unwrap();
-        let mut got = deliveries(&mut again, wait).await;
-        got.sort();
-        assert_eq!(got, vec!["d1", "d2"], "a new connection hears them again");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_token_without_the_tasks_permission_cannot_subscribe() {
-        let relay: &'static FakeRelay = Box::leak(Box::default());
-        let hub = start_with(Some(relay));
-        let mut link = Connection::open(&hub.url, &hub.rex).await.unwrap();
-        let err = link.call(SUBSCRIBE, json!({})).await.unwrap_err().message();
-        assert!(err.contains("do not allow `tasks`"), "{err}");
-        let err = link
-            .call(TASK_ACCEPT, json!({"delivery": "d1", "task": "3"}))
-            .await
-            .unwrap_err()
-            .message();
-        assert!(err.contains("do not allow `tasks`"), "{err}");
-        assert!(relay.heard.lock().unwrap().is_empty());
+    async fn a_token_without_the_tasks_permission_reaches_no_task() {
+        let tasks: &'static FakeTasks = Box::leak(Box::default());
+        let hub = start_with(Some(tasks));
+        let link = Link::new(&hub.url, &hub.rex);
+        for method in TASK_METHODS {
+            let err = link
+                .ask(method, json!({"project": "shop"}))
+                .await
+                .unwrap_err();
+            assert!(err.contains("do not allow `tasks`"), "{method}: {err}");
+        }
+        assert!(tasks.heard.lock().unwrap().is_empty());
     }
 }

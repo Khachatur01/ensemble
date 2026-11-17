@@ -1,16 +1,16 @@
-//! Work the caller does not wait for: tasks from the state directory's `tasks/`, and
-//! background delegations.
+//! Work the caller does not wait for: tasks, and background delegations.
 //!
 //! A blocking `delegate` holds the caller's tool call open for as long as the
 //! agent runs, and the caller's MCP client may give up on it long before that.
 //! Two things here avoid that:
 //!
-//! - A **task** is a ticket on disk ([`crate::tasks`]). The manager writes one
-//!   with `submit`, or a person or an inbox writes one. While the folder's
-//!   worker runs ([`Queue::work`], in the node), it
-//!   starts every task that has no result yet, oldest id first, as its agent's
-//!   slots allow, and writes `result.md` when it ends. A task the worker's end
-//!   interrupts has no result, so it runs again next time.
+//! - A **task** is a ticket kept on the hub ([`crate::board`]). The manager
+//!   writes one with `submit`, or a person or the hub's inbox does. While the
+//!   folder's worker runs ([`Queue::work`], in the node), it claims every task
+//!   of the folder's project that may start, oldest id first, as its agent's
+//!   slots allow, renews its claim while the agent works, and tells the hub
+//!   how the run ended. A task the worker's end interrupts is put back, and a
+//!   node that dies stops renewing, so either way another run takes it up.
 //! - A **background delegation** (`delegate` with `background`) is a one-off:
 //!   it answers at once with an id (`adhoc-N`), and what it did is kept in
 //!   memory and in the git-ignored `runs/` only.
@@ -24,9 +24,11 @@
 //! its agent first, so `max_concurrent` means what it says.
 
 use super::delegation::{ToolResult, run_delegation};
+use crate::board::{Board, Cancelled, Claim, End, LEASE, Renewal};
+use crate::runs::Runs;
 use crate::tasks::{
-    ASK_MARKER, Entry, HANDOFF_MARKER, Status, Store, Ticket, handoff_in, idle_line, minutes,
-    question_in, waiting_for,
+    ASK_MARKER, Detail, HANDOFF_MARKER, Status, Task, Ticket, entry_line, handoff_in, idle_line,
+    minutes, question_in, utc, waiting_for,
 };
 use ensemble_agents::external::gate;
 use ensemble_agents::router::Ensemble;
@@ -51,8 +53,10 @@ const KEPT_LINES: usize = 8;
 const LISTED_LINES: usize = 3;
 /// Ended tasks shown when listing every task; older ones are counted.
 const LISTED_ENDED: usize = 10;
-/// How often the worker looks for tasks written by hand.
+/// How often the worker looks at the hub for tasks that may start.
 const SCAN_EVERY: Duration = Duration::from_secs(2);
+/// How many times a run's end is told to the hub before it is given up.
+const FINISH_ATTEMPTS: u32 = 3;
 /// How often a delegation waiting for a slot checks whether it was cancelled.
 const SLOT_POLL: Duration = Duration::from_millis(200);
 
@@ -90,6 +94,16 @@ struct Adhoc {
 /// One run of [`Queue::work`]: a task or a background delegation.
 type Run<'q> = Pin<Box<dyn Future<Output = ()> + Send + 'q>>;
 
+/// What one look found to start.
+struct Looked<'q> {
+    adhoc: Vec<Adhoc>,
+    /// Tasks claimed on the board, each with a slot of its agent and the flag
+    /// that stops it.
+    claimed: Vec<(Ticket, Slot<'q>, Arc<AtomicBool>)>,
+    /// The caller is gone: nothing new starts.
+    closed: bool,
+}
+
 #[derive(Default)]
 struct Inner {
     /// Set by `close`: the caller is gone, and nothing new starts.
@@ -111,6 +125,9 @@ struct Inner {
     /// Tasks already noted as waiting for a backend, so the note is written
     /// once per wait, not once per scan.
     backend_waits: HashSet<String>,
+    /// Whether the hub could not be reached at the last look, so that is said
+    /// once, not every few seconds.
+    board_down: bool,
 }
 
 /// A delegation that stopped to ask, kept so that an answer can resume it. It
@@ -151,12 +168,24 @@ pub type Recall<'e> =
 /// The most of a task's text used as the topic of a recall.
 const MAX_TOPIC_CHARS: usize = 1000;
 
-/// The tasks and background delegations of one session.
+/// Whether a folder's worker runs its project's tasks now: when a computer
+/// has two folders of one name, only the one used last does.
+pub type Turn<'e> = dyn Fn() -> bool + Send + Sync + 'e;
+
+/// The tasks and background delegations of one folder.
 pub struct Queue<'e> {
     ensemble: &'e Ensemble,
-    /// Where tasks live. Without one (a request handled outside a session)
-    /// there are no tasks, and background delegations are kept in memory.
-    store: Option<Store>,
+    /// Where the folder's project's tasks are kept: on the node's hub.
+    /// Without one there are no tasks, and only background delegations run.
+    board: Option<Box<dyn Board + 'e>>,
+    /// This node's name, which its claims on tasks carry.
+    node: String,
+    /// How long a claim lasts unless renewed.
+    lease: Duration,
+    turn: Option<Box<Turn<'e>>>,
+    /// What this node keeps of its runs here: logs, worktrees, usage. Without
+    /// it (a request handled outside a session) runs are kept in memory.
+    runs: Option<Runs>,
     /// The session's hub knowledge, for agents given notes with their tasks.
     recall: Option<Box<Recall<'e>>>,
     inner: Mutex<Inner>,
@@ -184,12 +213,16 @@ impl Drop for Slot<'_> {
 }
 
 impl<'e> Queue<'e> {
-    pub fn new(ensemble: &'e Ensemble, store: Option<Store>) -> Self {
-        let last_adhoc = store.as_ref().map_or(0, Store::last_adhoc);
-        let usage = store.as_ref().map(Store::usage).unwrap_or_default();
+    pub fn new(ensemble: &'e Ensemble, runs: Option<Runs>) -> Self {
+        let last_adhoc = runs.as_ref().map_or(0, Runs::last_adhoc);
+        let usage = runs.as_ref().map(Runs::usage).unwrap_or_default();
         Queue {
             ensemble,
-            store,
+            board: None,
+            node: String::new(),
+            lease: LEASE,
+            turn: None,
+            runs,
             recall: None,
             inner: Mutex::new(Inner {
                 last_adhoc,
@@ -198,6 +231,53 @@ impl<'e> Queue<'e> {
             }),
             changed: Notify::new(),
         }
+    }
+
+    /// This queue, with the tasks of `board`, run as the node `node`.
+    pub fn with_board(mut self, board: impl Board + 'e, node: &str) -> Self {
+        self.board = Some(Box::new(board));
+        self.node = node.to_string();
+        self
+    }
+
+    /// Claims that last `lease` unless renewed, in place of [`LEASE`].
+    pub fn with_lease(mut self, lease: Duration) -> Self {
+        self.lease = lease;
+        self
+    }
+
+    /// Run the board's tasks only while `turn` says so.
+    pub fn with_turn(mut self, turn: impl Fn() -> bool + Send + Sync + 'e) -> Self {
+        self.turn = Some(Box::new(turn));
+        self
+    }
+
+    /// Where the tasks are kept, when they are.
+    pub fn board(&self) -> Option<&dyn Board> {
+        self.board.as_deref()
+    }
+
+    /// What this node keeps of its runs here, when it keeps them.
+    pub fn runs(&self) -> Option<&Runs> {
+        self.runs.as_ref()
+    }
+
+    /// The board, or why there are no tasks.
+    fn tasks(&self) -> Result<&dyn Board, ToolResult> {
+        self.board.as_deref().ok_or_else(|| {
+            ToolResult::err(
+                "tasks are kept on a hub, and this node names none: add `hub:` to \
+                 ~/.config/ensemble/node/node.yaml and sign in with `ensemble login`. Without \
+                 one, `delegate` with `background: true` runs work you do not wait for.",
+            )
+        })
+    }
+
+    /// Every task of the board, or why they cannot be read.
+    async fn all(&self, board: &dyn Board) -> Result<Vec<Task>, ToolResult> {
+        board.scan().await.map_err(|e| {
+            ToolResult::err(format!("cannot read the tasks on {}: {e}", board.place()))
+        })
     }
 
     /// This queue, with the agents that have `recall` given what `recall`
@@ -377,11 +457,11 @@ impl<'e> Queue<'e> {
             return Ok(());
         }
         let now = unix_now();
-        let runs = inner.usage.entry(self.key(agent)).or_default();
-        runs.retain(|t| now < t + HOUR);
-        runs.push(now);
-        if let Some(store) = &self.store {
-            store.save_usage(&inner.usage);
+        let started = inner.usage.entry(self.key(agent)).or_default();
+        started.retain(|t| now < t + HOUR);
+        started.push(now);
+        if let Some(runs) = &self.runs {
+            runs.save_usage(&inner.usage);
         }
         Ok(())
     }
@@ -445,8 +525,8 @@ impl<'e> Queue<'e> {
             }
             live.recent.push_back(line.to_string());
         }
-        if let Some(store) = &self.store {
-            store.log(id, line);
+        if let Some(runs) = &self.runs {
+            runs.log(id, line);
         }
     }
 
@@ -545,11 +625,10 @@ impl<'e> Queue<'e> {
     }
 
     /// Run what this queue is given until it is closed and nothing it runs
-    /// is left: background delegations, and with `tasks`, every task without
-    /// a result, oldest id first, as its agent's slots allow. Tasks are
-    /// looked for again every few seconds, and at once when one is submitted
-    /// or a run ends. Only the one process that holds the folder's lock runs
-    /// its tasks.
+    /// is left: background delegations, and with `tasks`, every task of the
+    /// board that may start, oldest id first, as its agent's slots allow.
+    /// The board is looked at again every few seconds, and at once when a
+    /// task is submitted or a run ends.
     pub async fn work(&self, tasks: bool) {
         self.drive(tasks, false).await;
     }
@@ -560,73 +639,70 @@ impl<'e> Queue<'e> {
         self.drive(false, true).await;
     }
 
+    /// Whether `task` may start here: assigned, not ended, not asking, not
+    /// waiting for another task, and not running on another node.
+    fn may_start(&self, task: &Task, all: &[Task]) -> bool {
+        task.status.is_none()
+            && !task.ticket.agent.is_empty()
+            && task.question.is_none()
+            && task.running_on.as_ref().is_none_or(|n| *n == self.node)
+            && waiting_for(&task.ticket, all).is_empty()
+    }
+
+    /// The board's tasks, when this worker runs them now. A board that
+    /// cannot be reached is said once, until it can again.
+    async fn startable(&self, tasks: bool) -> (Option<&dyn Board>, Vec<Task>) {
+        let board = self
+            .board
+            .as_deref()
+            .filter(|_| tasks && self.turn.as_ref().is_none_or(|turn| turn()));
+        let Some(board) = board else {
+            return (None, Vec::new());
+        };
+        match board.scan().await {
+            Ok(all) => {
+                self.lock().board_down = false;
+                (Some(board), all)
+            }
+            Err(e) => {
+                let mut inner = self.lock();
+                if !inner.board_down {
+                    inner.board_down = true;
+                    eprintln!(
+                        "ensemble: cannot read the tasks on {}: {e}; trying again",
+                        board.place()
+                    );
+                }
+                (Some(board), Vec::new())
+            }
+        }
+    }
+
     async fn drive(&self, tasks: bool, until_idle: bool) {
         let mut runs: FuturesUnordered<Run<'_>> = FuturesUnordered::new();
         loop {
             let changed = self.watch();
-            let store = self.store.as_ref().filter(|_| tasks);
-            let entries = store.map(Store::scan).unwrap_or_default();
-            // Agents whose tasks wait for a backend (`when_none: wait` and no
-            // usable model), found before the lock is taken: asking a backend
-            // can take seconds. Each backend is asked at most once a minute.
-            let mut blocked: HashMap<&str, Option<String>> = HashMap::new();
-            for entry in &entries {
-                if let Entry::Task(t, None) = entry
-                    && !t.agent.is_empty()
-                    && !blocked.contains_key(t.agent.as_str())
-                {
-                    let ready = blocking(|| self.ensemble.backend_ready(&t.agent));
-                    blocked.insert(&t.agent, ready.err());
+            // The runs go on while the board is looked at: a run renewing its
+            // claim and the look share one link to the hub.
+            let look = self.look(tasks);
+            tokio::pin!(look);
+            let looked = loop {
+                tokio::select! {
+                    looked = &mut look => break looked,
+                    Some(()) = runs.next(), if !runs.is_empty() => {}
                 }
+            };
+            for adhoc in looked.adhoc {
+                runs.push(Box::pin(self.run_adhoc(adhoc)));
             }
-            {
-                let mut inner = self.lock();
-                for adhoc in inner.started.drain(..) {
-                    runs.push(Box::pin(self.run_adhoc(adhoc)));
-                }
-                if runs.is_empty() && (inner.closed || until_idle) {
-                    return;
-                }
-                let open = !inner.closed;
-                for entry in entries.iter().filter(|_| open) {
-                    let (Some(store), Entry::Task(ticket, None)) = (store, entry) else {
-                        continue;
-                    };
-                    // Ended since the scan: a result is written before its run
-                    // leaves `live`, under this lock.
-                    if inner.live.contains_key(&ticket.id)
-                        || ticket.agent.is_empty()
-                        || store.outcome(&ticket.id).is_some()
-                        || !waiting_for(ticket, &entries).is_empty()
-                        || store.open_question(&ticket.id).is_some()
-                    {
-                        continue;
-                    }
-                    if let Some(Some(why)) = blocked.get(ticket.agent.as_str()) {
-                        if inner.backend_waits.insert(ticket.id.clone()) {
-                            store.log(&ticket.id, &format!("waiting for a backend: {why}"));
-                        }
-                        continue;
-                    }
-                    let ticket = ticket.clone();
-                    if self.over_budget(&inner, &ticket.agent).is_some() {
-                        continue;
-                    }
-                    let Some(slot) = self.take(&mut inner, &ticket.agent) else {
-                        continue;
-                    };
-                    // Cannot fail: the budget was checked under this same lock.
-                    let _ = self.spend_locked(&mut inner, &ticket.agent);
-                    inner.backend_waits.remove(&ticket.id);
-                    let cancel = Arc::new(AtomicBool::new(false));
-                    inner.live.insert(
-                        ticket.id.clone(),
-                        Self::live(&ticket.agent, &ticket.title, cancel.clone(), false),
-                    );
-                    runs.push(Box::pin(async move {
-                        self.run_ticket(store, *ticket, slot, &cancel).await
-                    }));
-                }
+            for (ticket, slot, cancel) in looked.claimed {
+                let board = self.board.as_deref().expect("claimed on the board");
+                runs.push(Box::pin(async move {
+                    self.run_ticket(board, ticket, slot, &cancel).await
+                }));
+            }
+            if runs.is_empty() && (looked.closed || until_idle) {
+                return;
             }
             tokio::select! {
                 Some(()) = runs.next(), if !runs.is_empty() => {}
@@ -636,9 +712,153 @@ impl<'e> Queue<'e> {
         }
     }
 
-    async fn run_ticket(&self, store: &Store, ticket: Ticket, slot: Slot<'_>, cancel: &AtomicBool) {
+    /// One look at what to start: the background delegations started since
+    /// the last, and the board's tasks that may start, each claimed with a
+    /// slot of its agent taken.
+    async fn look(&self, tasks: bool) -> Looked<'_> {
+        let (board, all) = self.startable(tasks).await;
+        // Agents whose tasks wait for a backend (`when_none: wait` and no
+        // usable model), found before the lock is taken: asking a backend
+        // can take seconds. Each backend is asked at most once a minute.
+        let mut blocked: HashMap<&str, Option<String>> = HashMap::new();
+        for task in all.iter().filter(|t| self.may_start(t, &all)) {
+            let agent = task.ticket.agent.as_str();
+            if !blocked.contains_key(agent) {
+                let ready = blocking(|| self.ensemble.backend_ready(agent));
+                blocked.insert(agent, ready.err());
+            }
+        }
+        // Taken a slot for, to claim on the board.
+        let mut picked = Vec::new();
+        let (adhoc, closed) = {
+            let mut inner = self.lock();
+            let adhoc = std::mem::take(&mut inner.started);
+            let closed = inner.closed;
+            for task in all.iter().filter(|_| !closed) {
+                let ticket = &task.ticket;
+                if inner.live.contains_key(&ticket.id) || !self.may_start(task, &all) {
+                    continue;
+                }
+                if let Some(Some(why)) = blocked.get(ticket.agent.as_str()) {
+                    if inner.backend_waits.insert(ticket.id.clone())
+                        && let Some(runs) = &self.runs
+                    {
+                        runs.log(&ticket.id, &format!("waiting for a backend: {why}"));
+                    }
+                    continue;
+                }
+                if self.over_budget(&inner, &ticket.agent).is_some() {
+                    continue;
+                }
+                let Some(slot) = self.take(&mut inner, &ticket.agent) else {
+                    continue;
+                };
+                let cancel = Arc::new(AtomicBool::new(false));
+                inner.live.insert(
+                    ticket.id.clone(),
+                    Self::live(&ticket.agent, &ticket.title, cancel.clone(), false),
+                );
+                picked.push((ticket.clone(), slot, cancel));
+            }
+            (adhoc, closed)
+        };
+        let mut claimed = Vec::new();
+        for (ticket, slot, cancel) in picked {
+            let Some(board) = board else { break };
+            match board.claim(&ticket.id, &self.node, self.lease).await {
+                Ok(Claim::Taken) => {
+                    let mut inner = self.lock();
+                    // Checked under the lock above; a run that started since
+                    // may have used the last place, which is counted all the
+                    // same.
+                    let _ = self.spend_locked(&mut inner, &ticket.agent);
+                    inner.backend_waits.remove(&ticket.id);
+                    claimed.push((ticket, slot, cancel));
+                }
+                // Another node was first, or the hub could not be asked: the
+                // next look tries again.
+                Ok(Claim::Refused(_)) | Err(_) => {
+                    self.lock().live.remove(&ticket.id);
+                    drop(slot);
+                }
+            }
+        }
+        Looked {
+            adhoc,
+            claimed,
+            closed,
+        }
+    }
+
+    /// Keep this node's claim on task `id` while it runs: renewed four times
+    /// a lease. Someone cancelling the task, or the claim lost to another
+    /// node (or not renewed for a whole lease), stops the run through
+    /// `cancel`; a lost claim also sets `lost`. Never resolves.
+    async fn hold(&self, board: &dyn Board, id: &str, cancel: &AtomicBool, lost: &AtomicBool) {
+        let mut failing: Option<Instant> = None;
+        loop {
+            tokio::time::sleep(self.lease / 4).await;
+            match board.renew(id, &self.node, self.lease).await {
+                Ok(Renewal::Kept) => failing = None,
+                Ok(Renewal::Cancel) => {
+                    if let Some(live) = self.lock().live.get_mut(id) {
+                        live.asked = true;
+                    }
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                Ok(Renewal::Lost) => {
+                    lost.store(true, Ordering::Relaxed);
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    if failing.get_or_insert_with(Instant::now).elapsed() >= self.lease {
+                        lost.store(true, Ordering::Relaxed);
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Tell the board how a run of `id` ended, trying again when the hub
+    /// cannot be reached; a run whose end is never told is run again once its
+    /// claim runs out.
+    async fn tell(&self, board: &dyn Board, id: &str, end: Option<End>) {
+        let mut said = String::new();
+        for attempt in 1..=FINISH_ATTEMPTS {
+            let told = match &end {
+                Some(end) => board.finish(id, &self.node, end.clone()).await,
+                None => board.release(id, &self.node).await,
+            };
+            match told {
+                Ok(()) => return,
+                Err(e) => said = e,
+            }
+            if attempt < FINISH_ATTEMPTS {
+                tokio::time::sleep(SCAN_EVERY).await;
+            }
+        }
+        self.note(
+            id,
+            &format!("the hub was not told how this run ended: {said}"),
+        );
+        eprintln!(
+            "ensemble: {}: cannot tell {} how {id} ended: {said}",
+            self.node,
+            board.place()
+        );
+    }
+
+    async fn run_ticket(
+        &self,
+        board: &dyn Board,
+        ticket: Ticket,
+        slot: Slot<'_>,
+        cancel: &AtomicBool,
+    ) {
         let since = SystemTime::now();
-        store.set_state(&ticket.id, "running", since);
+        // What it asked and was answered, and what earlier agents handed on.
+        let detail = board.get(&ticket.id).await.ok().flatten();
         let place = self
             .ensemble
             .workdir()
@@ -654,17 +874,30 @@ impl<'e> Queue<'e> {
                             &ticket.id,
                             &format!("{}: preparing a git worktree", ticket.agent),
                         );
-                        blocking(|| worktree::prepare(&project, store.root(), &ticket.id))
+                        let root = self
+                            .runs
+                            .as_ref()
+                            .map(|r| r.root().to_path_buf())
+                            .ok_or("no state directory for a worktree")?;
+                        blocking(|| worktree::prepare(&project, &root, &ticket.id))
                             .map(|wt| (wt.dir.clone(), Some(wt)))
                     }
                     _ => Ok((project, None)),
                 },
             );
-        let (mut result, mut extra) = match &place {
-            Ok((dir, _)) => self.work_on(store, &ticket, dir, cancel).await,
-            Err(e) => (ToolResult::err(e.clone()), Vec::new()),
+        let lost = AtomicBool::new(false);
+        let work = async {
+            match &place {
+                Ok((dir, _)) => self.work_on(&ticket, detail.as_ref(), dir, cancel).await,
+                Err(e) => (ToolResult::err(e.clone()), Vec::new()),
+            }
+        };
+        let (mut result, mut extra) = tokio::select! {
+            done = work => done,
+            () = self.hold(board, &ticket.id, cancel, &lost) => unreachable!("holding never ends"),
         };
         drop(slot);
+        let lost = lost.load(Ordering::Relaxed);
         // Commit the work on the task's branch, unless the session ended under
         // it: then the worktree is left as it is, for the next session.
         let asked = self.lock().live.get(&ticket.id).is_some_and(|l| l.asked);
@@ -699,9 +932,6 @@ impl<'e> Queue<'e> {
                 &ticket.id,
                 &format!("{}: needs input: {question}", ticket.agent),
             );
-            if let Err(e) = store.ask(&ticket.id, question, &result.text) {
-                eprintln!("ensemble: cannot write the question of {}: {e}", ticket.id);
-            }
         }
         if let Ok((_, Some(wt))) = &place
             && !interrupted_now
@@ -726,43 +956,35 @@ impl<'e> Queue<'e> {
             };
             result.text = format!("{}\n{note}", result.text);
         }
-        let mut inner = self.lock();
-        if interrupted_now {
-            // The session ended under it: no result, so the next session
-            // runs it again.
-            store.set_state(&ticket.id, "interrupted", since);
-        } else if question.is_some() {
-            store.set_state(&ticket.id, "needs-input", since);
-        } else if let Some((to, note)) = &handoff {
-            match store
-                .append_handoff(&ticket.id, &ticket.agent, to, note, &result.text)
-                .and_then(|()| store.assign(&ticket.id, to))
-            {
-                Ok(()) => {
-                    // The lock is held here, so the log is written directly.
-                    store.log(
-                        &ticket.id,
-                        &format!("{} handed the task to {to}", ticket.agent),
-                    );
-                    store.set_state(&ticket.id, "queued", since);
-                }
-                Err(e) => {
-                    eprintln!("ensemble: cannot hand {} to {to}: {e}", ticket.id);
-                    store.set_state(&ticket.id, "failed", since);
-                    let text = format!(
-                        "{}\n\n[the hand-off to {to} could not be written: {e}]",
-                        result.text
-                    );
-                    let _ = store.write_result(
-                        &ticket.id,
-                        &ticket.agent,
-                        Status::Failed,
-                        since,
-                        &extra,
-                        &text,
-                    );
-                }
-            }
+        let end = if lost {
+            // Another node runs it now; what this run did stays here.
+            self.note(
+                &ticket.id,
+                &format!(
+                    "{}: stopped: this node's claim on the task ran out, and another node runs it now",
+                    ticket.agent
+                ),
+            );
+            None
+        } else if interrupted_now {
+            // The session ended under it: put back, to run again.
+            Some(None)
+        } else if let Some(question) = question {
+            Some(Some(End::Ask {
+                question,
+                reply: result.text.clone(),
+            }))
+        } else if let Some((to, note)) = handoff {
+            self.note(
+                &ticket.id,
+                &format!("{} handed the task to {to}", ticket.agent),
+            );
+            Some(Some(End::Handoff {
+                from: ticket.agent.clone(),
+                to,
+                note,
+                reply: result.text.clone(),
+            }))
         } else {
             let status = if asked {
                 Status::Cancelled
@@ -771,43 +993,41 @@ impl<'e> Queue<'e> {
             } else {
                 Status::Done
             };
-            store.set_state(&ticket.id, status.as_str(), since);
-            if let Err(e) = store.write_result(
-                &ticket.id,
-                &ticket.agent,
+            Some(Some(End::Result {
                 status,
-                since,
-                &extra,
-                &result.text,
-            ) {
-                eprintln!("ensemble: cannot write the result of {}: {e}", ticket.id);
-            }
+                agent: ticket.agent.clone(),
+                started: utc(since),
+                extra: extra.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+                text: result.text.clone(),
+            }))
+        };
+        if let Some(end) = end {
+            self.tell(board, &ticket.id, end).await;
         }
-        inner.live.remove(&ticket.id);
-        drop(inner);
+        self.lock().live.remove(&ticket.id);
         self.changed.notify_waiters();
     }
 
     /// Run the agent on `ticket` in `dir`, then its gate if it has one. While
     /// the gate fails and attempts remain, the agent runs again with the
-    /// gate's output. Returns the outcome and front matter for `result.md`.
+    /// gate's output. Returns the outcome and front matter for the result.
     async fn work_on(
         &self,
-        store: &Store,
         ticket: &Ticket,
+        detail: Option<&Detail>,
         dir: &Path,
         cancel: &AtomicBool,
     ) -> (ToolResult, Vec<(&'static str, String)>) {
         let note = |line: &str| self.note(&ticket.id, line);
         let mut base = ticket.prompt();
-        if let Some((questions, reply)) = store.conversation(&ticket.id) {
+        if let Some((questions, reply)) = detail.and_then(|d| d.conversation.as_ref()) {
             base.push_str(&format!(
                 "\n\nYou stopped earlier to ask. The questions and their answers:\n\n{}\n\nYour reply when you last stopped:\n{}\n\nGo on from there.",
                 questions.trim(),
                 reply.trim()
             ));
         }
-        if let Some(earlier) = store.handoffs(&ticket.id) {
+        if let Some(earlier) = detail.and_then(|d| d.handoffs.as_ref()) {
             base.push_str(&format!(
                 "\n\nThis task was handed to you. What earlier agents did and left for you:\n\n{}",
                 earlier.trim()
@@ -904,18 +1124,13 @@ impl<'e> Queue<'e> {
         }
     }
 
-    /// Write a new task for the worker, and return at once.
-    pub fn submit(&self, ticket: &Ticket) -> ToolResult {
-        let Some(store) = &self.store else {
-            return ToolResult::err("there is no task store in this session.");
+    /// Keep a new task on the hub for a worker to run, and return at once.
+    pub async fn submit(&self, ticket: &Ticket) -> ToolResult {
+        let board = match self.tasks() {
+            Ok(board) => board,
+            Err(refused) => return refused,
         };
-        if let Some(missing) = ticket.after.iter().find(|a| !store.exists(a)) {
-            return ToolResult::err(format!(
-                "`after` names '{missing}', which is not a task. Tasks are named by the id \
-                 `submit` returned."
-            ));
-        }
-        match store.create(ticket) {
+        match board.create(ticket).await {
             Ok(id) => {
                 self.changed.notify_waiters();
                 ToolResult::ok(format!(
@@ -923,16 +1138,27 @@ impl<'e> Queue<'e> {
                      returns its result."
                 ))
             }
-            Err(e) => ToolResult::err(format!(
-                "cannot write the task in {}: {e}",
-                store.tasks_dir().display()
-            )),
+            Err(e) => ToolResult::err(format!("cannot keep the task on {}: {e}", board.place())),
+        }
+    }
+
+    /// One task with what it said, from the hub.
+    pub async fn detail(&self, id: &str) -> Result<Option<Detail>, String> {
+        match self.board.as_deref() {
+            Some(board) => board.get(id).await,
+            None => Ok(None),
         }
     }
 
     /// What one task or background delegation is doing, or all of them.
-    pub fn status(&self, id: Option<&str>) -> ToolResult {
-        let entries = self.store.as_ref().map(Store::scan).unwrap_or_default();
+    pub async fn status(&self, id: Option<&str>) -> ToolResult {
+        let all = match self.board.as_deref() {
+            Some(board) => match self.all(board).await {
+                Ok(all) => all,
+                Err(refused) => return refused,
+            },
+            None => Vec::new(),
+        };
         let inner = self.lock();
         if let Some(id) = id {
             if let Some(live) = inner.live.get(id) {
@@ -941,9 +1167,9 @@ impl<'e> Queue<'e> {
             if let Some(ended) = inner.ended.get(id) {
                 return ToolResult::ok(describe_ended(id, ended));
             }
-            return match entries.iter().find(|e| e.id() == id) {
-                Some(entry) => ToolResult::ok(self.describe_entry(&inner, entry, &entries)),
-                None => ToolResult::err(unknown(&inner, &entries, id)),
+            return match all.iter().find(|t| t.id() == id) {
+                Some(task) => ToolResult::ok(self.describe(&inner, task, &all)),
+                None => ToolResult::err(unknown(&inner, &all, id)),
             };
         }
 
@@ -953,10 +1179,11 @@ impl<'e> Queue<'e> {
             .map(|(id, live)| describe_live(id, live, LISTED_LINES))
             .collect();
         let mut over = Vec::new();
-        for entry in entries.iter().filter(|e| !inner.live.contains_key(e.id())) {
-            match entry {
-                Entry::Task(_, Some(_)) => over.push(self.describe_entry(&inner, entry, &entries)),
-                _ => lines.push(self.describe_entry(&inner, entry, &entries)),
+        for task in all.iter().filter(|t| !inner.live.contains_key(t.id())) {
+            if task.status.is_some() {
+                over.push(self.describe(&inner, task, &all));
+            } else {
+                lines.push(self.describe(&inner, task, &all));
             }
         }
         let hidden = over.len().saturating_sub(LISTED_ENDED);
@@ -965,10 +1192,11 @@ impl<'e> Queue<'e> {
         }
         lines.extend(over.into_iter().skip(hidden));
         lines.extend(inner.ended.iter().map(|(id, e)| describe_ended(id, e)));
+        let idle = (self.board.is_some() && inner.live.is_empty())
+            .then(|| idle_line(&all))
+            .flatten();
         drop(inner);
-        if let Some(idle) = self.idle() {
-            lines.push(idle);
-        }
+        lines.extend(idle);
         if lines.is_empty() {
             ToolResult::ok("No tasks.")
         } else {
@@ -976,36 +1204,19 @@ impl<'e> Queue<'e> {
         }
     }
 
-    fn describe_entry(&self, inner: &Inner, entry: &Entry, entries: &[Entry]) -> String {
-        let wait = match entry {
-            Entry::Task(t, None) => self.over_budget(inner, &t.agent),
-            _ => None,
+    fn describe(&self, inner: &Inner, task: &Task, all: &[Task]) -> String {
+        let wait = match task.status {
+            None => self.over_budget(inner, &task.ticket.agent),
+            Some(_) => None,
         };
-        let elsewhere = self
-            .store
-            .as_ref()
-            .and_then(|s| super::lock::holder(s.root()))
-            .is_some_and(|pid| pid != std::process::id());
-        crate::tasks::entry_line(self.store.as_ref(), entry, entries, wait, elsewhere)
+        entry_line(task, all, wait)
     }
 
     /// The result of a task or background delegation, waiting up to
     /// `timeout` for it to end. One still going at the end of that is
     /// reported, not failed: the caller asks again.
     pub async fn wait(&self, id: &str, timeout: Duration) -> ToolResult {
-        let exists = |inner: &Inner| {
-            inner.live.contains_key(id)
-                || inner.ended.contains_key(id)
-                || self.store.as_ref().is_some_and(|s| s.exists(id))
-        };
         let deadline = tokio::time::Instant::now() + timeout;
-        {
-            let inner = self.lock();
-            if !exists(&inner) {
-                let entries = self.store.as_ref().map(Store::scan).unwrap_or_default();
-                return ToolResult::err(unknown(&inner, &entries, id));
-            }
-        }
         loop {
             let changed = self.watch();
             {
@@ -1022,33 +1233,50 @@ impl<'e> Queue<'e> {
                         },
                     };
                 }
-                if !inner.live.contains_key(id)
-                    && let Some(q) = self.store.as_ref().and_then(|s| s.open_question(id))
-                {
+            }
+            let running_here = self.lock().live.contains_key(id);
+            let detail = match self.detail(id).await {
+                Ok(detail) => detail,
+                Err(e) => return ToolResult::err(format!("cannot read task {id}: {e}")),
+            };
+            if !running_here && detail.is_none() {
+                let all = match self.board.as_deref() {
+                    Some(board) => board.scan().await.unwrap_or_default(),
+                    None => Vec::new(),
+                };
+                return ToolResult::err(unknown(&self.lock(), &all, id));
+            }
+            if let Some(detail) = &detail {
+                if !running_here && let Some(q) = &detail.task.question {
                     return ToolResult::ok(format!(
                         "{id} needs input: {q}\nAnswer it with `answer`; the task then goes on."
                     ));
                 }
-                if let Some(outcome) = self.store.as_ref().and_then(|s| s.outcome(id)) {
+                if let Some(outcome) = &detail.outcome {
                     return ToolResult {
-                        text: outcome.text,
+                        text: outcome.text.clone(),
                         is_error: outcome.status != Status::Done,
                     };
                 }
-                if tokio::time::Instant::now() >= deadline {
-                    return ToolResult::ok(match inner.live.get(id) {
-                        Some(live) => format!(
-                            "{id} is still running; call `wait` again.\n{}",
-                            describe_live(id, live, KEPT_LINES)
-                        ),
-                        None => format!(
-                            "{id} is queued: it starts when a slot of its agent is free. Call `wait` again."
-                        ),
-                    });
-                }
             }
-            // A task another process runs ends without a word to this one,
-            // so its result is looked for every few seconds too.
+            if tokio::time::Instant::now() >= deadline {
+                let inner = self.lock();
+                return ToolResult::ok(match (inner.live.get(id), &detail) {
+                    (Some(live), _) => format!(
+                        "{id} is still running; call `wait` again.\n{}",
+                        describe_live(id, live, KEPT_LINES)
+                    ),
+                    (None, Some(d)) if d.task.running_on.is_some() => format!(
+                        "{id} is running on {}; call `wait` again.",
+                        d.task.running_on.as_deref().unwrap_or("another node")
+                    ),
+                    _ => format!(
+                        "{id} is queued: it starts when a slot of its agent is free. Call `wait` again."
+                    ),
+                });
+            }
+            // A task another node runs ends without a word to this one, so
+            // the hub is asked again every few seconds too.
             tokio::select! {
                 () = changed => {}
                 () = tokio::time::sleep(SCAN_EVERY) => {}
@@ -1058,51 +1286,53 @@ impl<'e> Queue<'e> {
     }
 
     /// Stop a run, or cancel a task that has not started.
-    pub fn cancel(&self, id: &str) -> ToolResult {
-        let mut inner = self.lock();
-        if let Some(live) = inner.live.get_mut(id) {
-            live.asked = true;
-            live.cancel.store(true, Ordering::Relaxed);
-            return ToolResult::ok(format!("{id} is being cancelled."));
+    pub async fn cancel(&self, id: &str) -> ToolResult {
+        {
+            let mut inner = self.lock();
+            if let Some(live) = inner.live.get_mut(id) {
+                live.asked = true;
+                live.cancel.store(true, Ordering::Relaxed);
+                return ToolResult::ok(format!("{id} is being cancelled."));
+            }
+            if inner.ended.contains_key(id) {
+                return ToolResult::ok(format!("{id} had already ended."));
+            }
         }
-        if inner.ended.contains_key(id) {
-            return ToolResult::ok(format!("{id} had already ended."));
-        }
-        let Some(store) = self.store.as_ref().filter(|s| s.exists(id)) else {
-            let entries = self.store.as_ref().map(Store::scan).unwrap_or_default();
-            return ToolResult::err(unknown(&inner, &entries, id));
+        let board = match self.tasks() {
+            Ok(board) => board,
+            Err(_) => return ToolResult::err(unknown(&self.lock(), &[], id)),
         };
-        if store.outcome(id).is_some() {
-            return ToolResult::ok(format!("{id} had already ended."));
-        }
-        let agent = store.read(id).map(|t| t.agent).unwrap_or_default();
-        // Under the lock, so the worker cannot start it meanwhile.
-        let written = store.write_result(
-            id,
-            &agent,
-            Status::Cancelled,
-            SystemTime::now(),
-            &[],
-            "Cancelled before it started.",
-        );
-        drop(inner);
+        let cancelled = board.cancel(id).await;
         self.changed.notify_waiters();
-        match written {
-            Ok(()) => ToolResult::ok(format!("{id} is cancelled; it had not started.")),
-            Err(e) => ToolResult::err(format!("cannot cancel {id}: {e}")),
+        match cancelled {
+            Ok(Cancelled::Before) => {
+                ToolResult::ok(format!("{id} is cancelled; it had not started."))
+            }
+            Ok(Cancelled::Running(node)) => {
+                ToolResult::ok(format!("{id} is being cancelled: {node} stops it."))
+            }
+            Ok(Cancelled::Ended) => ToolResult::ok(format!("{id} had already ended.")),
+            Err(e) => self.refused(board, id, e).await,
         }
+    }
+
+    /// What the board refused about task `id`: a task it does not have is
+    /// named among those it has.
+    async fn refused(&self, board: &dyn Board, id: &str, e: String) -> ToolResult {
+        if e.starts_with("no task") {
+            let all = board.scan().await.unwrap_or_default();
+            return ToolResult::err(unknown(&self.lock(), &all, id));
+        }
+        ToolResult::err(e)
     }
 
     /// Assign task `id` to `agent`: from the backlog, or to someone else. A
     /// task that is running or has ended is left alone.
-    pub fn assign(&self, id: &str, agent: &str) -> ToolResult {
-        let Some(store) = &self.store else {
-            return ToolResult::err("there is no task store in this session.");
+    pub async fn assign(&self, id: &str, agent: &str) -> ToolResult {
+        let board = match self.tasks() {
+            Ok(board) => board,
+            Err(refused) => return refused,
         };
-        if !store.exists(id) {
-            let entries = store.scan();
-            return ToolResult::err(unknown(&self.lock(), &entries, id));
-        }
         let to = match self.ensemble.config().agent(agent) {
             Some(a) => a.name.clone(),
             None => {
@@ -1112,53 +1342,46 @@ impl<'e> Queue<'e> {
                 ));
             }
         };
-        if store.outcome(id).is_some() {
-            return ToolResult::err(format!(
-                "{id} has ended; it cannot be assigned. Submit it again."
-            ));
-        }
         if self.lock().live.contains_key(id) {
             return ToolResult::err(format!("{id} is running; assign it when it stops."));
         }
-        match store.assign(id, &to) {
+        match board.assign(id, &to).await {
             Ok(()) => {
                 self.changed.notify_waiters();
                 ToolResult::ok(format!("{id} is assigned to {to}."))
             }
-            Err(e) => ToolResult::err(format!("cannot assign {id}: {e}")),
+            Err(e) => self.refused(board, id, e).await,
         }
     }
 
     /// A line saying nothing is active, and what waits for the owner, when
     /// that is so: no run is going and no task is assigned and ready.
-    pub fn idle(&self) -> Option<String> {
-        let store = self.store.as_ref()?;
+    pub async fn idle(&self) -> Option<String> {
+        let board = self.board.as_deref()?;
         if !self.lock().live.is_empty() {
             return None;
         }
-        idle_line(&store.scan(), Some(store))
+        idle_line(&board.scan().await.ok()?)
     }
 
     /// Answer the question a task is waiting on, so it goes on.
-    pub fn answer(&self, id: &str, answer: &str) -> ToolResult {
-        let Some(store) = &self.store else {
-            return ToolResult::err("there is no task store in this session.");
+    pub async fn answer(&self, id: &str, answer: &str) -> ToolResult {
+        let board = match self.tasks() {
+            Ok(board) => board,
+            Err(refused) => return refused,
         };
-        if !store.exists(id) {
-            let entries = store.scan();
-            return ToolResult::err(unknown(&self.lock(), &entries, id));
-        }
-        match store.answer(id, answer) {
+        match board.answer(id, answer).await {
             Ok(()) => {
                 self.changed.notify_waiters();
                 ToolResult::ok(format!("{id} is answered and queued to go on."))
             }
-            Err(e) => ToolResult::err(e),
+            Err(e) => self.refused(board, id, e).await,
         }
     }
 
     /// Stop every run, and anything started later, for when the caller is
-    /// gone. Tasks that had not started stay on disk for the next session.
+    /// gone. Tasks that were running are put back on the hub, and those that
+    /// had not started stay there, for the next run.
     pub fn close(&self) {
         let mut inner = self.lock();
         inner.closed = true;
@@ -1186,10 +1409,10 @@ fn over_budget_message(agent: &str, wait: u64) -> String {
     )
 }
 
-fn unknown(inner: &Inner, entries: &[Entry], id: &str) -> String {
+fn unknown(inner: &Inner, all: &[Task], id: &str) -> String {
     let mut known: Vec<&str> = inner.live.keys().map(String::as_str).collect();
     known.extend(inner.ended.keys().map(String::as_str));
-    known.extend(entries.iter().map(Entry::id));
+    known.extend(all.iter().map(Task::id));
     known.sort();
     known.dedup();
     if known.is_empty() {

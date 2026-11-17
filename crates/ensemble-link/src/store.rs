@@ -1,5 +1,6 @@
 //! The hub server's state that changes while it runs: its accounts and their
-//! tokens (`users`), and the tracker relay's deliveries. One Turso database,
+//! tokens (`users`), the tasks it keeps for them (`ensemble_tasks::board`),
+//! and which issue of the tracker became which task (the inbox). One Turso database,
 //! `database.db`, in the hub's folder (`~/.config/ensemble/hub/`), which only
 //! whoever runs the hub may enter.
 //!
@@ -39,6 +40,14 @@ CREATE TABLE IF NOT EXISTS tokens (
     scopes TEXT,
     expires TEXT,
     made TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tasks (
+    owner TEXT NOT NULL,
+    project TEXT NOT NULL,
+    id TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (owner, project, id)
 );
 CREATE TABLE IF NOT EXISTS deliveries (
     issue TEXT PRIMARY KEY,
@@ -95,6 +104,15 @@ pub async fn transaction(
         tx.execute(sql, params).await.map_err(|e| e.to_string())?;
     }
     tx.commit().await.map_err(|e| e.to_string())
+}
+
+/// Run one statement, and return how many rows it changed.
+pub async fn execute(
+    conn: &turso::Connection,
+    sql: &str,
+    params: Vec<Value>,
+) -> Result<u64, String> {
+    conn.execute(sql, params).await.map_err(|e| e.to_string())
 }
 
 /// Every row `sql` returns, each as its values.

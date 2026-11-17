@@ -594,7 +594,7 @@ async fn stream_reply(
 mod tests {
     use crate::client::Connection;
     use crate::protocol::*;
-    use crate::server::tests::start;
+    use crate::server::testing::start;
     use ensemble_core::runtime::blocking;
     use serde_json::{Value, json};
     use std::time::Duration;

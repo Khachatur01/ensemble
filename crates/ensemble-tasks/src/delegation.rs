@@ -609,26 +609,28 @@ pub async fn call(
             if let Err(e) = repo_of(ensemble, args) {
                 return ToolResult::err(format!("{SUBMIT}: {e}"));
             }
-            queue.submit(&crate::tasks::Ticket {
-                title: title.to_string(),
-                agent: role.to_string(),
-                context: optional("context"),
-                goal: optional("goal"),
-                repo: optional("repo"),
-                constraints,
-                files,
-                done_when,
-                after,
-                gate,
-                text: task.to_string(),
-                ..Default::default()
-            })
+            queue
+                .submit(&crate::tasks::Ticket {
+                    title: title.to_string(),
+                    agent: role.to_string(),
+                    context: optional("context"),
+                    goal: optional("goal"),
+                    repo: optional("repo"),
+                    constraints,
+                    files,
+                    done_when,
+                    after,
+                    gate,
+                    text: task.to_string(),
+                    ..Default::default()
+                })
+                .await
         }
 
         STATUS => match args.get("task") {
-            None | Some(Value::Null) => queue.status(None),
+            None | Some(Value::Null) => queue.status(None).await,
             Some(task) => match task.as_str() {
-                Some(id) => queue.status(Some(id)),
+                Some(id) => queue.status(Some(id)).await,
                 None => ToolResult::err(format!("{STATUS}: `task` must be a task id")),
             },
         },
@@ -648,7 +650,7 @@ pub async fn call(
         }
 
         CANCEL => match args.get("task").and_then(Value::as_str) {
-            Some(id) => queue.cancel(id),
+            Some(id) => queue.cancel(id).await,
             None => ToolResult::err(format!(
                 "{CANCEL}: `task` is required and must be a task id"
             )),
@@ -660,17 +662,16 @@ pub async fn call(
                     "{REVIEW}: `task` is required and must be a task id"
                 ));
             };
-            let state = match ensemble.state_dir() {
-                Ok(state) => state,
-                Err(e) => return ToolResult::err(format!("{REVIEW}: {e}")),
-            };
             let workdir = match ensemble.workdir() {
                 Ok(dir) => dir,
                 Err(e) => return ToolResult::err(format!("{REVIEW}: {e}")),
             };
-            let store = crate::tasks::Store::new(&state);
+            let detail = match queue.detail(id).await {
+                Ok(detail) => detail,
+                Err(e) => return ToolResult::err(format!("{REVIEW}: {e}")),
+            };
             match blocking(|| {
-                crate::review::find(&store, &workdir, id)
+                crate::review::find(detail, &workdir, id)
                     .and_then(|task| crate::review::review(&task))
             }) {
                 Ok(text) => ToolResult::ok(text),
@@ -681,7 +682,7 @@ pub async fn call(
         ASSIGN => {
             let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::trim);
             match (text("task"), text("agent")) {
-                (Some(id), Some(agent)) if !agent.is_empty() => queue.assign(id, agent),
+                (Some(id), Some(agent)) if !agent.is_empty() => queue.assign(id, agent).await,
                 _ => ToolResult::err(format!("{ASSIGN}: `task` and `agent` are required")),
             }
         }
@@ -689,7 +690,7 @@ pub async fn call(
         ANSWER => {
             let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::trim);
             match (text("task"), text("answer")) {
-                (Some(id), Some(answer)) if !answer.is_empty() => queue.answer(id, answer),
+                (Some(id), Some(answer)) if !answer.is_empty() => queue.answer(id, answer).await,
                 _ => ToolResult::err(format!(
                     "{ANSWER}: `task` and a non-empty `answer` are required"
                 )),

@@ -4,15 +4,16 @@
 //! It is tied to no project. Your agent CLI starts `ensemble mcp` in a folder,
 //! which connects to the node's socket, says which folder it is in, and from
 //! then on carries MCP both ways ([`bridge`]). The node keeps one worker per
-//! folder it has served: that folder's tasks go on after the session ends,
-//! and start again when the node does. With a hub server it also keeps one
-//! link: the tasks the hub sends you, and, for whom it works for, the agents
-//! and models it offers.
+//! folder it has served, which runs the tasks the hub keeps for the folder's
+//! project (its name): they go on after the session ends, and start again when
+//! the node does. With a hub server it also keeps one link, for whom it works
+//! for: the agents and models it offers.
 //!
 //! What it keeps for a folder lives as long as the node, so it is leaked on
 //! purpose: a folder served once is served until the node stops.
 
 use crate::STOP;
+use ensemble::board::RemoteBoard;
 use ensemble::config::{Config, Node};
 use ensemble::folders::Folders;
 use ensemble::knowledge::KnowledgeAccess;
@@ -20,7 +21,7 @@ use ensemble::link::RemoteMemory;
 use ensemble::mcp;
 use ensemble::queue::Queue;
 use ensemble::router::Ensemble;
-use ensemble::tasks::Store;
+use ensemble::runs::Runs;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -83,10 +84,6 @@ impl<'a> Daemon<'a> {
             workers: Mutex::new(Vec::new()),
             say,
         }
-    }
-
-    pub fn folders(&self) -> &Folders {
-        &self.folders
     }
 
     /// Serve sessions on `socket` until [`STOP`] is set, after starting the
@@ -233,13 +230,23 @@ impl<'a> Daemon<'a> {
         });
         let memory = knowledge.map(|k| k as &dyn KnowledgeAccess);
         let state = ensemble.state_dir().map_err(|e| e.to_string())?;
-        let mut store = Store::new(&state);
+        let mut runs = Runs::new(&state);
         if let Some(usage) = ensemble.usage_dir() {
-            store = store.with_usage_dir(usage);
+            runs = runs.with_usage_dir(usage);
         }
         mcp::note_recall_without_knowledge(ensemble, memory);
-        let queue: &'static Queue<'static> =
-            Box::leak(Box::new(mcp::queue_for(ensemble, Some(store), memory)));
+        let mut queue = mcp::queue_for(ensemble, Some(runs), memory);
+        // The tasks the hub keeps for the folder's project. Of two folders of
+        // one name, the one used last runs them.
+        if let (Some((url, token)), Some(project)) = (&self.hub, dir.file_name()) {
+            let project = project.to_string_lossy().into_owned();
+            let board = RemoteBoard::new(url, token, &project);
+            let (folders, here) = (self.folders.clone(), dir.clone());
+            queue = queue
+                .with_board(board, &self.node.name)
+                .with_turn(move || folders.of(&project).is_none_or(|f| f == here));
+        }
+        let queue: &'static Queue<'static> = Box::leak(Box::new(queue));
         // One worker per folder: when another process has it, sessions here
         // only read and write its tasks, and run their background
         // delegations.

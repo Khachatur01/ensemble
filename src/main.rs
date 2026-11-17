@@ -5,6 +5,7 @@
 //! config, checking the backends are reachable, and sending one task to one
 //! agent with no harness in the way.
 
+use ensemble::board::Board;
 use ensemble::config::{self, Adapter, Config, SystemEnv};
 use ensemble::external::{claude_code, opencode};
 use ensemble::knowledge::KnowledgeAccess;
@@ -788,8 +789,7 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
     for line in &waiting {
         say(line);
     }
-    // With a hub: the link that offers what the node offers, and the tasks
-    // the hub sends you.
+    // With a hub: its tasks, and the link that offers what the node offers.
     let hub = match &node.hub {
         Some(_) => Some(node_hub("node serve")?),
         None => None,
@@ -821,23 +821,10 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
         }
         _ => None,
     };
-    let inbox = match (&url, &token) {
-        (Some(url), Some(token)) => Some(ensemble::inbox::NodeInbox::new(
-            url,
-            token,
-            daemon.folders().clone(),
-            team.agent_names().into_iter().map(String::from).collect(),
-            dir.join("inbox"),
-        )),
-        _ => None,
-    };
     // What else holds the teams, given them again when they are reloaded.
     let reloaded = |config: &Config| -> Result<(), String> {
         if let Some(worker) = &worker {
             worker.reload(config)?;
-        }
-        if let Some(inbox) = &inbox {
-            inbox.set_agents(config.agent_names().into_iter().map(String::from).collect());
         }
         Ok(())
     };
@@ -853,13 +840,8 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
                 stop.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         };
-        let tasks = async {
-            if let Some(inbox) = &inbox {
-                inbox.work(stop, &say).await;
-            }
-        };
-        let (served, (), ()) = ensemble::runtime::shared()
-            .block_on(async { tokio::join!(daemon.serve(&socket, &reloaded), link, tasks) });
+        let (served, ()) = ensemble::runtime::shared()
+            .block_on(async { tokio::join!(daemon.serve(&socket, &reloaded), link) });
         STOP.store(true, std::sync::atomic::Ordering::Relaxed);
         served
     };
@@ -978,10 +960,9 @@ fn cmd_hub_serve(args: &Args) -> Result<ExitCode, String> {
         ))),
         None => None,
     };
-    let mut server = ensemble::link::Server::new(memory, &hub.roles, server, users);
-    if let Some(inbox) = inbox {
-        server = server.with_relay(inbox);
-    }
+    let tasks: &'static ensemble::board::Service =
+        Box::leak(Box::new(ensemble::board::Service::new(&users)));
+    let server = ensemble::link::Server::new(memory, &hub.roles, server, users).with_tasks(tasks);
     let server: &'static ensemble::link::Server<'static> = Box::leak(Box::new(server));
     std::thread::scope(|scope| {
         scope.spawn(|| memory.work(&STOP, &say));
@@ -1340,58 +1321,50 @@ fn cmd_check(config: Config, dir: &Path) -> Result<ExitCode, String> {
         }
     }
 
-    // A bad ticket fails only when the worker reaches it; say so now.
-    let store = tasks::Store::new(&state_for(dir)?);
-    let entries = store.scan();
+    // A task this node would run fails only when it starts; say so now.
     let mut bad = Vec::new();
-    for entry in &entries {
-        match entry {
-            tasks::Entry::Unreadable { id, error } => bad.push(format!("{id}: {error}")),
-            tasks::Entry::Task(t, None) if config.agent(&t.agent).is_none() => bad.push(format!(
-                "{}: agent '{}' is not configured; it would fail at once",
-                t.id, t.agent
-            )),
-            tasks::Entry::Task(t, None)
-                if t.gate
-                    .as_ref()
-                    .is_some_and(|g| config.gate_for(&t.agent, &g.name).is_none()) =>
-            {
-                bad.push(format!(
-                    "{}: gate '{}' is not configured under `gates`; it would fail at once",
-                    t.id,
-                    t.gate.as_ref().map_or("", |g| g.name.as_str())
-                ))
-            }
-            _ => {}
-        }
-    }
-    for entry in &entries {
-        if let tasks::Entry::Task(t, None) = entry {
-            for dep in tasks::waiting_for(t, &entries) {
-                if dep.ends_with("(no such task)") || dep.ends_with("(unreadable)") {
-                    bad.push(format!("{}: `after` {dep}; it can never start", t.id));
+    if let Ok(board) = board_for(dir, "check") {
+        match ensemble::runtime::block_on(board.scan()) {
+            Ok(all) => {
+                let unfinished: Vec<&tasks::Task> =
+                    all.iter().filter(|t| t.status.is_none()).collect();
+                let mut elsewhere = Vec::new();
+                for t in &unfinished {
+                    let t = &t.ticket;
+                    if t.agent.is_empty() {
+                        continue;
+                    }
+                    if config.agent(&t.agent).is_none() {
+                        elsewhere.push(format!(
+                            "{}: agent '{}' is not one of this node's; another of your nodes runs it",
+                            t.id, t.agent
+                        ));
+                    } else if let Some(gate) = &t.gate
+                        && config.gate_for(&t.agent, &gate.name).is_none()
+                    {
+                        bad.push(format!(
+                            "{}: gate '{}' is not configured under `gates`; it would fail at once",
+                            t.id, gate.name
+                        ));
+                    }
+                }
+                if !all.is_empty() {
+                    println!();
+                    println!(
+                        "tasks: {} on {}, {} unfinished",
+                        all.len(),
+                        board.place(),
+                        unfinished.len()
+                    );
+                    for line in bad.iter().chain(&elsewhere) {
+                        println!("  {line}");
+                    }
                 }
             }
-        }
-    }
-    for id in tasks::cyclic(&entries) {
-        bad.push(format!(
-            "{id}: its `after` leads back to itself; it can never start"
-        ));
-    }
-    if !entries.is_empty() {
-        let queued = entries
-            .iter()
-            .filter(|e| matches!(e, tasks::Entry::Task(_, None)))
-            .count();
-        println!();
-        println!(
-            "tasks: {} in {}, {queued} without a result",
-            entries.len(),
-            store.tasks_dir().display()
-        );
-        for line in &bad {
-            println!("  {line}");
+            Err(e) => {
+                println!();
+                println!("tasks: cannot read them on {}: {e}", board.place());
+            }
         }
     }
 
@@ -2168,19 +2141,29 @@ fn cmd_team(args: &Args) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The task store of the working folder.
-fn store_for(dir: &Path) -> Result<tasks::Store, String> {
-    Ok(tasks::Store::new(&state_for(dir)?))
+/// The tasks of the working folder's project, on this computer's node's
+/// hub.
+fn board_for(dir: &Path, command: &str) -> Result<ensemble::board::RemoteBoard, String> {
+    let (url, token) = node_hub(command)?;
+    let project = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| {
+            format!(
+                "{command}: {} has no name to keep tasks under",
+                dir.display()
+            )
+        })?;
+    Ok(ensemble::board::RemoteBoard::new(&url, &token, &project))
 }
 
 fn cmd_tasks(args: &Args, dir: &Path) -> Result<ExitCode, String> {
-    let store = store_for(dir)?;
-    let entries = store.scan();
+    let board = board_for(dir, "tasks")?;
+    let all = ensemble::runtime::block_on(board.scan()).map_err(|e| format!("tasks: {e}"))?;
     let wanted = opt(args, "--status");
-    let worker = ensemble::lock::holder(store.root()).is_some();
     let mut shown = 0;
-    for entry in &entries {
-        let line = tasks::entry_line(Some(&store), entry, &entries, None, worker);
+    for task in &all {
+        let line = tasks::entry_line(task, &all, None);
         let status = line.split(" · ").nth(2).unwrap_or("");
         if wanted.is_none_or(|w| status.starts_with(w)) {
             println!("{line}");
@@ -2192,13 +2175,12 @@ fn cmd_tasks(args: &Args, dir: &Path) -> Result<ExitCode, String> {
             "{}",
             match wanted {
                 Some(w) => format!("No tasks with status '{w}'."),
-                None => format!("No tasks in {}.", store.tasks_dir().display()),
+                None => format!("No tasks on {}.", board.place()),
             }
         );
     }
     if wanted.is_none()
-        && !worker
-        && let Some(idle) = tasks::idle_line(&entries, Some(&store))
+        && let Some(idle) = tasks::idle_line(&all)
     {
         println!("{idle}");
     }
@@ -2210,31 +2192,29 @@ fn cmd_task(args: &Args, dir: &Path) -> Result<ExitCode, String> {
         .rest
         .first()
         .ok_or("task: needs a task id. `ensemble tasks` lists them.")?;
-    let store = store_for(dir)?;
-    let entries = store.scan();
-    let Some(entry) = entries.iter().find(|e| e.id() == id) else {
+    let board = board_for(dir, "task")?;
+    let (all, detail) = ensemble::runtime::block_on(async {
+        Ok::<_, String>((board.scan().await?, board.get(id).await?))
+    })
+    .map_err(|e| format!("task: {e}"))?;
+    let Some(detail) = detail else {
         return Err(format!(
             "task: no task '{id}'. `ensemble tasks` lists them."
         ));
     };
-    let worker = ensemble::lock::holder(store.root()).is_some();
-    println!(
-        "{}",
-        tasks::entry_line(Some(&store), entry, &entries, None, worker)
-    );
-    if let tasks::Entry::Task(t, _) = entry {
-        println!("\n{}", t.prompt());
-        if let Some(repo) = &t.repo {
-            println!("\nrepo: {repo}");
-        }
-        if let Some(gate) = &t.gate {
-            println!("gate: {} ({} attempts)", gate.name, gate.attempts);
-        }
+    let t = &detail.task.ticket;
+    println!("{}", tasks::entry_line(&detail.task, &all, None));
+    println!("\n{}", t.prompt());
+    if let Some(repo) = &t.repo {
+        println!("\nrepo: {repo}");
     }
-    if let Some(q) = store.open_question(id) {
+    if let Some(gate) = &t.gate {
+        println!("gate: {} ({} attempts)", gate.name, gate.attempts);
+    }
+    if let Some(q) = &detail.task.question {
         println!("\nWaiting for an answer to: {q}\nAnswer it with: ensemble answer {id} <text>");
     }
-    if let Some(outcome) = store.outcome(id) {
+    if let Some(outcome) = &detail.outcome {
         println!("\n{}", outcome.text);
     }
     Ok(ExitCode::SUCCESS)
@@ -2251,7 +2231,8 @@ fn cmd_answer(args: &Args, dir: &Path) -> Result<ExitCode, String> {
             "answer: needs the answer, e.g. `ensemble answer 0001-add-retry use ureq`".into(),
         );
     }
-    store_for(dir)?.answer(id, &answer)?;
+    let board = board_for(dir, "answer")?;
+    ensemble::runtime::block_on(board.answer(id, &answer)).map_err(|e| format!("answer: {e}"))?;
     println!("answered {id}: {}.", tell_node(dir));
     Ok(ExitCode::SUCCESS)
 }
@@ -2336,15 +2317,10 @@ fn cmd_submit(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, Stri
         text,
         ..Default::default()
     };
-    let store = store_for(dir)?;
-    let id = store
-        .create(&ticket)
-        .map_err(|e| format!("submit: cannot write the task: {e}"))?;
-    println!(
-        "task {id} written in {}: {}.",
-        store.tasks_dir().join(&id).display(),
-        tell_node(dir)
-    );
+    let board = board_for(dir, "submit")?;
+    let id =
+        ensemble::runtime::block_on(board.create(&ticket)).map_err(|e| format!("submit: {e}"))?;
+    println!("task {id} kept on {}: {}.", board.place(), tell_node(dir));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -2355,8 +2331,10 @@ fn tell_node(dir: &Path) -> String {
         ensemble::runtime::block_on(daemon::touch(&state::node_socket(&node), dir))
     });
     match told {
-        Ok(()) => "your node runs it".into(),
-        Err(e) => format!("{e}; it runs once your node does (`ensemble node serve`)"),
+        Ok(()) => "your node runs it, or another of yours with its agent".into(),
+        Err(e) => format!(
+            "{e}; another of your nodes with its agent runs it, or this one once it does (`ensemble node serve`)"
+        ),
     }
 }
 
@@ -2402,24 +2380,14 @@ fn cmd_assign(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, Stri
             );
         }
     };
-    let store = store_for(dir)?;
-    if !store.exists(id) {
-        return Err(format!(
-            "assign: no task '{id}'. `ensemble tasks` lists them."
-        ));
-    }
     let to = config.agent(agent).map(|a| a.name.clone()).ok_or_else(|| {
         format!(
             "assign: no agent '{agent}'. Agents: {}.",
             config.agent_names().join(", ")
         )
     })?;
-    if store.outcome(id).is_some() {
-        return Err(format!("assign: {id} has ended; submit it again."));
-    }
-    store
-        .assign(id, &to)
-        .map_err(|e| format!("assign: cannot write: {e}"))?;
+    let board = board_for(dir, "assign")?;
+    ensemble::runtime::block_on(board.assign(id, &to)).map_err(|e| format!("assign: {e}"))?;
     println!("{id} is assigned to {to}: {}.", tell_node(dir));
     Ok(ExitCode::SUCCESS)
 }
@@ -2436,9 +2404,11 @@ fn cmd_review(args: &Args, dir: &Path) -> Result<ExitCode, String> {
                 args.command
             )
         })?;
-    let store = store_for(dir)?;
+    let board = board_for(dir, &args.command)?;
+    let detail =
+        ensemble::runtime::block_on(board.get(id)).map_err(|e| format!("{}: {e}", args.command))?;
     let task =
-        ensemble::review::find(&store, dir, id).map_err(|e| format!("{}: {e}", args.command))?;
+        ensemble::review::find(detail, dir, id).map_err(|e| format!("{}: {e}", args.command))?;
     match args.command.as_str() {
         "review" => print!(
             "{}",
@@ -2449,8 +2419,7 @@ fn cmd_review(args: &Args, dir: &Path) -> Result<ExitCode, String> {
             ensemble::review::diff(&task).map_err(|e| format!("diff: {e}"))?
         ),
         _ => {
-            let worktree = store
-                .root()
+            let worktree = state_for(dir)?
                 .join(ensemble::worktree::WORKTREES_DIR)
                 .join(id);
             let said = ensemble::review::merge(

@@ -724,18 +724,15 @@ fn a_harness_can_delegate_in_the_background_and_collect_the_work() {
 
     let status = tool_text(&session.call("status", serde_json::json!({})));
     assert!(status.contains("adhoc-1 · team/coder · done"), "{status}");
-    assert!(
-        !s.path().join("@state/tasks").exists(),
-        "a background delegation writes no ticket"
-    );
 }
 
 #[test]
-fn a_harness_can_submit_a_task_and_collect_its_result_from_the_ticket() {
+fn a_harness_can_submit_a_task_and_collect_its_result_from_the_hub() {
     let s = Scratch::new("mcp-submit");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
     s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
+    let _hub = with_hub(&s);
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
 
@@ -755,8 +752,8 @@ fn a_harness_can_submit_a_task_and_collect_its_result_from_the_ticket() {
     assert!(text.contains("status: done"), "{text}");
     assert!(text.contains("[files changed: a.txt (modified)]"), "{text}");
 
-    let ticket = s.place("@state/tasks/0001-rename-foo");
-    assert!(ticket.join("task.md").is_file() && ticket.join("result.md").is_file());
+    drop(session);
+    assert!(ended(&s, "0001-rename-foo"), "the hub has its result");
 }
 
 #[test]
@@ -1016,64 +1013,52 @@ fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
 }
 
 #[test]
-fn check_reports_a_task_that_could_not_run() {
+fn check_says_which_tasks_on_the_hub_this_node_cannot_run() {
     let s = Scratch::new("check-tasks");
-    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
-    s.write(
-        "@state/tasks/0001-ok/task.md",
-        "---\ntitle: Ok\nagent: team/coder\n---\nDo it.\n",
+    let _hub = with_hub(&s);
+    let gated = config_yaml("opencode", NOWHERE).replace(
+        "gates: {}",
+        "gates:\n  test: { command: \"true\", timeout_seconds: 5 }",
     );
+    s.write("@team/config.yaml", &gated);
+    for args in [
+        vec![
+            "submit",
+            "team/coder",
+            "Ok",
+            "--text",
+            "do it",
+            "--gate",
+            "test:1",
+        ],
+        vec!["submit", "team/reviewer", "Look", "--text", "look"],
+    ] {
+        let out = ensemble(&s, &args);
+        assert!(out.status.success(), "{}", stderr_of(&out));
+    }
     let out = ensemble(&s, &["check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stdout_of(&out).contains("tasks: 1 in"),
+        stdout_of(&out).contains("tasks: 2 on the hub ws://")
+            && stdout_of(&out).contains("2 unfinished"),
         "{}",
         stdout_of(&out)
     );
 
-    s.write("@state/tasks/0002-bad/task.md", "Do it.\n");
+    // The gate is gone, and the reviewer is another node's now.
     s.write(
-        "@state/tasks/0003-who/task.md",
-        "---\ntitle: Who\nagent: architect\n---\nDo it.\n",
+        "@team/config.yaml",
+        &config_yaml("opencode", NOWHERE).replace("  reviewer:", "  critic:"),
     );
     let out = ensemble(&s, &["check"]);
     assert!(!out.status.success());
     let text = stdout_of(&out);
     assert!(
-        text.contains("0002-bad:") && text.contains("front matter"),
+        text.contains("0001-ok: gate 'test' is not configured"),
         "{text}"
     );
     assert!(
-        text.contains("0003-who: agent 'architect' is not configured"),
-        "{text}"
-    );
-}
-
-#[test]
-fn check_reports_a_task_that_can_never_start() {
-    let s = Scratch::new("check-after");
-    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
-    s.write(
-        "@state/tasks/0001-a/task.md",
-        "---\ntitle: a\nagent: team/coder\nafter: [0002-b]\n---\na\n",
-    );
-    s.write(
-        "@state/tasks/0002-b/task.md",
-        "---\ntitle: b\nagent: team/coder\nafter: [0001-a]\n---\nb\n",
-    );
-    s.write(
-        "@state/tasks/0003-c/task.md",
-        "---\ntitle: c\nagent: team/coder\nafter: [0009]\n---\nc\n",
-    );
-    let out = ensemble(&s, &["check"]);
-    assert!(!out.status.success());
-    let text = stdout_of(&out);
-    assert!(
-        text.contains("0001-a: its `after` leads back to itself"),
-        "{text}"
-    );
-    assert!(
-        text.contains("0003-c: `after` 0009 (no such task)"),
+        text.contains("0002-look: agent 'team/reviewer' is not one of this node's"),
         "{text}"
     );
 }
@@ -1527,11 +1512,12 @@ fn team_update_shows_what_changed_and_moves_only_once_trusted() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_task_written_by_submit_is_listed_shown_and_run_by_a_session() {
+fn a_task_kept_on_the_hub_by_submit_is_listed_shown_and_run_by_a_session() {
     let s = Scratch::new("cli-tasks");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
     s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
+    let _hub = with_hub(&s);
 
     let none = ensemble(&s, &["tasks"]);
     assert!(
@@ -1556,7 +1542,7 @@ fn a_task_written_by_submit_is_listed_shown_and_run_by_a_session() {
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stdout_of(&out).contains("task 0001-rename-foo written"),
+        stdout_of(&out).contains("task 0001-rename-foo kept on the hub ws://"),
         "{}",
         stdout_of(&out)
     );
@@ -1613,6 +1599,16 @@ fn a_task_written_by_submit_is_listed_shown_and_run_by_a_session() {
 fn submit_refuses_what_a_task_cannot_be() {
     let s = Scratch::new("cli-submit-bad");
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
+    // Tasks are kept on a hub: without one there is nowhere to keep them.
+    s.node_yaml();
+    let nowhere = ensemble(&s, &["submit", "team/coder", "T", "--text", "x"]);
+    assert!(!nowhere.status.success());
+    assert!(
+        stderr_of(&nowhere).contains("names no hub"),
+        "{}",
+        stderr_of(&nowhere)
+    );
+    let _hub = with_hub(&s);
     let no_text = ensemble(&s, &["submit", "team/coder", "T"]);
     assert!(!no_text.status.success());
     for (args, needle) in [
@@ -1668,39 +1664,36 @@ fn submit_refuses_what_a_task_cannot_be() {
 #[test]
 fn answer_gives_a_waiting_task_its_answer() {
     let s = Scratch::new("cli-answer");
-    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
-    s.write(
-        "@state/tasks/0001-ask/task.md",
-        "---\ntitle: ask\nagent: team/coder\n---\nask\n",
+    let cli = s.opencode(
+        "x",
+        r#"if printf '%s' "$*" | grep -q 'use bar'; then t="renamed with bar"; else t="NEEDS INPUT: Which name?"; fi
+printf '%s\n' "{\"type\":\"text\",\"part\":{\"text\":\"$t\"}}"; exit 0"#,
     );
-    s.write(
-        "@state/tasks/0001-ask/questions.md",
-        "## Question 1\nWhich name?\n\n",
-    );
-    let listed = ensemble(&s, &["tasks"]);
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
+    let _hub = with_hub(&s);
+    let _node = start_node(&s, &[]);
+    let out = ensemble(&s, &["submit", "team/coder", "Ask", "--text", "rename it"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stdout_of(&listed).contains("needs input: Which name?"),
+        wait_for(30, || stdout_of(&ensemble(&s, &["tasks"]))
+            .contains("needs input: Which name?")),
         "{}",
-        stdout_of(&listed)
+        stdout_of(&ensemble(&s, &["tasks"]))
     );
     let none = ensemble(&s, &["answer", "0001-ask"]);
     assert!(!none.status.success());
     let out = ensemble(&s, &["answer", "0001-ask", "use", "bar"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(
-        s.read("@state/tasks/0001-ask/questions.md")
-            .contains("### Answer\nuse bar")
-    );
     let again = ensemble(&s, &["answer", "0001-ask", "twice"]);
     assert!(
         !again.status.success(),
         "a second answer has no question to answer"
     );
-    let listed = ensemble(&s, &["tasks"]);
+    assert!(wait_for(30, || ended(&s, "0001-ask")), "it did not go on");
+    let shown = stdout_of(&ensemble(&s, &["task", "0001-ask"]));
     assert!(
-        stdout_of(&listed).contains("queued"),
-        "{}",
-        stdout_of(&listed)
+        shown.contains("status: done") && shown.contains("renamed with bar"),
+        "{shown}"
     );
 }
 
@@ -1735,6 +1728,7 @@ fn the_node_runs_a_submitted_task_without_a_session_and_stops_on_sigterm() {
     let cli = s.opencode("renamed it", "echo bar > a.txt");
     s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
+    let _hub = with_hub(&s);
     let mut node = start_node(&s, &[]);
     // `submit` tells the node about the folder, which no session has opened.
     let out = ensemble(
@@ -1754,9 +1748,7 @@ fn the_node_runs_a_submitted_task_without_a_session_and_stops_on_sigterm() {
         stdout_of(&out)
     );
     assert!(
-        wait_for(30, || s
-            .place("@state/tasks/0001-rename-foo/result.md")
-            .is_file()),
+        wait_for(30, || ended(&s, "0001-rename-foo")),
         "the node did not run the task"
     );
     assert_eq!(
@@ -1804,6 +1796,7 @@ fn a_task_stopped_in_the_middle_is_run_again_when_the_node_starts_again() {
     );
     let cli = s.opencode("done", &body);
     s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
+    let _hub = with_hub(&s);
     let mut first = start_node(&s, &[]);
     let out = ensemble(
         &s,
@@ -1813,19 +1806,16 @@ fn a_task_stopped_in_the_middle_is_run_again_when_the_node_starts_again() {
     assert!(wait_for(30, || marker.exists()));
     let listed = ensemble(&s, &["tasks"]);
     assert!(
-        stdout_of(&listed).contains("running"),
+        stdout_of(&listed).contains("running on desk"),
         "{}",
         stdout_of(&listed)
     );
     sigterm(&first);
     first.wait().unwrap();
-    assert!(
-        !s.place("@state/tasks/0001-slow/result.md").exists(),
-        "a stopped task has no result"
-    );
+    assert!(!ended(&s, "0001-slow"), "a stopped task has no result");
     let listed = ensemble(&s, &["tasks"]);
     assert!(
-        stdout_of(&listed).contains("interrupted"),
+        stdout_of(&listed).contains("queued (interrupted on desk)"),
         "{}",
         stdout_of(&listed)
     );
@@ -1833,7 +1823,7 @@ fn a_task_stopped_in_the_middle_is_run_again_when_the_node_starts_again() {
     // The node remembers the folder, and runs it again when it starts.
     let _second = start_node(&s, &[]);
     assert!(
-        wait_for(30, || s.place("@state/tasks/0001-slow/result.md").is_file()),
+        wait_for(30, || ended(&s, "0001-slow")),
         "the node did not run it again"
     );
 }
@@ -1895,6 +1885,7 @@ fn a_backlog_task_waits_until_it_is_assigned_and_the_helper_team_says_when_it_is
     let cli = s.opencode("renamed it", "echo bar > a.txt");
     s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
+    let _hub = with_hub(&s);
 
     let out = ensemble(
         &s,
@@ -1913,12 +1904,11 @@ fn a_backlog_task_waits_until_it_is_assigned_and_the_helper_team_says_when_it_is
         listed.contains("Idle: no active tasks (1 in the backlog, to be assigned)"),
         "{listed}"
     );
-    assert!(s.place("@state/tasks/0001-rename-foo/task.md").is_file());
 
     // Nothing runs it while it has no assignee.
     let node = start_node(&s, &[]);
     std::thread::sleep(std::time::Duration::from_secs(3));
-    assert!(!s.place("@state/tasks/0001-rename-foo/result.md").exists());
+    assert!(!ended(&s, "0001-rename-foo"));
 
     let bad = ensemble(&s, &["assign", "0001-rename-foo", "nobody"]);
     assert!(!bad.status.success());
@@ -1930,9 +1920,7 @@ fn a_backlog_task_waits_until_it_is_assigned_and_the_helper_team_says_when_it_is
         stdout_of(&ok)
     );
     assert!(
-        wait_for(30, || s
-            .place("@state/tasks/0001-rename-foo/result.md")
-            .is_file()),
+        wait_for(30, || ended(&s, "0001-rename-foo")),
         "the node did not run the task once assigned"
     );
     drop(node);
@@ -2069,6 +2057,7 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
     git_in(s.path(), &["add", "a.txt"]);
     git_in(s.path(), &["commit", "--quiet", "-m", "start"]);
 
+    let _hub = with_hub(&s);
     let node = start_node(&s, &[]);
     let out = ensemble(
         &s,
@@ -2082,9 +2071,7 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        wait_for(30, || s
-            .place("@state/tasks/0001-rename-foo/result.md")
-            .is_file()),
+        wait_for(30, || ended(&s, "0001-rename-foo")),
         "the node did not run the task"
     );
     drop(node);
@@ -2530,7 +2517,20 @@ fn hub_server(scratch: &Scratch) -> (PathBuf, String, String) {
     (hub, address, stdout_of(&out).trim().to_string())
 }
 
-/// `ensemble hub serve`, started and waited for until it listens.
+/// The scratch computer with a hub of its own, running until dropped, which
+/// its node names and is signed in to as ana: where its tasks are kept.
+fn with_hub(scratch: &Scratch) -> Served {
+    let (hub, address, token) = hub_server(scratch);
+    let served = serve_hub(scratch, &hub);
+    node_with_hub(scratch, &format!("ws://{address}"), &token);
+    served
+}
+
+/// Whether task `id` of the scratch project has ended, as the hub says.
+fn ended(scratch: &Scratch, id: &str) -> bool {
+    stdout_of(&ensemble(scratch, &["task", id])).contains("\n---\nstatus: ")
+}
+
 /// A running `ensemble hub serve`, stopped when the test ends, passed or
 /// failed: left running, it would keep the test runner's output open.
 struct Served(Child);
@@ -2953,8 +2953,7 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_node_and_reported_back() {
     );
     let said = std::fs::read_to_string(&issue).unwrap();
     for expected in [
-        "Waiting for ana's computer",
-        "on ana's computer",
+        "Picked up as task 0001-rename-foo, for team/coder",
         "is done:",
     ] {
         assert!(said.contains(expected), "{expected} in {said}");
@@ -3303,13 +3302,7 @@ fn a_session_reaches_the_node_from_its_folder_and_a_task_goes_on_after_it_ends()
     };
 
     // With no node running, `mcp` says how to start one.
-    let config = s.0.with_extension("xdg-config").join("ensemble/node");
-    std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("node.yaml"),
-        "version: 1\nname: desk\naccess: private\noffers: {}\n",
-    )
-    .unwrap();
+    let _hub = with_hub(&s);
     let out = session(&[]);
     assert!(!out.status.success());
     assert!(

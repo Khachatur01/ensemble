@@ -1,7 +1,7 @@
 //! A hub server and the link to it. A team runs one hub on a server; each
 //! member's node opens WebSockets to it, signed in with a token: to share to
-//! and recall from the organization's vault, to take the tasks the hub's inbox
-//! has for its account, and as a node, to run agents and serve models for
+//! and recall from the organization's vault, to keep and run the tasks the hub
+//! holds for its account, and as a node, to run agents and serve models for
 //! others (`nodes`).
 //!
 //! The hub's users and their tokens are kept in `users`: state, not config.
@@ -20,7 +20,7 @@ pub mod store;
 pub mod tokens;
 pub mod users;
 
-pub use client::RemoteMemory;
+pub use client::{Link, RemoteMemory};
 pub use server::Server;
 pub use tokens::Tokens;
 pub use users::{User, Users};

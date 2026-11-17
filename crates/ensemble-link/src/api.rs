@@ -458,7 +458,7 @@ fn token_view(token: &Token) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use crate::server::tests::{PASSWORD, start};
+    use crate::server::testing::{PASSWORD, start};
     use ensemble_core::runtime::block_on;
     use serde_json::{Value, json};
 

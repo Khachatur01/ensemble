@@ -20,6 +20,10 @@ tokio-tungstenite.workspace = true
 tokio.workspace = true
 futures-util = { workspace = true, features = ["sink"] }
 
+[features]
+# The hub server for tests in the crates above (`server::testing`).
+test-support = ["ensemble-core/test-support"]
+
 [dev-dependencies]
 ureq.workspace = true
 ensemble-core = { workspace = true, features = ["test-support"] }

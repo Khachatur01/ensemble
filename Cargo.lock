@@ -687,9 +687,11 @@ dependencies = [
 name = "ensemble-tasks"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "ensemble-agents",
  "ensemble-config",
  "ensemble-core",
+ "ensemble-link",
  "futures-util",
  "serde",
  "serde_json",
