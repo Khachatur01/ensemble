@@ -828,7 +828,9 @@ its lock is a file in the folder's state directory, and one left by a process
 that died is taken over. When a session ends, nothing stops: the node's
 worker for the folder goes on.
 
-To keep it running, as a systemd user unit (`~/.config/systemd/user/ensemble.service`):
+On NixOS, and with Home Manager on Linux or macOS, the Nix modules run it for
+you ([Installation](#installation)). Otherwise, to keep it running, as a
+systemd user unit (`~/.config/systemd/user/ensemble.service`):
 
 ```ini
 [Service]
@@ -1391,40 +1393,198 @@ llm_backends:
 
 ## Installation
 
-Linux is where it is built and tested; the rest of Unix should work. Windows is not supported:
-Ensemble stops agent CLIs as process groups and runs gates with `sh -c`, and
-`ensemble` says so and exits there. Use WSL.
+Ensemble is one program, `ensemble`. It is built and tested on Linux, and it is
+Unix-only: it runs agent CLIs as process groups, gates with `sh -c`, and the
+node on a Unix socket.
+
+| platform | how | keeps the node running |
+| --- | --- | --- |
+| NixOS | [the NixOS module](#nixos), configured in Nix | a systemd user service |
+| Linux with Nix | [`nix profile install`](#linux-with-nix), or [Home Manager](#home-manager-linux-and-macos) | a systemd user service |
+| Linux | [cargo](#linux-and-macos-with-cargo) | [a systemd user service](#running-the-node) |
+| macOS | [cargo](#linux-and-macos-with-cargo), or Nix with [Home Manager](#home-manager-linux-and-macos) | a launchd agent |
+| Windows | [WSL 2](#windows-through-wsl-2), then as on Linux | a systemd user service inside WSL |
+
+The macOS build is made by the same flake and the same cargo, but the tests run
+on Linux; tell us what breaks. Native Windows is not supported: `ensemble`
+says so and exits.
+
+Besides Ensemble, install the CLIs of the adapters your teams use: `claude` for
+`claude-code`, `opencode` for `opencode`, `codex` for `codex`. The `builtin`,
+`direct` and `node` adapters need none. git is needed for worktrees and pulled
+teams. Then run `ensemble setup` ([Quick start](#quick-start)).
 
 ### NixOS
 
-The repository is a flake, so Ensemble installs like any other package. Add it
-as an input of your system flake:
+The repository is a flake with a NixOS module. Add it as an input of your
+system flake, and import the module:
 
 ```nix
 # flake.nix
-inputs.ensemble = {
-  url = "github:Khachatur01/ensemble";
-  inputs.nixpkgs.follows = "nixpkgs";
-};
-```
-
-and to the packages of a module that receives `inputs` (through
-`specialArgs`):
-
-```nix
-{ inputs, pkgs, ... }:
 {
-  environment.systemPackages = [
-    inputs.ensemble.packages.${pkgs.stdenv.hostPlatform.system}.default
-  ];
+  inputs.ensemble = {
+    url = "github:Khachatur01/ensemble";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { nixpkgs, ensemble, ... }: {
+    nixosConfigurations.laptop = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [ ensemble.nixosModules.default ./configuration.nix ];
+    };
+  };
 }
 ```
 
-After `nixos-rebuild switch`, `ensemble` is on `PATH`. With Home Manager, put
-the same expression in `home.packages`. `nix flake update ensemble` picks up
-new commits.
+The module has two parts, each enabled on its own, both configured in Nix:
+`hub.yaml`, `node.yaml` and the node's teams are written from it, with every
+setting as Ensemble wants it (the module adds none; `ensemble node init
+--stdout`, `ensemble team new --stdout` and `ensemble hub init --stdout` print
+them all).
 
-### Nix on any Linux
+**This computer's node**, a systemd user service of one person, with its teams:
+
+```nix
+# configuration.nix
+{ pkgs, inputs, ... }:
+{
+  services.ensemble.node = {
+    enable = true;
+    user = "ana";                          # it runs for her alone
+    extraPackages = [ pkgs.claude-code ];  # the agent CLIs on its PATH; git is always there
+    environmentFile = "/home/ana/.config/ensemble/keys.env";  # API keys, kept out of the store
+    settings = {                           # node.yaml
+      version = 4;
+      name = "laptop";
+      access = "private";
+      hub = "wss://hub.example.com";       # left out: no hub
+      offers = { };
+    };
+    teams = {
+      web.source = inputs.acme-web-team;   # a team repository, pinned by flake.lock
+      docs.settings = {                    # or a team written here: its config.yaml
+        version = 3;
+        llm_backends = { };
+        limits = { };
+        tracker.type = "local_markdown";
+        gates = { };
+        agents.reviewer = {
+          prompt = "You review code and report findings as file:line: problem.";
+          max_seconds = 1800;
+          max_concurrent = 1;
+          isolation = "shared";
+          budget.type = "unlimited";
+          adapter = {
+            type = "claude-code";
+            model = "sonnet";
+            tools = [ "Read" "Grep" "Glob" ];
+            permission_mode = "dontAsk";
+            max_turns = 30;
+            command = "claude";
+          };
+        };
+      };
+    };
+  };
+}
+```
+
+`node.yaml` and each team are linked into `~/.config/ensemble/node/` when the
+service starts, beside what is not declared: `hubs.json` from `ensemble login`,
+and teams made by hand (`ensemble team new`, `pull`, `add`), which are left
+alone. A team declared in Nix is a link into the store, so it is read-only to
+`ensemble`; its trust is your review of the Nix configuration. `ensemble` is
+put on the system's `PATH`, for the `ensemble mcp` your agent CLI starts.
+
+**A hub**, a system service of its own user, with its files in
+`/var/lib/ensemble-hub/ensemble/hub/`:
+
+```nix
+{
+  services.ensemble.hub = {
+    enable = true;
+    openFirewall = false;                  # the port of server.listen
+    environmentFile = "/run/secrets/ensemble-hub.env";  # keys its backends name
+    settings = {                           # hub.yaml
+      version = 1;
+      owner = "acme";
+      llm_backends.central = {
+        type = "openai-compatible-api";
+        base_url = "http://127.0.0.1:8000/v1";
+        timeout_seconds = 300;
+      };
+      knowledge = {
+        vault = "vault";
+        distill = {
+          try = [ { backend = "central"; model = "qwen3.5-72b"; } ];
+          when_none = "wait";
+          max_tokens = 4000;
+        };
+        recall = { max_notes = 8; max_chars = 6000; };
+      };
+      server = {
+        listen = "127.0.0.1:7700";
+        registration = { type = "approval"; max_pending = 20; };
+        sessions.hours = 12;
+        lockout = { failures = 5; minutes = 15; };
+      };
+      roles = {
+        admin = [ "admin" "share" "recall" "tasks" "compute" "host" ];
+        member = [ "share" "recall" "tasks" "compute" ];
+      };
+    };
+  };
+}
+```
+
+`hub.yaml` is written again on every start, and the vault is made on the first.
+Accounts live in the hub's `database.db`, not in Nix: manage them with
+`ensemble-hub`, which runs `ensemble hub …` as the hub's user:
+
+```console
+$ sudo ensemble-hub user add root --role admin   # prints the token once
+$ sudo ensemble-hub user password root
+$ sudo ensemble-hub knowledge status
+```
+
+For the internet, put a TLS proxy in front (`services.caddy`, see
+[The hub](#the-hub)) and leave `openFirewall` off. A whole configuration that
+runs a hub for one person and a node that names it is in
+[`nix/example.nix`](nix/example.nix); the flake's checks build it.
+
+### Home Manager (Linux and macOS)
+
+On any Linux with Nix, and on macOS with Nix (with or without nix-darwin), the
+Home Manager module runs this computer's node: a systemd user service on Linux,
+a launchd agent on macOS (its log in `~/Library/Logs/ensemble-node.log`). Its
+`services.ensemble.node` takes the same `settings`, `teams`, `environmentFile`
+and `extraPackages` as the NixOS module's node, without `user`:
+
+```nix
+# home.nix, with ensemble.homeManagerModules.default in the modules
+{ pkgs, ... }:
+{
+  services.ensemble.node = {
+    enable = true;
+    extraPackages = [ pkgs.opencode ];
+    settings = {
+      version = 4;
+      name = "macbook";
+      access = "private";
+      offers = { };
+    };
+    teams.web.source = ./teams/web;    # a folder with config.yaml
+  };
+}
+```
+
+`node.yaml` and the teams are linked into `~/.config/ensemble/node/` on every
+`home-manager switch`, and `ensemble` is put in `home.packages`. A hub runs on
+NixOS through the NixOS module, or anywhere with `ensemble hub serve`.
+
+### Linux with Nix
+
+Without NixOS or Home Manager:
 
 ```console
 $ nix profile install github:Khachatur01/ensemble  # installed, on PATH
@@ -1434,24 +1594,52 @@ $ nix run github:Khachatur01/ensemble -- check     # one command
 
 An agent spawns `ensemble mcp` by name, so it has to find `ensemble` on the
 `PATH` it was started with: install it, or start the agent from inside
-`nix shell`.
+`nix shell`. `nix profile upgrade ensemble` updates it. Keep the node running
+as in [Running the node](#running-the-node).
 
-### Other Unix: cargo
+### Linux and macOS with cargo
 
-Needs Rust 1.92 or newer (edition 2024) and a C linker.
+Needs Rust 1.92 or newer (edition 2024; [rustup](https://rustup.rs) installs
+it) and a C toolchain: `build-essential` on Debian and Ubuntu, `base-devel` on
+Arch, the Xcode command line tools on macOS (`xcode-select --install`).
 
 ```console
 $ cargo install --git https://github.com/Khachatur01/ensemble
 ```
 
 This puts `ensemble` in `~/.cargo/bin`, which must be on `PATH`. Run the same
-command again to update. Ensemble is not published on crates.io.
+command again to update. Ensemble is not published on crates.io. Keep the node
+running with a systemd user unit on Linux, or a launchd agent on macOS, both in
+[Running the node](#running-the-node).
 
-Besides Ensemble, you need the CLIs of the adapter types your team uses:
-`claude` for `claude-code`, `opencode` for `opencode`, `codex` for `codex`.
-Nothing runs in the background unless you start it: a node
-(`ensemble node serve`) is optional and listens only on a socket of yours, and
-only a hub server opens a port.
+### Windows, through WSL 2
+
+Ensemble runs inside WSL 2, Linux on Windows, with the agent CLIs it starts.
+Claude Code, OpenCode and Codex all run in WSL.
+
+1. In PowerShell, as administrator: `wsl --install -d Ubuntu`, then restart and
+   make your Linux user when Ubuntu first opens.
+2. Let WSL run systemd, so the node can be a user service: in Ubuntu, put
+   this in `/etc/wsl.conf`, then run `wsl --shutdown` in PowerShell and open
+   Ubuntu again:
+
+   ```ini
+   [boot]
+   systemd=true
+   ```
+
+3. In Ubuntu, install Ensemble with [cargo](#linux-and-macos-with-cargo) (after
+   `sudo apt install build-essential git` and rustup) or
+   [Nix](#linux-with-nix), and the agent CLIs you use, inside WSL too.
+4. Run `ensemble setup`, and keep the node running with the systemd user unit
+   in [Running the node](#running-the-node) (`loginctl enable-linger $USER`
+   keeps it running while no Ubuntu window is open).
+
+Work in folders inside WSL (`~/code/…`), not under `/mnt/c`: the agents, git
+and Ensemble are much faster there, and file changes are seen at once. Editors
+reach them through their WSL support (VS Code's WSL extension, JetBrains
+Gateway). A hub runs in WSL the same way; for other computers to reach it, it
+must listen on an address Windows forwards, or run on another machine.
 
 ## Usage
 
@@ -1574,6 +1762,7 @@ scripts stand in for the CLIs.
 | `tests/end_to_end.rs` | the real binary: CLI, `show`, `health` against a stub server, MCP over real pipes, an agent changing a file; session hooks; an agent run on a node and its changes back; a node's models through the hub; a session through a node, its task going on after the session; a hub task worked by a node |
 | `crates/ensemble-agents/tests/fixtures/` | saved event streams per CLI version, replayed through each adapter's parser (see its README) |
 | `tests/real_cli.rs` | the real `claude`, `opencode` and `codex` CLIs: `health` and one trivial run. Ignored; run with `ENSEMBLE_REAL_CLI=1 cargo test --test real_cli -- --ignored`. |
+| `nix/example.nix` | `nix flake check` evaluates the NixOS module with it, and builds the hub's and the node's units |
 
 ## Limitations
 

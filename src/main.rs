@@ -612,8 +612,7 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
             let knowledge = &hub.knowledge;
             println!("knowledge vault: {}", knowledge.vault.display());
             if !ensemble::knowledge::Vault::new(&knowledge.vault).exists() {
-                println!("  it is not a git repository yet; `ensemble hub init` makes it");
-                return Ok(ExitCode::FAILURE);
+                println!("  it is not a git repository yet; `ensemble hub serve` makes it");
             }
             let candidates: Vec<(&config::LlmBackend, &str)> = knowledge
                 .distill
@@ -960,12 +959,11 @@ fn cmd_hub_serve(args: &Args) -> Result<ExitCode, String> {
     .map_err(|e| e.to_string())?;
     let server = hub.server;
     let memory = ensemble::knowledge::Memory::new(&hub, None);
-    if !memory.vault().exists() {
-        return Err(format!(
-            "hub serve: the knowledge vault {} is not a git repository yet; `ensemble hub init` makes it",
-            memory.vault().root().display()
-        ));
-    }
+    // A hub written by hand, or by a NixOS module, gets its vault here.
+    memory
+        .vault()
+        .init()
+        .map_err(|e| format!("hub serve: the knowledge vault: {e}"))?;
     let users = dir.clone();
     let listener = std::net::TcpListener::bind(server.listen)
         .map_err(|e| format!("hub serve: cannot listen on {}: {e}", server.listen))?;

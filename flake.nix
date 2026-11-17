@@ -54,6 +54,43 @@
         };
       });
 
-      checks = forAll (pkgs: { inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) ensemble; });
+      # A hub as a system service and this computer's node as a user service,
+      # configured in Nix: `services.ensemble.{hub,node}`.
+      nixosModules.default = import ./nix/nixos-module.nix { inherit self; };
+      # This computer's node for one person, on Linux or macOS:
+      # `services.ensemble.node`.
+      homeManagerModules.default = import ./nix/home-manager-module.nix { inherit self; };
+
+      checks = forAll (
+        pkgs:
+        {
+          inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) ensemble;
+        }
+        // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          # The NixOS module evaluates, and makes the hub's and the node's units.
+          nixos-module =
+            let
+              system = nixpkgs.lib.nixosSystem {
+                inherit (pkgs.stdenv.hostPlatform) system;
+                modules = [
+                  self.nixosModules.default
+                  ./nix/example.nix
+                  {
+                    boot.loader.grub.enable = false;
+                    fileSystems."/" = {
+                      device = "/dev/null";
+                      fsType = "ext4";
+                    };
+                    system.stateVersion = "25.05";
+                  }
+                ];
+              };
+            in
+            pkgs.linkFarm "ensemble-nixos-module" {
+              "ensemble-hub.service" = system.config.systemd.units."ensemble-hub.service".unit;
+              "ensemble-node.service" = system.config.systemd.user.units."ensemble-node.service".unit;
+            };
+        }
+      );
     };
 }

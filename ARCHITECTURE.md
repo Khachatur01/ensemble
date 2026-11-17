@@ -112,6 +112,7 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 | `ensemble-node` | a node's link to a hub | `Worker`: runs and model calls for others (`lib.rs`) |
 | `ensemble-mcp` | MCP over stdio | the session loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`) |
 | `ensemble` (the root) | the binary | the commands (`src/main.rs`); the node's sessions and the bridge (`src/daemon.rs`); `setup`, `connect`, `doctor` (`src/setup.rs`); session hooks (`src/hooks.rs`); the node's teams, loaded, made, linked, pulled and approved (`src/teams.rs`), over git repositories pinned and trusted per commit (`src/remote.rs`) |
+| `nix/` | not a crate: the NixOS module (`nixos-module.nix`: a hub as a system service, the node as a user service), the Home Manager module (`home-manager-module.nix`: the node on Linux or macOS), what they share about a node (`node.nix`), and an example configuration the flake's checks build (`example.nix`) |
 
 Two rules keep the layers apart. The MCP session knows the tools and the
 router, not which CLIs exist. The router knows agents; only the adapters know
@@ -841,6 +842,10 @@ crate holds it today.
 11. Reloading the node's teams without a restart: after every `team`
     command and on `ensemble node reload`, with the open sessions told their
     tools changed. (Done.)
+12. Installing on NixOS and with Home Manager, configured in Nix: a hub as a
+    system service, this computer's node as a user service (systemd, or
+    launchd on macOS), with `node.yaml`, `hub.yaml` and the teams written
+    from Nix. (Done.)
 
 What remains is the "Not yet" of steps 4 and 5, and the modules marked not
 built above.
