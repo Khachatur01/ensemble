@@ -376,7 +376,6 @@ dependencies = [
  "ensemble-agents",
  "ensemble-config",
  "ensemble-core",
- "ensemble-inbox",
  "ensemble-knowledge",
  "ensemble-tasks",
  "futures-util",

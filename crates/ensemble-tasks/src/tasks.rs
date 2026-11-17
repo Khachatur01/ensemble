@@ -1,6 +1,5 @@
 //! Tasks as files: tickets the calling agent, a person or an inbox writes,
-//! that agents work through while a worker runs for the folder (an
-//! `ensemble mcp --team` session, a node, or `ensemble serve`).
+//! that agents work through while the node runs a worker for the folder.
 //!
 //! A task is a directory under the state directory's `tasks/`, named by its id
 //! (`0007-add-retry`), holding files a person can read, like a ticket and its
@@ -58,7 +57,7 @@ One directory per task, named by its id (`0001-add-retry`). Agents work
 through them while `ensemble mcp` runs, oldest id first, each within its
 agent's `max_concurrent`.
 
-`task.md` is the ticket; write one by hand or let the manager `submit` it:
+`task.md` is the ticket; write one by hand or let your agent `submit` it:
 
     ---
     title: Add retry to the fetcher
@@ -76,7 +75,7 @@ agent's `max_concurrent`.
     Retry a failed request three times, waiting 1s, 2s, 4s.
 
 If the agent stops to ask, its question is added to `questions.md`; answer it
-with the manager's `answer` tool, or write `### Answer` and the answer under
+with your agent's `answer` tool, or write `### Answer` and the answer under
 it, and the task goes on.
 
 `result.md` appears when the task ends, with its status (done, failed or

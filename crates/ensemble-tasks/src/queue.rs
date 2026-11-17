@@ -7,7 +7,7 @@
 //!
 //! - A **task** is a ticket on disk ([`crate::tasks`]). The manager writes one
 //!   with `submit`, or a person or an inbox writes one. While the folder's
-//!   worker runs ([`Queue::work`], in a session, a node or `ensemble serve`), it
+//!   worker runs ([`Queue::work`], in the node), it
 //!   starts every task that has no result yet, oldest id first, as its agent's
 //!   slots allow, and writes `result.md` when it ends. A task the worker's end
 //!   interrupts has no result, so it runs again next time.

@@ -2,7 +2,7 @@
 //!
 //! Ensemble never merges on its own: a task's work stays on its branch,
 //! `ensemble/<id>`, until a person decides. `review` and `diff` only look.
-//! `merge` is for a person to type; the manager gets no tool for it.
+//! `merge` is for a person to type; the calling agent gets no tool for it.
 
 use crate::tasks::{Status, Store};
 use ensemble_core::workspace;
@@ -97,7 +97,7 @@ pub fn diff(task: &Task) -> Result<String, String> {
     )
 }
 
-/// A task's branch and result, for a person or the manager to read. It changes
+/// A task's branch and result, for a person or the calling agent to read. It changes
 /// nothing.
 pub fn review(task: &Task) -> Result<String, String> {
     let changes = stat(task)?;

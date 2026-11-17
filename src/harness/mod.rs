@@ -4,9 +4,7 @@
 //! team as tools and decides what to delegate; Ensemble runs the agent and
 //! returns the work. `delegation` holds the tools and what a failed delegation
 //! says, and `queue` the work nobody waits for; both live in `ensemble_tasks`.
-//! `mcp` (`ensemble_mcp`) is the JSON-RPC transport around them, and `serve` the
-//! worker with no session.
+//! `mcp` (`ensemble_mcp`) is the JSON-RPC transport around them.
 
 pub use ensemble_mcp as mcp;
-pub use ensemble_mcp::serve;
 pub use ensemble_tasks::{delegation, lock, queue};

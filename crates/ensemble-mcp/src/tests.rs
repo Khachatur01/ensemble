@@ -1,7 +1,45 @@
 use super::*;
 use ensemble_config as config;
 use ensemble_core::workspace::testing::{TempDir, executable};
+use ensemble_knowledge::Memory;
 use std::collections::BTreeMap;
+
+/// What a session's hub brings in these tests: its knowledge.
+#[derive(Clone, Copy, Default)]
+struct Hub<'a> {
+    knowledge: Option<&'a dyn KnowledgeAccess>,
+}
+
+/// A session of `e` on `input` with its folder's worker beside it, as a node
+/// runs one, except that the queue closes when `input` ends.
+fn serve(
+    e: &Ensemble,
+    input: impl AsyncBufRead + Unpin + Send,
+    output: impl AsyncWrite + Unpin + Send,
+) -> std::io::Result<()> {
+    serve_with(e, Hub::default(), input, output)
+}
+
+/// [`serve`], with what a hub adds.
+fn serve_with(
+    e: &Ensemble,
+    hub: Hub<'_>,
+    input: impl AsyncBufRead + Unpin + Send,
+    output: impl AsyncWrite + Unpin + Send,
+) -> std::io::Result<()> {
+    let state = e.state_dir()?;
+    // As on a node: only the worker that holds the folder runs its tasks.
+    let lock = ensemble_tasks::lock::acquire(&state);
+    let mut store = Store::new(&state);
+    if let Some(usage) = e.usage_dir() {
+        store = store.with_usage_dir(usage);
+    }
+    let queue = queue_for(e, Some(store), hub.knowledge);
+    runtime::block_on(async {
+        let session = serve_session(e, hub.knowledge, &queue, input, output, true);
+        tokio::join!(session, queue.work(lock.is_ok())).0
+    })
+}
 
 /// One OpenCode JSON event per line, as `printf` commands.
 fn emit(events: &[Value]) -> String {
@@ -1352,20 +1390,6 @@ fn a_session_runs_no_tasks_while_another_worker_holds_the_folder() {
 }
 
 #[test]
-fn a_session_holds_the_lock_while_it_runs_and_frees_it_after() {
-    let (e, tmp) = team(&[("scout", "read", "true")]);
-    let state = project(&tmp).join(".ensemble");
-    session(&e, |ask| {
-        let _ = ask("status", json!({}));
-        assert_eq!(
-            ensemble_tasks::lock::holder(&state),
-            Some(std::process::id())
-        );
-    });
-    assert_eq!(ensemble_tasks::lock::holder(&state), None);
-}
-
-#[test]
 fn a_delegation_leaves_a_record_of_the_run() {
     let (e, tmp) = scouting();
     let r = call(&e, "delegate", json!({"agent": "scout", "task": "look"}));
@@ -1837,7 +1861,6 @@ fn a_task_of_an_agent_with_recall_is_given_the_notes_about_it() {
     );
     let hub = Hub {
         knowledge: Some(&Deploys),
-        ..Hub::default()
     };
     session_with(&e, hub, |ask| {
         let r = ask(

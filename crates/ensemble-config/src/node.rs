@@ -1,7 +1,6 @@
 //! `node.yaml`: one node, a worker that gives this computer's power to its
-//! owner and, when shared, to the people of a hub server. The usual one is
-//! `~/.config/ensemble/node.yaml`; a computer may run more, each from a file
-//! of its own (`--node <file>`).
+//! owner and, when shared, to the people of a hub server: `~/.config/ensemble/
+//! node.yaml`. A computer runs one node.
 //!
 //! A node says who it works for (its owner alone, or also the others whose
 //! role has `compute`), the helper team it runs, and what it offers: agents of
@@ -19,6 +18,9 @@ pub const NODE_SUPPORTED_VERSION: u32 = 3;
 
 /// The JSON Schema for `node.yaml`.
 pub const NODE_SCHEMA: &str = include_str!("../../../node.schema.json");
+
+/// The first line of a node file, which points an editor at its schema.
+pub const NODE_SCHEMA_URL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/node.schema.json";
 
 /// The file `ensemble node init` writes.
 pub const NODE_SAMPLE: &str = include_str!("node_sample.yaml");

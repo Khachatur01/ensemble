@@ -30,7 +30,7 @@ spread across them. MCP is how an agent CLI reaches a node. It is one binary,
   on the right person's node), knowledge, accounts and tokens, routing runs
   and model calls between nodes, and integrations (Telegram and others, to
   come). It runs as `ensemble hub serve` on a server for a team, or embedded
-  in one person's own node or session.
+  in one person's own node.
 - **The helper team**: agents described in one `config.yaml`, each run by an
   adapter (an agent CLI started headless, an agent loop of Ensemble's own, one
   chat request to a model, or a run on another node).
@@ -44,15 +44,13 @@ On one computer:
   your agent CLI (Claude Code, Codex, OpenCode, ...)
         │  MCP: JSON-RPC 2.0, one object per line, on stdio
         ▼
-  ensemble mcp ───────────────────────────────┐  no --team: a bridge
-        │  --team: the session and the        │  Unix socket: one hello
-        │  folder's worker, in this process   │  line, then MCP both ways
-        │                                     ▼
-        │                         ensemble node serve
-        │                         sessions from any folder,
-        │                         a worker per folder it served
-        ▼                                     │
-  the helper team (config.yaml) ◄─────────────┘
+  ensemble mcp          a bridge
+        │  Unix socket: one hello line, then MCP both ways
+        ▼
+  ensemble node serve   one per computer: sessions from any folder,
+        │               a worker per folder it served
+        ▼
+  the helper team (config.yaml)
         │  router: agent → adapter; model from its `try` list
         ▼
   claude -p · opencode run · codex exec        agent CLIs, as subprocesses
@@ -83,18 +81,16 @@ Every process is the same binary. What runs in each:
 
 | command | what it runs | ends |
 | --- | --- | --- |
-| `ensemble mcp --team <dir>` | one MCP session on stdio and the worker of its folder (the task queue), and with an embedded hub (`--hub <dir>`) its distiller and inbox | when the agent CLI closes stdin; the running tasks stop and are queued again |
-| `ensemble mcp` (no `--team`) | a bridge: it connects to the node's socket, sends `{"dir": "<folder>"}`, and copies bytes between stdio and the socket | when the node closes the session |
-| `ensemble node serve` | the node: a socket for sessions, a worker per folder, with a hub server a link that offers runs and models (`Worker`) and one that takes your tasks (`NodeInbox`), with an embedded hub its distiller and inbox | on SIGINT or SIGTERM |
-| `ensemble serve --team <dir>` | a folder's worker with no session | on a signal, or once idle with `--exit-when-idle` |
+| `ensemble mcp` | a bridge: it connects to the node's socket, sends `{"dir": "<folder>"}`, and copies bytes between stdio and the socket | when the node closes the session |
+| `ensemble node serve` | the node, one per computer: a socket for sessions, a worker per folder, with a hub server a link that offers runs and models (`Worker`) and one that takes your tasks (`NodeInbox`), with an embedded hub its distiller and inbox | on SIGINT or SIGTERM |
 | `ensemble hub serve --hub <dir>` | the hub server: one port for the link, the REST API and `/nodes/v1/`; the organization vault's distiller; the tracker relay | on SIGINT or SIGTERM |
-| everything else | one command: read the config and the state, do one thing, print | at once |
+| everything else | one command: read the config and the state, do one thing, print; `submit`, `assign` and `answer` also tell the node about the folder, so that its worker runs there | at once |
 
 A folder's tasks are run by one worker at a time: whoever holds the lock file
-(`worker.lock`) in the folder's state directory. A session that finds the lock
-taken reads and writes tasks but starts none. A lock left by a dead process is
-taken over. The same lock keeps one node per `node.yaml` name, one distiller
-per vault and one inbox per hub.
+(`worker.lock`) in the folder's state directory. A node that finds the lock
+taken serves sessions there but starts no tasks. A lock left by a dead process
+is taken over. The same lock keeps one node per computer, one distiller per
+vault and one inbox per hub.
 
 ## Crates
 
@@ -112,7 +108,7 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 | `ensemble-tasks` | work handed to the team | tasks as files (`tasks.rs`); the `Tracker` trait and `LocalMarkdown` (`tracker.rs`); the queue that runs tasks and background delegations within slots and budgets (`queue.rs`); the MCP tools (`delegation.rs`); review and merge of a worktree task (`review.rs`) |
 | `ensemble-inbox` | issues from a tracker into tasks | the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`); an issue made a task and what the task reports (`work.rs`); the embedded hub's inbox (`bridge.rs`); a hub server's (`relay.rs`); a member's computer's part in it (`node.rs`) |
 | `ensemble-node` | a node's link to a hub | `Worker`: runs and model calls for others (`lib.rs`) |
-| `ensemble-mcp` | MCP over stdio | the session loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`), `ensemble serve` (`serve.rs`) |
+| `ensemble-mcp` | MCP over stdio | the session loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`) |
 | `ensemble` (the root) | the binary | the commands (`src/main.rs`); the node's sessions and the bridge (`src/daemon.rs`); `setup`, `connect`, `doctor` (`src/setup.rs`); session hooks (`src/hooks.rs`); remote helper teams (`src/remote.rs`) |
 
 Two rules keep the layers apart. The MCP session knows the tools and the
@@ -128,7 +124,7 @@ Ensemble except on request (`add-agent`, `migrate`):
 | --- | --- | --- |
 | `config.yaml` | the helper team's directory (`--team`), often a git repository; or a remote one, `<url>#<commit>` | `llm_backends`, `limits`, `gates`, `tracker`, `agents` |
 | `hub.yaml` | the hub's directory (`--hub`) | `owner`, the hub's own `llm_backends`, `knowledge`, `tasks`, and for a server `server` and `roles` |
-| `node.yaml` | `~/.config/ensemble/node.yaml`, or `--node <file>` | `name`, `access`, `team`, `offers` |
+| `node.yaml` | `~/.config/ensemble/node.yaml`, one per computer | `name`, `access`, `team`, `offers` |
 
 No setting has a default: every one is written, and a missing one is refused by
 name. A block that is absent means its module is off. No file holds a secret:
@@ -144,7 +140,7 @@ or a config directory:
 | `~/.local/state/ensemble/workdirs/<folder>-<hash>/` | a working folder's `tasks/`, `runs/`, `worktrees/`, `state.json` and `worker.lock` |
 | `~/.local/state/ensemble/orgs/<team>-<hash>/` | a helper team's `usage.json` (budgets) and `records.jsonl` (`ensemble stats`), shared by every folder |
 | `~/.local/state/ensemble/hubs/<hub>-<hash>/` | an embedded inbox's `inbox.json`; a hub server's `users.json` and `deliveries.json` |
-| `~/.local/state/ensemble/nodes/<name>/` | a node's lock, `folders.json` (the folder last used for each project), `runs/` for others, `inbox/node.json` |
+| `~/.local/state/ensemble/node/` | the node's lock, `folders.json` (the folder last used for each project), `runs/` for others, `inbox/node.json` |
 | `$XDG_RUNTIME_DIR/ensemble/<hash>.sock` | a node's socket, in a folder only its user may enter (`/tmp/ensemble-<user>/` without `XDG_RUNTIME_DIR`) |
 | `~/.config/ensemble/hubs.json` | hub tokens, one per URL, mode 0600 |
 | `~/.cache/ensemble/` | clones of remote helper teams |
@@ -246,8 +242,8 @@ an inbox. On each scan the queue:
    is `ensemble merge`, which only a person runs.
 
 What a run does as it goes (its activity lines, its state) is in `runs/<id>/`,
-which is how `status` shows what an agent is doing. A task stopped by the end
-of a session or a node has no result, so it runs again next time.
+which is how `status` shows what an agent is doing. A task stopped when the
+node stops has no result, so it runs again next time.
 
 ## Knowledge
 
@@ -286,7 +282,7 @@ helper team never calls a tracker. A tracker is the `IssueTracker` trait; a
 folder of markdown issues is the one implementation so far.
 
 - **Embedded** (`hub.yaml` with `tasks.user` and `tasks.projects`): `Inbox`
-  polls the tracker every `poll_seconds` on a thread of the session or node. An
+  polls the tracker every `poll_seconds` on a thread of the node. An
   open issue assigned to you with the label becomes a task in the folder its
   project maps to, for the agent a `<label>:<agent>` label names or in the
   backlog. A question goes out as a comment and your next comment comes back as
@@ -392,7 +388,8 @@ and is written to be read by the model that will see it.
   between nodes, model access. The word "organization" is not used for it,
   to keep it apart from the old agent config.
 - **Node**: a worker: a process that gives computing resources to its owner
-  and the hub's users. A computer may run any number of nodes. A node is
+  and the hub's users. A computer runs one node. (Decided 2026-11-17; a
+  computer could run several before.) A node is
   **private**, working only for its owner, or **shared**, lending its
   machine's power to other users of the hub. It holds a helper team and is the
   MCP server for its owner's agent sessions from any folder: `ensemble mcp`
@@ -437,8 +434,8 @@ server, quotas per user, a usage log).
 
 **Node** (`ensemble node`): a worker. It runs its owner's helper team, wires the
 local agent CLIs (MCP, session hooks), and connects outbound to the hub over
-WebSockets, so it needs no open port. A computer may run several nodes, such as
-one per hub, or a private one beside a shared one. (A WebSocket was chosen on
+WebSockets, so it needs no open port. A computer runs one node, private or
+shared. (A WebSocket was chosen on
 2026-11-11, over plain HTTP with long-polling.)
 
 **The hub is a role, not a place.** Its modules run inside the node process for a
@@ -781,8 +778,13 @@ crate holds it today.
 6. Async, the `builtin` adapter, and one node per worker that is also the MCP
    server. (Done: tokio throughout, as part one describes; `builtin` on
    harness-rs; the node as the long-running MCP server on a socket, with
-   `ensemble mcp` without `--team` as a bridge to it and a worker per folder;
-   `node.yaml` version 3.)
+   `ensemble mcp` as a bridge to it and a worker per folder; `node.yaml`
+   version 3.)
+7. One node per computer, and the node as the only way in: no session that
+   runs a team itself (`mcp --team`), no `ensemble serve`, no `--node` or
+   `--state`; `setup` and `connect` register the bridge with the client.
+   (Done.) Next: teams kept in a directory of the node, pulled like images
+   or made on request with your approval; then the hub's accounts in Turso.
 
 What remains is the "Not yet" of steps 4 and 5, and the modules marked not
 built above.

@@ -7,7 +7,6 @@
 
 use ensemble::config::{self, Adapter, Config, SystemEnv};
 use ensemble::external::{claude_code, opencode};
-use ensemble::harness::mcp;
 use ensemble::remote;
 use ensemble::router::Ensemble;
 use ensemble::setup;
@@ -27,27 +26,26 @@ USAGE:
     ensemble <COMMAND> [OPTIONS]
 
 COMMANDS:
-    mcp [--node FILE]       Serve the agents over MCP on stdio. This is what an
-                            agent (Claude Code, OpenCode, ...) spawns, with the
-                            project as its working directory; it is not meant
-                            to be run by hand. With --team it runs that helper
-                            team in this session alone; without, it is a
-                            session of the running node (`node serve`), whose
-                            tasks go on after the session ends.
+    mcp                     A session of your node over MCP on stdio: what an
+                            agent (Claude Code, OpenCode, ...) spawns, in the
+                            folder you work in; not meant to be run by hand. It
+                            carries MCP between the agent and the running node
+                            (`node serve`), whose tasks go on after the session.
     init [--force|--stdout] Write a sample helper team: config.yaml in the --team
                             directory, with every setting. Refuses to overwrite
                             it unless --force; --stdout prints it instead.
     migrate <FILE>          Rewrite a version 1 or 2 config as a version 3
                             helper team in --team: every agent in one flat list.
-    setup [--team DIR] [--manager M] [--starter S] [--yes]
-                            Set everything up: find the agent CLIs, write a
-                            starter helper team, register it with the agent you
-                            talk to and check it. Asks what it needs.
-    connect --manager M [--team DIR | --node FILE] [--hub DIR] [--env-file F] [--global] [--hooks]
+    setup [--client C] [--name N] [--team DIR] [--yes]
+                            Set this computer up: find the agent CLIs, write
+                            its node (~/.config/ensemble/node.yaml) if there is
+                            none, register Ensemble with the agent you talk to,
+                            and check the node's team. Asks what it needs.
+    connect --client C [--hub DIR] [--env-file F] [--global] [--hooks]
                             Register Ensemble with the agent you talk to:
-                            claude-code, opencode or codex. Prints the command
-                            it runs. With --team, each session runs that team;
-                            without, sessions reach your node. --hooks (Claude Code, Codex; needs --hub)
+                            claude-code, opencode or codex, so its sessions
+                            reach your node. Prints the command it runs.
+                            --hooks (Claude Code, Codex; needs --hub)
                             also adds session hooks that put the vault's notes
                             about each prompt into the conversation: in the
                             project's .claude/settings.local.json or
@@ -57,21 +55,20 @@ COMMANDS:
                             with every setting, and make its knowledge vault a
                             git repository. --server writes a hub server for a
                             team instead of a hub for you alone.
-    node init [--node FILE] [--force|--stdout]
-                            Write a node: ~/.config/ensemble/node.yaml, or FILE.
+    node init [--force|--stdout]
+                            Write this computer's node: ~/.config/ensemble/node.yaml.
                             It names the node, says whom it works for (private:
                             you; shared: also those whose role has `compute`),
                             the helper team it runs, and what it offers through
                             a hub: agents of that team, models.
-    node serve [--node FILE] [--hub HUB]
+    node serve [--hub HUB]
                             Run that node until stopped (Ctrl-C or SIGTERM):
                             `ensemble mcp` sessions from any folder reach its
                             team, and each folder's tasks go on between them.
                             With a hub server it also takes your tasks from the
                             hub (into the folder of the project's name where a
                             session last ran), and runs the agents and serves
-                            the models it offers. A computer may run any number
-                            of nodes, each from its own file.
+                            the models it offers. A computer runs one node.
     nodes --hub URL         The nodes of a hub server you may use now, with the
                             agents and models each offers.
     hub check               Load and validate hub.yaml, and say which model
@@ -103,7 +100,7 @@ COMMANDS:
                             with its label, where each stands and the task it
                             became. --once (needs --team) first makes new
                             issues into tasks and reports tasks back, as a
-                            running `ensemble mcp` or `serve` does.
+                            running node does.
     recall TOPIC            Print the notes of the --hub vault about TOPIC, as
                             an agent's `recall` tool gets them.
     hook --hub HUB          What a Claude Code or Codex session hook runs: reads
@@ -113,7 +110,7 @@ COMMANDS:
     knowledge status        Shares, those not yet distilled, notes, and what
                             waits in review/.
     knowledge distill       Turn every pending share into notes now, instead of
-                            waiting for `ensemble mcp` or `serve` to.
+                            waiting for the node to.
     knowledge rebuild [--yes]
                             Delete the notes and make them again from every
                             share, in one commit.
@@ -135,8 +132,8 @@ COMMANDS:
                             Merge that branch into the repository, once the task
                             is done. Refuses a dirty repository and a conflict,
                             and undoes the latter. --cleanup then removes the
-                            task's worktree and branch. Only you run this: the
-                            manager has no tool for it.
+                            task's worktree and branch. Only you run this: your
+                            agent has no tool for it.
     tasks [--status S]      List the tasks of this working folder and where each
                             stands. Reads files; starts nothing.
     task ID                 Show one task: its ticket, where it stands, its
@@ -144,13 +141,8 @@ COMMANDS:
     submit AGENT TITLE --text T   (or TITLE --backlog: put it in the backlog)
            [--goal G] [--context C] [--repo R] [--gate N:K]
            [--after ID,ID] [--files F,F] [--constraints C,C] [--done-when D,D]
-                            Write a task. A running `ensemble mcp` picks it up.
+                            Write a task. Your running node picks it up.
     answer ID TEXT          Answer the question a task stopped to ask.
-    serve [--exit-when-idle]
-                            Work through this folder's tasks with no agent session
-                            around them, until stopped (Ctrl-C or SIGTERM), saying
-                            when nothing is left to do; --exit-when-idle stops
-                            there instead. Only one worker runs a folder's tasks.
     assign ID AGENT         Give a task to an agent: from the backlog, or to
                             someone else.
     stats [--since 7d] [--json]
@@ -181,8 +173,6 @@ OPTIONS:
                             knowledge.
         --env-file <PATH>   A file of NAME=value lines read for variables the
                             environment does not set.
-        --state <DIR>       Keep tasks, runs and worktrees here instead of in
-                            the per-user state directory.
     -d, --dir <PATH>        The project directory agents work in.
                             Default: the current directory.
         --context <TEXT>    Extra context for `run`.
@@ -220,12 +210,10 @@ struct Args {
     /// Where usage counters live, when the helper team is remote.
     usage: Option<PathBuf>,
     env_file: Option<PathBuf>,
-    state: Option<PathBuf>,
     dir: Option<PathBuf>,
     context: Option<String>,
-    /// The options that take a value and belong to one command: `--manager`,
-    /// `--adapter`, `--model`, `--backend`, `--starter`, `--prompt`, and those
-    /// of `submit`.
+    /// The options that take a value and belong to one command: `--client`,
+    /// `--adapter`, `--model`, `--backend`, `--prompt`, and those of `submit`.
     opts: std::collections::BTreeMap<String, String>,
 }
 
@@ -235,7 +223,6 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
     let mut team = None;
     let mut hub = None;
     let mut env_file = None;
-    let mut state = None;
     let mut dir = None;
     let mut context = None;
     let mut opts = std::collections::BTreeMap::new();
@@ -263,13 +250,12 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             }
             "--hub" => hub = Some(PathBuf::from(value("--hub")?)),
             "--env-file" => env_file = Some(PathBuf::from(value("--env-file")?)),
-            "--state" => state = Some(PathBuf::from(value("--state")?)),
             "-d" | "--dir" => dir = Some(PathBuf::from(value("--dir")?)),
             "--context" => context = Some(value("--context")?),
-            "--manager" | "--adapter" | "--model" | "--backend" | "--starter" | "--prompt"
-            | "--status" | "--text" | "--goal" | "--repo" | "--gate" | "--since" | "--after"
-            | "--files" | "--constraints" | "--done-when" | "--ref" | "--title" | "--role"
-            | "--token" | "--user" | "--node" => {
+            "--client" | "--adapter" | "--model" | "--backend" | "--prompt" | "--status"
+            | "--text" | "--goal" | "--repo" | "--gate" | "--since" | "--after" | "--files"
+            | "--constraints" | "--done-when" | "--ref" | "--title" | "--role" | "--token"
+            | "--user" | "--name" => {
                 opts.insert(arg.clone(), value(&arg)?);
             }
             other if other.starts_with('-') && command.is_none() => {
@@ -292,7 +278,6 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             hub,
             usage: None,
             env_file,
-            state,
             dir,
             context,
             opts,
@@ -379,8 +364,8 @@ fn run() -> Result<ExitCode, String> {
     if args.command == "hook" {
         return cmd_hook(&args);
     }
-    if args.command == "mcp" && args.team.is_none() {
-        return cmd_mcp_bridge(&args, &dir);
+    if args.command == "mcp" {
+        return cmd_mcp(&dir);
     }
     if args.command == "login" {
         return cmd_login(&args);
@@ -396,14 +381,12 @@ fn run() -> Result<ExitCode, String> {
         .map_err(|e| e.to_string())?;
 
     match args.command.as_str() {
-        "mcp" => cmd_mcp(config, dir, &args),
-        "check" => cmd_check(config, &dir, &args),
+        "check" => cmd_check(config, &dir),
         "agents" => cmd_agents(config, dir, &args),
         "show" => cmd_show(&config, &args),
         "health" => cmd_health(config, dir, &args),
         "doctor" => cmd_doctor(config, &dir, &args),
         "submit" => cmd_submit(&config, &dir, &args),
-        "serve" => cmd_serve(config, dir, &args),
         "stats" => cmd_stats(config, dir, &args),
         "assign" => cmd_assign(&config, &dir, &args),
         "run" => cmd_run(config, dir, &args),
@@ -468,14 +451,6 @@ impl Knowledge {
         match self {
             Knowledge::Local(m) => m.as_ref(),
             Knowledge::Remote(r) => r.as_ref(),
-        }
-    }
-
-    /// The knowledge this process distills, which only an embedded hub has.
-    fn local(&self) -> Option<&ensemble::knowledge::Memory> {
-        match self {
-            Knowledge::Local(m) => Some(m.as_ref()),
-            Knowledge::Remote(_) => None,
         }
     }
 }
@@ -751,14 +726,10 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
     }
 }
 
-/// `ensemble node init`: write `~/.config/ensemble/node.yaml`, which maps the
-/// projects of a hub server's tasks to folders on this computer.
-/// The node file `--node` names, else ~/.config/ensemble/node.yaml.
-fn node_file(args: &Args) -> Result<PathBuf, String> {
-    match opt(args, "--node") {
-        Some(file) => absolute(Path::new(file)),
-        None => Ok(config::node_path(&state::config_root()?)),
-    }
+/// This computer's node file, `~/.config/ensemble/node.yaml`: a computer runs
+/// one node.
+fn node_file() -> Result<PathBuf, String> {
+    Ok(config::node_path(&state::config_root()?))
 }
 
 fn cmd_node(args: &Args) -> Result<ExitCode, String> {
@@ -768,7 +739,7 @@ fn cmd_node(args: &Args) -> Result<ExitCode, String> {
                 print!("{}", config::node::NODE_SAMPLE);
                 return Ok(ExitCode::SUCCESS);
             }
-            let path = node_file(args)?;
+            let path = node_file()?;
             if path.exists() && !has(args, "--force") {
                 return Err(format!(
                     "{} already exists. Pass --force to overwrite it.",
@@ -796,7 +767,7 @@ fn cmd_node(args: &Args) -> Result<ExitCode, String> {
 /// It serves `ensemble mcp` sessions from any folder with its team; with a hub
 /// server, it also takes your tasks from the hub and offers what it offers.
 fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
-    let path = node_file(args)?;
+    let path = node_file()?;
     let node = config::load_node(&path)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| {
@@ -816,7 +787,7 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
         ),
         None => None,
     };
-    let dir = state::node_dir(&node.name)?;
+    let dir = state::node_dir()?;
     let _lock = ensemble::lock::acquire(&dir).map_err(|pid| {
         format!(
             "node serve: process {pid} already runs the node '{}'",
@@ -918,19 +889,18 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `ensemble mcp` with no `--team`: a session of the running node, which
-/// `--node` names (else ~/.config/ensemble/node.yaml), in `dir`.
-fn cmd_mcp_bridge(args: &Args, dir: &Path) -> Result<ExitCode, String> {
-    let path = node_file(args)?;
+/// `ensemble mcp`: a session of this computer's running node, in `dir`.
+fn cmd_mcp(dir: &Path) -> Result<ExitCode, String> {
+    let path = node_file()?;
     let node = config::load_node(&path)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| {
             format!(
-                "mcp: no --team, and no node file at {} to reach a node instead. Pass --team <dir>, or write a node with `ensemble node init` and start it with `ensemble node serve`",
+                "mcp: no node file at {}. `ensemble setup` writes one, or `ensemble node init`; then start the node with `ensemble node serve`",
                 path.display()
             )
         })?;
-    let socket = state::node_socket(&state::node_dir(&node.name)?);
+    let socket = state::node_socket(&state::node_dir()?);
     ensemble::runtime::shared()
         .block_on(daemon::bridge(&socket, dir, &node.name))
         .map_err(|e| format!("mcp: {e}"))?;
@@ -1220,12 +1190,9 @@ fn confirm(question: &str, args: &Args) -> Result<bool, String> {
     Ok(matches!(answer.to_lowercase().as_str(), "y" | "yes"))
 }
 
-/// An `Ensemble` for `config`, keeping its state where `--state` says.
+/// An `Ensemble` for `config`, its usage counted where a remote team's is.
 fn ensemble_for(config: Config, dir: PathBuf, args: &Args) -> Ensemble {
     let mut ensemble = Ensemble::new(config, Some(dir));
-    if let Some(state) = &args.state {
-        ensemble = ensemble.with_state(state.clone());
-    }
     if let Some(usage) = &args.usage {
         ensemble = ensemble.with_usage_dir(usage.clone());
     }
@@ -1233,11 +1200,8 @@ fn ensemble_for(config: Config, dir: PathBuf, args: &Args) -> Ensemble {
 }
 
 /// Where tasks and runs are kept for the work done in `dir`.
-fn state_for(dir: &Path, args: &Args) -> Result<PathBuf, String> {
-    match &args.state {
-        Some(state) => Ok(state.clone()),
-        None => state::dir_for(dir),
-    }
+fn state_for(dir: &Path) -> Result<PathBuf, String> {
+    state::dir_for(dir)
 }
 
 /// Write the sample helper team, or print it.
@@ -1302,33 +1266,6 @@ fn cmd_migrate(args: &Args) -> Result<ExitCode, String> {
         "wrote {}: one helper team with every agent. Comments were not kept; an agent or gate that two teams both had is now `<team>-<name>`.",
         path.display()
     );
-    Ok(ExitCode::SUCCESS)
-}
-
-fn cmd_mcp(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String> {
-    // A friendly nudge, on stderr so it cannot corrupt the protocol stream.
-    if std::io::stdin().is_terminal() {
-        eprintln!(
-            "ensemble: speaking MCP (JSON-RPC 2.0, one object per line) on stdin/stdout.\n\
-             ensemble: a harness spawns this; for a one-off try `ensemble run <agent> <task>`."
-        );
-    }
-    let knowledge = knowledge_for(args, &dir)?;
-    let agents: Vec<String> = config.agent_names().into_iter().map(String::from).collect();
-    let inbox = inbox_for(args, agents)?;
-    let ensemble = ensemble_for(config, dir, args);
-    mcp::serve_with(
-        &ensemble,
-        mcp::Hub {
-            knowledge: knowledge.as_ref().map(Knowledge::access),
-            distill: knowledge.as_ref().and_then(Knowledge::local),
-            inbox: inbox.as_ref(),
-            node: None,
-        },
-        tokio::io::BufReader::new(tokio::io::stdin()),
-        tokio::io::stdout(),
-    )
-    .map_err(|e| format!("mcp: {e}"))?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1537,7 +1474,7 @@ fn cmd_share(args: &Args, dir: &Path) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_check(config: Config, dir: &Path, args: &Args) -> Result<ExitCode, String> {
+fn cmd_check(config: Config, dir: &Path) -> Result<ExitCode, String> {
     // Reaching here means the config already loaded and validated; `load`
     // returns an error otherwise.
     println!(
@@ -1605,7 +1542,7 @@ fn cmd_check(config: Config, dir: &Path, args: &Args) -> Result<ExitCode, String
     }
 
     // A bad ticket fails only when the worker reaches it; say so now.
-    let store = tasks::Store::new(&state_for(dir, args)?);
+    let store = tasks::Store::new(&state_for(dir)?);
     let entries = store.scan();
     let mut bad = Vec::new();
     for entry in &entries {
@@ -1873,7 +1810,7 @@ fn command_line(program: &str, args: &[String]) -> String {
         .join(" ")
 }
 
-/// The value of an option that takes one, such as `--manager`.
+/// The value of an option that takes one, such as `--client`.
 fn opt<'a>(args: &'a Args, name: &str) -> Option<&'a str> {
     args.opts.get(name).map(String::as_str)
 }
@@ -1921,8 +1858,6 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-/// Run a registration, saying first what it is. The manager's own words come
-/// through, and so does its exit status.
 /// The `--hub` to register: a directory made absolute, or a hub server's URL
 /// as it is.
 fn hub_for_registration(args: &Args) -> Result<Option<PathBuf>, String> {
@@ -1933,6 +1868,8 @@ fn hub_for_registration(args: &Args) -> Result<Option<PathBuf>, String> {
     }
 }
 
+/// Run a registration, saying first what it is. The client's own words come
+/// through, and so does its exit status.
 fn run_registration(reg: &setup::Registration) -> Result<(), String> {
     println!("$ {}", reg.line());
     match std::process::Command::new(reg.program)
@@ -1952,66 +1889,22 @@ fn run_registration(reg: &setup::Registration) -> Result<(), String> {
     }
 }
 
+/// `ensemble connect --client C`: register Ensemble with the agent CLI you
+/// talk to, so that its sessions reach this computer's node; with `--hooks`,
+/// the session hooks of the `--hub` vault too.
 fn cmd_connect(args: &Args) -> Result<ExitCode, String> {
-    let manager = opt(args, "--manager").ok_or(format!(
-        "connect: needs --manager, the agent you talk to: {}",
-        setup::MANAGERS.join(" or ")
+    let client = opt(args, "--client").ok_or(format!(
+        "connect: needs --client, the agent CLI you talk to: {}",
+        setup::CLIENTS.join(" or ")
     ))?;
-    let env_file = args.env_file.as_deref().map(absolute).transpose()?;
-    let hub = hub_for_registration(args)?;
-    let reg = match args.team.as_deref() {
-        // No team: the agent's sessions go to the running node, which has one.
-        None => {
-            let node = opt(args, "--node")
-                .map(|f| absolute(Path::new(f)))
-                .transpose()?;
-            let file = match &node {
-                Some(file) => file.clone(),
-                None => config::node_path(&state::config_root()?),
-            };
-            if !file.exists() {
-                return Err(format!(
-                    "connect: needs --team <dir>, a helper team to run in each session, or a node to reach; there is no node file at {}. `ensemble node init` writes one",
-                    file.display()
-                ));
-            }
-            setup::node_registration(
-                manager,
-                &setup::ensemble_command(),
-                node.as_deref(),
-                has(args, "--global"),
-            )?
-        }
-        Some(spec) => {
-            let team = match remote::parse_source(spec)? {
-                remote::Source::Local(dir) => absolute(&dir)?,
-                remote::Source::Remote { url, sha, git_ref } => {
-                    // Pin it to the commit it is now, show what it would run,
-                    // and record the approval, before anything is registered.
-                    let sha = match sha {
-                        Some(sha) => sha,
-                        None => remote::resolve(&url, git_ref.as_deref())?,
-                    };
-                    approve(&url, &sha, args)?;
-                    PathBuf::from(remote::pinned(&url, &sha))
-                }
-            };
-            setup::registration(
-                manager,
-                &setup::ensemble_command(),
-                &team,
-                hub.as_deref(),
-                env_file.as_deref(),
-                has(args, "--global"),
-            )?
-        }
-    };
+    let reg = setup::registration(client, &setup::ensemble_command(), has(args, "--global"))?;
     // The hooks are checked before anything is registered, so that a request
     // that cannot be met changes nothing.
     let hooks = if has(args, "--hooks") {
-        let hub = hub.as_deref().ok_or(
+        let hub = hub_for_registration(args)?.ok_or(
             "connect: --hooks needs --hub: the hooks put the notes of its vault into your sessions",
         )?;
+        let env_file = args.env_file.as_deref().map(absolute).transpose()?;
         let home =
             setup::home().ok_or("connect: cannot find your home directory: HOME is not set")?;
         let dir = absolute(
@@ -2020,10 +1913,10 @@ fn cmd_connect(args: &Args) -> Result<ExitCode, String> {
                 .clone()
                 .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?),
         )?;
-        let path = ensemble::hooks::settings_path(manager, has(args, "--global"), &home, &dir)
+        let path = ensemble::hooks::settings_path(client, has(args, "--global"), &home, &dir)
             .map_err(|e| format!("connect: --hooks: {e}"))?;
         let command =
-            ensemble::hooks::hook_command(&setup::ensemble_command(), hub, env_file.as_deref());
+            ensemble::hooks::hook_command(&setup::ensemble_command(), &hub, env_file.as_deref());
         Some((path, command))
     } else {
         None
@@ -2032,14 +1925,34 @@ fn cmd_connect(args: &Args) -> Result<ExitCode, String> {
     if let Some((path, command)) = hooks {
         ensemble::hooks::install_into(&path, &command)?;
         println!("Hooks written to {}: `{command}`", path.display());
-        if manager == config::CODEX_AGENT {
+        if client == config::CODEX_AGENT {
             println!("Codex runs them once you trust them: open /hooks in Codex.");
         }
     }
-    println!("Registered. Restart {manager} so that it starts the server.");
+    let node = node_file()?;
+    if !node.exists() {
+        println!(
+            "There is no node yet: `ensemble setup` writes {}, or `ensemble node init`.",
+            node.display()
+        );
+    }
+    println!(
+        "Registered. Restart {client}: its sessions reach your node, which `ensemble node serve` runs."
+    );
     Ok(ExitCode::SUCCESS)
 }
 
+/// This computer's name, offered as the node's name when setup asks.
+fn host_name() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+        .ok()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+}
+
+/// `ensemble setup`: find the agent CLIs, write this computer's node if there
+/// is none, register Ensemble with the client, and check the node's team.
 fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
     let interactive = std::io::stdin().is_terminal() && !has(args, "--yes");
     let found = setup::detect(true);
@@ -2062,13 +1975,13 @@ fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
             )
         }
     );
-    let manager = match opt(args, "--manager") {
-        Some(m) => m.to_string(),
+    let client = match opt(args, "--client") {
+        Some(c) => c.to_string(),
         None => {
             let there: Vec<&str> = [
-                (found.claude, "claude-code"),
-                (found.opencode, "opencode"),
-                (found.codex, "codex"),
+                (found.claude, config::CLAUDE_CODE_AGENT),
+                (found.opencode, config::OPENCODE_AGENT),
+                (found.codex, config::CODEX_AGENT),
             ]
             .iter()
             .filter(|(yes, _)| *yes)
@@ -2085,70 +1998,76 @@ fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
                 )?,
                 several => {
                     return Err(format!(
-                        "setup: {} are installed; say which one you talk to with --manager.",
+                        "setup: {} are installed; say which one you talk to with --client.",
                         several.join(", ")
                     ));
                 }
             }
         }
     };
-    let team = match &args.team {
-        Some(team) => PathBuf::from(team),
-        None if interactive => {
-            let home = setup::home().unwrap_or_else(|| dir.to_path_buf());
-            PathBuf::from(ask(
-                "Where should the helper team live?",
-                Some(&home.join("ensemble-team").display().to_string()),
-            )?)
-        }
-        None => {
-            return Err("setup: say where the helper team lives with --team <dir>.".into());
-        }
-    };
-    let team = absolute(&team)?;
-    let path = config::config_path(&team);
+    let path = node_file()?;
     if path.exists() {
         println!("{} exists; keeping it.", path.display());
     } else {
-        let starter = setup::starter(opt(args, "--starter").unwrap_or("software"))?;
-        let text = setup::starter_team(starter, &found)?;
-        std::fs::create_dir_all(&team)
-            .map_err(|e| format!("cannot create {}: {e}", team.display()))?;
+        let name = match opt(args, "--name") {
+            Some(name) => name.to_string(),
+            None if interactive => ask(
+                "What is this computer's node called? A hub knows it as <you>/<name>.",
+                host_name().as_deref(),
+            )?,
+            None => {
+                return Err("setup: name this computer's node with --name <name>.".into());
+            }
+        };
+        let team = args
+            .team
+            .as_deref()
+            .map(|t| absolute(Path::new(t)))
+            .transpose()?;
+        let text = setup::node_file(&name, team.as_deref())?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
         std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-        println!(
-            "Wrote {}: the {} starter. Edit it, or change it with `ensemble add-agent` and `remove-agent`.",
-            path.display(),
-            starter.name
-        );
+        println!("Wrote {}: the node '{name}'.", path.display());
     }
-    let env_file = args.env_file.as_deref().map(absolute).transpose()?;
-    let hub = hub_for_registration(args)?;
-    let reg = setup::registration(
-        &manager,
-        &setup::ensemble_command(),
-        &team,
-        hub.as_deref(),
-        env_file.as_deref(),
-        has(args, "--global"),
-    )?;
+    let reg = setup::registration(&client, &setup::ensemble_command(), has(args, "--global"))?;
     let registered = run_registration(&reg);
     if let Err(e) = &registered {
         println!("{e}");
     }
     println!();
-    let config =
-        config::load(&path, args.env_file.as_deref(), &SystemEnv).map_err(|e| e.to_string())?;
-    let healthy = report_doctor(&config, &team, dir, args)?;
+    let node = config::load_node(&path)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("setup: {} went away", path.display()))?;
+    let healthy = match &node.team {
+        Some(team) => {
+            let config = config::load(
+                &config::config_path(team),
+                args.env_file.as_deref(),
+                &SystemEnv,
+            )
+            .map_err(|e| e.to_string())?;
+            report_doctor(&config, team, dir, args)?
+        }
+        None => {
+            println!(
+                "The node runs no helper team yet: name its directory with `team:` in {}.",
+                path.display()
+            );
+            false
+        }
+    };
     println!();
     if registered.is_ok() && healthy {
         println!(
-            "Done. In {manager}, try: \"have the helper team implement X\" (restart {manager} first if it was running)."
+            "Done. Start your node with `ensemble node serve` and keep it running; then in {client}, try: \"have the helper team implement X\" (restart {client} first if it was running)."
         );
         Ok(ExitCode::SUCCESS)
     } else {
         println!(
-            "Setup is not finished: fix what is listed above, then run `ensemble doctor --team {}`.",
-            team.display()
+            "Setup is not finished: fix what is listed above, then run `ensemble setup` again."
         );
         Ok(ExitCode::FAILURE)
     }
@@ -2299,7 +2218,7 @@ fn cmd_team(args: &Args) -> Result<ExitCode, String> {
     match what {
         "trust" => {
             let sha = sha.ok_or(format!(
-                "team trust: pin the commit: {spec}#<commit>. `ensemble connect` pins and trusts in one step."
+                "team trust: pin the commit: {spec}#<commit>. `ensemble team update {spec} --ref <branch>` prints the pin a branch or tag is at now."
             ))?;
             approve(&url, &sha, args)?;
             Ok(ExitCode::SUCCESS)
@@ -2324,7 +2243,7 @@ fn cmd_team(args: &Args) -> Result<ExitCode, String> {
                 None => println!("Nothing to compare with: no commit was given to update from."),
             }
             println!(
-                "\nThe new pin is {}.\nRead the changes above, then: ensemble team trust {}\nand register it again with ensemble connect --team {}",
+                "\nThe new pin is {}.\nRead the changes above, then: ensemble team trust {}\nand use it with --team {}",
                 remote::pinned(&url, &new),
                 remote::pinned(&url, &new),
                 remote::pinned(&url, &new)
@@ -2335,13 +2254,13 @@ fn cmd_team(args: &Args) -> Result<ExitCode, String> {
     }
 }
 
-/// The task store of the working folder, kept where `--state` says.
-fn store_for(dir: &Path, args: &Args) -> Result<tasks::Store, String> {
-    Ok(tasks::Store::new(&state_for(dir, args)?))
+/// The task store of the working folder.
+fn store_for(dir: &Path) -> Result<tasks::Store, String> {
+    Ok(tasks::Store::new(&state_for(dir)?))
 }
 
 fn cmd_tasks(args: &Args, dir: &Path) -> Result<ExitCode, String> {
-    let store = store_for(dir, args)?;
+    let store = store_for(dir)?;
     let entries = store.scan();
     let wanted = opt(args, "--status");
     let worker = ensemble::harness::lock::holder(store.root()).is_some();
@@ -2377,7 +2296,7 @@ fn cmd_task(args: &Args, dir: &Path) -> Result<ExitCode, String> {
         .rest
         .first()
         .ok_or("task: needs a task id. `ensemble tasks` lists them.")?;
-    let store = store_for(dir, args)?;
+    let store = store_for(dir)?;
     let entries = store.scan();
     let Some(entry) = entries.iter().find(|e| e.id() == id) else {
         return Err(format!(
@@ -2418,8 +2337,8 @@ fn cmd_answer(args: &Args, dir: &Path) -> Result<ExitCode, String> {
             "answer: needs the answer, e.g. `ensemble answer 0001-add-retry use ureq`".into(),
         );
     }
-    store_for(dir, args)?.answer(id, &answer)?;
-    println!("answered {id}; a running `ensemble mcp` carries the task on.");
+    store_for(dir)?.answer(id, &answer)?;
+    println!("answered {id}: {}.", tell_node(dir));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -2503,48 +2422,36 @@ fn cmd_submit(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, Stri
         text,
         ..Default::default()
     };
-    let store = store_for(dir, args)?;
+    let store = store_for(dir)?;
     let id = store
         .create(&ticket)
         .map_err(|e| format!("submit: cannot write the task: {e}"))?;
     println!(
-        "task {id} written in {}. A running `ensemble mcp` for this folder picks it up.",
-        store.tasks_dir().join(&id).display()
+        "task {id} written in {}: {}.",
+        store.tasks_dir().join(&id).display(),
+        tell_node(dir)
     );
     Ok(ExitCode::SUCCESS)
 }
 
-/// Set by SIGINT and SIGTERM, so that `serve` can stop its tasks cleanly.
+/// Tell this computer's node about `dir`, so that its worker runs the
+/// folder's tasks, and say what happens next.
+fn tell_node(dir: &Path) -> String {
+    let told = state::node_dir().and_then(|node| {
+        ensemble::runtime::block_on(daemon::touch(&state::node_socket(&node), dir))
+    });
+    match told {
+        Ok(()) => "your node runs it".into(),
+        Err(e) => format!("{e}; it runs once your node does (`ensemble node serve`)"),
+    }
+}
+
+/// Set by SIGINT and SIGTERM, so that a node or a hub server stops cleanly.
 static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(unix)]
 extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn cmd_serve(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String> {
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
-    }
-    let knowledge = knowledge_for(args, &dir)?;
-    let agents: Vec<String> = config.agent_names().into_iter().map(String::from).collect();
-    let inbox = inbox_for(args, agents)?;
-    let ensemble = ensemble_for(config, dir, args);
-    ensemble::harness::serve::run(
-        &ensemble,
-        mcp::Hub {
-            knowledge: knowledge.as_ref().map(Knowledge::access),
-            distill: knowledge.as_ref().and_then(Knowledge::local),
-            inbox: inbox.as_ref(),
-            node: None,
-        },
-        &STOP,
-        &|line| eprintln!("ensemble: {line}"),
-        has(args, "--exit-when-idle"),
-    )?;
-    Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_stats(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String> {
@@ -2581,7 +2488,7 @@ fn cmd_assign(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, Stri
             );
         }
     };
-    let store = store_for(dir, args)?;
+    let store = store_for(dir)?;
     if !store.exists(id) {
         return Err(format!(
             "assign: no task '{id}'. `ensemble tasks` lists them."
@@ -2599,7 +2506,7 @@ fn cmd_assign(config: &Config, dir: &Path, args: &Args) -> Result<ExitCode, Stri
     store
         .assign(id, &to)
         .map_err(|e| format!("assign: cannot write: {e}"))?;
-    println!("{id} is assigned to {to}.");
+    println!("{id} is assigned to {to}: {}.", tell_node(dir));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -2615,7 +2522,7 @@ fn cmd_review(args: &Args, dir: &Path) -> Result<ExitCode, String> {
                 args.command
             )
         })?;
-    let store = store_for(dir, args)?;
+    let store = store_for(dir)?;
     let task =
         ensemble::review::find(&store, dir, id).map_err(|e| format!("{}: {e}", args.command))?;
     match args.command.as_str() {

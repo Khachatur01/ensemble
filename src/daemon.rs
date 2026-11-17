@@ -263,9 +263,7 @@ async fn read_line(stream: &mut UnixStream) -> Result<String, String> {
 /// which it does once stdin ends and its calls are answered.
 pub async fn bridge(socket: &Path, dir: &Path, node: &str) -> Result<(), String> {
     let mut stream = UnixStream::connect(socket).await.map_err(|e| {
-        format!(
-            "no node '{node}' is running ({e}). Start it with `ensemble node serve`, or pass --team to run a helper team in this session alone"
-        )
+        format!("no node '{node}' is running ({e}). Start it with `ensemble node serve`")
     })?;
     let hello = serde_json::json!({ "dir": dir });
     stream
@@ -292,5 +290,25 @@ pub async fn bridge(socket: &Path, dir: &Path, node: &str) -> Result<(), String>
     tokio::select! {
         copied = down => copied.map(|_| ()).map_err(|e| e.to_string()),
         () = async { up.await; std::future::pending::<()>().await } => Ok(()),
+    }
+}
+
+/// Tell the node on `socket` about the folder `dir`, so that its worker runs
+/// there: a session that says hello and ends. What `submit`, `assign` and
+/// `answer` do, so that a folder no session has opened yet is served too.
+pub async fn touch(socket: &Path, dir: &Path) -> Result<(), String> {
+    let mut stream = UnixStream::connect(socket)
+        .await
+        .map_err(|e| format!("no node is running ({e})"))?;
+    let hello = serde_json::json!({ "dir": dir });
+    stream
+        .write_all(format!("{hello}\n").as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    let reply: serde_json::Value = serde_json::from_str(&read_line(&mut stream).await?)
+        .map_err(|e| format!("the node answered something else: {e}"))?;
+    match reply["error"].as_str() {
+        Some(e) => Err(format!("the node refused this folder: {e}")),
+        None => Ok(()),
     }
 }

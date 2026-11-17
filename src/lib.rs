@@ -7,7 +7,7 @@
 //!   your agent (Claude Code, OpenCode, Codex, ...)
 //!         |  MCP over stdio                 (ensemble-mcp, as `harness::mcp`)
 //!         v
-//!   ensemble mcp --team, or a node         (src/main.rs, src/daemon.rs)
+//!   ensemble mcp -> the node               (src/main.rs, src/daemon.rs)
 //!         |  the tools: delegate, submit, ... (ensemble-tasks)
 //!         v
 //!   the router: agent -> adapter, model    (ensemble-agents: router)

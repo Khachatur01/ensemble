@@ -53,10 +53,15 @@ pub fn config_root() -> Result<PathBuf, String> {
 /// Named for the folder, with a hash of its whole path so two folders of the
 /// same name do not share one.
 pub fn dir_for(workdir: &Path) -> Result<PathBuf, String> {
+    dir_in(&root()?, workdir)
+}
+
+/// [`dir_for`], under the state directory `root` instead of this user's.
+pub fn dir_in(root: &Path, workdir: &Path) -> Result<PathBuf, String> {
     let canonical = workdir
         .canonicalize()
         .map_err(|e| format!("{}: {e}", workdir.display()))?;
-    Ok(root()?.join("workdirs").join(labelled(&canonical)))
+    Ok(root.join("workdirs").join(labelled(&canonical)))
 }
 
 /// What is shared by every project that uses the helper team at `config`: how
@@ -79,10 +84,10 @@ pub fn hub_dir(hub: &Path) -> Result<PathBuf, String> {
     Ok(root()?.join("hubs").join(labelled(&canonical)))
 }
 
-/// What the node named `name` keeps: its lock, the folders it worked in, its
-/// runs for others.
-pub fn node_dir(name: &str) -> Result<PathBuf, String> {
-    Ok(root()?.join("nodes").join(labelled_text(name)))
+/// What this computer's node keeps: its lock, the folders it worked in, its
+/// runs for others. A computer runs one node.
+pub fn node_dir() -> Result<PathBuf, String> {
+    Ok(root()?.join("node"))
 }
 
 /// Where the node whose state is in `node_dir` listens for `ensemble mcp`. A

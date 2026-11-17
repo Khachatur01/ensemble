@@ -12,8 +12,8 @@
 # A hub for a team is written by `ensemble hub init --server`.
 # Check the file with `ensemble hub check --hub <dir>`.
 #
-# Give the hub to the MCP server your agent starts, and it can share and recall:
-#   claude mcp add --scope local ensemble -- ensemble mcp --team <team> --hub <dir>
+# Give the hub to your node, and your agent can share and recall:
+#   ensemble node serve --hub <dir>
 
 version: 1
 

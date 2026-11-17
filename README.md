@@ -71,8 +71,8 @@ See [Knowledge](#knowledge).
   your agent (Claude Code, OpenCode, Codex, ...)
         |  MCP over stdio, in the folder you work in
         v
-  ensemble mcp  --->  ensemble node serve          or   ensemble mcp --team <dir>
-  (a bridge)          (your node, long-running)         (a node for this session only)
+  ensemble mcp  --->  ensemble node serve
+  (a bridge)          (this computer's node, long-running)
                             |
                             v
   the helper team (config.yaml): an agent -> its adapter -> a model
@@ -83,8 +83,8 @@ See [Knowledge](#knowledge).
         +--> node                                    a run on another node, through the hub
 ```
 
-- **Your node runs the work.** `ensemble node serve` is a process you keep
-  running. It holds the helper team for every folder you work in, runs each
+- **Your node runs the work.** A computer runs one node, `ensemble node
+  serve`, a process you keep running. It holds the helper team for every folder you work in, runs each
   folder's tasks, and goes on after your agent's session ends. With a hub
   server, it also takes the tasks the hub has for you and lends what it offers
   to others.
@@ -92,8 +92,7 @@ See [Knowledge](#knowledge).
   starts, is a bridge to the node: your agent sees the helper team as tools.
   It calls `delegate` and gets the work back, or `submit`s a task and follows
   it with `status` and `wait`. It never names a model: the config decides what
-  runs each agent. To try Ensemble without a node, `ensemble mcp --team <dir>`
-  runs the team inside the session instead, and its tasks stop with it.
+  runs each agent.
 - **Load spreads across nodes.** An agent of `type: node` runs on another
   node through the hub, and a node's model servers can serve the whole team
   through the hub as an OpenAI-compatible endpoint.
@@ -112,20 +111,24 @@ issue and a run on a node.
 
 ```console
 $ ensemble setup
+$ ensemble node serve
 ```
 
-That is all most people need. `setup` finds the agent CLIs you have (`claude`,
-`opencode`) and any local model server, asks which agent you talk to and where
-the helper team should live, writes a starter team there, registers Ensemble
-with your agent and checks that every agent starts. It ends with a sentence to
-try: restart your agent and ask it to have the helper team implement something.
-Your agent learns the team from Ensemble itself when it connects, so there is
-nothing to add to its `CLAUDE.md` or `AGENTS.md`.
+`setup` finds the agent CLIs you have (`claude`, `opencode`, `codex`) and any
+local model server, asks which one you talk to (the **client**) and what to
+call this computer's node, writes the node file
+(`~/.config/ensemble/node.yaml`), registers Ensemble with your client and
+checks the node's helper team. `ensemble node serve` then runs the node; keep
+it running (see [Running the node](#running-the-node)). Restart your agent and
+ask it to have the helper team implement something. Your agent learns the team
+from Ensemble itself when it connects, so there is nothing to add to its
+`CLAUDE.md` or `AGENTS.md`.
 
-Without a terminal, or to script it: `ensemble setup --yes --manager claude-code
---team ~/my-team --starter software`. Starters are `software`, `hardware` and
-`docs`. [Install](#installation) Ensemble first, so that `ensemble` is on your
-`PATH`.
+Without a terminal, or to script it: `ensemble setup --yes --client claude-code
+--name desk --team ~/my-team`. `--team` is the helper team the node runs: a
+directory with a `config.yaml`, which `ensemble init --team ~/my-team` writes
+with every setting for you to edit. [Install](#installation) Ensemble first, so
+that `ensemble` is on your `PATH`.
 
 Afterwards, `ensemble doctor --team ~/my-team` says what is wrong and how to fix
 each thing, and `ensemble add-agent tester --adapter claude-code
@@ -142,58 +145,49 @@ path that leaves the folder is refused.
 
 ## Connect your agent
 
-Your agent reaches Ensemble as a standard MCP server on stdio, `ensemble mcp`.
-`ensemble setup` and
-`ensemble connect --manager claude-code|opencode|codex --team <dir>` register
-it for you and print what they run; this shows the same by hand. Any agent that
-can spawn one can use it; nothing in it is specific to one harness. Register it
-with the helper team it serves: `--team` is the directory with `config.yaml`.
+Your agent reaches your node through `ensemble mcp`, a standard MCP server on
+stdio that carries each session to the node, in the folder the agent works
+in. `ensemble setup` and `ensemble connect --client claude-code|opencode|codex`
+register it for you and print what they run; this shows the same by hand. Any
+agent that can spawn an MCP server can use it; nothing in it is specific to
+one client. One registration serves every folder: the node holds the helper
+team.
 
 **OpenCode**
 
 ```console
-$ opencode mcp add ensemble -- ensemble mcp --team ~/my-team
+$ opencode mcp add --global ensemble -- ensemble mcp
 $ opencode mcp list
 ✓ ensemble  connected
 ```
 
-This writes the server into the project's `opencode.json`. Add `--global` to
-register it for every project instead.
+Without `--global` it is written into the project's `opencode.json` only.
 
 **Claude Code**
 
 ```console
-$ claude mcp add --scope local ensemble -- ensemble mcp --team ~/my-team
+$ claude mcp add --scope user ensemble -- ensemble mcp
 $ claude mcp list
 ensemble: ensemble mcp - ✔ Connected
 ```
 
-`--scope local` keeps the registration to this project and to you;
-`--scope project` writes it to `.mcp.json` for everyone who clones the repo.
-
-A registration for every project (`--global`, `--scope user`) works too: the
-helper team is named in the registration, so the same team serves every folder
-you open. Ensemble reads no other config and searches for none. `--org` is the
-old name of `--team` and still works for one release, with a notice.
-
-**Through a node.** Registered with no `--team`, `ensemble mcp` is a session
-of your running [node](#nodes), which has the helper team: one registration
-for every project (`ensemble connect --manager claude-code --global`, or
-`claude mcp add --scope user ensemble -- ensemble mcp`), and tasks that go on
-after the session ends. Without a node running it says how to start one.
+`--scope user` registers it for every project of yours; `--scope local` for
+this project only. Without a node running, a session says how to start one.
 
 Your agent sees these tools: `delegate` (send a task to an agent, get the work
 back), `submit` (write a task for an agent to work through), `status`, `wait`
 and `cancel` (follow tasks and background delegations), `answer` (answer a
-question a task stopped to ask), `agents` (the team and what each agent is for) and `health` (every agent
-CLI starts, and every model server answers and serves its agents' models).
+question a task stopped to ask), `agents` (the team and what each agent is
+for) and `health` (every agent CLI starts, and every model server answers and
+serves its agents' models).
 
 ## Configuration
 
-The helper team is one directory, `--team`, with one file in it: `config.yaml`,
-the llm backends and the agents. Commit it; it holds no secrets. Ensemble reads
-it from where it is named and nowhere else: nothing is searched for, and there
-is no user-level config. `ensemble init` writes a sample with every setting.
+The helper team is one directory with one file in it: `config.yaml`, the llm
+backends and the agents. Commit it; it holds no secrets. The node runs the team
+its `team:` names, and the commands that read a team take it as `--team <dir>`;
+nothing is searched for, and there is no user-level config. `ensemble init`
+writes a sample with every setting.
 
 What Ensemble learns while it runs is state, not configuration, and is kept per
 user, outside every project:
@@ -205,8 +199,7 @@ user, outside every project:
 | `.../worktrees/` | a git worktree per task of an agent with `isolation: worktree` |
 | `$XDG_STATE_HOME/ensemble/orgs/<team>-<hash>/usage.json` | how many runs each agent started, shared by every project that uses the helper team |
 
-`--state <dir>` puts the first three somewhere else. An older config, version 1
-(one team per project) or version 2 (an organization of teams), becomes a
+An older config, version 1 (one team per project) or version 2 (an organization of teams), becomes a
 version 3 helper team with `ensemble migrate <file> --team <dir>`: every team's
 agents and gates go into one list, and a name two teams both used becomes
 `<team>-<name>`. Tasks kept in the old `tasks/<team>/` folders are moved up the
@@ -668,8 +661,7 @@ it both answer at once:
 
 - **`submit`** writes a **task**: a ticket in the state directory, `tasks/<id>/task.md`. Ids are numbered across the folder, so an id names one task. A ticket from
   before version 3 that names its agent as `team/agent` is read as `agent`.
-  While a worker runs for the folder (an `ensemble mcp --team` session, your
-  node, or `ensemble serve`), agents work through the tasks without a result,
+  While your node runs, agents work through the tasks without a result,
   oldest id first, each agent at most `max_concurrent` at a time, and write
   `result.md` beside the ticket when one ends. You can write a `task.md` by
   hand too; it is picked up within a few seconds.
@@ -806,29 +798,28 @@ not have to.
   your answer) the team says so, and what waits: `Idle: no active tasks (2
   in the backlog, to be assigned, 1 waiting for an answer). The helper team waits
   for planning: tell your agent what to do next.` `status` and `ensemble tasks`
-  show it, and `ensemble serve` prints it once without stopping;
-  `ensemble serve --exit-when-idle` stops there instead.
+  show it.
 
 Tasks that ask you something (`NEEDS INPUT:`) wait for your answer, through
 your agent or `ensemble answer`.
 
-### Running tasks without a session
+### Running the node
 
-`ensemble serve --team <dir>`, run in the working folder, is the same worker with
-no agent around it: it works through the folder's tasks until it gets Ctrl-C or
-SIGTERM, then stops the running ones (they run again next time) and leaves the
-rest queued. Only one worker runs a folder's tasks, so a second `serve`
-refuses, and an `ensemble mcp` that finds one running reads and writes tasks
-but starts none of its own; `ensemble tasks` shows a task as `running` while
-the other worker has it. The worker's lock is a file in the state directory; one
-left by a process that died is taken over.
+`ensemble node serve` runs this computer's node until it gets Ctrl-C or
+SIGTERM. It keeps a worker for every folder a session of it has opened, or
+that `ensemble submit`, `assign` or `answer` told it about, and starts them
+again when it starts. On a stop, running tasks are stopped (they have no
+result, so they run again next time) and the rest stay queued. A computer runs
+one node, so a second `node serve` refuses. One worker runs a folder's tasks:
+its lock is a file in the folder's state directory, and one left by a process
+that died is taken over. When a session ends, nothing stops: the node's
+worker for the folder goes on.
 
 To keep it running, as a systemd user unit (`~/.config/systemd/user/ensemble.service`):
 
 ```ini
 [Service]
-WorkingDirectory=%h/work/myproject
-ExecStart=ensemble serve --team %h/my-team --env-file %h/.config/ensemble.env
+ExecStart=ensemble node serve --env-file %h/.config/ensemble.env
 Restart=on-failure
 
 [Install]
@@ -841,25 +832,18 @@ and `systemctl --user enable --now ensemble`. On macOS, a launchd agent
 ```xml
 <plist version="1.0"><dict>
   <key>Label</key><string>dev.ensemble</string>
-  <key>WorkingDirectory</key><string>/Users/me/work/myproject</string>
   <key>ProgramArguments</key><array>
-    <string>ensemble</string><string>serve</string>
-    <string>--team</string><string>/Users/me/my-team</string>
+    <string>ensemble</string><string>node</string><string>serve</string>
   </array>
   <key>KeepAlive</key><true/>
 </dict></plist>
 ```
 
-When the caller closes the pipe of an `ensemble mcp --team`, running tasks and
-background delegations are stopped. A task stopped that way gets no result, so
-it runs again in the next session; tasks that had not started stay queued.
-Through a node, the session's end stops nothing: the node's worker for the
-folder goes on. Tasks of a `shared` agent share the
-project like any other parallel delegations, so give two of them that change
-the same files to an agent with `max_concurrent: 1`, or `isolation: worktree`. A blocking
-`delegate` takes a slot of its agent too, waiting for one if needed; raising
-the MCP timeout in your agent's config is the other fix for a client that
-times out.
+Tasks of a `shared` agent share the project like any other parallel
+delegations, so give two of them that change the same files to an agent with
+`max_concurrent: 1`, or `isolation: worktree`. A blocking `delegate` takes a
+slot of its agent too, waiting for one if needed; raising the MCP timeout in
+your agent's config is the other fix for a client that times out.
 
 ### Shared limits
 
@@ -891,36 +875,36 @@ permission modes that skip the checks, and about token budgets.
 ### Remote helper teams
 
 A helper team can live in a git repository you do not have checked out, and be
-shared by a department or a company:
+shared by a department or a company. The commands that read a team take it
+pinned to a commit, as `--team github.com/acme/team#<commit>`:
 
 ```console
-$ ensemble connect --manager claude-code --team github.com/acme/team@v1.2
+$ ensemble team update github.com/acme/team --ref v1.2   # the commit v1.2 is at now: the pin
+$ ensemble team trust github.com/acme/team#<commit>      # read what it runs, and trust it
+$ ensemble check --team github.com/acme/team#<commit>
 ```
 
-`connect` resolves `@v1.2` (a tag or a branch) to the commit it is now, clones it
-into your cache (`$XDG_CACHE_HOME/ensemble`), prints every agent command, gate
-command, tool list and permission mode the config would run on your machine,
-with a warning for each risk, and asks you to trust that commit. Only then does
-it register `github.com/acme/team#<commit>`. Git does the talking, with your own
-SSH agent or credential helper; Ensemble stores no credentials.
+`team trust` clones it into your cache (`$XDG_CACHE_HOME/ensemble`), prints
+every agent command, gate command, tool list and permission mode the config
+would run on your machine, with a warning for each risk, and asks you to trust
+that commit. Git does the talking, with your own SSH agent or credential
+helper; Ensemble stores no credentials.
 
 A remote helper team is code that runs with your permissions, so:
 
-- **It is pinned.** `ensemble mcp` and every other command accept only
-  `<url>#<commit>`; a branch or tag is never followed at run time, so a moved
-  tag cannot swap what you approved.
-- **It is trusted per commit.** `ensemble team trust <url>#<commit>` shows what
-  it would run and records your approval for that exact commit. An untrusted
-  commit is refused with that command to run; the MCP server cannot ask,
-  because stdio is the protocol. There is no trusting a whole publisher.
+- **It is pinned.** Only `<url>#<commit>` is accepted; a branch or tag is
+  never followed at run time, so a moved tag cannot swap what you approved.
+- **It is trusted per commit.** An untrusted commit is refused with the command
+  that trusts it. There is no trusting a whole publisher.
 - **The cache is checked.** A cached copy that is not at the commit, or has been
   changed by hand, is refused.
 - **Updating is explicit.** `ensemble team update <url>#<commit> --ref main` shows
-  what changed in `config.yaml` and prints the new pin; nothing is trusted or
-  registered until you do both.
+  what changed in `config.yaml` and prints the new pin; nothing is trusted
+  until you do it.
 
 A remote helper team is read-only: clone it to change it. Its keys are not in
-it; they come from your environment or `--env-file`, as always.
+it; they come from your environment or `--env-file`, as always. A node runs a
+team from a directory: `team:` in `node.yaml` names one.
 
 ### Secrets
 
@@ -988,7 +972,7 @@ share. Without `--hub` there is no knowledge; everything above works the same.
 ```console
 $ ensemble hub init --hub ~/hub     # writes ~/hub/hub.yaml and makes ~/hub/vault a git repository
 $ ensemble hub check --hub ~/hub    # validates it; says which model would distill shares now
-$ ensemble connect --manager claude-code --team ~/team --hub ~/hub
+$ ensemble node serve --hub ~/hub     # the node runs with that hub
 ```
 
 ```yaml
@@ -1018,9 +1002,8 @@ is refused, so the agent shares again without it: the vault keeps everything it
 is given.
 
 **Only Ensemble writes notes.** Each share is kept as it arrived, and the
-pipeline turns it into notes in the background, while `ensemble mcp`,
-`ensemble serve` or a node runs with that hub, or now with
-`ensemble knowledge distill`:
+pipeline turns it into notes in the background, while your node runs with that
+hub, or now with `ensemble knowledge distill`:
 
 1. One chat request extracts typed items (decision, fact, how-to, lesson,
    commitment, preference, ownership); chatter gives none and is skipped.
@@ -1065,7 +1048,7 @@ session, and again after the context is cleared or compacted. A prompt of one
 or two words recalls nothing. Set them up when you register Ensemble:
 
 ```sh
-ensemble connect --manager claude-code --team <dir> --hub <hub> --hooks
+ensemble connect --client claude-code --hub <hub> --hooks
 ```
 
 This writes the hook into Claude Code's `.claude/settings.local.json` of the
@@ -1133,9 +1116,8 @@ status: open
 After logging in, it redirects to /home instead of back to where you were.
 ```
 
-What the inbox does, every `poll_seconds`, while `ensemble mcp`,
-`ensemble serve` or a node runs with that hub (`ensemble inbox --once --team
-<dir>` does one pass by hand):
+What the inbox does, every `poll_seconds`, while your node runs with that hub
+(`ensemble inbox --once --team <dir>` does one pass by hand):
 
 - **An open issue becomes a task** in the folder its `project` maps to: for
   the agent a second label `ensemble:<agent>` names, or else in the backlog, for
@@ -1151,10 +1133,8 @@ What the inbox does, every `poll_seconds`, while `ensemble mcp`,
 
 Ensemble changes only an issue's `status:` line and appends comments
 (`## Comment by ensemble at <time>`); everything else in the file stays as you
-wrote it. The task runs when a worker runs for its folder: an `ensemble mcp`
-session opened there, a node that served it, or `ensemble serve --dir
-<folder>`. `ensemble inbox --hub
-<dir>` lists your labelled issues, where each stands and the task it became.
+wrote it. Your node runs the task in that folder. `ensemble inbox --hub <dir>`
+lists your labelled issues, where each stands and the task it became.
 
 **For a team, on the hub server.** A hub server's `tasks` block names only the
 tracker, the label and `poll_seconds`; the rest belongs to each person:
@@ -1249,7 +1229,7 @@ On each member's computer:
 
 ```console
 $ ensemble login wss://hub.example.com --user ana    # asks the password; makes a token "ensemble on <host>"
-$ ensemble connect --manager claude-code --team ~/team --hub wss://hub.example.com
+$ ensemble node serve --hub wss://hub.example.com       # your node, with the hub's knowledge and tasks
 $ ensemble recall --hub wss://hub.example.com deploys
 ```
 
@@ -1301,12 +1281,12 @@ On a LAN or a VPN, listen on that address instead and connect with `ws://`.
 ## Nodes
 
 A node is a worker on a computer: the one long-running process that holds a
-helper team there. It is tied to no project. Your agent CLI starts
-`ensemble mcp` with no `--team` in whatever folder you work in; that connects
+helper team there, and a computer runs one. It is tied to no project. Your
+agent CLI starts `ensemble mcp` in whatever folder you work in; that connects
 to the node, says which folder it is, and from then on carries MCP both ways.
 The node keeps a worker for each folder it has served, so a folder's tasks go
 on after the session that submitted them ends, and start again when the node
-does. A computer may run any number of nodes, each from its own file.
+does.
 
 With a hub server, a node also keeps one link to it: the tasks the hub sends
 you (see [Tasks from a tracker](#tasks-from-a-tracker)), and what it lends. A
@@ -1315,7 +1295,7 @@ for everyone whose role has `compute`; connecting a shared one needs `host`.
 The hub connects them, and keeps no node once it is gone.
 
 ```yaml
-# node.yaml — `ensemble node init` writes it; `--node <file>` for another one
+# ~/.config/ensemble/node.yaml — `ensemble setup` or `ensemble node init` writes it
 version: 3
 name: gpu-box                    # a hub knows it as <you>/gpu-box
 access: shared                   # private: you alone
@@ -1334,7 +1314,6 @@ $ ensemble node serve                                          # until Ctrl-C or
 $ cd ~/code/shop && claude                                     # its sessions reach the node
 $ ensemble login wss://hub.example.com --user kim
 $ ensemble node serve --hub wss://hub.example.com              # and lend through a hub
-$ ensemble node serve --hub wss://hub.example.com --node ~/box2.yaml   # another node
 $ ensemble nodes --hub wss://hub.example.com                   # the nodes you may use now
 ```
 
@@ -1343,7 +1322,7 @@ A session reaches the node on a socket only you may open (in
 you goes to the folder of its project's name where a session of the node last
 ran; one for a project the node has not served is refused, and the issue says
 so. With `--hub <dir>`, an embedded hub, the node also turns shares into notes
-and issues into tasks, as `ensemble mcp --team` does.
+and issues into tasks.
 
 **Running an agent on a node.** In your helper team, an agent of
 `type: node` names an agent a node offers:
@@ -1467,11 +1446,11 @@ Day to day you do not run Ensemble; your agent does. These are for setting it
 up and for debugging it.
 
 ```console
-$ ensemble setup                      # find the CLIs, write a starter, register it, check it
-$ ensemble connect --manager M [--team <dir>] [--hub <dir>] [--global]  # register with claude-code, opencode or codex; no --team: with your node
+$ ensemble setup [--client C] [--name N] [--team <dir>]   # find the CLIs, write the node, register it with your client, check its team
+$ ensemble connect --client C [--global] [--hub <hub> --hooks]   # register with claude-code, opencode or codex; sessions reach your node
 $ ensemble hub init --hub <dir> [--server]   # a sample hub (--server: for a team): <dir>/hub.yaml, and its knowledge vault
-$ ensemble node init [--node FILE]  # ~/.config/ensemble/node.yaml: a node, its team and what it offers
-$ ensemble node serve [--hub HUB] [--node FILE]   # run that node until stopped
+$ ensemble node init                # ~/.config/ensemble/node.yaml with every setting: the node, its team, what it offers
+$ ensemble node serve [--hub HUB]   # run this computer's node until stopped
 $ ensemble nodes --hub URL         # the nodes of a hub server you may use now
 $ ensemble hook --hub <hub>        # what a Claude Code or Codex session hook runs
 $ ensemble hub user tracker <name> [<tracker name>] --hub <dir>   # who the account is in the tracker
@@ -1504,7 +1483,6 @@ $ ensemble submit <title> --backlog --text T # write a task with no assignee yet
 $ ensemble assign <id> <agent>     # give a task to an agent
 $ ensemble answer <id> <text>      # answer the question a task stopped to ask
 $ ensemble stats --team <dir> [--since 7d] [--json]   # what each agent has done: runs, failures, time, tokens
-$ ensemble serve --team <dir>      # run this folder's tasks with no session, until stopped
 $ ensemble init --team <dir>       # write a sample helper team: <dir>/config.yaml
 $ ensemble init --stdout           # print it instead (init refuses to overwrite without --force)
 $ ensemble migrate <file> --team <dir>  # a version 1 or 2 config becomes a version 3 helper team
@@ -1516,14 +1494,12 @@ $ ensemble run <agent> <task> --team <dir>  # send one task to one agent (it wor
 $ ensemble team trust <url>#<commit>   # read what a remote helper team runs, and trust that commit
 $ ensemble team update <url>#<commit>  # what changed since, and the new pin
 $ ensemble schema                  # print the JSON Schema for config.yaml
-$ ensemble mcp --team <dir>        # serve the helper team over stdio
-$ ensemble mcp                     # no --team: a session of your running node
+$ ensemble mcp                     # what your client starts: a session of your node over stdio
 ```
 
 `run` prints the answer on stdout and the provenance on stderr, so it pipes
 cleanly. Options: `--team <dir>` (`--org` is its old name), `--hub <dir>` (the hub, which keeps your knowledge), `--env-file <path>`, `--dir <path>` (the working
-folder, default the current directory), `--state <dir>` (instead of the per-user
-state directory), `--context <text>` (for `run`).
+folder, default the current directory), `--context <text>` (for `run`).
 
 ## How it fits together
 
@@ -1603,13 +1579,10 @@ scripts stand in for the CLIs.
 - **Limits are per agent unless shared.** Agents on one server share a limit only
   when they name the same one. Budgets are shared by every project that uses the
   helper team. A token budget counts what runs report, which not every CLI does.
-- **Tasks run only while a worker runs.** With `--team`, the worker lives in
-  `ensemble mcp`, so tasks stop with the calling agent's session; a node, or
-  `ensemble serve`, is a worker that goes on. One worker runs a folder's tasks at
-  a time.
-- **A session's working folder is fixed.** With `--team`, it is the working
-  directory of the process (or `--dir`); through a node, the folder the bridge
-  was started in. A call can work in a folder inside it with `repo`, but not
+- **Tasks run only while your node runs.** One node per computer, and one
+  worker runs a folder's tasks at a time.
+- **A session's working folder is fixed:** the folder `ensemble mcp` was
+  started in. A call can work in a folder inside it with `repo`, but not
   outside.
 - **A hub server shares knowledge, hands out tasks and connects nodes.** A chat API, a web UI
   and single sign-on are not built. People sign up through the REST API
@@ -1629,7 +1602,7 @@ scripts stand in for the CLIs.
   wait there. A node's models are reached at `/chat/completions` and
   `/completions` only. The hub keeps nothing of a node once it disconnects. A
   node keeps what it holds for a folder until it stops, and works within the
-  folder a session started in; `--state` does not apply to it.
+  folder a session started in.
 - **One tracker so far.** The inbox reads a folder of markdown issues; GitLab,
   GitHub and Jira adapters are not built. A member's computer takes a hub
   server's tasks only while their node runs, and only for projects it has

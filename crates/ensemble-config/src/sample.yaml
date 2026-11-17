@@ -16,9 +16,8 @@
 # `ensemble show <agent> --team <dir>`, and check that everything it needs is
 # there with `ensemble health --team <dir>`.
 #
-# Register Ensemble with the agent you talk to, which then hands work to the team:
-#   claude mcp add --scope local ensemble -- ensemble mcp --team <dir>
-#   opencode mcp add ensemble -- ensemble mcp --team <dir>
+# Name this directory as `team:` in your node (`ensemble setup --team <dir>`
+# writes it), and the agent you talk to hands work to the team through the node.
 
 version: 3
 

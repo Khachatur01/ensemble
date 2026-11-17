@@ -42,9 +42,32 @@ impl Scratch {
         self.0.with_extension("org")
     }
 
-    /// Where tasks and runs go (`--state`), beside the project too.
+    /// Where the project's tasks and runs go: its state directory, under
+    /// the scratch's own XDG state directory.
     fn state(&self) -> PathBuf {
-        self.0.with_extension("state")
+        ensemble::state::dir_in(
+            &self.0.with_extension("xdg-state").join("ensemble"),
+            &self.0,
+        )
+        .unwrap()
+    }
+
+    /// This scratch computer's node file, `node.yaml`, running the helper team.
+    fn node_yaml(&self) -> PathBuf {
+        let config = self.0.with_extension("xdg-config").join("ensemble");
+        std::fs::create_dir_all(&config).unwrap();
+        let path = config.join("node.yaml");
+        if !path.exists() {
+            std::fs::write(
+                &path,
+                format!(
+                    "version: 3\nname: desk\naccess: private\nteam: \"{}\"\noffers: {{}}\n",
+                    self.org().display()
+                ),
+            )
+            .unwrap();
+        }
+        path
     }
 
     /// A path in the project, or one of the old `.ensemble/` names, which are
@@ -109,7 +132,8 @@ impl Drop for Scratch {
         let _ = std::fs::remove_dir_all(&self.0);
         let _ = std::fs::remove_dir_all(self.0.with_extension("bin"));
         let _ = std::fs::remove_dir_all(self.org());
-        let _ = std::fs::remove_dir_all(self.state());
+        let _ = std::fs::remove_dir_all(self.0.with_extension("xdg-config"));
+        let _ = std::fs::remove_dir_all(self.0.with_extension("machines"));
         let _ = std::fs::remove_dir_all(self.0.with_extension("xdg-state"));
         let _ = std::fs::remove_dir_all(self.0.with_extension("xdg-cache"));
     }
@@ -182,8 +206,6 @@ fn command(scratch: &Scratch) -> Command {
         .env("XDG_CONFIG_HOME", scratch.0.with_extension("xdg-config"))
         .arg("--team")
         .arg(scratch.org())
-        .arg("--state")
-        .arg(scratch.state())
         .env_remove("ENSEMBLE_TEST_LOCAL_URL")
         .env_remove("ENSEMBLE_TEST_LOCAL_KEY");
     let env_file = scratch.org().join(".env");
@@ -556,11 +578,14 @@ fn health_checks_the_cli_and_that_the_backend_serves_the_model() {
 // The harness interface, over real pipes
 // ---------------------------------------------------------------------------
 
-/// A live `ensemble mcp` subprocess, driven the way a harness drives it.
+/// A live `ensemble mcp` subprocess, driven the way a harness drives it,
+/// with the node it is a session of.
 struct McpSession {
     child: Child,
     reader: BufReader<std::process::ChildStdout>,
     next_id: i64,
+    /// Stopped after the session, when this is dropped.
+    _node: Served,
 }
 
 impl McpSession {
@@ -568,11 +593,12 @@ impl McpSession {
         Self::start_with(scratch, &[])
     }
 
-    /// `ensemble mcp` with `extra` arguments, such as `--hub <dir>`.
+    /// A session of a node started with `extra` arguments, such as
+    /// `--hub <dir>`.
     fn start_with(scratch: &Scratch, extra: &[&std::ffi::OsStr]) -> Self {
-        let mut child = command(scratch)
+        let node = start_node(scratch, extra);
+        let mut child = bare_command(scratch)
             .arg("mcp")
-            .args(extra)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -583,6 +609,7 @@ impl McpSession {
             child,
             reader,
             next_id: 0,
+            _node: node,
         }
     }
 
@@ -891,12 +918,13 @@ fn the_server_exits_cleanly_when_the_harness_closes_the_pipe() {
 }
 
 #[test]
-fn an_invalid_config_stops_the_mcp_server_before_it_serves_anything() {
-    // Better to fail at spawn, where the harness reports a server that would
-    // not start, than to accept a handshake and fail every delegation.
-    let s = Scratch::new("mcp-bad-config");
+fn an_invalid_team_stops_the_node_before_it_serves_anything() {
+    // Better to fail at start, where it is seen, than to accept sessions and
+    // fail every delegation.
+    let s = Scratch::new("node-bad-config");
     s.write(".ensemble/config.yaml", "version: 1\nbackends: {}\n");
-    let out = ensemble(&s, &["mcp"]);
+    s.node_yaml();
+    let out = bare_command(&s).args(["node", "serve"]).output().unwrap();
     assert!(!out.status.success());
     assert!(stderr_of(&out).contains("backend"), "{}", stderr_of(&out));
 }
@@ -1131,7 +1159,7 @@ fn a_light_agent_is_one_request_to_its_backend() {
 // Getting started
 // ---------------------------------------------------------------------------
 
-/// A directory of stand-ins for the manager and agent CLIs. Each answers
+/// A directory of stand-ins for the client and agent CLIs. Each answers
 /// `--version`, and otherwise saves its arguments, one per line, to
 /// `<name>.args` beside itself.
 fn stub_clis(scratch: &Scratch, names: &[&str]) -> PathBuf {
@@ -1158,46 +1186,42 @@ fn with_path(scratch: &Scratch, bin: &Path) -> Command {
     let mut c = Command::new(BIN);
     c.current_dir(scratch.path())
         .env("PATH", bin)
-        .env("XDG_STATE_HOME", scratch.state())
+        .env("XDG_STATE_HOME", scratch.0.with_extension("xdg-state"))
+        .env("XDG_CONFIG_HOME", scratch.0.with_extension("xdg-config"))
+        .env("XDG_CACHE_HOME", scratch.0.with_extension("xdg-cache"))
         .env("HOME", scratch.0.with_extension("home"));
     c
 }
 
 #[test]
-fn connect_registers_the_team_with_the_agent_you_talk_to_and_says_what_it_ran() {
-    for (manager, program, scope) in [
+fn connect_registers_a_session_of_the_node_with_the_client_and_says_what_it_ran() {
+    for (client, program, scope) in [
         ("claude-code", "claude", "--scope\nuser\n"),
         ("opencode", "opencode", "--global\n"),
     ] {
         let s = Scratch::new(&format!("connect-{program}"));
-        s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
         let bin = stub_clis(&s, &[program]);
         let out = with_path(&s, &bin)
-            .args(["connect", "--manager", manager, "--global"])
-            .arg("--team")
-            .arg(s.org())
+            .args(["connect", "--client", client, "--global"])
             .output()
             .unwrap();
         assert!(out.status.success(), "{}", stderr_of(&out));
         let said = stdout_of(&out);
         assert!(said.contains(&format!("$ {program} mcp add")), "{said}");
+        assert!(said.contains("There is no node yet"), "{said}");
         let args = std::fs::read_to_string(bin.join(format!("{program}.args"))).unwrap();
         assert!(args.starts_with("mcp\nadd\n"), "{args}");
         assert!(args.contains(scope), "{args}");
-        assert!(args.contains("\nmcp\n--team\n"), "{args}");
-        assert!(args.contains(&s.org().display().to_string()), "{args}");
+        assert!(args.ends_with("\nmcp\n"), "{args}");
     }
 }
 
 #[test]
-fn connect_without_the_manager_cli_prints_the_command_and_fails() {
+fn connect_without_the_clients_cli_prints_the_command_and_fails() {
     let s = Scratch::new("connect-missing");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
     let bin = stub_clis(&s, &[]);
     let out = with_path(&s, &bin)
-        .args(["connect", "--manager", "claude-code"])
-        .arg("--team")
-        .arg(s.org())
+        .args(["connect", "--client", "claude-code"])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -1214,17 +1238,21 @@ fn connect_without_the_manager_cli_prints_the_command_and_fails() {
 }
 
 #[test]
-fn setup_writes_a_starter_registers_it_and_checks_it() {
+fn setup_writes_the_node_registers_it_and_checks_its_team() {
     let s = Scratch::new("setup");
+    s.write(
+        ".ensemble/config.yaml",
+        "version: 3\nllm_backends: {}\nlimits: {}\ntracker: { type: local_markdown }\ngates: {}\nagents:\n  reviewer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter: { type: claude-code, model: sonnet, tools: [Read], permission_mode: dontAsk, max_turns: 5, command: claude }\n",
+    );
     let bin = stub_clis(&s, &["claude", "opencode"]);
     let out = with_path(&s, &bin)
         .args([
             "setup",
             "--yes",
-            "--manager",
+            "--client",
             "claude-code",
-            "--starter",
-            "hardware",
+            "--name",
+            "desk",
         ])
         .arg("--team")
         .arg(s.org())
@@ -1233,19 +1261,18 @@ fn setup_writes_a_starter_registers_it_and_checks_it() {
     let said = stdout_of(&out);
     assert!(out.status.success(), "{said}\n{}", stderr_of(&out));
     assert!(said.contains("Done."), "{said}");
-    let written = std::fs::read_to_string(s.org().join("config.yaml")).unwrap();
+    let node = s.0.with_extension("xdg-config").join("ensemble/node.yaml");
+    let written = std::fs::read_to_string(&node).unwrap();
     assert!(
-        written.contains("designer:") && written.contains("checker:"),
+        written.contains("name: \"desk\"") && written.contains(&s.org().display().to_string()),
         "{written}"
     );
     let args = std::fs::read_to_string(bin.join("claude.args")).unwrap();
-    assert!(args.contains("--team\n"), "{args}");
+    assert!(args.ends_with("\nmcp\n"), "{args}");
 
-    // A second run keeps what is there.
+    // A second run keeps the node that is there.
     let again = with_path(&s, &bin)
-        .args(["setup", "--yes", "--manager", "claude-code"])
-        .arg("--team")
-        .arg(s.org())
+        .args(["setup", "--yes", "--client", "claude-code"])
         .output()
         .unwrap();
     assert!(
@@ -1253,10 +1280,7 @@ fn setup_writes_a_starter_registers_it_and_checks_it() {
         "{}",
         stdout_of(&again)
     );
-    assert_eq!(
-        std::fs::read_to_string(s.org().join("config.yaml")).unwrap(),
-        written
-    );
+    assert_eq!(std::fs::read_to_string(&node).unwrap(), written);
 }
 
 #[test]
@@ -1264,14 +1288,16 @@ fn setup_without_any_agent_cli_says_what_to_install() {
     let s = Scratch::new("setup-nothing");
     let bin = stub_clis(&s, &[]);
     let out = with_path(&s, &bin)
-        .args(["setup", "--yes"])
-        .arg("--team")
-        .arg(s.org())
+        .args(["setup", "--yes", "--name", "desk"])
         .output()
         .unwrap();
     assert!(!out.status.success());
     assert!(stderr_of(&out).contains("Install"), "{}", stderr_of(&out));
-    assert!(!s.org().join("config.yaml").exists());
+    assert!(
+        !s.0.with_extension("xdg-config")
+            .join("ensemble/node.yaml")
+            .exists()
+    );
 }
 
 #[test]
@@ -1466,36 +1492,6 @@ fn a_remote_helper_team_is_pinned_trusted_and_then_used() {
         "{}",
         stderr_of(&refused)
     );
-}
-
-#[test]
-fn connect_pins_a_remote_helper_team_shows_it_and_registers_the_pin() {
-    let s = Scratch::new("remote-connect");
-    let (url, sha) = origin(&s, &config_yaml("true", NOWHERE));
-    let bin = stub_clis(&s, &["claude"]);
-    let out = remote_cmd(&s, Some(&bin))
-        .args([
-            "connect",
-            "--manager",
-            "claude-code",
-            "--yes",
-            "--team",
-            &format!("{url}@main"),
-        ])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    let said = stdout_of(&out);
-    assert!(said.contains("Trusted"), "{said}");
-    let args = std::fs::read_to_string(bin.join("claude.args")).unwrap();
-    assert!(args.contains(&format!("{url}#{sha}")), "{args}");
-
-    // What it registered is usable now: it was trusted on the way.
-    let used = remote_cmd(&s, None)
-        .args(["agents", "--team", &format!("{url}#{sha}")])
-        .output()
-        .unwrap();
-    assert!(used.status.success(), "{}", stderr_of(&used));
 }
 
 #[test]
@@ -1719,11 +1715,13 @@ fn sigterm(child: &Child) {
 }
 
 #[test]
-fn serve_runs_the_tasks_without_a_session_and_stops_on_sigterm() {
+fn the_node_runs_a_submitted_task_without_a_session_and_stops_on_sigterm() {
     let s = Scratch::new("serve");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
     s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
+    let mut node = start_node(&s, &[]);
+    // `submit` tells the node about the folder, which no session has opened.
     let out = ensemble(
         &s,
         &[
@@ -1735,19 +1733,16 @@ fn serve_runs_the_tasks_without_a_session_and_stops_on_sigterm() {
         ],
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
-
-    let mut serve = command(&s)
-        .arg("serve")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    assert!(
+        stdout_of(&out).contains("your node runs it"),
+        "{}",
+        stdout_of(&out)
+    );
     assert!(
         wait_for(30, || s
             .place(".ensemble/tasks/0001-rename-foo/result.md")
             .is_file()),
-        "serve did not run the task"
+        "the node did not run the task"
     );
     assert_eq!(
         std::fs::read_to_string(s.path().join("a.txt")).unwrap(),
@@ -1760,31 +1755,30 @@ fn serve_runs_the_tasks_without_a_session_and_stops_on_sigterm() {
         stdout_of(&listed)
     );
 
-    // One worker per folder: a second serve refuses, and a session does not
-    // start another worker.
-    let second = command(&s)
-        .arg("serve")
+    // One node per computer: a second one refuses.
+    let second = bare_command(&s)
+        .args(["node", "serve"])
         .stdin(Stdio::null())
         .output()
         .unwrap();
     assert!(!second.status.success());
     assert!(
-        stderr_of(&second).contains("already running"),
+        stderr_of(&second).contains("already runs the node"),
         "{}",
         stderr_of(&second)
     );
 
-    sigterm(&serve);
-    let status = serve.wait().unwrap();
-    assert!(status.success(), "serve ends cleanly on SIGTERM");
+    sigterm(&node);
+    let status = node.wait().unwrap();
+    assert!(status.success(), "the node ends cleanly on SIGTERM");
     assert!(
         !s.place(".ensemble/worker.lock").exists(),
-        "the lock is released"
+        "the folder's lock is released"
     );
 }
 
 #[test]
-fn a_task_stopped_in_the_middle_is_run_again_by_the_next_serve() {
+fn a_task_stopped_in_the_middle_is_run_again_when_the_node_starts_again() {
     let s = Scratch::new("serve-resume");
     // The first run is slow and is stopped; the marker says it had started, so
     // the run after it answers at once.
@@ -1795,25 +1789,10 @@ fn a_task_stopped_in_the_middle_is_run_again_by_the_next_serve() {
     );
     let cli = s.opencode("done", &body);
     s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    let mut first = start_node(&s, &[]);
     let out = ensemble(&s, &["submit", "coder", "Slow", "--text", "take your time"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-
-    let mut first = command(&s)
-        .arg("serve")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    assert!(wait_for(30, || s
-        .0
-        .parent()
-        .unwrap()
-        .join("started")
-        .exists()
-        || {
-            let t = ensemble(&s, &["tasks"]);
-            stdout_of(&t).contains("running")
-        }));
+    assert!(wait_for(30, || marker.exists()));
     let listed = ensemble(&s, &["tasks"]);
     assert!(
         stdout_of(&listed).contains("running"),
@@ -1833,20 +1812,14 @@ fn a_task_stopped_in_the_middle_is_run_again_by_the_next_serve() {
         stdout_of(&listed)
     );
 
-    let mut second = command(&s)
-        .arg("serve")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    // The node remembers the folder, and runs it again when it starts.
+    let _second = start_node(&s, &[]);
     assert!(
         wait_for(30, || s
             .place(".ensemble/tasks/0001-slow/result.md")
             .is_file()),
-        "the next serve did not run it again"
+        "the node did not run it again"
     );
-    sigterm(&second);
-    second.wait().unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -1901,7 +1874,7 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_backlog_task_is_assigned_then_served_and_the_helper_team_says_when_it_is_idle() {
+fn a_backlog_task_waits_until_it_is_assigned_and_the_helper_team_says_when_it_is_idle() {
     let s = Scratch::new("backlog");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
     s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
@@ -1927,17 +1900,8 @@ fn a_backlog_task_is_assigned_then_served_and_the_helper_team_says_when_it_is_id
     assert!(s.place(".ensemble/tasks/0001-rename-foo/task.md").is_file());
 
     // Nothing runs it while it has no assignee.
-    let idle = command(&s)
-        .args(["serve", "--exit-when-idle"])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(idle.status.success(), "{}", stderr_of(&idle));
-    assert!(
-        stderr_of(&idle).contains("Idle: no active tasks"),
-        "{}",
-        stderr_of(&idle)
-    );
+    let node = start_node(&s, &[]);
+    std::thread::sleep(std::time::Duration::from_secs(3));
     assert!(
         !s.place(".ensemble/tasks/0001-rename-foo/result.md")
             .exists()
@@ -1952,22 +1916,13 @@ fn a_backlog_task_is_assigned_then_served_and_the_helper_team_says_when_it_is_id
         "{}",
         stdout_of(&ok)
     );
-    let listed = stdout_of(&ensemble(&s, &["tasks"]));
-    assert!(listed.contains("coder · queued"), "{listed}");
-    assert!(!listed.contains("Idle"), "{listed}");
-
-    // Served, then it stops by itself because nothing is left.
-    let served = command(&s)
-        .args(["serve", "--exit-when-idle"])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(served.status.success(), "{}", stderr_of(&served));
     assert!(
-        stderr_of(&served).contains("Idle: no active tasks"),
-        "{}",
-        stderr_of(&served)
+        wait_for(30, || s
+            .place(".ensemble/tasks/0001-rename-foo/result.md")
+            .is_file()),
+        "the node did not run the task once assigned"
     );
+    drop(node);
     assert_eq!(
         std::fs::read_to_string(s.path().join("a.txt")).unwrap(),
         "bar\n"
@@ -1975,23 +1930,6 @@ fn a_backlog_task_is_assigned_then_served_and_the_helper_team_says_when_it_is_id
     assert!(stdout_of(&ensemble(&s, &["tasks"])).contains("Idle: no active tasks"));
     let shown = stdout_of(&ensemble(&s, &["task", "0001-rename-foo"]));
     assert!(shown.contains("status: done"), "{shown}");
-}
-
-#[test]
-fn an_empty_helper_team_is_idle_and_serve_can_end_there() {
-    let s = Scratch::new("idle-empty");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
-    let out = command(&s)
-        .args(["serve", "--exit-when-idle"])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(
-        stderr_of(&out).contains("Idle: no active tasks. The helper team waits for planning"),
-        "{}",
-        stderr_of(&out)
-    );
 }
 
 #[test]
@@ -2114,6 +2052,7 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
     git_in(s.path(), &["add", "a.txt"]);
     git_in(s.path(), &["commit", "--quiet", "-m", "start"]);
 
+    let node = start_node(&s, &[]);
     let out = ensemble(
         &s,
         &[
@@ -2125,12 +2064,13 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
         ],
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let served = command(&s)
-        .args(["serve", "--exit-when-idle"])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(served.status.success(), "{}", stderr_of(&served));
+    assert!(
+        wait_for(30, || s
+            .place(".ensemble/tasks/0001-rename-foo/result.md")
+            .is_file()),
+        "the node did not run the task"
+    );
+    drop(node);
     assert_eq!(
         std::fs::read_to_string(s.path().join("a.txt")).unwrap(),
         "foo\n",
@@ -2673,6 +2613,38 @@ impl Drop for Served {
     }
 }
 
+/// This scratch computer's node, running its helper team until dropped;
+/// `extra` goes to `node serve`, such as `--hub <dir>`.
+fn start_node(s: &Scratch, extra: &[&std::ffi::OsStr]) -> Served {
+    s.node_yaml();
+    let mut c = bare_command(s);
+    c.args(["node", "serve"]).args(extra);
+    let env_file = s.org().join(".env");
+    if env_file.exists() {
+        c.arg("--env-file").arg(env_file);
+    }
+    let mut node = c
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut said = BufReader::new(node.stderr.take().unwrap());
+    let (mut line, mut all) = (String::new(), String::new());
+    while !line.contains("ready for `ensemble mcp` sessions") {
+        line.clear();
+        assert!(
+            said.read_line(&mut line).unwrap() > 0,
+            "the node stopped: {all}"
+        );
+        all.push_str(&line);
+    }
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut said, &mut std::io::sink());
+    });
+    Served(node)
+}
+
 fn serve_hub(scratch: &Scratch, hub: &Path) -> Served {
     let mut child = command(scratch)
         .args(["hub", "serve", "--hub"])
@@ -3147,12 +3119,10 @@ fn connect_with_hooks_writes_them_into_the_clis_settings() {
     let hub = s.0.with_extension("hub");
     std::fs::create_dir_all(&hub).unwrap();
     let bin = stub_clis(&s, &["claude", "opencode"]);
-    let connect = |manager: &str, extra: &[&str]| {
+    let connect = |client: &str, extra: &[&str]| {
         with_path(&s, &bin)
-            .args(["connect", "--manager", manager, "--hooks"])
+            .args(["connect", "--client", client, "--hooks"])
             .args(extra)
-            .arg("--team")
-            .arg(s.org())
             .arg("--hub")
             .arg(&hub)
             .output()
@@ -3184,11 +3154,34 @@ fn connect_with_hooks_writes_them_into_the_clis_settings() {
     );
 }
 
-/// `ensemble node serve`, started and waited for until it is connected.
-fn serve_node(scratch: &Scratch, url: &str, node: &Path) -> Served {
-    let mut child = command(scratch)
-        .args(["node", "serve", "--hub", url, "--node"])
-        .arg(node)
+/// The binary on another computer of the scratch, `machine`: its own config
+/// and state directories, with `node_yaml` as its node and signed in to the
+/// hubs the scratch signed in to.
+fn on_machine(scratch: &Scratch, machine: &str, node_yaml: &str) -> Command {
+    let home = scratch.0.with_extension("machines").join(machine);
+    let config = home.join("config").join("ensemble");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("node.yaml"), node_yaml).unwrap();
+    let tokens = scratch
+        .0
+        .with_extension("xdg-config")
+        .join("ensemble/hubs.json");
+    if tokens.exists() {
+        std::fs::copy(&tokens, config.join("hubs.json")).unwrap();
+    }
+    let mut c = Command::new(BIN);
+    c.current_dir(scratch.path())
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_STATE_HOME", home.join("state"))
+        .env("XDG_CACHE_HOME", scratch.0.with_extension("xdg-cache"));
+    c
+}
+
+/// `ensemble node serve` on the computer `machine`, whose node is
+/// `node_yaml`, started and waited for until it is connected.
+fn serve_node(scratch: &Scratch, url: &str, machine: &str, node_yaml: &str) -> Served {
+    let mut child = on_machine(scratch, machine, node_yaml)
+        .args(["node", "serve", "--hub", url])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -3231,16 +3224,11 @@ fn an_agent_runs_on_a_node_and_what_it_changed_comes_back() {
         "printf 'hello, changed' > a.txt\nprintf new > b.txt\nls -a > given.txt",
     );
     std::fs::write(team.join("config.yaml"), config_yaml(&cli, NOWHERE)).unwrap();
-    let node_file = s.0.with_extension("node.yaml");
-    std::fs::write(
-        &node_file,
-        format!(
-            "version: 3\nname: laptop\naccess: private\nteam: \"{}\"\noffers:\n  runs: {{ agents: [reviewer] }}\n",
-            team.display()
-        ),
-    )
-    .unwrap();
-    let _node = serve_node(&s, &url, &node_file);
+    let node_yaml = format!(
+        "version: 3\nname: laptop\naccess: private\nteam: \"{}\"\noffers:\n  runs: {{ agents: [reviewer] }}\n",
+        team.display()
+    );
+    let _node = serve_node(&s, &url, "laptop", &node_yaml);
     let out = command(&s).args(["nodes", "--hub", &url]).output().unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
@@ -3313,19 +3301,13 @@ fn a_node_serves_its_models_through_the_hub_and_a_shared_node_lends_no_login() {
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     let server = models_stub(r#"{"choices":[{"message":{"content":"hi from the node"}}]}"#);
-    let node_file = |access: &str, offers: &str| {
-        let path = s.0.with_extension(format!("{access}.yaml"));
-        std::fs::write(
-            &path,
-            format!("version: 3\nname: {access}-box\naccess: {access}\n{offers}"),
-        )
-        .unwrap();
-        path
+    let node_yaml = |access: &str, offers: &str| {
+        format!("version: 3\nname: {access}-box\naccess: {access}\n{offers}")
     };
     let models = format!(
         "offers:\n  models: {{ base_url: \"{server}\", timeout_seconds: 5, names: [small] }}\n"
     );
-    let _node = serve_node(&s, &url, &node_file("private", &models));
+    let _node = serve_node(&s, &url, "private-box", &node_yaml("private", &models));
     let mut answer = ureq::post(format!("http://{address}/nodes/v1/chat/completions"))
         .header("authorization", format!("Bearer {token}"))
         .send(r#"{"model": "small", "messages": [{"role": "user", "content": "hi"}]}"#)
@@ -3334,9 +3316,8 @@ fn a_node_serves_its_models_through_the_hub_and_a_shared_node_lends_no_login() {
     assert!(body.contains("hi from the node"), "{body}");
 
     // A member may not host a shared node.
-    let out = command(&s)
-        .args(["node", "serve", "--hub", &url, "--node"])
-        .arg(node_file("shared", &models))
+    let out = on_machine(&s, "shared-box", &node_yaml("shared", &models))
+        .args(["node", "serve", "--hub", &url])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -3349,17 +3330,20 @@ fn a_node_serves_its_models_through_the_hub_and_a_shared_node_lends_no_login() {
     let team = s.0.with_extension("node-team");
     std::fs::create_dir_all(&team).unwrap();
     std::fs::write(team.join("config.yaml"), config_yaml("opencode", NOWHERE)).unwrap();
-    let out = command(&s)
-        .args(["node", "serve", "--hub", &url, "--node"])
-        .arg(node_file(
+    let out = on_machine(
+        &s,
+        "shared-box",
+        &node_yaml(
             "shared",
             &format!(
                 "team: \"{}\"\noffers:\n  runs: {{ agents: [reviewer] }}\n",
                 team.display()
             ),
-        ))
-        .output()
-        .unwrap();
+        ),
+    )
+    .args(["node", "serve", "--hub", &url])
+    .output()
+    .unwrap();
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("never lends"),

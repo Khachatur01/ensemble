@@ -4,9 +4,8 @@
 # Your agent CLI reaches it from any folder through `ensemble mcp`, and its
 # tasks go on after the session ends. With a hub server you signed in to
 # (`ensemble login`), it also takes your tasks from the hub and can lend this
-# computer's power. Written by `ensemble node init` in ~/.config/ensemble; a
-# computer may run more nodes, each from a file of its own
-# (`ensemble node serve --node <file>`).
+# computer's power. Written by `ensemble setup` or `ensemble node init` in
+# ~/.config/ensemble. A computer runs one node.
 #
 # Nothing has a default value. `team` and each block under `offers` may be left
 # out, which means they are not used; `offers: {}` offers nothing.

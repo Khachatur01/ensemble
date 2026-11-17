@@ -21,12 +21,12 @@
 //!
 //! The tools themselves live in `ensemble_tasks::delegation`, kept apart from the
 //! transport so what an agent is and what a failed delegation says do not depend
-//! on how it was asked. This crate owns only the JSON-RPC envelope, and `serve`,
-//! the worker that runs a folder's tasks with no session around it.
+//! on how it was asked. This crate owns only the JSON-RPC envelope: the node
+//! (`src/daemon.rs`) runs a session with [`serve_session`] beside the
+//! folder's queue.
 
 use ensemble_agents::router::Ensemble;
-use ensemble_inbox::{Inbox, NodeInbox};
-use ensemble_knowledge::{KnowledgeAccess, Memory, RECALL, RECALL_HEADER, recalled_within};
+use ensemble_knowledge::{KnowledgeAccess, RECALL, RECALL_HEADER, recalled_within};
 use ensemble_tasks::delegation;
 use ensemble_tasks::queue::Queue;
 use ensemble_tasks::tasks::Store;
@@ -41,25 +41,11 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 mod notify;
 mod protocol;
-pub mod serve;
 
 use notify::*;
 use protocol::tool_definitions;
 pub use protocol::{PROTOCOL_VERSION, SERVER_NAME};
 
-/// What a hub adds to a session: its knowledge, whose tools are offered,
-/// embedded or on a hub server; for an embedded hub, the knowledge whose shares
-/// are distilled in the background; and its task inbox, which turns issues into
-/// tasks in the background.
-#[derive(Clone, Copy, Default)]
-pub struct Hub<'a> {
-    pub knowledge: Option<&'a dyn KnowledgeAccess>,
-    pub distill: Option<&'a Memory>,
-    pub inbox: Option<&'a Inbox>,
-    /// This computer's part in a hub server's task inbox, when `--hub` is a
-    /// hub server: its tasks go to the folders a node served, by project.
-    pub node: Option<&'a NodeInbox>,
-}
 /// Handle one JSON-RPC message.
 ///
 /// `None` means "send nothing" — which is required, not merely allowed, for
@@ -67,8 +53,8 @@ pub struct Hub<'a> {
 /// violation that some clients treat as fatal.
 ///
 /// With no session around it, a background delegation runs to its end before
-/// this returns and there are no tasks; [`serve`] is what runs them alongside
-/// the rest. This waits for the answer, so it is for code that is not async.
+/// this returns and there are no tasks; a node runs them alongside the rest
+/// ([`serve_session`]). This waits for the answer, so it is for code that is not async.
 pub fn handle(ensemble: &Ensemble, request: &Value) -> Option<Value> {
     handle_with(ensemble, None, request)
 }
@@ -199,7 +185,7 @@ pub async fn handle_reporting(
 
         "ping" => reply(json!({})),
 
-        // The level itself is applied by `serve`, which owns the output.
+        // The level itself is applied by `serve_session`, which owns the output.
         "logging/setLevel" => reply(json!({})),
 
         // Notifications: no id, no answer.
@@ -218,90 +204,17 @@ pub async fn handle_reporting(
     }
 }
 
-/// Run the server until `input` ends.
-///
-/// Each `tools/call` runs alongside the others, so the caller can delegate to
-/// several agents at once and still get `ping` and `tools/list` answered while
-/// they work. `notifications/cancelled` stops the named call at its next step,
-/// and it gets no reply: the client has stopped waiting for one.
-///
-/// Alongside, a worker runs the tasks in the state directory's `tasks/`, and,
-/// with a hub, others turn shares into notes and issues into tasks.
-/// When `input` ends, running tasks and background delegations are stopped
-/// (tasks that had not started stay queued for the next session), and blocking
-/// calls still running are finished before this returns.
-pub fn serve(
-    ensemble: &Ensemble,
-    input: impl AsyncBufRead + Unpin + Send,
-    output: impl AsyncWrite + Unpin + Send,
-) -> std::io::Result<()> {
-    serve_with(ensemble, Hub::default(), input, output)
-}
-
-/// [`serve`], with what a hub adds when there is one. What a hub does in the
-/// background that is not async yet runs on threads of its own.
-pub fn serve_with(
-    ensemble: &Ensemble,
-    hub: Hub<'_>,
-    input: impl AsyncBufRead + Unpin + Send,
-    output: impl AsyncWrite + Unpin + Send,
-) -> std::io::Result<()> {
-    let memory = hub.knowledge;
-    let state = ensemble.state_dir()?;
-    // One worker per folder: when another process (a node, `ensemble serve`,
-    // or another session) has it, this one reads and writes the tasks and
-    // runs none.
-    let lock = ensemble_tasks::lock::acquire(&state);
-    if let Err(pid) = &lock {
-        eprintln!(
-            "ensemble: process {pid} is running this folder's tasks; this session only reads and writes them"
-        );
-    }
-    let worker = lock.is_ok();
-    let mut store = Store::new(&state);
-    if let Some(usage) = ensemble.usage_dir() {
-        store = store.with_usage_dir(usage);
-    }
-    note_recall_without_knowledge(ensemble, memory);
-    let queue = queue_for(ensemble, Some(store), memory);
-    let queue = &queue;
-
-    let hub_stop = &AtomicBool::new(false);
-    std::thread::scope(|scope| {
-        // Shares become notes alongside, unless another process does that.
-        if let Some(memory) = hub.distill {
-            scope.spawn(move || memory.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
-        }
-        // So do issues from the tracker, and tasks from a hub server.
-        if let Some(inbox) = hub.inbox {
-            scope.spawn(move || inbox.work(hub_stop, &|line| eprintln!("ensemble: {line}")));
-        }
-        // The session closes the queue when it ends, and the worker returns
-        // once what it runs has stopped.
-        let session = async {
-            let result = serve_session(ensemble, memory, queue, input, output, true).await;
-            hub_stop.store(true, Ordering::Relaxed);
-            result
-        };
-        let node = async {
-            if let Some(node) = hub.node {
-                node.work(hub_stop, &|line| eprintln!("ensemble: {line}"))
-                    .await;
-            }
-        };
-        let (result, (), ()) =
-            runtime::block_on(async { tokio::join!(session, queue.work(worker), node) });
-        hub_stop.store(true, Ordering::Relaxed);
-        result
-    })
-}
-
 /// One session: JSON-RPC from `input`, answered on `output`, until `input`
 /// ends, with tasks and background delegations kept in `queue`, which
 /// [`Queue::work`] runs alongside. With `close_at_end` the queue is closed when
 /// the caller goes, which stops what runs in it; a node's queue is not, and
 /// its work goes on. Blocking calls still running are finished before this
 /// returns.
+///
+/// Each `tools/call` runs alongside the others, so the caller can delegate to
+/// several agents at once and still get `ping` and `tools/list` answered while
+/// they work. `notifications/cancelled` stops the named call at its next step,
+/// and it gets no reply: the client has stopped waiting for one.
 pub async fn serve_session(
     ensemble: &Ensemble,
     memory: Option<&dyn KnowledgeAccess>,
