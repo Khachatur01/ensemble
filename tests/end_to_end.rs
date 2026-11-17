@@ -2799,6 +2799,22 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
         "{}",
         stdout_of(&out)
     );
+    // An admin adds an account on the server while the hub runs: the database
+    // is shared between the two processes, and the new token works at once.
+    let added = command(&s)
+        .args(["hub", "user", "add", "kim", "--role", "member", "--hub"])
+        .arg(&hub)
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{}", stderr_of(&added));
+    let kim = stdout_of(&added).trim().to_string();
+    let other = Scratch::new("hub-remote-kim");
+    let out = command(&other)
+        .args(["login", &url, "--token", &kim])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(stdout_of(&out).contains("as kim"), "{}", stdout_of(&out));
     let tokens = s.0.with_extension("xdg-config").join("ensemble/hubs.json");
     #[cfg(unix)]
     {

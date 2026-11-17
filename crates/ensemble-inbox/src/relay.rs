@@ -14,7 +14,8 @@
 //!    (`review` or `blocked`). Ensemble never closes an issue.
 //! 4. An issue closed, or without the label, drops its delivery.
 //!
-//! The deliveries are kept in `deliveries.json` in the hub's state directory.
+//! The deliveries are kept in the hub's database (`ensemble_link::store`), in
+//! its state directory.
 
 use crate::bridge::{AUTHOR, reply_after};
 use crate::tracker::{Issue, IssueTracker, Status};
@@ -24,6 +25,7 @@ use ensemble_link::Users;
 use ensemble_link::protocol::{
     ANSWER_EVENT, ANSWER_TAKEN, Event, TASK_ACCEPT, TASK_EVENT, TASK_REFUSE, TASK_UPDATE, TaskRelay,
 };
+use ensemble_link::store;
 use ensemble_tasks::tasks::Status as TaskStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -33,6 +35,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+/// Where deliveries were kept before the database; taken into it once.
 const DELIVERIES_FILE: &str = "deliveries.json";
 
 /// Where a delivery stands.
@@ -68,12 +71,49 @@ pub struct Delivery {
     pub refused: bool,
 }
 
+/// The deliveries kept in `dir`, by issue. Those from before the database,
+/// in `deliveries.json`, are taken into it once.
+fn load(dir: &std::path::Path) -> Result<BTreeMap<String, Delivery>, String> {
+    store::with(dir, async |c| {
+        let mut out = BTreeMap::new();
+        for row in store::rows(c, "SELECT issue, data FROM deliveries", vec![]).await? {
+            let (Some(issue), Some(data)) = (store::text(&row[0]), store::text(&row[1])) else {
+                continue;
+            };
+            let delivery = serde_json::from_str(&data)
+                .map_err(|e| format!("the delivery of issue {issue} is unreadable: {e}"))?;
+            out.insert(issue, delivery);
+        }
+        let old = dir.join(DELIVERIES_FILE);
+        if out.is_empty()
+            && let Ok(text) = std::fs::read_to_string(&old)
+        {
+            let before: BTreeMap<String, Delivery> = serde_json::from_str(&text)
+                .map_err(|e| format!("{} is not readable: {e}", old.display()))?;
+            let mut statements = Vec::new();
+            for (issue, delivery) in &before {
+                let data = serde_json::to_string(delivery).map_err(|e| e.to_string())?;
+                statements.push((
+                    "INSERT INTO deliveries (issue, data) VALUES (?1, ?2)",
+                    vec![store::Value::Text(issue.clone()), store::Value::Text(data)],
+                ));
+            }
+            store::transaction(c, statements).await?;
+            std::fs::rename(&old, old.with_extension("json.imported"))
+                .map_err(|e| format!("cannot move {} aside: {e}", old.display()))?;
+            out = before;
+        }
+        Ok(out)
+    })
+}
+
 /// A hub server's task inbox.
 pub struct ServerInbox {
     tasks: Tasks,
     tracker: Box<dyn IssueTracker + Send>,
     roles: BTreeMap<String, Vec<Permission>>,
-    /// The hub's state directory: its users, and `deliveries.json`.
+    /// The hub's state directory, with its database: its users, and the
+    /// deliveries.
     dir: PathBuf,
     /// Held for every pass and every request, so the tracker and the
     /// deliveries change one step at a time.
@@ -81,18 +121,19 @@ pub struct ServerInbox {
 }
 
 impl ServerInbox {
-    pub fn new(tasks: &Tasks, roles: &BTreeMap<String, Vec<Permission>>, dir: PathBuf) -> Self {
-        let deliveries = std::fs::read_to_string(dir.join(DELIVERIES_FILE))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default();
-        ServerInbox {
+    pub fn new(
+        tasks: &Tasks,
+        roles: &BTreeMap<String, Vec<Permission>>,
+        dir: PathBuf,
+    ) -> Result<Self, String> {
+        let deliveries = load(&dir)?;
+        Ok(ServerInbox {
             tracker: crate::tracker_for(tasks),
             tasks: tasks.clone(),
             roles: roles.clone(),
             dir,
             deliveries: Mutex::new(deliveries),
-        }
+        })
     }
 
     pub fn tracker(&self) -> &dyn IssueTracker {
@@ -107,15 +148,17 @@ impl ServerInbox {
             .clone()
     }
 
+    /// Keep `deliveries`, in one transaction.
     fn save(&self, deliveries: &BTreeMap<String, Delivery>) -> Result<(), String> {
-        std::fs::create_dir_all(&self.dir)
-            .map_err(|e| format!("cannot create {}: {e}", self.dir.display()))?;
-        let path = self.dir.join(DELIVERIES_FILE);
-        let tmp = path.with_extension("tmp");
-        let json = serde_json::to_string_pretty(deliveries).map_err(|e| e.to_string())?;
-        std::fs::write(&tmp, json)
-            .and_then(|()| std::fs::rename(&tmp, &path))
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))
+        let mut statements = vec![("DELETE FROM deliveries", Vec::new())];
+        for (issue, delivery) in deliveries {
+            let data = serde_json::to_string(delivery).map_err(|e| e.to_string())?;
+            statements.push((
+                "INSERT INTO deliveries (issue, data) VALUES (?1, ?2)",
+                vec![store::Value::Text(issue.clone()), store::Value::Text(data)],
+            ));
+        }
+        store::with(&self.dir, async |c| store::transaction(c, statements).await)
     }
 
     /// The account the issue is for: active, `tracker_name` its assignee, with
@@ -412,8 +455,44 @@ mod tests {
             poll_seconds: 1,
             personal: None,
         };
-        let inbox = ServerInbox::new(&tasks, &roles, tmp.0.join("state"));
+        let inbox = ServerInbox::new(&tasks, &roles, tmp.0.join("state")).unwrap();
         World { tmp, inbox }
+    }
+
+    #[test]
+    fn deliveries_are_kept_in_the_database_and_those_from_before_are_taken_in_once() {
+        let w = world();
+        let state = w.tmp.0.join("state");
+        let mut kept = BTreeMap::new();
+        kept.insert(
+            "7".to_string(),
+            Delivery {
+                issue: "7".into(),
+                account: "ana".into(),
+                stage: Stage::Queued,
+                task: None,
+                comments: 0,
+                answer: None,
+                refused: false,
+            },
+        );
+        w.inbox.save(&kept).unwrap();
+        let roles = w.inbox.roles.clone();
+        let again = ServerInbox::new(&w.inbox.tasks, &roles, state.clone()).unwrap();
+        assert_eq!(again.deliveries(), kept);
+
+        // A hub from before the database: its file is read once, then set aside.
+        let old = w.tmp.0.join("old");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(
+            old.join(DELIVERIES_FILE),
+            serde_json::to_string(&kept).unwrap(),
+        )
+        .unwrap();
+        let taken = ServerInbox::new(&w.inbox.tasks, &roles, old.clone()).unwrap();
+        assert_eq!(taken.deliveries(), kept);
+        assert!(!old.join(DELIVERIES_FILE).exists());
+        assert!(old.join("deliveries.json.imported").exists());
     }
 
     impl World {

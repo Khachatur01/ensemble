@@ -1218,8 +1218,11 @@ The permissions are `share` (keep knowledge in the organization vault),
 `recall` (read its notes), `tasks` (receive the issues assigned to you; see
 [Tasks from a tracker](#tasks-from-a-tracker)), `admin` (manage users),
 `compute` (use other people's shared nodes) and `host` (connect a shared node;
-see [Nodes](#nodes)). Accounts are not in `hub.yaml`: they are kept in the
-hub's state directory, readable only by whoever runs the hub. A share is kept
+see [Nodes](#nodes)). Accounts are not in `hub.yaml`: they are kept in
+`hub.db`, a Turso database in the hub's state directory, readable only by
+whoever runs the hub, with the tracker's deliveries. A hub from before it
+kept them in `users.json` and `deliveries.json`; those are taken in once, and
+set aside as `.imported`. A share is kept
 under the name of the account that signed in, never a name the node sends, and
 the hub distills shares itself, with its own `knowledge.distill` models.
 

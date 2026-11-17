@@ -28,6 +28,10 @@ libc = "0.2"
 # The link between a node and a hub server: one WebSocket on tokio, TLS through
 # rustls, which ureq already brings.
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+# The hub server's accounts and task deliveries: Turso, the Rust rewrite of
+# SQLite, embedded and async. Pinned exactly: it is young, and its API moves
+# between releases.
+turso = { version = "=0.8.3", default-features = false }
 # Hashing hub tokens and making new ones; already in the tree through rustls.
 ring = "0.17"
 # The async runtime. Agents, the link and the node run on it; harness-rs, the

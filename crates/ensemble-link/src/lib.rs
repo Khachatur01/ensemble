@@ -16,6 +16,7 @@ mod http;
 mod nodes;
 pub mod protocol;
 pub mod server;
+pub mod store;
 pub mod tokens;
 pub mod users;
 

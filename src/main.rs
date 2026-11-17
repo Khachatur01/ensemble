@@ -985,13 +985,13 @@ fn cmd_hub_serve(args: &Args) -> Result<ExitCode, String> {
     // connection is a task of its own.
     let hub: &'static config::Hub = Box::leak(Box::new(hub));
     let memory: &'static ensemble::knowledge::Memory = Box::leak(Box::new(memory));
-    let inbox: Option<&'static ensemble::inbox::ServerInbox> = hub.tasks.as_ref().map(|tasks| {
-        &*Box::leak(Box::new(ensemble::inbox::ServerInbox::new(
-            tasks,
-            &hub.roles,
-            users.clone(),
-        )))
-    });
+    let inbox: Option<&'static ensemble::inbox::ServerInbox> = match &hub.tasks {
+        Some(tasks) => Some(Box::leak(Box::new(
+            ensemble::inbox::ServerInbox::new(tasks, &hub.roles, users.clone())
+                .map_err(|e| format!("hub serve: {e}"))?,
+        ))),
+        None => None,
+    };
     let mut server = ensemble::link::Server::new(memory, &hub.roles, server, users);
     if let Some(inbox) = inbox {
         server = server.with_relay(inbox);

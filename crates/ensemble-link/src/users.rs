@@ -1,6 +1,6 @@
 //! A hub server's accounts, and the tokens that sign in as them. Accounts are
-//! state, not config: they live in `users.json` in the hub's state directory,
-//! which only the admin who runs the hub can read.
+//! state, not config: they live in the hub's database (`store`) in its state
+//! directory, which only the admin who runs the hub can read.
 //!
 //! An account has a name, a role and a password, kept as a PBKDF2-HMAC-SHA256
 //! hash. Logging in with the password gives a **session** token, which lasts
@@ -12,6 +12,7 @@
 //! Someone who signs up is `pending`, and cannot log in until an admin
 //! approves them with a role.
 
+use crate::store::{self, Value};
 use ensemble_config::Permission;
 use ring::digest::{SHA256, digest};
 use ring::pbkdf2;
@@ -178,52 +179,54 @@ impl From<UsersError> for String {
 
 /// The accounts of one hub server.
 pub struct Users {
-    path: PathBuf,
+    /// The hub's state directory, with its database.
+    dir: PathBuf,
     users: BTreeMap<String, User>,
 }
 
 pub type Roles = BTreeMap<String, Vec<Permission>>;
 
 impl Users {
-    /// The accounts kept in `dir`, none when there is no file yet.
+    /// The accounts kept in `dir`, none when there are none yet. Accounts
+    /// from before the database, in `users.json`, are taken into it once.
     pub fn load(dir: &Path) -> Result<Users, UsersError> {
-        let path = dir.join(USERS_FILE);
-        let mut users: BTreeMap<String, User> = match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text)
-                .map_err(|e| UsersError::Io(format!("{} is not readable: {e}", path.display())))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(e) => {
-                return Err(UsersError::Io(format!(
-                    "cannot read {}: {e}",
-                    path.display()
-                )));
+        let mut users = store::with(dir, async |c| {
+            let users = read(c).await?;
+            if !users.is_empty() {
+                return Ok(users);
             }
-        };
+            let Some(old) = old_file(dir)? else {
+                return Ok(users);
+            };
+            store::transaction(c, statements(&old)).await?;
+            let file = dir.join(USERS_FILE);
+            std::fs::rename(&file, file.with_extension("json.imported"))
+                .map_err(|e| format!("cannot move {} aside: {e}", file.display()))?;
+            Ok(old)
+        })
+        .map_err(UsersError::Io)?;
         for token in users.values_mut().flat_map(|u| u.tokens.iter_mut()) {
             if token.id.is_empty() {
                 token.id = token.sha256.chars().take(8).collect();
             }
         }
-        Ok(Users { path, users })
+        Ok(Users {
+            dir: dir.to_path_buf(),
+            users,
+        })
     }
 
-    /// Write the accounts, readable only by their owner, without the tokens
-    /// that have expired.
+    /// Write the accounts, in one transaction, without the tokens that have
+    /// expired.
     pub fn save(&mut self) -> Result<(), UsersError> {
         let now = now();
         for user in self.users.values_mut() {
             user.tokens
                 .retain(|t| t.expires.as_ref().is_none_or(|e| *e > now));
         }
-        let dir = self.path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(dir)
-            .map_err(|e| UsersError::Io(format!("cannot create {}: {e}", dir.display())))?;
-        let json =
-            serde_json::to_string_pretty(&self.users).map_err(|e| UsersError::Io(e.to_string()))?;
-        let tmp = self.path.with_extension("tmp");
-        write_private(&tmp, &json)
-            .and_then(|()| std::fs::rename(&tmp, &self.path))
-            .map_err(|e| UsersError::Io(format!("cannot write {}: {e}", self.path.display())))
+        let statements = statements(&self.users);
+        store::with(&self.dir, async |c| store::transaction(c, statements).await)
+            .map_err(UsersError::Io)
     }
 
     pub fn list(&self) -> impl Iterator<Item = &User> {
@@ -639,6 +642,129 @@ fn random<const N: usize>() -> Result<[u8; N], UsersError> {
     Ok(bytes)
 }
 
+/// The accounts in `users.json`, the file they were kept in before the
+/// database, if it is there.
+fn old_file(dir: &Path) -> Result<Option<BTreeMap<String, User>>, String> {
+    let path = dir.join(USERS_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|e| format!("{} is not readable: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+    }
+}
+
+/// Every account in the database, with its tokens in the order they were made.
+async fn read(c: &turso::Connection) -> Result<BTreeMap<String, User>, String> {
+    let text = |v: &Value| store::text(v).unwrap_or_default();
+    let mut users = BTreeMap::new();
+    let rows = store::rows(
+        c,
+        "SELECT name, role, status, registered, password_rounds, password_salt, password_hash, tracker_user FROM users",
+        vec![],
+    )
+    .await?;
+    for r in rows {
+        let password = match (&r[4], store::text(&r[5]), store::text(&r[6])) {
+            (Value::Integer(rounds), Some(salt), Some(hash)) => Some(Password {
+                rounds: u32::try_from(*rounds).map_err(|e| e.to_string())?,
+                salt,
+                hash,
+            }),
+            _ => None,
+        };
+        let name = text(&r[0]);
+        users.insert(
+            name.clone(),
+            User {
+                name,
+                role: text(&r[1]),
+                status: match text(&r[2]).as_str() {
+                    "pending" => Status::Pending,
+                    _ => Status::Active,
+                },
+                registered: text(&r[3]),
+                password,
+                tracker_user: store::text(&r[7]),
+                tokens: Vec::new(),
+            },
+        );
+    }
+    let rows = store::rows(
+        c,
+        "SELECT user, sha256, id, name, kind, scopes, expires, made FROM tokens ORDER BY rowid",
+        vec![],
+    )
+    .await?;
+    for r in rows {
+        let scopes = match store::text(&r[5]) {
+            Some(json) => Some(serde_json::from_str(&json).map_err(|e| e.to_string())?),
+            None => None,
+        };
+        if let Some(user) = users.get_mut(&text(&r[0])) {
+            user.tokens.push(Token {
+                sha256: text(&r[1]),
+                id: text(&r[2]),
+                name: text(&r[3]),
+                kind: match text(&r[4]).as_str() {
+                    "session" => Kind::Session,
+                    _ => Kind::Personal,
+                },
+                scopes,
+                expires: store::text(&r[6]),
+                made: text(&r[7]),
+            });
+        }
+    }
+    Ok(users)
+}
+
+/// What makes the database hold exactly `users`.
+fn statements(users: &BTreeMap<String, User>) -> Vec<(&'static str, Vec<Value>)> {
+    let t = |s: &str| Value::Text(s.to_string());
+    let mut out = vec![
+        ("DELETE FROM tokens", vec![]),
+        ("DELETE FROM users", vec![]),
+    ];
+    for user in users.values() {
+        let p = user.password.as_ref();
+        out.push((
+            "INSERT INTO users (name, role, status, registered, password_rounds, password_salt, password_hash, tracker_user) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            vec![
+                t(&user.name),
+                t(&user.role),
+                t(user.status.as_str()),
+                t(&user.registered),
+                p.map_or(Value::Null, |p| Value::Integer(i64::from(p.rounds))),
+                store::optional(p.map(|p| p.salt.as_str())),
+                store::optional(p.map(|p| p.hash.as_str())),
+                store::optional(user.tracker_user.as_deref()),
+            ],
+        ));
+        for token in &user.tokens {
+            let scopes = token
+                .scopes
+                .as_ref()
+                .map(|s| serde_json::to_string(s).unwrap_or_default());
+            out.push((
+                "INSERT INTO tokens (sha256, user, id, name, kind, scopes, expires, made) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                vec![
+                    t(&token.sha256),
+                    t(&user.name),
+                    t(&token.id),
+                    t(&token.name),
+                    t(token.kind.as_str()),
+                    store::optional(scopes.as_deref()),
+                    store::optional(token.expires.as_deref()),
+                    t(&token.made),
+                ],
+            ));
+        }
+    }
+    out
+}
+
 fn now() -> String {
     ensemble_core::time::utc(SystemTime::now())
 }
@@ -719,16 +845,14 @@ mod tests {
             vec![Permission::Share, Permission::Recall]
         );
         assert!(users.authenticate("ens_nope", &roles()).is_none());
-        let file = std::fs::read_to_string(tmp.0.join(USERS_FILE)).unwrap();
-        assert!(!file.contains(&ana[4..]), "no token is kept, only hashes");
+        let kept = String::from_utf8_lossy(&std::fs::read(tmp.0.join(store::DB_FILE)).unwrap())
+            .into_owned();
+        assert!(!kept.contains(&ana[4..]), "no token is kept, only hashes");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(tmp.0.join(USERS_FILE))
-                .unwrap()
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, 0o600);
+            let mode = std::fs::metadata(&tmp.0).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "only the hub's owner may enter");
         }
 
         let mut users = users;
@@ -767,8 +891,9 @@ mod tests {
         let mut users = Users::load(&tmp.0).unwrap();
         users.register("ana", PASSWORD, 2).unwrap();
         users.save().unwrap();
-        let file = std::fs::read_to_string(tmp.0.join(USERS_FILE)).unwrap();
-        assert!(!file.contains(PASSWORD), "the password is never kept");
+        let kept = String::from_utf8_lossy(&std::fs::read(tmp.0.join(store::DB_FILE)).unwrap())
+            .into_owned();
+        assert!(!kept.contains(PASSWORD), "the password is never kept");
         let mut users = Users::load(&tmp.0).unwrap();
         assert!(matches!(
             users.login("ana", PASSWORD, 1),
@@ -902,12 +1027,13 @@ mod tests {
     #[test]
     fn accounts_and_tokens_from_before_still_work() {
         let tmp = TempDir::new();
-        let mut users = Users::load(&tmp.0).unwrap();
+        let mut users = Users::load(&tmp.0.join("new")).unwrap();
         let token = users.add("ana", "member", &roles()).unwrap();
-        users.save().unwrap();
-        let path = tmp.0.join(USERS_FILE);
-        let mut old: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // A `users.json` of the oldest kind, from before the database.
+        let mut old = serde_json::json!({ "ana": users.get("ana").unwrap() });
+        let dir = tmp.0.join("old");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(USERS_FILE);
         let ana = old["ana"].as_object_mut().unwrap();
         for key in ["status", "registered", "password"] {
             ana.remove(key);
@@ -917,10 +1043,14 @@ mod tests {
             t.remove(key);
         }
         std::fs::write(&path, old.to_string()).unwrap();
-        let users = Users::load(&tmp.0).unwrap();
+        let users = Users::load(&dir).unwrap();
         let signed = users.authenticate(&token, &roles()).unwrap();
         assert_eq!(signed.user.status, Status::Active);
         assert_eq!(signed.kind, Kind::Personal);
         assert_eq!(signed.token_id.len(), 8);
+        // Taken into the database once, and kept aside.
+        assert!(!path.exists() && dir.join("users.json.imported").exists());
+        let again = Users::load(&dir).unwrap();
+        assert!(again.authenticate(&token, &roles()).is_some());
     }
 }

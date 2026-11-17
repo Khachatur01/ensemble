@@ -68,9 +68,9 @@ With a hub server for a team:
 ```text
   member's node                              ensemble hub serve
   ─────────────                              ──────────────────
-  RemoteMemory (a session's knowledge) ══╗   accounts, sessions, tokens (users.json)
+  RemoteMemory (a session's knowledge) ══╗   accounts, sessions, tokens (hub.db)
   NodeInbox (your tasks)               ══╬══ the organization vault and its distiller
-  Worker (runs and models it offers)   ══╝   the tracker relay (deliveries.json)
+  Worker (runs and models it offers)   ══╝   the tracker relay (hub.db)
   `node` adapter (a run elsewhere)     ══    the connected nodes, runs, /nodes/v1/
                                              REST /api/v1/
      ══ one WebSocket each, opened by the node, signed in with a bearer token
@@ -104,7 +104,7 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 | `ensemble-config` | the three files a person writes | `config.yaml`: the document as written (`raw.rs`), the environment and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), versions 1 and 2 to 3 (`migrate.rs`), adding and removing an agent as text, comments kept (`edit.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); `hub.yaml` (`hub.rs`); `node.yaml` (`node.rs`) |
 | `ensemble-backends` | talking to model servers | one chat request in the server's own format (`chat.rs`); which models a server serves (`models.rs`); the first usable model of a `try` list (`resolve.rs`); a stand-in server for tests (`testing.rs`) |
 | `ensemble-knowledge` | the hub's knowledge | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait a session uses (`lib.rs`) |
-| `ensemble-link` | the hub server and the link to it | accounts and hashed tokens (`users.rs`); the REST API (`api.rs`) over a small HTTP reader (`http.rs`); the frames of the link (`protocol.rs`); the hub's side, a task per connection (`server.rs`); connected nodes, runs and model calls, `/nodes/v1/` (`nodes.rs`); the node's side, `Connection` and `RemoteMemory` (`client.rs`); the token file (`tokens.rs`) |
+| `ensemble-link` | the hub server and the link to it | accounts and hashed tokens (`users.rs`), kept with the relay's deliveries in `hub.db`, a Turso database (`store.rs`); the REST API (`api.rs`) over a small HTTP reader (`http.rs`); the frames of the link (`protocol.rs`); the hub's side, a task per connection (`server.rs`); connected nodes, runs and model calls, `/nodes/v1/` (`nodes.rs`); the node's side, `Connection` and `RemoteMemory` (`client.rs`); the token file (`tokens.rs`) |
 | `ensemble-agents` | running one agent once | the adapters (`external/`): `claude_code.rs`, `opencode.rs`, `codex.rs`, `builtin.rs`, `direct.rs`, `node.rs`, the subprocess runner (`process.rs`) and gates (`gate.rs`); a git worktree per task (`worktree.rs`); the router: agents to adapters, models, records, `health` (`router.rs`) |
 | `ensemble-tasks` | work handed to the team | tasks as files (`tasks.rs`); the `Tracker` trait and `LocalMarkdown` (`tracker.rs`); the queue that runs tasks and background delegations within slots and budgets (`queue.rs`); the MCP tools (`delegation.rs`); review and merge of a worktree task (`review.rs`) |
 | `ensemble-inbox` | issues from a tracker into tasks | the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`); an issue made a task and what the task reports (`work.rs`); the embedded hub's inbox (`bridge.rs`); a hub server's (`relay.rs`); a member's computer's part in it (`node.rs`) |
@@ -141,7 +141,7 @@ or a config directory:
 | --- | --- |
 | `~/.local/state/ensemble/workdirs/<folder>-<hash>/` | a working folder's `tasks/`, `runs/`, `worktrees/`, `state.json` and `worker.lock` |
 | `~/.local/state/ensemble/orgs/teams-<hash>/` | the teams' `usage.json` (budgets) and `records.jsonl` (`ensemble stats`), by `<team>/<agent>`, shared by every folder |
-| `~/.local/state/ensemble/hubs/<hub>-<hash>/` | an embedded inbox's `inbox.json`; a hub server's `users.json` and `deliveries.json` |
+| `~/.local/state/ensemble/hubs/<hub>-<hash>/` | an embedded inbox's `inbox.json`; a hub server's `hub.db`, a Turso database of its accounts, tokens and deliveries, in a folder only its owner may enter |
 | `~/.local/state/ensemble/node/` | the node's lock, `folders.json` (the folder last used for each project), `runs/` for others, `inbox/node.json` |
 | `$XDG_RUNTIME_DIR/ensemble/<hash>.sock` | a node's socket, in a folder only its user may enter (`/tmp/ensemble-<user>/` without `XDG_RUNTIME_DIR`) |
 | `~/.config/ensemble/hubs.json` | hub tokens, one per URL, mode 0600 |
@@ -177,6 +177,10 @@ Ensemble is async, on tokio (one shared multi-thread runtime,
   tasks off the thread. It still holds up the other futures of its own task
   while it runs. `runtime::block_on` is for the CLI's entry points and sync
   interfaces that wait on async work.
+- **The hub's database** (`hub.db`) is opened for each read or change and
+  closed after, a change in one transaction, with a busy timeout: Turso
+  locks the file while it is open, and this lets `ensemble hub user` change
+  accounts while the server runs.
 - **Loops that are not async** (a vault's distiller, a tracker's inbox) run on
   threads of their own, polling every few seconds.
 - **Stopping**: SIGINT and SIGTERM set one flag. Every loop watches it, the
@@ -324,7 +328,7 @@ folder of markdown issues is the one implementation so far.
   `blocked`. What it did is kept in `inbox.json`.
 - **On a hub server** (`ServerInbox`, `relay.rs`): an issue becomes a
   **delivery** for the account whose tracker name is its assignee, kept in
-  `deliveries.json`. The server pushes it over the link, as a `task` event, to
+  the hub's database. The server pushes it over the link, as a `task` event, to
   every node of that account that subscribed. On the member's computer,
   `NodeInbox` makes it a task in the folder of the project's name that a
   session of the node last ran in, and answers `task_accept` (or
@@ -824,7 +828,11 @@ crate holds it today.
 8. Teams in a directory of the node: made, linked, pulled from git pinned
    to a trusted commit, or written by an agent and approved by the person;
    all run at once as `<team>/<agent>`; `node.yaml` version 4 without
-   `team`. (Done.) Next: the hub's accounts and deliveries in Turso.
+   `team`. (Done.)
+9. The hub server's accounts, tokens and deliveries in Turso, the Rust
+   rewrite of SQLite, pinned to one exact version: `hub.db` in the hub's
+   state directory, taken over from `users.json` and `deliveries.json` once.
+   (Done; decided 2026-11-17.)
 
 What remains is the "Not yet" of steps 4 and 5, and the modules marked not
 built above.

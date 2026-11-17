@@ -52,7 +52,7 @@ pub struct Server<'a> {
     /// Where it listens, how people join, how long a login lasts, and when
     /// failed logins lock a name.
     pub(crate) settings: ensemble_config::Server,
-    /// The hub's state directory, with `users.json`.
+    /// The hub's state directory, with its database.
     users: PathBuf,
     /// Held while the users file is read, changed and written, so two
     /// requests at once cannot lose a change.
