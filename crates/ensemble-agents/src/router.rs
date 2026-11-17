@@ -17,6 +17,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 
 /// What a delegation produced, with enough provenance to audit it.
 ///
@@ -112,7 +113,9 @@ impl RouteError {
 }
 
 pub struct Ensemble {
-    config: Config,
+    /// The helper team, which a node replaces when its teams change; each run
+    /// keeps the one it started with.
+    config: RwLock<Arc<Config>>,
     workdir: Option<PathBuf>,
     /// Where tasks, run logs and worktrees go; the per-user state directory
     /// of the working directory unless set.
@@ -129,7 +132,7 @@ pub struct Ensemble {
 impl Ensemble {
     pub fn new(config: Config, workdir: Option<PathBuf>) -> Self {
         Ensemble {
-            config,
+            config: RwLock::new(Arc::new(config)),
             workdir,
             state: None,
             usage: None,
@@ -141,11 +144,14 @@ impl Ensemble {
 
     /// The backends and models of `agent`'s `try` list, in order. A backend
     /// the config does not define is left out; validation refuses one anyway.
-    fn candidates<'a>(&'a self, agent: &'a AgentConfig) -> Vec<(&'a LlmBackend, &'a str)> {
+    fn candidates<'a>(
+        config: &'a Config,
+        agent: &'a AgentConfig,
+    ) -> Vec<(&'a LlmBackend, &'a str)> {
         agent
             .llm_backends()
             .into_iter()
-            .filter_map(|(b, m)| self.config.llm_backends.get(b).map(|b| (b, m)))
+            .filter_map(|(b, m)| config.llm_backends.get(b).map(|b| (b, m)))
             .collect()
     }
 
@@ -153,12 +159,13 @@ impl Ensemble {
     /// its first model.
     fn bind<'a>(
         &self,
+        config: &'a Config,
         agent: &'a AgentConfig,
     ) -> Result<(Cow<'a, AgentConfig>, Option<String>), RouteError> {
         let Some(fallback) = agent.fallback() else {
             return Ok((Cow::Borrowed(agent), None));
         };
-        let candidates = self.candidates(agent);
+        let candidates = Self::candidates(config, agent);
         match self.resolver.choose(&candidates) {
             Ok(0) => Ok((Cow::Owned(agent.bound_to(0)), None)),
             Ok(i) => Ok((
@@ -177,7 +184,8 @@ impl Ensemble {
     /// list has no usable model and whose `when_none` is `wait`: such a task
     /// waits. Asks the backends, at most once a minute each.
     pub fn backend_ready(&self, name: &str) -> Result<(), String> {
-        let Some(agent) = self.config.agent(name) else {
+        let config = self.config();
+        let Some(agent) = config.agent(name) else {
             return Ok(());
         };
         if agent
@@ -186,7 +194,7 @@ impl Ensemble {
         {
             return Ok(());
         }
-        match self.bind(agent) {
+        match self.bind(&config, agent) {
             Err(e @ RouteError::NoBackend { .. }) => Err(e.to_string()),
             _ => Ok(()),
         }
@@ -195,9 +203,10 @@ impl Ensemble {
     /// `Some` with a short note when `name`'s first model was found unusable
     /// the last time its backends were asked; asks none of them now.
     pub fn fallback_note(&self, name: &str) -> Option<&'static str> {
-        let agent = self.config.agent(name)?;
+        let config = self.config();
+        let agent = config.agent(name)?;
         agent.fallback().filter(|f| f.candidates.len() > 1)?;
-        match self.resolver.known(&self.candidates(agent))? {
+        match self.resolver.known(&Self::candidates(&config, agent))? {
             Ok(0) => None,
             Ok(_) => Some("on a fallback model"),
             Err(()) => Some("no model reachable"),
@@ -207,9 +216,10 @@ impl Ensemble {
     /// The index of the model a run of `name` would use now, asking its
     /// backends, or why there is none. For `ensemble show --probe`.
     pub fn probe(&self, name: &str) -> Result<usize, RouteError> {
-        let agent = self.resolve(name)?;
+        let config = self.config();
+        let agent = Self::resolve(&config, name)?;
         self.resolver
-            .choose(&self.candidates(agent))
+            .choose(&Self::candidates(&config, agent))
             .map_err(|refusals| RouteError::NoBackend {
                 agent: agent.name.clone(),
                 refusals,
@@ -238,10 +248,10 @@ impl Ensemble {
         match &self.usage {
             Some(dir) => Some(dir.clone()),
             None => self
-                .config
+                .config()
                 .source
                 .exists()
-                .then(|| ensemble_core::state::team_dir(&self.config.source).ok())
+                .then(|| ensemble_core::state::team_dir(&self.config().source).ok())
                 .flatten(),
         }
     }
@@ -262,33 +272,42 @@ impl Ensemble {
         }
     }
 
-    pub fn config(&self) -> &Config {
-        &self.config
-    }
-
-    pub fn agents(&self) -> Vec<&str> {
-        self.config.agent_names()
-    }
-
-    fn resolve(&self, name: &str) -> Result<&AgentConfig, RouteError> {
+    /// The helper team now. A run that started before a change keeps the one
+    /// it had.
+    pub fn config(&self) -> Arc<Config> {
         self.config
-            .agent(name)
-            .ok_or_else(|| RouteError::UnknownAgent {
-                asked: name.to_string(),
-                known: self
-                    .config
-                    .agent_names()
-                    .into_iter()
-                    .map(String::from)
-                    .collect(),
-            })
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Replace the helper team: what a node does when its teams change. Runs
+    /// going on finish with the one they had; what starts after uses this.
+    pub fn set_config(&self, config: Config) {
+        *self.config.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(config);
+    }
+
+    pub fn agents(&self) -> Vec<String> {
+        self.config()
+            .agent_names()
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    fn resolve<'a>(config: &'a Config, name: &str) -> Result<&'a AgentConfig, RouteError> {
+        config.agent(name).ok_or_else(|| RouteError::UnknownAgent {
+            asked: name.to_string(),
+            known: config.agent_names().into_iter().map(String::from).collect(),
+        })
     }
 
     /// Where an agent runs, and on which model. Used by `ensemble agents`;
     /// starts nothing.
-    pub fn route_of(&self, name: &str) -> Result<(String, &str), RouteError> {
-        let a = self.resolve(name)?;
-        Ok((a.runs_on(), a.model()))
+    pub fn route_of(&self, name: &str) -> Result<(String, String), RouteError> {
+        let config = self.config();
+        let a = Self::resolve(&config, name)?;
+        Ok((a.runs_on(), a.model().to_string()))
     }
 
     /// Send a task to an agent and return what it produced.
@@ -312,7 +331,8 @@ impl Ensemble {
         progress: &(dyn Fn(&str) + Sync),
         cancel: &AtomicBool,
     ) -> Result<Outcome, RouteError> {
-        let agent = self.resolve(name)?;
+        let config = self.config();
+        let agent = Self::resolve(&config, name)?;
         let workdir = self.workdir().map_err(|e| {
             RouteError::Agent(Error::Unsupported {
                 backend: agent.kind().to_string(),
@@ -334,9 +354,12 @@ impl Ensemble {
         progress: &(dyn Fn(&str) + Sync),
         cancel: &AtomicBool,
     ) -> Result<Outcome, RouteError> {
-        let (bound, note) = self.bind(self.resolve(name)?)?;
+        let config = self.config();
+        let (bound, note) = self.bind(&config, Self::resolve(&config, name)?)?;
         let mut outcome = self
-            .run_on(&bound, name, task, context, workdir, progress, cancel)
+            .run_on(
+                &config, &bound, name, task, context, workdir, progress, cancel,
+            )
             .await?;
         if let Some(note) = note {
             outcome.runs_on = format!("{} ({note})", outcome.runs_on);
@@ -345,8 +368,12 @@ impl Ensemble {
     }
 
     /// The LLM backend an agent bound to one model runs on.
-    fn backend_of(&self, name: &str, backend: &str) -> Result<&LlmBackend, RouteError> {
-        self.config.llm_backends.get(backend).ok_or_else(|| {
+    fn backend_of<'a>(
+        config: &'a Config,
+        name: &str,
+        backend: &str,
+    ) -> Result<&'a LlmBackend, RouteError> {
+        config.llm_backends.get(backend).ok_or_else(|| {
             RouteError::Agent(Error::Unsupported {
                 backend: backend.to_string(),
                 detail: format!("LLM backend for agent '{name}' is not defined"),
@@ -358,6 +385,7 @@ impl Ensemble {
     #[allow(clippy::too_many_arguments)]
     async fn run_on(
         &self,
+        config: &Config,
         agent: &AgentConfig,
         name: &str,
         task: &str,
@@ -382,14 +410,14 @@ impl Ensemble {
                 .await
             }
             Adapter::Direct(la) => {
-                let backend = self.backend_of(name, la.backend())?;
+                let backend = Self::backend_of(config, name, la.backend())?;
                 run(Box::pin(direct::run(
                     agent, la, backend, task, context, progress, cancel,
                 )))
                 .await
             }
             Adapter::Builtin(ba) => {
-                let backend = self.backend_of(name, ba.backend())?;
+                let backend = Self::backend_of(config, name, ba.backend())?;
                 run(Box::pin(builtin::run(
                     agent, ba, backend, task, context, workdir, progress, cancel,
                 )))
@@ -398,7 +426,7 @@ impl Ensemble {
             Adapter::OpenCode(oc) => {
                 let backend = oc
                     .llm_backend()
-                    .map(|b| self.backend_of(name, b))
+                    .map(|b| Self::backend_of(config, name, b))
                     .transpose()?;
                 run(Box::pin(opencode::run(
                     agent, oc, backend, task, context, workdir, progress, cancel,
@@ -509,10 +537,11 @@ impl Ensemble {
     /// Keyed by what is checked, not by agent: two agents on one endpoint are
     /// one thing to check and one thing to fix.
     pub fn health(&self) -> Vec<(String, Result<(), Error>)> {
+        let config = self.config();
         let mut commands: Vec<(&str, &str)> = Vec::new();
         // Each backend in use, with the models its agents name.
         let mut backends: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
-        for a in self.config.agents.values() {
+        for a in config.agents.values() {
             match &a.adapter {
                 Adapter::ClaudeCode(cc) => commands.push((CLAUDE_CODE_AGENT, &cc.command)),
                 Adapter::OpenCode(oc) => commands.push((OPENCODE_AGENT, &oc.command)),
@@ -545,7 +574,7 @@ impl Ensemble {
         for (name, mut wanted) in backends {
             wanted.sort_unstable();
             wanted.dedup();
-            let result = match self.config.llm_backends.get(name) {
+            let result = match config.llm_backends.get(name) {
                 Some(b) => ensemble_backends::models::models(b)
                     .and_then(|served| served_all(name, &wanted, &served)),
                 None => Err(Error::Unsupported {
@@ -555,7 +584,7 @@ impl Ensemble {
             };
             out.push((name.to_string(), result));
         }
-        for a in self.config.agents.values() {
+        for a in config.agents.values() {
             if let Adapter::Node(na) = &a.adapter {
                 out.push((
                     format!("{} ({})", a.runs_on(), na.agent),
@@ -739,15 +768,15 @@ agents:
         let e = ensemble("/nonexistent", None);
         assert_eq!(
             e.route_of("looker").unwrap(),
-            ("opencode".into(), "opencode/big-pickle")
+            ("opencode".into(), "opencode/big-pickle".into())
         );
         assert_eq!(
             e.route_of("doer").unwrap(),
-            ("opencode on local".into(), "qwen3.5-9b")
+            ("opencode on local".into(), "qwen3.5-9b".into())
         );
         assert_eq!(
             e.route_of("reviewer").unwrap(),
-            ("claude-code".into(), "sonnet")
+            ("claude-code".into(), "sonnet".into())
         );
     }
 

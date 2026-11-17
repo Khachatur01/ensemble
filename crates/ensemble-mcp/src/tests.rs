@@ -36,7 +36,7 @@ fn serve_with(
     }
     let queue = queue_for(e, Some(store), hub.knowledge);
     runtime::block_on(async {
-        let session = serve_session(e, hub.knowledge, &queue, input, output, true);
+        let session = serve_session(e, hub.knowledge, &queue, input, output, true, None);
         tokio::join!(session, queue.work(lock.is_ok())).0
     })
 }
@@ -1290,7 +1290,7 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
 fn an_agent_over_its_budget_is_refused_and_its_tasks_wait() {
     let (e, tmp) = team(&[("scout", "read", &emit(&step(vec![text("found it")])))]);
     // One run an hour; the record is kept across sessions.
-    let mut config = e.config().clone();
+    let mut config = (*e.config()).clone();
     config.agents.get_mut("scout").unwrap().budget = config::Budget::PerHour { delegations: 1 };
     let e = Ensemble::new(config, Some(project(&tmp))).with_state(project(&tmp).join(".ensemble"));
     session(&e, |ask| {
@@ -1567,7 +1567,7 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
 fn agents_on_one_shared_limit_do_not_overlap_whatever_each_would_allow() {
     // Each agent alone would allow two at once; the limit they share allows one.
     let (e, tmp) = team_limited(&[("coder", "read", BUSY), ("scout", "read", BUSY)], 2);
-    let mut config = e.config().clone();
+    let mut config = (*e.config()).clone();
     config.limits.insert(
         "server".into(),
         config::Limit {
@@ -1596,7 +1596,7 @@ fn agents_on_one_shared_limit_do_not_overlap_whatever_each_would_allow() {
 #[test]
 fn a_token_budget_counts_what_runs_reported_and_refuses_when_it_is_used() {
     let (e, tmp) = team(&[("scout", "read", &emit(&step(vec![text("found it")])))]);
-    let mut config = e.config().clone();
+    let mut config = (*e.config()).clone();
     config.agents.get_mut("scout").unwrap().budget = config::Budget::PerHourTokens { tokens: 100 };
     let e = Ensemble::new(config, Some(project(&tmp))).with_state(project(&tmp).join(".ensemble"));
     let dir = project(&tmp).join(".ensemble");
@@ -1632,7 +1632,7 @@ fn a_token_budget_counts_what_runs_reported_and_refuses_when_it_is_used() {
     );
     // Runs older than an hour are not counted.
     let (e2, tmp2) = team(&[("scout", "read", &emit(&step(vec![text("ok")])))]);
-    let mut config = e2.config().clone();
+    let mut config = (*e2.config()).clone();
     config.agents.get_mut("scout").unwrap().budget = config::Budget::PerHourTokens { tokens: 100 };
     let e2 =
         Ensemble::new(config, Some(project(&tmp2))).with_state(project(&tmp2).join(".ensemble"));

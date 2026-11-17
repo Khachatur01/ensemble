@@ -219,8 +219,13 @@ agents named `web/coder`; a task's `gate: { name: test }` means the gate
   file. The agent has no tool to change a team that exists.
 
 The commands that read teams (`check`, `agents`, `show`, `health`, `run`,
-`doctor`, `stats`, `submit`) load them the same way. A running node does not
-watch the directory: a change is used once it restarts.
+`doctor`, `stats`, `submit`) load them the same way. A running node reloads them when a `team` command
+changes the directory, or on `ensemble node reload` after a change by hand:
+it reads them again, and if one cannot be loaded it keeps the teams it had
+and says why. Otherwise each folder's `Ensemble` gets the new teams with
+`set_config` (a run going on keeps the snapshot it started with), the node's
+offers and its inbox get them too, and every open session sends its client
+`notifications/tools/list_changed`, so the client asks for the tools again.
 
 ## A delegation
 
@@ -832,7 +837,10 @@ crate holds it today.
     and `~/.config/ensemble/hub/` (hub.yaml, database.db, vault), and no
     hub embedded in a node: a hub is always `ensemble hub serve`, with no
     team, and a node names it as `hub:`; no `--hub`. (Done; decided
-    2026-11-17.) Next: reloading the node's teams without a restart.
+    2026-11-17.)
+11. Reloading the node's teams without a restart: after every `team`
+    command and on `ensemble node reload`, with the open sessions told their
+    tools changed. (Done.)
 
 What remains is the "Not yet" of steps 4 and 5, and the modules marked not
 built above.

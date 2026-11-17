@@ -581,6 +581,8 @@ struct McpSession {
     child: Child,
     reader: BufReader<std::process::ChildStdout>,
     next_id: i64,
+    /// The notifications that came before replies, in order.
+    notes: Vec<serde_json::Value>,
     /// Stopped after the session, when this is dropped.
     _node: Served,
 }
@@ -606,6 +608,7 @@ impl McpSession {
             child,
             reader,
             next_id: 0,
+            notes: Vec::new(),
             _node: node,
         }
     }
@@ -628,6 +631,7 @@ impl McpSession {
             let v: serde_json::Value = serde_json::from_str(line.trim())
                 .unwrap_or_else(|e| panic!("reply was not JSON ({e}): {line}"));
             if v.get("id").is_none() && v.get("method").is_some() {
+                self.notes.push(v);
                 continue;
             }
             assert_eq!(v["id"], id, "replies must match requests: {v}");
@@ -3501,5 +3505,64 @@ fn an_agent_writes_a_team_that_runs_only_once_the_person_approves_it() {
     assert!(removed.status.success(), "{}", stderr_of(&removed));
     assert!(elsewhere.join("config.yaml").is_file(), "the folder stays");
     assert!(!stdout_of(&ensemble(&s, &["teams"])).contains("pcb"));
+    let _ = std::fs::remove_dir_all(&elsewhere);
+}
+
+#[test]
+fn a_running_node_reloads_its_teams_and_tells_its_sessions_the_tools_changed() {
+    let s = Scratch::new("reload");
+    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    let mut session = McpSession::start(&s);
+    session.request("initialize", serde_json::json!({}));
+    let tools = session
+        .request("tools/list", serde_json::json!({}))
+        .to_string();
+    assert!(!tools.contains("pcb/coder"), "{tools}");
+
+    // A team linked while the node runs is used at once.
+    let elsewhere = s.0.with_extension("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("config.yaml"), config_yaml("true", NOWHERE)).unwrap();
+    let added = command(&s)
+        .args(["team", "add", "pcb"])
+        .arg(&elsewhere)
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{}", stderr_of(&added));
+    assert!(
+        stdout_of(&added).contains("The node uses it now"),
+        "{}",
+        stdout_of(&added)
+    );
+    let tools = session
+        .request("tools/list", serde_json::json!({}))
+        .to_string();
+    assert!(
+        tools.contains("pcb/coder") && tools.contains("team/coder"),
+        "{tools}"
+    );
+    assert!(
+        session
+            .notes
+            .iter()
+            .any(|n| n["method"] == "notifications/tools/list_changed"),
+        "{:?}",
+        session.notes
+    );
+
+    // A team that cannot be loaded leaves the node's teams as they were.
+    std::fs::write(elsewhere.join("config.yaml"), "version: 3\n").unwrap();
+    let out = ensemble(&s, &["node", "reload"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("kept its teams as they were")
+            && stderr_of(&out).contains("team 'pcb'"),
+        "{}",
+        stderr_of(&out)
+    );
+    let tools = session
+        .request("tools/list", serde_json::json!({}))
+        .to_string();
+    assert!(tools.contains("pcb/coder"), "{tools}");
     let _ = std::fs::remove_dir_all(&elsewhere);
 }

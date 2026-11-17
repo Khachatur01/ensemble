@@ -24,7 +24,7 @@ use ensemble::tasks::Store;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -46,8 +46,14 @@ pub struct Daemon<'a> {
     node: Node,
     /// The hub server it names, and its token.
     hub: Option<(String, String)>,
-    /// Its teams, as one helper team: `<team>/<agent>`.
-    team: Config,
+    /// Its teams, as one helper team: `<team>/<agent>`. Replaced when they are
+    /// reloaded.
+    team: RwLock<Config>,
+    /// Where the keys its teams name are read from, as `node serve` was given.
+    env_file: Option<PathBuf>,
+    /// Counts reloads, so that open sessions tell their clients the tools
+    /// changed.
+    tools_changed: tokio::sync::watch::Sender<u64>,
     folders: Folders,
     open: Mutex<HashMap<PathBuf, Arc<Folder>>>,
     /// The folders' workers, which stopping waits for.
@@ -62,13 +68,16 @@ impl<'a> Daemon<'a> {
         node: Node,
         hub: Option<(String, String)>,
         team: Config,
+        env_file: Option<PathBuf>,
         dir: &Path,
         say: &'a (dyn Fn(&str) + Sync),
     ) -> Self {
         Daemon {
             node,
             hub,
-            team,
+            team: RwLock::new(team),
+            env_file,
+            tools_changed: tokio::sync::watch::Sender::new(0),
             folders: Folders::new(dir),
             open: Mutex::new(HashMap::new()),
             workers: Mutex::new(Vec::new()),
@@ -81,8 +90,13 @@ impl<'a> Daemon<'a> {
     }
 
     /// Serve sessions on `socket` until [`STOP`] is set, after starting the
-    /// workers of the folders served before.
-    pub async fn serve(&self, socket: &Path) -> Result<(), String> {
+    /// workers of the folders served before. A reload of the teams, asked on
+    /// the socket, is also given to `reloaded`, for what else holds them.
+    pub async fn serve(
+        &self,
+        socket: &Path,
+        reloaded: &(dyn Fn(&Config) -> Result<(), String> + Sync),
+    ) -> Result<(), String> {
         for folder in self.folders.all().into_values().filter(|f| f.is_dir()) {
             if let Err(e) = self.folder(&folder) {
                 (self.say)(&format!("{}: {e}", folder.display()));
@@ -99,8 +113,10 @@ impl<'a> Daemon<'a> {
                 () = tokio::time::sleep(Duration::from_millis(200)) => continue,
             };
             let Ok((stream, _)) = accepted else { continue };
-            match self.hello(stream).await {
-                Ok((folder, stream)) => {
+            match self.hello(stream, reloaded).await {
+                Ok(None) => {}
+                Ok(Some((folder, stream))) => {
+                    let changed = self.tools_changed.subscribe();
                     // The folder outlives the session.
                     tokio::spawn(async move {
                         let (input, output) = stream.into_split();
@@ -111,6 +127,7 @@ impl<'a> Daemon<'a> {
                             tokio::io::BufReader::new(input),
                             output,
                             false,
+                            Some(changed),
                         )
                         .await;
                     });
@@ -134,9 +151,25 @@ impl<'a> Daemon<'a> {
     }
 
     /// Read a session's hello, `{"dir": "/abs/folder"}`, and answer it: the
-    /// folder's worker, or why there is none.
-    async fn hello(&self, mut stream: UnixStream) -> Result<(Arc<Folder>, UnixStream), String> {
+    /// folder's worker, or why there is none. `{"reload": true}` reloads the
+    /// teams instead, and answers what it found; no session follows.
+    async fn hello(
+        &self,
+        mut stream: UnixStream,
+        reloaded: &(dyn Fn(&Config) -> Result<(), String> + Sync),
+    ) -> Result<Option<(Arc<Folder>, UnixStream)>, String> {
         let line = read_line(&mut stream).await?;
+        if serde_json::from_str::<serde_json::Value>(&line).is_ok_and(|h| h["reload"] == true) {
+            let reply = match self.reload(reloaded) {
+                Ok(said) => serde_json::json!({"ok": true, "said": said}),
+                Err(e) => serde_json::json!({"error": e}),
+            };
+            stream
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
+            return Ok(None);
+        }
         let answer = serde_json::from_str::<serde_json::Value>(&line)
             .map_err(|e| format!("the hello is not JSON: {e}"))
             .and_then(|hello| {
@@ -154,7 +187,31 @@ impl<'a> Daemon<'a> {
             .write_all(format!("{reply}\n").as_bytes())
             .await
             .map_err(|e| e.to_string())?;
-        Ok((answer?, stream))
+        Ok(Some((answer?, stream)))
+    }
+
+    /// Read the teams again and use them: in every folder from its next run
+    /// on, in what `reloaded` holds, and in the tools sessions are offered. A
+    /// team that cannot be loaded leaves everything as it was, and says why.
+    fn reload(
+        &self,
+        reloaded: &(dyn Fn(&Config) -> Result<(), String> + Sync),
+    ) -> Result<String, String> {
+        let (team, waiting) =
+            ensemble::teams::load_all(self.env_file.as_deref(), &ensemble::config::SystemEnv)?;
+        reloaded(&team)?;
+        for folder in self.open.lock().unwrap().values() {
+            folder.ensemble.set_config(team.clone());
+        }
+        let said = format!(
+            "teams reloaded: {} agent(s){}",
+            team.agents.len(),
+            waiting.iter().map(|w| format!("; {w}")).collect::<String>()
+        );
+        *self.team.write().unwrap_or_else(|e| e.into_inner()) = team;
+        self.tools_changed.send_modify(|n| *n += 1);
+        (self.say)(&said);
+        Ok(said)
     }
 
     /// The worker of `dir`, started the first time it is asked for.
@@ -165,7 +222,7 @@ impl<'a> Daemon<'a> {
         if let Some(open) = self.open.lock().unwrap().get(&dir) {
             return Ok(open.clone());
         }
-        let config = self.team.clone();
+        let config = self.team.read().unwrap_or_else(|e| e.into_inner()).clone();
         // Each folder keeps its own state: `--state` would put every folder's
         // tasks in one place.
         let ensemble: &'static Ensemble =
@@ -310,5 +367,25 @@ pub async fn touch(socket: &Path, dir: &Path) -> Result<(), String> {
     match reply["error"].as_str() {
         Some(e) => Err(format!("the node refused this folder: {e}")),
         None => Ok(()),
+    }
+}
+
+/// Ask the node on `socket` to reload its teams, and what it said.
+pub async fn reload(socket: &Path) -> Result<String, String> {
+    let mut stream = UnixStream::connect(socket)
+        .await
+        .map_err(|e| format!("no node is running ({e})"))?;
+    stream
+        .write_all(b"{\"reload\": true}\n")
+        .await
+        .map_err(|e| e.to_string())?;
+    let reply: serde_json::Value = serde_json::from_str(&read_line(&mut stream).await?)
+        .map_err(|e| format!("the node answered something else: {e}"))?;
+    match reply["error"].as_str() {
+        Some(e) => Err(format!("the node kept its teams as they were: {e}")),
+        None => Ok(reply["said"]
+            .as_str()
+            .unwrap_or("teams reloaded")
+            .to_string()),
     }
 }

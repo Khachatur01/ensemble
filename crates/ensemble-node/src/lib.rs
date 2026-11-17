@@ -46,6 +46,29 @@ const MODEL_PATHS: [&str; 2] = ["/chat/completions", "/completions"];
 /// What a run or a model call hands the connection to send.
 type Outbox = UnboundedSender<(&'static str, Value)>;
 
+/// Every agent `node` offers is in `config`, and a shared node offers only
+/// agents on `llm_backends`.
+fn check_offers(node: &Node, config: &Config) -> Result<(), String> {
+    let Some(runs) = &node.offers.runs else {
+        return Ok(());
+    };
+    for name in &runs.agents {
+        let Some(agent) = config.agent(name) else {
+            return Err(format!(
+                "offers.runs: no team of this node has the agent '{name}'. Its agents: {}.",
+                config.agent_names().join(", ")
+            ));
+        };
+        if node.access == Access::Shared && !on_llm_backends(&agent.adapter) {
+            return Err(format!(
+                "offers.runs: '{name}' runs on {}, which uses an agent CLI's own login or provider, and a shared node never lends that; offer an agent of type opencode on llm_backends, builtin, or direct",
+                agent.runs_on()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A node, ready to connect.
 pub struct Worker {
     url: String,
@@ -72,21 +95,8 @@ impl Worker {
         scratch: PathBuf,
     ) -> Result<Worker, String> {
         let team = match (&node.offers.runs, team) {
-            (Some(runs), Some(config)) => {
-                for name in &runs.agents {
-                    let Some(agent) = config.agent(name) else {
-                        return Err(format!(
-                            "offers.runs: no team of this node has the agent '{name}'. Its agents: {}.",
-                            config.agent_names().join(", ")
-                        ));
-                    };
-                    if node.access == Access::Shared && !on_llm_backends(&agent.adapter) {
-                        return Err(format!(
-                            "offers.runs: '{name}' runs on {}, which uses an agent CLI's own login or provider, and a shared node never lends that; offer an agent of type opencode on llm_backends, builtin, or direct",
-                            agent.runs_on()
-                        ));
-                    }
-                }
+            (Some(_), Some(config)) => {
+                check_offers(&node, &config)?;
                 Some(Ensemble::new(config, None).with_state(scratch.join("state")))
             }
             (Some(_), None) => {
@@ -105,6 +115,18 @@ impl Worker {
         })
     }
 
+    /// Use `config`, the node's teams read again, for the runs that start from
+    /// now on; refused, and nothing changes, when it no longer has an agent
+    /// the node offers. What the hub was told the node offers is told again on
+    /// its next connection.
+    pub fn reload(&self, config: &Config) -> Result<(), String> {
+        if let Some(team) = &self.team {
+            check_offers(&self.node, config)?;
+            team.set_config(config.clone());
+        }
+        Ok(())
+    }
+
     /// What this node says it is when it connects.
     fn hello(&self) -> Value {
         let agents: Vec<Value> = match (&self.node.offers.runs, &self.team) {
@@ -112,8 +134,8 @@ impl Worker {
                 .agents
                 .iter()
                 .map(|name| {
-                    let about = team
-                        .config()
+                    let config = team.config();
+                    let about = config
                         .agent(name)
                         .and_then(|a| a.prompt.as_deref())
                         .and_then(|p| p.lines().map(str::trim).find(|l| !l.is_empty()))

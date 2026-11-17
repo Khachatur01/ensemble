@@ -905,7 +905,11 @@ command, gate command, tool list and permission mode it would run on your
 machine, with a warning for each risk, and lets it run only once you say yes.
 Your agent cannot change a team that exists. `ensemble team remove <name>`
 takes a team out; a linked folder and a pulled clone are left where they are.
-A running node reads its teams when it starts, so restart it after a change.
+A running node uses a change at once: each `team` command tells it to reload
+its teams, and so does `ensemble node reload` after you edit a team by hand.
+Open sessions are told their tools changed (`notifications/tools/list_changed`),
+so your agent sees the new agents without restarting. A team that cannot be
+loaded leaves the node's teams as they were, and the command says why.
 
 **Pulled teams** work like images pinned to a digest. `team pull` resolves
 `@v1.2` (a tag or a branch; without one, the default branch) to the commit it
@@ -1467,6 +1471,7 @@ $ ensemble team update <name> [--ref R]      # move a pulled team to a new commi
 $ ensemble team approve <name>               # read a team your agent wrote, and let it run
 $ ensemble team remove <name>                # take a team out of the node
 $ ensemble node serve               # run this computer's node until stopped
+$ ensemble node reload              # the running node reads its teams again (a `team` command does it by itself)
 $ ensemble nodes                    # the nodes of your node's hub you may use now
 $ ensemble hook                     # what a Claude Code or Codex session hook runs
 $ ensemble hub user tracker <name> [<tracker name>]   # who the account is in the tracker
@@ -1592,8 +1597,8 @@ scripts stand in for the CLIs.
   helper team. A token budget counts what runs report, which not every CLI does.
 - **Tasks run only while your node runs.** One node per computer, and one
   worker runs a folder's tasks at a time.
-- **A node reads its teams when it starts.** A team made, pulled, approved or
-  removed while it runs is used once it restarts.
+- **A task of an agent whose team was removed** fails when it starts: the
+  agent is no longer there.
 - **A session's working folder is fixed:** the folder `ensemble mcp` was
   started in. A call can work in a folder inside it with `repo`, but not
   outside.

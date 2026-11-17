@@ -117,20 +117,22 @@ pub async fn handle_reporting(
             ) {
                 memory.set_client(client);
             }
-            let mut instructions = protocol::instructions(ensemble.config());
+            let mut instructions = protocol::instructions(&ensemble.config());
             if let Some(memory) = memory {
                 instructions.push_str(&memory.instructions().await);
             }
             reply(json!({
                 "protocolVersion": version,
-                "capabilities": { "tools": { "listChanged": false }, "logging": {} },
+                "capabilities": { "tools": { "listChanged": true }, "logging": {} },
                 "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
                 "instructions": instructions
             }))
         }
 
         "tools/list" => {
-            let tools = tool_definitions(&ensemble.agents(), memory).await;
+            let agents = ensemble.agents();
+            let names: Vec<&str> = agents.iter().map(String::as_str).collect();
+            let tools = tool_definitions(&names, memory).await;
             reply(json!({ "tools": tools }))
         }
 
@@ -215,6 +217,10 @@ pub async fn handle_reporting(
 /// several agents at once and still get `ping` and `tools/list` answered while
 /// they work. `notifications/cancelled` stops the named call at its next step,
 /// and it gets no reply: the client has stopped waiting for one.
+///
+/// Each time `tools_changed` changes (a node reloaded its teams), the client is
+/// told with `notifications/tools/list_changed`, and asks for the tools again.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_session(
     ensemble: &Ensemble,
     memory: Option<&dyn KnowledgeAccess>,
@@ -222,6 +228,7 @@ pub async fn serve_session(
     input: impl AsyncBufRead + Unpin + Send,
     mut output: impl AsyncWrite + Unpin + Send,
     close_at_end: bool,
+    mut tools_changed: Option<tokio::sync::watch::Receiver<u64>>,
 ) -> std::io::Result<()> {
     // Everything for the client goes through one writer, so messages never
     // interleave, and a notification can be sent from code that is not async.
@@ -245,9 +252,27 @@ pub async fn serve_session(
         let mut lines = input.lines();
         let mut calls = FuturesUnordered::new();
         let result = loop {
+            let changed = async {
+                match tools_changed.as_mut() {
+                    Some(rx) => rx.changed().await.is_ok(),
+                    None => std::future::pending().await,
+                }
+            };
             let line = tokio::select! {
-                line = lines.next_line() => line,
+                line = lines.next_line() => Some(line),
                 Some(()) = calls.next(), if !calls.is_empty() => continue,
+                open = changed => {
+                    if open {
+                        send(json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}));
+                        continue;
+                    }
+                    None
+                }
+            };
+            // No more changes will come: the node is stopping.
+            let Some(line) = line else {
+                tools_changed = None;
+                continue;
             };
             let line = match line {
                 Ok(Some(line)) => line,
@@ -376,8 +401,8 @@ pub fn queue_for<'s>(
 /// Say once, on stderr, that agents with `recall` get no notes in a session
 /// without a hub that keeps knowledge.
 pub fn note_recall_without_knowledge(ensemble: &Ensemble, memory: Option<&dyn KnowledgeAccess>) {
-    let wanting: Vec<&str> = ensemble
-        .config()
+    let config = ensemble.config();
+    let wanting: Vec<&str> = config
         .agents
         .values()
         .filter(|a| a.recall.is_some())

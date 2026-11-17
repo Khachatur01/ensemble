@@ -51,8 +51,9 @@ pub struct NodeInbox {
     token: String,
     /// The folders the node worked in, by project.
     folders: Folders,
-    /// The helper team's agents, which `<label>:<agent>` may name.
-    agents: Vec<String>,
+    /// The node's agents, which `<label>:<team>/<agent>` may name; replaced
+    /// when the node reloads its teams.
+    agents: std::sync::RwLock<Vec<String>>,
     /// Where `node.json` and the lock live.
     dir: PathBuf,
     state_for: Box<StateFor>,
@@ -70,10 +71,15 @@ impl NodeInbox {
             url: url.to_string(),
             token: token.to_string(),
             folders,
-            agents,
+            agents: std::sync::RwLock::new(agents),
             dir,
             state_for: Box::new(ensemble_core::state::dir_for),
         }
+    }
+
+    /// The agents a label may name from now on: the node reloaded its teams.
+    pub fn set_agents(&self, agents: Vec<String>) {
+        *self.agents.write().unwrap_or_else(|e| e.into_inner()) = agents;
     }
 
     /// Keep each folder's tasks where `state_for` says.
@@ -225,11 +231,16 @@ impl NodeInbox {
                     body: text("body"),
                 };
                 let store = self.store(&folder).map_err(Failure::Hub)?;
+                let agents = self
+                    .agents
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 let (task, _) = work::make_task(
                     &store,
                     &issue,
                     &text("label"),
-                    &self.agents,
+                    &agents,
                     &issue.assignee,
                     "on this computer",
                 )

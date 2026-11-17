@@ -313,7 +313,7 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
                       name and its whole config.yaml (version 3, every setting written; \
                       `teams` with `sample` shows the form). It is checked, then kept \
                       waiting: it runs nothing until the person reads and approves it with \
-                      `ensemble team approve <name>` in a terminal, and the node restarts. \
+                      `ensemble team approve <name>` in a terminal; the node then uses it at once. \
                       Say so to the person. It cannot change a team that exists."
             .into(),
         parameters: json!({
@@ -585,8 +585,8 @@ pub async fn call(
                         ));
                     }
                     Ok(g) if ensemble.config().gate_for(role, &g.name).is_none() => {
-                        let known: Vec<&str> =
-                            ensemble.config().gates.keys().map(String::as_str).collect();
+                        let config = ensemble.config();
+                        let known: Vec<&str> = config.gates.keys().map(String::as_str).collect();
                         return ToolResult::err(format!(
                             "{SUBMIT}: no gate '{}' is configured under `gates`. Gates: {}.",
                             g.name,
@@ -745,7 +745,7 @@ pub async fn call(
                     .collect();
                 if agents.is_empty() && !team.pending {
                     lines.push(
-                        "  (not running: added since the node started, or it has no agents)".into(),
+                        "  (not running: changed by hand since the node last read its teams, or it has no agents; `ensemble node reload`)".into(),
                     );
                 }
                 for agent in agents {
@@ -784,7 +784,7 @@ pub async fn call(
             }) {
                 Ok(path) => ToolResult::ok(format!(
                     "Wrote the team '{name}' in {}. It runs nothing until the person approves it: \
-                     tell them to read it and run `ensemble team approve {name}`, then restart the node.",
+                     tell them to read it and run `ensemble team approve {name}`; the node uses it at once.",
                     path.display()
                 )),
                 Err(e) => ToolResult::err(format!("{TEAM_CREATE}: {e}")),

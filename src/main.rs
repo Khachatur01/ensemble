@@ -83,6 +83,10 @@ COMMANDS:
                             (private: you; shared: also those whose role has
                             `compute`), the hub it connects to, and what it
                             offers through the hub: agents of its teams, models.
+    node reload             Have the running node read its teams again, after
+                            you changed one by hand; a `team` command does it
+                            by itself. A team that cannot be loaded leaves the
+                            node as it was.
     node serve              Run that node until stopped (Ctrl-C or SIGTERM):
                             `ensemble mcp` sessions from any folder reach its
                             teams, and each folder's tasks go on between them.
@@ -753,7 +757,15 @@ fn cmd_node(args: &Args) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         Some("serve") => cmd_node_serve(args),
-        _ => Err("node: needs init or serve. Try --help.".into()),
+        Some("reload") => {
+            let said = ensemble::runtime::block_on(daemon::reload(&state::node_socket(
+                &state::node_dir()?,
+            )))
+            .map_err(|e| format!("node reload: {e}"))?;
+            println!("{said}");
+            Ok(ExitCode::SUCCESS)
+        }
+        _ => Err("node: needs init, serve or reload. Try --help.".into()),
     }
 }
 
@@ -798,7 +810,14 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
         Some((url, token)) => (Some(url.clone()), Some(token.clone())),
         None => (None, None),
     };
-    let daemon = daemon::Daemon::new(node.clone(), hub.clone(), team.clone(), &dir, &say);
+    let daemon = daemon::Daemon::new(
+        node.clone(),
+        hub.clone(),
+        team.clone(),
+        args.env_file.clone(),
+        &dir,
+        &say,
+    );
     let worker = match (&url, &token) {
         (Some(url), Some(token)) if node.offers.runs.is_some() || node.offers.models.is_some() => {
             Some(
@@ -824,6 +843,16 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
         )),
         _ => None,
     };
+    // What else holds the teams, given them again when they are reloaded.
+    let reloaded = |config: &Config| -> Result<(), String> {
+        if let Some(worker) = &worker {
+            worker.reload(config)?;
+        }
+        if let Some(inbox) = &inbox {
+            inbox.set_agents(config.agent_names().into_iter().map(String::from).collect());
+        }
+        Ok(())
+    };
     let socket = state::node_socket(&dir);
     let refused = std::sync::Mutex::new(None);
     let served = {
@@ -842,7 +871,7 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
             }
         };
         let (served, (), ()) = ensemble::runtime::shared()
-            .block_on(async { tokio::join!(daemon.serve(&socket), link, tasks) });
+            .block_on(async { tokio::join!(daemon.serve(&socket, &reloaded), link, tasks) });
         STOP.store(true, std::sync::atomic::Ordering::Relaxed);
         served
     };
@@ -1415,7 +1444,7 @@ fn cmd_check(config: Config, dir: &Path) -> Result<ExitCode, String> {
 fn cmd_agents(config: Config, dir: PathBuf, args: &Args) -> Result<ExitCode, String> {
     let ensemble = ensemble_for(config, dir, args);
     for role in ensemble.agents() {
-        let (runs_on, model) = ensemble.route_of(role).map_err(|e| e.to_string())?;
+        let (runs_on, model) = ensemble.route_of(&role).map_err(|e| e.to_string())?;
         println!("{role}\t{runs_on}\t{model}");
     }
     Ok(ExitCode::SUCCESS)
@@ -1976,8 +2005,19 @@ fn approve(url: &str, sha: &str, args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-/// What to say after a team is added, changed or removed.
-const RESTART_NOTE: &str = "A running node reads its teams when it starts: restart it (`ensemble node serve`) to use this.";
+/// After a team is added, changed or removed: have the running node use it
+/// now, and say what happened.
+fn reload_node() {
+    let reloaded = state::node_dir()
+        .and_then(|d| ensemble::runtime::block_on(daemon::reload(&state::node_socket(&d))));
+    match reloaded {
+        Ok(said) => println!("The node uses it now: {said}."),
+        Err(e) if e.starts_with("no node is running") => {
+            println!("No node is running; it reads its teams when it starts.")
+        }
+        Err(e) => println!("{e}"),
+    }
+}
 
 /// `ensemble teams`: the node's teams, where each comes from, and its agents.
 fn cmd_teams(args: &Args) -> Result<ExitCode, String> {
@@ -2051,7 +2091,7 @@ fn cmd_team(args: &Args) -> Result<ExitCode, String> {
                 "wrote {}: the team '{name}', a sample with every setting. Edit its agents, then check it with `ensemble check`. API keys go in the environment, or in a file you pass with --env-file; never in this directory.",
                 config::config_path(&dir).display()
             );
-            println!("{RESTART_NOTE}");
+            reload_node();
         }
         "add" => {
             let name = name()?;
@@ -2061,7 +2101,7 @@ fn cmd_team(args: &Args) -> Result<ExitCode, String> {
             let target = absolute(Path::new(target))?;
             teams::link(name, &target).map_err(|e| format!("team add: {e}"))?;
             println!("linked {} as the team '{name}'.", target.display());
-            println!("{RESTART_NOTE}");
+            reload_node();
         }
         "pull" => {
             let spec = words
@@ -2091,7 +2131,7 @@ fn cmd_team(args: &Args) -> Result<ExitCode, String> {
                 "pulled {} as the team '{name}'.",
                 remote::pinned(&url, &sha)
             );
-            println!("{RESTART_NOTE}");
+            reload_node();
         }
         "update" => {
             let name = name()?;
@@ -2118,7 +2158,7 @@ fn cmd_team(args: &Args) -> Result<ExitCode, String> {
             approve(url, &new, args)?;
             teams::pin(name, url, &new, false)?;
             println!("'{name}' is at {} now.", remote::pinned(url, &new));
-            println!("{RESTART_NOTE}");
+            reload_node();
         }
         "approve" => {
             let name = name()?;
@@ -2148,7 +2188,7 @@ fn cmd_team(args: &Args) -> Result<ExitCode, String> {
             }
             teams::approve(name)?;
             println!("approved '{name}'.");
-            println!("{RESTART_NOTE}");
+            reload_node();
         }
         "remove" => {
             let name = name()?;
@@ -2157,7 +2197,7 @@ fn cmd_team(args: &Args) -> Result<ExitCode, String> {
             }
             teams::remove(name)?;
             println!("removed '{name}'.");
-            println!("{RESTART_NOTE}");
+            reload_node();
         }
         other => {
             return Err(format!(
