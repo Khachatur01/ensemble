@@ -33,7 +33,7 @@ pub fn is_sha(text: &str) -> bool {
     text.len() == 40 && text.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Read what `--org` was given: a path, or a git URL with an optional `@ref`,
+/// Read what `team pull` was given: a path, or a git URL with an optional `@ref`,
 /// or a pinned one, `#sha`.
 pub fn parse_source(text: &str) -> Result<Source, String> {
     let text = text.trim();
@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn describing_a_team_lists_what_runs_and_warns_about_the_risky() {
-        let doc = "version: 3\nllm_backends: {}\nlimits: {}\ntracker: { type: local_markdown }\ngates:\n  test: { command: \"rm -rf build && make\", timeout_seconds: 5 }\nagents:\n  doer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter: { type: claude-code, model: sonnet, tools: [Read, \"Bash(*)\"], permission_mode: bypassPermissions, max_turns: 3, command: claude }\n";
+        let doc = "version: 1\nllm_backends: {}\nlimits: {}\ngates:\n  test: { command: \"rm -rf build && make\", timeout_seconds: 5 }\nagents:\n  doer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter: { type: claude-code, model: sonnet, tools: [Read, \"Bash(*)\"], permission_mode: bypassPermissions, max_turns: 3, command: claude }\n";
         let config =
             crate::config::parse(doc, Path::new("c.yaml"), &std::collections::BTreeMap::new())
                 .unwrap();

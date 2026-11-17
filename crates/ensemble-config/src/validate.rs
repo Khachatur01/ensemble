@@ -52,8 +52,7 @@ pub fn parse(text: &str, path: &Path, env: &dyn Env) -> Result<Config, ConfigErr
 }
 
 /// What serde said, which already says where in the document, with a missing
-/// key put as the instruction it is and the removed `ensemble` type pointed to
-/// its replacement.
+/// key put as the instruction it is.
 /// A budget as written, checked at `at`.
 pub(super) fn resolve_budget(at: &str, raw: &RawBudget, problems: &mut Vec<String>) -> Budget {
     match raw {
@@ -81,16 +80,6 @@ pub(super) fn explain(e: &serde_norway::Error) -> String {
         && let Some((key, after)) = rest.split_once('`')
     {
         detail = format!("{before}`{key}` is required{after}");
-    }
-    if detail.contains(&format!("unknown variant `{RENAMED_LLM_AGENT}`")) {
-        detail.push_str(&format!(
-            ". Type '{RENAMED_LLM_AGENT}' is called '{DIRECT_AGENT}' since version 3; `ensemble migrate` renames it."
-        ));
-    }
-    if detail.contains(&format!("unknown variant `{REMOVED_ENSEMBLE_AGENT}`")) {
-        detail.push_str(&format!(
-            ". Type '{REMOVED_ENSEMBLE_AGENT}' was removed; Its successor is type '{BUILTIN_AGENT}': an agent loop on an LLM backend, with tools listed in `tools`."
-        ));
     }
     detail
 }
@@ -136,10 +125,6 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
             },
         );
     }
-
-    let tracker = match &raw.tracker {
-        RawTracker::LocalMarkdown(_) => Tracker::LocalMarkdown,
-    };
 
     // --- gates ---
     let mut gates = BTreeMap::new();
@@ -273,7 +258,6 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
             version: raw.version,
             llm_backends: backends,
             limits,
-            tracker,
             gates,
             agents,
             source: path.to_path_buf(),

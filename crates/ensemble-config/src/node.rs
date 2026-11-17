@@ -15,7 +15,7 @@ use super::*;
 use serde::Deserialize;
 
 pub const NODE_FILENAME: &str = "node.yaml";
-pub const NODE_SUPPORTED_VERSION: u32 = 4;
+pub const NODE_SUPPORTED_VERSION: u32 = 1;
 
 /// The JSON Schema for `node.yaml`.
 pub const NODE_SCHEMA: &str = include_str!("../../../node.schema.json");
@@ -140,33 +140,6 @@ pub fn load_node(path: &Path) -> Result<Option<Node>, ConfigError> {
 }
 
 pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
-    // Say what changed rather than which key is missing.
-    let old = |problem: &str| {
-        Err(ConfigError::Invalid {
-            path: path.to_path_buf(),
-            problems: vec![problem.to_string()],
-        })
-    };
-    if let Ok(v) = serde_norway::from_str::<serde_norway::Value>(text) {
-        match v.get("version").and_then(serde_norway::Value::as_u64) {
-            Some(1) => {
-                return old(&format!(
-                    "version: 1 is no longer read. Make it `version: {NODE_SUPPORTED_VERSION}`, remove `projects`, and add `name:` (this node's name), `access: private` and `offers: {{}}`; `ensemble node init --stdout` prints every setting"
-                ));
-            }
-            Some(2) => {
-                return old(&format!(
-                    "version: 2 is no longer read. Make it `version: {NODE_SUPPORTED_VERSION}`, remove `projects` (a task now goes to the folder of its project's name where a session last ran), and remove `offers.runs.team`: the node runs every team in its teams directory, and offers agents as `<team>/<agent>`"
-                ));
-            }
-            Some(3) => {
-                return old(&format!(
-                    "version: 3 is no longer read. Make it `version: {NODE_SUPPORTED_VERSION}` and remove `team`: the node runs every team in its teams directory, so link yours there with `ensemble team add <name> <dir>`. Name offered agents as `<team>/<agent>`"
-                ));
-            }
-            _ => {}
-        }
-    }
     let raw: RawNode = serde_norway::from_str(text).map_err(|e| ConfigError::Syntax {
         path: path.to_path_buf(),
         detail: explain(&e),

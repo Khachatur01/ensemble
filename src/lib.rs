@@ -5,7 +5,7 @@
 //!
 //! ```text
 //!   your agent (Claude Code, OpenCode, Codex, ...)
-//!         |  MCP over stdio                 (ensemble-mcp, as `harness::mcp`)
+//!         |  MCP over stdio                 (ensemble-mcp)
 //!         v
 //!   ensemble mcp -> the node               (src/main.rs, src/daemon.rs)
 //!         |  the tools: delegate, submit, ... (ensemble-tasks)
@@ -24,7 +24,6 @@
 //! router knows agents, and the adapters in `external` know how each CLI is
 //! started and read. `ARCHITECTURE.md` is the map of the whole.
 
-pub mod harness;
 pub mod hooks;
 pub mod remote;
 pub mod setup;
@@ -37,5 +36,6 @@ pub use ensemble_core::{folders, lock, port, records, snapshot, state, workspace
 pub use ensemble_inbox as inbox;
 pub use ensemble_knowledge as knowledge;
 pub use ensemble_link as link;
+pub use ensemble_mcp as mcp;
 pub use ensemble_node as node;
-pub use ensemble_tasks::{review, tasks, tracker};
+pub use ensemble_tasks::{delegation, queue, review, tasks};

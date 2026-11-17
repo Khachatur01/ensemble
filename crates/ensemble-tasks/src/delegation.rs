@@ -310,7 +310,7 @@ pub fn tools(agents: &[&str]) -> Vec<Tool> {
     out.push(Tool {
         name: TEAM_CREATE,
         description: "Write a new helper team for the node, when the person asks for one: its \
-                      name and its whole config.yaml (version 3, every setting written; \
+                      name and its whole config.yaml (version 1, every setting written; \
                       `teams` with `sample` shows the form). It is checked, then kept \
                       waiting: it runs nothing until the person reads and approves it with \
                       `ensemble team approve <name>` in a terminal; the node then uses it at once. \

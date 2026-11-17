@@ -55,9 +55,6 @@ COMMANDS:
     team remove NAME [--yes]
                             Take a team out of the node. A linked folder and a
                             pulled clone are left where they are.
-    migrate <FILE> --team NAME
-                            Rewrite a version 1 or 2 config as the new team
-                            NAME: every agent in one flat list.
     setup [--client C] [--name N] [--yes]
                             Set this computer up: find the agent CLIs, write
                             its node (~/.config/ensemble/node/node.yaml) if there is
@@ -183,7 +180,8 @@ OPTIONS:
                             teams directory. Every other command reads all the
                             node's teams, whose agents are <team>/<agent>.
         --env-file <PATH>   A file of NAME=value lines read for variables the
-                            environment does not set.
+                            environment does not set, instead of the node's or
+                            the hub's .env.
     -d, --dir <PATH>        The project directory agents work in.
                             Default: the current directory.
         --context <TEXT>    Extra context for `run`.
@@ -191,14 +189,17 @@ OPTIONS:
     -V, --version           Print the version.
 
 FILES:
-    ~/.config/ensemble/node/  node.yaml, teams/ (one folder per team), hubs.json
-    ~/.config/ensemble/hub/   hub.yaml, database.db, vault/ (a hub this computer runs)
+    ~/.config/ensemble/node/  node.yaml, teams/ (one folder per team), .env,
+                              hubs.json (its tokens for its hub)
+    ~/.config/ensemble/hub/   hub.yaml, .env, database.db, vault/ (a hub this
+                              computer runs)
     ~/.local/state/ensemble/  tasks, run logs and worktrees, per working folder
 
 ENVIRONMENT:
     LLM backends name the variables they read; `ensemble check` lists them. API keys
-    are never read from the config file. Variables missing from the environment
-    are read from the --env-file, when one is given.
+    are never read from the config files. Variables missing from the environment
+    are read from ~/.config/ensemble/node/.env (the node's teams) or
+    ~/.config/ensemble/hub/.env (the hub), or from --env-file when it is given.
 ";
 
 fn main() -> ExitCode {
@@ -253,15 +254,6 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
                 return Ok(None);
             }
             "-t" | "--team" => team = Some(value("--team")?),
-            "-o" | "--org" => {
-                eprintln!(
-                    "ensemble: --org is now --team; --org stops working in the next release."
-                );
-                team = Some(value("--org")?);
-            }
-            "--hub" => {
-                return Err("--hub is gone: this computer's node names its hub in ~/.config/ensemble/node/node.yaml (`hub: wss://…`), and a hub this computer runs keeps its files in ~/.config/ensemble/hub/".into());
-            }
             "--env-file" => env_file = Some(PathBuf::from(value("--env-file")?)),
             "-d" | "--dir" => dir = Some(PathBuf::from(value("--dir")?)),
             "--context" => context = Some(value("--context")?),
@@ -296,11 +288,44 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
     }
 }
 
+/// The file of `NAME=value` lines read for the variables the environment does
+/// not set, such as API keys: `--env-file` when it is given, or else `.env` in
+/// `dir` when there is one.
+fn env_file_in(args: &Args, dir: PathBuf) -> Option<PathBuf> {
+    if let Some(file) = &args.env_file {
+        return Some(file.clone());
+    }
+    let file = dir.join(state::ENV_FILE);
+    if !file.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::metadata(&file) {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o077 != 0 {
+            eprintln!(
+                "ensemble: note: other users can read {}; `chmod 600` it",
+                file.display()
+            );
+        }
+    }
+    Some(file)
+}
+
+/// The node's: `~/.config/ensemble/node/.env`, or `--env-file`.
+fn node_env(args: &Args) -> Result<Option<PathBuf>, String> {
+    Ok(env_file_in(args, state::node_config_dir()?))
+}
+
+/// A hub's: `~/.config/ensemble/hub/.env`, or `--env-file`.
+fn hub_env(args: &Args) -> Result<Option<PathBuf>, String> {
+    Ok(env_file_in(args, state::hub_config_dir()?))
+}
+
 fn run() -> Result<ExitCode, String> {
     let Some(args) = parse_args(std::env::args().skip(1).collect())? else {
         return Ok(ExitCode::SUCCESS);
     };
-    move_old_layout();
 
     if args.command == "schema" {
         print!("{}", config::SCHEMA);
@@ -315,9 +340,6 @@ fn run() -> Result<ExitCode, String> {
             .map_err(|e| format!("cannot read the current directory: {e}"))?,
     };
 
-    if args.command == "migrate" {
-        return cmd_migrate(&args);
-    }
     match args.command.as_str() {
         "review" | "diff" | "merge" => return cmd_review(&args, &dir),
         "tasks" => return cmd_tasks(&args, &dir),
@@ -330,7 +352,7 @@ fn run() -> Result<ExitCode, String> {
         _ => {}
     }
 
-    if args.command == "team" || args.command == "org" {
+    if args.command == "team" {
         return cmd_team(&args);
     }
     if args.command == "hub" {
@@ -377,7 +399,7 @@ fn run() -> Result<ExitCode, String> {
     }
 
     // Every other command reads the node's teams, as one helper team.
-    let (config, waiting) = teams::load_all(args.env_file.as_deref(), &SystemEnv)?;
+    let (config, waiting) = teams::load_all(node_env(&args)?.as_deref(), &SystemEnv)?;
     for line in &waiting {
         eprintln!("ensemble: {line}");
     }
@@ -604,7 +626,7 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
             let dir = state::hub_config_dir()?;
             let hub = config::load_hub(
                 &config::hub_path(&dir),
-                args.env_file.as_deref(),
+                hub_env(args)?.as_deref(),
                 &SystemEnv,
             )
             .map_err(|e| e.to_string())?;
@@ -649,39 +671,6 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
         other => Err(format!(
             "hub: unknown '{other}'. Use init, check, user, knowledge or serve."
         )),
-    }
-}
-
-/// Move what an older Ensemble kept elsewhere into the fixed layout under
-/// `~/.config/ensemble/`, once: the node file and hub tokens from the top of
-/// it, and the teams from `~/.local/share/ensemble/teams/`.
-fn move_old_layout() {
-    let (Ok(config), Ok(node)) = (state::config_root(), state::node_config_dir()) else {
-        return;
-    };
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
-    let mut moves = vec![
-        (config.join("node.yaml"), node.join("node.yaml")),
-        (config.join("hubs.json"), node.join("hubs.json")),
-    ];
-    if let Some(data) = data {
-        moves.push((data.join("ensemble/teams"), node.join("teams")));
-    }
-    for (old, new) in moves {
-        if old.exists() && !new.exists() {
-            let moved = std::fs::create_dir_all(&node).and_then(|()| std::fs::rename(&old, &new));
-            match moved {
-                Ok(()) => eprintln!("ensemble: moved {} to {}", old.display(), new.display()),
-                Err(e) => eprintln!(
-                    "ensemble: cannot move {} to {}: {e}",
-                    old.display(),
-                    new.display()
-                ),
-            }
-        }
     }
 }
 
@@ -781,7 +770,7 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
                 path.display()
             )
         })?;
-    let (team, waiting) = teams::load_all(args.env_file.as_deref(), &SystemEnv)
+    let (team, waiting) = teams::load_all(node_env(args)?.as_deref(), &SystemEnv)
         .map_err(|e| format!("node serve: {e}"))?;
     let dir = state::node_dir()?;
     let _lock = ensemble::lock::acquire(&dir).map_err(|pid| {
@@ -813,7 +802,7 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
         node.clone(),
         hub.clone(),
         team.clone(),
-        args.env_file.clone(),
+        node_env(args)?,
         &dir,
         &say,
     );
@@ -953,7 +942,7 @@ fn cmd_hub_serve(args: &Args) -> Result<ExitCode, String> {
     let dir = state::hub_config_dir()?;
     let hub = config::load_hub(
         &config::hub_path(&dir),
-        args.env_file.as_deref(),
+        hub_env(args)?.as_deref(),
         &SystemEnv,
     )
     .map_err(|e| e.to_string())?;
@@ -1012,7 +1001,7 @@ fn cmd_hub_user(args: &Args) -> Result<ExitCode, String> {
     let dir = state::hub_config_dir()?;
     let hub = config::load_hub(
         &config::hub_path(&dir),
-        args.env_file.as_deref(),
+        hub_env(args)?.as_deref(),
         &SystemEnv,
     )
     .map_err(|e| e.to_string())?;
@@ -1179,35 +1168,11 @@ fn state_for(dir: &Path) -> Result<PathBuf, String> {
     state::dir_for(dir)
 }
 
-/// Rewrite an older config as a version 3 helper team: the new team `--team`
-/// names, in the node's teams directory.
-fn cmd_migrate(args: &Args) -> Result<ExitCode, String> {
-    let source = args
-        .rest
-        .first()
-        .ok_or("migrate: needs the old config file, e.g. `ensemble migrate ~/my-org/config.yaml --team web`")?;
-    let name = args
-        .team
-        .as_deref()
-        .ok_or("migrate: name the new team with --team <name>")?;
-    let text = std::fs::read_to_string(source).map_err(|e| format!("migrate: {source}: {e}"))?;
-    let v3 = config::migrate::to_v3(&text).map_err(|e| format!("migrate: {source}: {e}"))?;
-    // Loading it now says what, if anything, the old file got wrong.
-    config::parse(&v3, Path::new(config::CONFIG_FILENAME), &SystemEnv)
-        .map_err(|e| format!("migrate: the result is not valid: {e}"))?;
-    let dir = teams::make(name, &v3).map_err(|e| format!("migrate: {e}"))?;
-    println!(
-        "wrote {}: the team '{name}' with every agent. Comments were not kept; an agent or gate that two teams both had is now `<team>-<name>`.",
-        config::config_path(&dir).display()
-    );
-    Ok(ExitCode::SUCCESS)
-}
-
 /// The knowledge vault of the hub this computer runs.
 fn hub_memory(args: &Args) -> Result<ensemble::knowledge::Memory, String> {
     let hub = config::load_hub(
         &config::hub_path(&state::hub_config_dir()?),
-        args.env_file.as_deref(),
+        hub_env(args)?.as_deref(),
         &SystemEnv,
     )
     .map_err(|e| e.to_string())?;
@@ -1863,7 +1828,7 @@ fn cmd_setup(args: &Args, dir: &Path) -> Result<ExitCode, String> {
     config::load_node(&path)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("setup: {} went away", path.display()))?;
-    let (team, waiting) = teams::load_all(args.env_file.as_deref(), &SystemEnv)?;
+    let (team, waiting) = teams::load_all(node_env(args)?.as_deref(), &SystemEnv)?;
     for line in &waiting {
         println!("{line}");
     }
@@ -2031,7 +1996,7 @@ fn cmd_teams(args: &Args) -> Result<ExitCode, String> {
         let loaded = teams::config_dir(team).and_then(|dir| {
             config::load(
                 &config::config_path(&dir),
-                args.env_file.as_deref(),
+                node_env(args)?.as_deref(),
                 &SystemEnv,
             )
             .map_err(|e| e.to_string())
@@ -2042,7 +2007,7 @@ fn cmd_teams(args: &Args) -> Result<ExitCode, String> {
                     let about = agent
                         .prompt
                         .as_deref()
-                        .map(ensemble::harness::delegation::first_line)
+                        .map(ensemble::delegation::first_line)
                         .unwrap_or_default();
                     println!("  {}/{}: {about}", team.name, agent.name);
                 }
@@ -2054,11 +2019,8 @@ fn cmd_teams(args: &Args) -> Result<ExitCode, String> {
 }
 
 /// `ensemble team new|add|pull|update|approve|remove`: the teams of this
-/// computer's node. `org` is the command's old name.
+/// computer's node.
 fn cmd_team(args: &Args) -> Result<ExitCode, String> {
-    if args.command == "org" {
-        eprintln!("ensemble: `org` is now `team`; `org` stops working in the next release.");
-    }
     let what = args
         .rest
         .first()
@@ -2086,7 +2048,7 @@ fn cmd_team(args: &Args) -> Result<ExitCode, String> {
             let name = name()?;
             let dir = teams::make(name, config::SAMPLE).map_err(|e| format!("team new: {e}"))?;
             println!(
-                "wrote {}: the team '{name}', a sample with every setting. Edit its agents, then check it with `ensemble check`. API keys go in the environment, or in a file you pass with --env-file; never in this directory.",
+                "wrote {}: the team '{name}', a sample with every setting. Edit its agents, then check it with `ensemble check`. API keys go in ~/.config/ensemble/node/.env or the environment; never in this directory.",
                 config::config_path(&dir).display()
             );
             reload_node();
@@ -2168,7 +2130,7 @@ fn cmd_team(args: &Args) -> Result<ExitCode, String> {
             }
             let config = config::load(
                 &config::config_path(&team.path),
-                args.env_file.as_deref(),
+                node_env(args)?.as_deref(),
                 &SystemEnv,
             )
             .map_err(|e| format!("team approve: {e}"))?;
@@ -2215,7 +2177,7 @@ fn cmd_tasks(args: &Args, dir: &Path) -> Result<ExitCode, String> {
     let store = store_for(dir)?;
     let entries = store.scan();
     let wanted = opt(args, "--status");
-    let worker = ensemble::harness::lock::holder(store.root()).is_some();
+    let worker = ensemble::lock::holder(store.root()).is_some();
     let mut shown = 0;
     for entry in &entries {
         let line = tasks::entry_line(Some(&store), entry, &entries, None, worker);
@@ -2255,7 +2217,7 @@ fn cmd_task(args: &Args, dir: &Path) -> Result<ExitCode, String> {
             "task: no task '{id}'. `ensemble tasks` lists them."
         ));
     };
-    let worker = ensemble::harness::lock::holder(store.root()).is_some();
+    let worker = ensemble::lock::holder(store.root()).is_some();
     println!(
         "{}",
         tasks::entry_line(Some(&store), entry, &entries, None, worker)

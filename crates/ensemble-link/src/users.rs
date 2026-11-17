@@ -24,7 +24,6 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-const USERS_FILE: &str = "users.json";
 /// The shortest password an account may have.
 pub const MIN_PASSWORD: usize = 12;
 /// PBKDF2 rounds for a new password hash: OWASP's figure for HMAC-SHA256.
@@ -84,17 +83,13 @@ pub struct User {
     pub name: String,
     /// One of the hub's `roles`; empty while pending.
     pub role: String,
-    #[serde(default)]
     pub status: Status,
     /// When the account was made, once known.
-    #[serde(default)]
     pub registered: String,
     /// None until a password is set.
-    #[serde(default)]
     pub password: Option<Password>,
     /// Who the account is in the task tracker, when that differs from its
     /// name.
-    #[serde(default)]
     pub tracker_user: Option<String>,
     pub tokens: Vec<Token>,
 }
@@ -111,24 +106,14 @@ impl User {
 pub struct Token {
     pub sha256: String,
     pub made: String,
-    /// For listing and revoking; tokens from before had none and get one from
-    /// their hash.
-    #[serde(default)]
+    /// For listing and revoking.
     pub id: String,
-    #[serde(default = "unnamed")]
     pub name: String,
-    #[serde(default)]
     pub kind: Kind,
     /// What it may do, within the account's role; none is all of it.
-    #[serde(default)]
     pub scopes: Option<Vec<Permission>>,
     /// When it stops working, in UTC; none is never.
-    #[serde(default)]
     pub expires: Option<String>,
-}
-
-fn unnamed() -> String {
-    "token".into()
 }
 
 /// Who a token signs in as, and what it may do.
@@ -187,29 +172,9 @@ pub struct Users {
 pub type Roles = BTreeMap<String, Vec<Permission>>;
 
 impl Users {
-    /// The accounts kept in `dir`, none when there are none yet. Accounts
-    /// from before the database, in `users.json`, are taken into it once.
+    /// The accounts kept in `dir`, none when there are none yet.
     pub fn load(dir: &Path) -> Result<Users, UsersError> {
-        let mut users = store::with(dir, async |c| {
-            let users = read(c).await?;
-            if !users.is_empty() {
-                return Ok(users);
-            }
-            let Some(old) = old_file(dir)? else {
-                return Ok(users);
-            };
-            store::transaction(c, statements(&old)).await?;
-            let file = dir.join(USERS_FILE);
-            std::fs::rename(&file, file.with_extension("json.imported"))
-                .map_err(|e| format!("cannot move {} aside: {e}", file.display()))?;
-            Ok(old)
-        })
-        .map_err(UsersError::Io)?;
-        for token in users.values_mut().flat_map(|u| u.tokens.iter_mut()) {
-            if token.id.is_empty() {
-                token.id = token.sha256.chars().take(8).collect();
-            }
-        }
+        let users = store::with(dir, async |c| read(c).await).map_err(UsersError::Io)?;
         Ok(Users {
             dir: dir.to_path_buf(),
             users,
@@ -642,19 +607,6 @@ fn random<const N: usize>() -> Result<[u8; N], UsersError> {
     Ok(bytes)
 }
 
-/// The accounts in `users.json`, the file they were kept in before the
-/// database, if it is there.
-fn old_file(dir: &Path) -> Result<Option<BTreeMap<String, User>>, String> {
-    let path = dir.join(USERS_FILE);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|e| format!("{} is not readable: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
-    }
-}
-
 /// Every account in the database, with its tokens in the order they were made.
 async fn read(c: &turso::Connection) -> Result<BTreeMap<String, User>, String> {
     let text = |v: &Value| store::text(v).unwrap_or_default();
@@ -1022,35 +974,5 @@ mod tests {
         assert!(full.contains("too many sign-ups"), "{full}");
         users.remove("bob").unwrap();
         assert!(users.register("carol", PASSWORD, 2).is_ok());
-    }
-
-    #[test]
-    fn accounts_and_tokens_from_before_still_work() {
-        let tmp = TempDir::new();
-        let mut users = Users::load(&tmp.0.join("new")).unwrap();
-        let token = users.add("ana", "member", &roles()).unwrap();
-        // A `users.json` of the oldest kind, from before the database.
-        let mut old = serde_json::json!({ "ana": users.get("ana").unwrap() });
-        let dir = tmp.0.join("old");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(USERS_FILE);
-        let ana = old["ana"].as_object_mut().unwrap();
-        for key in ["status", "registered", "password"] {
-            ana.remove(key);
-        }
-        let t = ana["tokens"][0].as_object_mut().unwrap();
-        for key in ["id", "name", "kind", "scopes", "expires"] {
-            t.remove(key);
-        }
-        std::fs::write(&path, old.to_string()).unwrap();
-        let users = Users::load(&dir).unwrap();
-        let signed = users.authenticate(&token, &roles()).unwrap();
-        assert_eq!(signed.user.status, Status::Active);
-        assert_eq!(signed.kind, Kind::Personal);
-        assert_eq!(signed.token_id.len(), 8);
-        // Taken into the database once, and kept aside.
-        assert!(!path.exists() && dir.join("users.json.imported").exists());
-        let again = Users::load(&dir).unwrap();
-        assert!(again.authenticate(&token, &roles()).is_some());
     }
 }

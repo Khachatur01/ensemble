@@ -401,44 +401,8 @@ impl Store {
             .map_or(1, |n| n + 1)
     }
 
-    /// Before version 3 tasks lived in a folder per team, `tasks/<team>/<id>`.
-    /// A folder under `tasks/` that is no task itself but holds tasks is one of
-    /// those: its tasks are moved up, once, so none is lost. A task that is
-    /// already there under the same id stays, and the old one is left where it
-    /// is and said so.
-    fn adopt_team_folders(&self) {
-        for team in dir_names(&self.tasks) {
-            let folder = self.tasks.join(&team);
-            if folder.join(TASK_FILE).is_file() {
-                continue;
-            }
-            for id in dir_names(&folder) {
-                let old = folder.join(&id);
-                if !old.join(TASK_FILE).is_file() {
-                    continue;
-                }
-                let new = self.tasks.join(&id);
-                if new.exists() {
-                    eprintln!(
-                        "ensemble: tasks/{team}/{id} was not moved to tasks/{id}: a task of that id is already there"
-                    );
-                    continue;
-                }
-                match fs::rename(&old, &new) {
-                    Ok(()) => eprintln!("ensemble: moved tasks/{team}/{id} to tasks/{id}"),
-                    Err(e) => {
-                        eprintln!("ensemble: cannot move tasks/{team}/{id} to tasks/{id}: {e}")
-                    }
-                }
-            }
-            // An emptied team folder goes; one with anything else in it stays.
-            let _ = fs::remove_dir(&folder);
-        }
-    }
-
     /// Every task, by id. A directory without a `task.md` is not a task yet.
     pub fn scan(&self) -> Vec<Entry> {
-        self.adopt_team_folders();
         let mut ids: Vec<String> = dir_names(&self.tasks)
             .into_iter()
             .filter(|id| self.dir(id).join(TASK_FILE).is_file())
@@ -1088,46 +1052,6 @@ mod tests {
     }
 
     #[test]
-    fn tasks_of_the_old_team_folders_are_moved_up_once_and_their_agents_keep_their_team() {
-        let tmp = TempDir::new();
-        let store = Store::new(&tmp.0);
-        let write = |path: &str, agent: &str| {
-            let dir = tmp.0.join("tasks").join(path);
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(
-                dir.join(TASK_FILE),
-                format!("---\ntitle: t\nagent: {agent}\n---\nDo it.\n"),
-            )
-            .unwrap();
-        };
-        write("software/0001-short", "coder");
-        write("software/0002-full", "software/coder");
-        write("hardware/0003-board", "hardware/layout");
-        fs::write(
-            tmp.0.join("tasks/hardware/0003-board").join(ASSIGNEE_FILE),
-            "hardware/checker",
-        )
-        .unwrap();
-        // One of that id is already in place: the old one stays where it is.
-        write("0002-full", "coder");
-        let ids: Vec<String> = store.scan().iter().map(|e| e.id().to_string()).collect();
-        assert_eq!(ids, ["0001-short", "0002-full", "0003-board"]);
-        assert!(tmp.0.join("tasks/0001-short/task.md").is_file());
-        assert!(
-            tmp.0.join("tasks/software/0002-full/task.md").is_file(),
-            "the clash is left in place"
-        );
-        assert!(
-            !tmp.0.join("tasks/hardware").exists(),
-            "an emptied team folder goes"
-        );
-        let agent = |id: &str| store.read(id).unwrap().agent;
-        assert_eq!(agent("0001-short"), "coder");
-        // An agent is `<team>/<agent>` again, as the node names it.
-        assert_eq!(agent("0003-board"), "hardware/checker");
-    }
-
-    #[test]
     fn ids_count_up_past_the_highest_and_skip_a_taken_one() {
         let tmp = TempDir::new();
         let store = Store::new(&tmp.0);
@@ -1143,8 +1067,8 @@ mod tests {
         let tmp = TempDir::new();
         let store = Store::new(&tmp.0);
         let write = |id: &str, text: &str| {
-            fs::create_dir_all(tmp.0.join("tasks/default").join(id)).unwrap();
-            fs::write(tmp.0.join("tasks/default").join(id).join(TASK_FILE), text).unwrap();
+            fs::create_dir_all(tmp.0.join("tasks").join(id)).unwrap();
+            fs::write(tmp.0.join("tasks").join(id).join(TASK_FILE), text).unwrap();
         };
         write(
             "a-good",
@@ -1199,13 +1123,7 @@ mod tests {
             &store.scan()[0],
             Entry::Task(_, Some(Status::Failed))
         ));
-        assert!(
-            !tmp.0
-                .join("tasks/default")
-                .join(&id)
-                .join("result.tmp")
-                .exists()
-        );
+        assert!(!tmp.0.join("tasks").join(&id).join("result.tmp").exists());
     }
 
     #[test]

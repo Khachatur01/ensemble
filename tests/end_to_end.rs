@@ -38,7 +38,7 @@ impl Scratch {
 
     /// The helper team: the team `team` in the scratch computer's teams
     /// directory, so its agents are `team/<agent>`.
-    fn org(&self) -> PathBuf {
+    fn team_dir(&self) -> PathBuf {
         self.0
             .with_extension("xdg-config")
             .join("ensemble/node/teams/team")
@@ -62,36 +62,43 @@ impl Scratch {
         if !path.exists() {
             std::fs::write(
                 &path,
-                "version: 4\nname: desk\naccess: private\noffers: {}\n",
+                "version: 1\nname: desk\naccess: private\noffers: {}\n",
             )
             .unwrap();
         }
         path
     }
 
-    /// A path in the project, or one of the old `.ensemble/` names, which are
-    /// the helper team (`config.yaml`, `.env`) and the state (the rest).
+    /// This scratch computer's node folder, `~/.config/ensemble/node/`.
+    fn node_dir(&self) -> PathBuf {
+        self.0.with_extension("xdg-config").join("ensemble/node")
+    }
+
+    /// A path in the project; `@team/<file>` is one in the helper team's
+    /// folder, `@node/<file>` one in the node's, such as its `.env`, and
+    /// `@state/<path>` one in the project's state directory.
     fn place(&self, name: &str) -> PathBuf {
-        match name.strip_prefix(".ensemble/") {
-            Some(rest) if rest == "config.yaml" || rest == ".env" => self.org().join(rest),
-            Some(rest) => self.state().join(rest),
-            None => self.0.join(name),
+        if let Some(rest) = name.strip_prefix("@node/") {
+            self.node_dir().join(rest)
+        } else if let Some(rest) = name.strip_prefix("@team/") {
+            self.team_dir().join(rest)
+        } else if let Some(rest) = name.strip_prefix("@state/") {
+            self.state().join(rest)
+        } else {
+            self.0.join(name)
         }
     }
 
     fn write(&self, name: &str, contents: &str) -> PathBuf {
         let p = self.place(name);
-        let converted;
-        let contents = if name == ".ensemble/config.yaml" {
-            converted = ensemble::config::migrate::to_v3(contents).unwrap_or(contents.to_string());
-            converted.as_str()
-        } else {
-            contents
-        };
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(&p, contents).expect("write scratch file");
+        if name == "@node/.env" {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         p
     }
 
@@ -138,9 +145,9 @@ impl Drop for Scratch {
     }
 }
 
-/// Two OpenCode agents run by `command`: `reviewer` on a provider OpenCode
+/// The helper team: two OpenCode agents run by `command`: `reviewer` on a provider OpenCode
 /// knows, and `coder` on the `openai-local` LLM backend at `backend_url`.
-fn config_v1(command: &str, backend_url: &str) -> String {
+fn config_yaml(command: &str, backend_url: &str) -> String {
     format!(
         r#"
 version: 1
@@ -151,6 +158,8 @@ llm_backends:
     base_url: "{backend_url}"
     api_key_env: ENSEMBLE_TEST_LOCAL_KEY
     timeout_seconds: 20
+
+limits: {{}}
 
 gates: {{}}
 
@@ -179,20 +188,15 @@ agents:
       type: opencode
       model:
         type: llm_backend
-        backend: openai-local
-        name: qwen3-coder
-        context_window: 32768
+        try:
+          - {{ backend: openai-local, name: qwen3-coder, context_window: 32768 }}
+        when_none: fail
       tools: [read, edit]
       system_prompt: append
       max_steps: 30
       command: "{command}"
 "#
     )
-}
-
-/// The same, as the version 3 helper team it is loaded as.
-fn config_yaml(command: &str, backend_url: &str) -> String {
-    ensemble::config::migrate::to_v3(&config_v1(command, backend_url)).expect("a version 1 sample")
 }
 
 /// The binary, run in `scratch` with none of the test variables inherited:
@@ -206,10 +210,6 @@ fn command(scratch: &Scratch) -> Command {
         .env("XDG_DATA_HOME", scratch.0.with_extension("xdg-data"))
         .env_remove("ENSEMBLE_TEST_LOCAL_URL")
         .env_remove("ENSEMBLE_TEST_LOCAL_KEY");
-    let env_file = scratch.org().join(".env");
-    if env_file.exists() {
-        c.arg("--env-file").arg(env_file);
-    }
     c
 }
 
@@ -281,7 +281,7 @@ fn models_stub(body: &str) -> String {
 #[test]
 fn check_accepts_a_valid_config_and_reports_the_team() {
     let s = Scratch::new("check-ok");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
 
     let out = ensemble(&s, &["check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -299,11 +299,12 @@ fn check_accepts_a_valid_config_and_reports_the_team() {
 fn check_reports_several_problems_at_once() {
     let s = Scratch::new("check-many");
     s.write(
-        ".ensemble/config.yaml",
+        "@team/config.yaml",
         r#"
-version: 4
+version: 9
 llm_backends:
   x: { type: openai-compatible-api, base_url: "nope", timeout_seconds: 5 }
+limits: {}
 gates: {}
 agents:
   r:
@@ -314,7 +315,7 @@ agents:
       type: unlimited
     adapter:
       type: opencode
-      model: { type: llm_backend, backend: nowhere, name: "", context_window: 8000 }
+      model: { type: llm_backend, try: [{ backend: nowhere, name: "", context_window: 8000 }], when_none: fail }
       tools: []
       system_prompt: append
       max_steps: 3
@@ -330,26 +331,10 @@ agents:
 }
 
 #[test]
-fn a_config_with_the_removed_ensemble_type_says_what_to_use_instead() {
-    let s = Scratch::new("removed-type");
-    s.write(
-        ".ensemble/config.yaml",
-        "version: 1\nllm_backends: {}\ngates: {}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 2\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter: { type: ensemble, model: m }\n",
-    );
-    let out = ensemble(&s, &["check"]);
-    assert!(!out.status.success());
-    let err = stderr_of(&out);
-    assert!(
-        err.contains("'ensemble' was removed") && err.contains("'builtin'"),
-        "{err}"
-    );
-}
-
-#[test]
 fn an_api_key_written_into_the_config_is_refused() {
     let s = Scratch::new("inline-key");
     s.write(
-        ".ensemble/config.yaml",
+        "@team/config.yaml",
         r#"
 version: 1
 llm_backends:
@@ -382,7 +367,7 @@ fn with_no_team_check_says_how_to_make_one() {
 #[test]
 fn a_broken_team_is_named_rather_than_skipped() {
     let s = Scratch::new("no-config");
-    s.write(".ensemble/config.yaml", "version: 3\n");
+    s.write("@team/config.yaml", "version: 1\n");
     let out = ensemble(&s, &["check"]);
     assert!(!out.status.success());
     assert!(
@@ -395,7 +380,7 @@ fn a_broken_team_is_named_rather_than_skipped() {
 #[test]
 fn agents_prints_the_routing_table() {
     let s = Scratch::new("agents");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
 
     let out = ensemble(&s, &["agents"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -413,7 +398,7 @@ fn agents_prints_the_routing_table() {
 #[test]
 fn the_base_url_is_the_one_in_the_config_and_no_variable_changes_it() {
     let s = Scratch::new("url-from-config");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
 
     let out = command(&s)
         .arg("check")
@@ -433,7 +418,7 @@ fn the_base_url_is_the_one_in_the_config_and_no_variable_changes_it() {
 fn run_starts_the_agents_cli_with_the_task_and_prints_its_answer() {
     let s = Scratch::new("run");
     let cli = s.opencode("the review is clean", "");
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
 
     let out = ensemble(&s, &["run", "team/reviewer", "review", "this", "code"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -466,10 +451,10 @@ fn an_agent_on_an_llm_backend_gets_its_endpoint_and_the_key_from_dotenv() {
     let s = Scratch::new("run-backend");
     let cli = s.opencode("done", "");
     s.write(
-        ".ensemble/config.yaml",
+        "@team/config.yaml",
         &config_yaml(&cli, "http://127.0.0.1:8888/v1"),
     );
-    s.write(".ensemble/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-from-dotenv\n");
+    s.write("@node/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-from-dotenv\n");
 
     let out = ensemble(&s, &["run", "team/coder", "do it"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -490,13 +475,10 @@ fn an_agent_on_an_llm_backend_gets_its_endpoint_and_the_key_from_dotenv() {
 fn show_prints_how_an_agent_starts_with_the_key_hidden() {
     let s = Scratch::new("show");
     s.write(
-        ".ensemble/config.yaml",
+        "@team/config.yaml",
         &config_yaml("opencode", "http://127.0.0.1:8888/v1"),
     );
-    s.write(
-        ".ensemble/.env",
-        "ENSEMBLE_TEST_LOCAL_KEY=sk-secret-value\n",
-    );
+    s.write("@node/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-secret-value\n");
 
     let out = ensemble(&s, &["show", "team/coder"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -525,7 +507,7 @@ fn show_prints_how_an_agent_starts_with_the_key_hidden() {
 fn files_the_agent_changed_are_reported() {
     let s = Scratch::new("changes");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
 
     let out = ensemble(&s, &["run", "team/coder", "rename foo to bar"]);
@@ -538,7 +520,7 @@ fn health_checks_the_cli_and_that_the_backend_serves_the_model() {
     let s = Scratch::new("health");
     let cli = s.opencode("", "");
     let serving = models_stub(r#"{"object":"list","data":[{"id":"qwen3-coder"}]}"#);
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, &serving));
+    s.write("@team/config.yaml", &config_yaml(&cli, &serving));
     let out = ensemble(&s, &["health"]);
     assert!(
         out.status.success(),
@@ -551,7 +533,7 @@ fn health_checks_the_cli_and_that_the_backend_serves_the_model() {
     assert!(text.contains("openai-local: ok"), "{text}");
 
     let other = models_stub(r#"{"object":"list","data":[{"id":"something-else"}]}"#);
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, &other));
+    s.write("@team/config.yaml", &config_yaml(&cli, &other));
     let out = ensemble(&s, &["health"]);
     assert!(!out.status.success());
     let text = stdout_of(&out);
@@ -561,7 +543,7 @@ fn health_checks_the_cli_and_that_the_backend_serves_the_model() {
         "{text}"
     );
 
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     let out = ensemble(&s, &["health"]);
     assert!(!out.status.success());
     assert!(
@@ -671,7 +653,7 @@ fn tool_text(reply: &serde_json::Value) -> String {
 #[test]
 fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
     let s = Scratch::new("mcp-handshake");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let mut session = McpSession::start(&s);
 
     let init = session.request(
@@ -719,7 +701,7 @@ fn a_harness_can_complete_the_mcp_handshake_and_list_the_tools() {
 fn a_harness_can_delegate_in_the_background_and_collect_the_work() {
     let s = Scratch::new("mcp-background");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
@@ -743,7 +725,7 @@ fn a_harness_can_delegate_in_the_background_and_collect_the_work() {
     let status = tool_text(&session.call("status", serde_json::json!({})));
     assert!(status.contains("adhoc-1 · team/coder · done"), "{status}");
     assert!(
-        !s.path().join(".ensemble/tasks").exists(),
+        !s.path().join("@state/tasks").exists(),
         "a background delegation writes no ticket"
     );
 }
@@ -752,7 +734,7 @@ fn a_harness_can_delegate_in_the_background_and_collect_the_work() {
 fn a_harness_can_submit_a_task_and_collect_its_result_from_the_ticket() {
     let s = Scratch::new("mcp-submit");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
@@ -773,7 +755,7 @@ fn a_harness_can_submit_a_task_and_collect_its_result_from_the_ticket() {
     assert!(text.contains("status: done"), "{text}");
     assert!(text.contains("[files changed: a.txt (modified)]"), "{text}");
 
-    let ticket = s.place(".ensemble/tasks/0001-rename-foo");
+    let ticket = s.place("@state/tasks/0001-rename-foo");
     assert!(ticket.join("task.md").is_file() && ticket.join("result.md").is_file());
 }
 
@@ -781,7 +763,7 @@ fn a_harness_can_submit_a_task_and_collect_its_result_from_the_ticket() {
 fn a_harness_can_delegate_through_mcp_and_get_the_work_back() {
     let s = Scratch::new("mcp-delegate");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
@@ -814,7 +796,7 @@ fn a_harness_can_delegate_through_mcp_and_get_the_work_back() {
 #[test]
 fn an_unknown_agent_comes_back_as_a_readable_tool_error_and_the_session_survives() {
     let s = Scratch::new("mcp-bad-agent");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
 
@@ -840,7 +822,7 @@ fn an_unknown_agent_comes_back_as_a_readable_tool_error_and_the_session_survives
 fn an_agent_failure_reaches_the_model_as_a_readable_reason() {
     let s = Scratch::new("mcp-agent-fails");
     let cli = s.opencode("", "echo 'Model unavailable: qwen3-coder' >&2\nexit 1");
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
 
@@ -864,7 +846,7 @@ fn an_agent_failure_reaches_the_model_as_a_readable_reason() {
 #[test]
 fn the_tools_never_offer_a_way_to_pick_a_model_or_a_backend() {
     let s = Scratch::new("mcp-no-model-param");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
 
@@ -885,7 +867,7 @@ fn nothing_but_protocol_is_ever_written_to_stdout() {
     // instead of a tool. The stand-in CLI's own output must not leak either.
     let s = Scratch::new("mcp-clean-stdout");
     let cli = s.opencode("fine", "echo 'not json, from the CLI'");
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
 
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
@@ -903,7 +885,7 @@ fn nothing_but_protocol_is_ever_written_to_stdout() {
 #[test]
 fn a_malformed_message_does_not_end_the_session() {
     let s = Scratch::new("mcp-garbage");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let mut session = McpSession::start(&s);
 
     {
@@ -924,7 +906,7 @@ fn a_malformed_message_does_not_end_the_session() {
 #[test]
 fn the_server_exits_cleanly_when_the_harness_closes_the_pipe() {
     let s = Scratch::new("mcp-eof");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
 
@@ -938,7 +920,7 @@ fn an_invalid_team_stops_the_node_before_it_serves_anything() {
     // Better to fail at start, where it is seen, than to accept sessions and
     // fail every delegation.
     let s = Scratch::new("node-bad-config");
-    s.write(".ensemble/config.yaml", "version: 1\nbackends: {}\n");
+    s.write("@team/config.yaml", "version: 1\nbackends: {}\n");
     s.node_yaml();
     let out = bare_command(&s).args(["node", "serve"]).output().unwrap();
     assert!(!out.status.success());
@@ -950,12 +932,12 @@ fn team_new_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_acci
     let s = Scratch::new("init");
     let out = ensemble(&s, &["team", "new", "team"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let written = std::fs::read_to_string(s.org().join("config.yaml")).unwrap();
+    let written = std::fs::read_to_string(s.team_dir().join("config.yaml")).unwrap();
     assert!(written.contains("type: opencode"), "{written}");
     assert!(written.contains("\nagents:\n"), "{written}");
     assert!(!written.contains("teams:"), "{written}");
     assert!(
-        !s.org().join(".env").exists() && !s.org().join(".gitignore").exists(),
+        !s.team_dir().join(".env").exists() && !s.team_dir().join(".gitignore").exists(),
         "a helper team holds no secrets, so it needs no .env"
     );
     assert!(
@@ -968,7 +950,7 @@ fn team_new_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_acci
     let text = stdout_of(&check);
     assert!(text.contains("team/coder  ->"), "{text}");
 
-    s.write(".ensemble/config.yaml", "mine");
+    s.write("@team/config.yaml", "mine");
     let again = ensemble(&s, &["team", "new", "team"]);
     assert!(!again.status.success());
     assert!(
@@ -977,7 +959,7 @@ fn team_new_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_acci
         stderr_of(&again)
     );
     assert_eq!(
-        std::fs::read_to_string(s.org().join("config.yaml")).unwrap(),
+        std::fs::read_to_string(s.team_dir().join("config.yaml")).unwrap(),
         "mine"
     );
 
@@ -986,76 +968,27 @@ fn team_new_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_acci
 }
 
 #[test]
-fn migrate_turns_a_version_1_config_into_a_helper_team() {
-    let s = Scratch::new("migrate");
-    let old = s.write("old.yaml", &{
-        let v1 = r#"
-version: 1
-llm_backends: {}
-gates: {}
-agents:
-  solo:
-    prompt: "Does it."
-    max_seconds: 60
-    max_concurrent: 1
-    isolation: shared
-    budget:
-      type: unlimited
-    adapter:
-      type: opencode
-      model: { type: provider, name: opencode/m }
-      tools: [read]
-      system_prompt: append
-      max_steps: 3
-      command: opencode
-"#;
-        v1.to_string()
-    });
-    let out = ensemble(&s, &["migrate", old.to_str().unwrap(), "--team", "team"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    let check = ensemble(&s, &["check"]);
-    assert!(check.status.success(), "{}", stderr_of(&check));
-    assert!(stdout_of(&check).contains("solo"), "{}", stdout_of(&check));
-    let again = ensemble(&s, &["migrate", old.to_str().unwrap(), "--team", "team"]);
-    assert!(!again.status.success(), "migrate does not overwrite");
-}
-
-#[test]
-fn migrate_turns_the_version_2_sample_into_a_flat_helper_team() {
-    let s = Scratch::new("migrate-v2");
-    let old =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/config/v2.yaml");
-    let out = ensemble(&s, &["migrate", old.to_str().unwrap(), "--team", "team"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    let written = std::fs::read_to_string(s.org().join("config.yaml")).unwrap();
-    assert!(written.contains("version: 3"), "{written}");
-    assert!(!written.contains("teams"), "{written}");
-    assert!(written.contains("type: direct"), "{written}");
-    let agents = ensemble(&s, &["agents"]);
-    assert!(agents.status.success(), "{}", stderr_of(&agents));
-    for name in ["coder", "explorer", "summariser", "fixer", "reviewer"] {
-        assert!(
-            stdout_of(&agents)
-                .lines()
-                .any(|l| l.starts_with(&format!("team/{name}\t"))),
-            "{name}: {}",
-            stdout_of(&agents)
-        );
-    }
-}
-
-#[test]
 fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
     let s = Scratch::new("dotenv");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
-    s.write(".ensemble/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-from-dotenv\n");
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@node/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-from-dotenv\n");
     let out = ensemble(&s, &["check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(text.contains("authenticated"), "{text}");
     assert!(!text.contains("sk-from-dotenv"), "{text}");
 
-    s.write(".ensemble/.env", "not a line\n");
+    // --env-file is read instead of the node's .env.
+    let other = s.write("keys.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-other\n");
+    let out = command(&s)
+        .arg("--env-file")
+        .arg(&other)
+        .args(["show", "team/coder"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    s.write("@node/.env", "not a line\n");
     let out = ensemble(&s, &["check"]);
     assert!(!out.status.success());
     assert!(
@@ -1063,14 +996,31 @@ fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
         "{}",
         stderr_of(&out)
     );
+    let out = command(&s)
+        .arg("--env-file")
+        .arg(&other)
+        .arg("check")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    // One that others can read is still read, with a note to make it private.
+    let dotenv = s.write("@node/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-from-dotenv\n");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dotenv, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let out = ensemble(&s, &["check"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("chmod 600"), "{}", stderr_of(&out));
 }
 
 #[test]
 fn check_reports_a_task_that_could_not_run() {
     let s = Scratch::new("check-tasks");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     s.write(
-        ".ensemble/tasks/0001-ok/task.md",
+        "@state/tasks/0001-ok/task.md",
         "---\ntitle: Ok\nagent: team/coder\n---\nDo it.\n",
     );
     let out = ensemble(&s, &["check"]);
@@ -1081,9 +1031,9 @@ fn check_reports_a_task_that_could_not_run() {
         stdout_of(&out)
     );
 
-    s.write(".ensemble/tasks/0002-bad/task.md", "Do it.\n");
+    s.write("@state/tasks/0002-bad/task.md", "Do it.\n");
     s.write(
-        ".ensemble/tasks/0003-who/task.md",
+        "@state/tasks/0003-who/task.md",
         "---\ntitle: Who\nagent: architect\n---\nDo it.\n",
     );
     let out = ensemble(&s, &["check"]);
@@ -1102,17 +1052,17 @@ fn check_reports_a_task_that_could_not_run() {
 #[test]
 fn check_reports_a_task_that_can_never_start() {
     let s = Scratch::new("check-after");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     s.write(
-        ".ensemble/tasks/0001-a/task.md",
+        "@state/tasks/0001-a/task.md",
         "---\ntitle: a\nagent: team/coder\nafter: [0002-b]\n---\na\n",
     );
     s.write(
-        ".ensemble/tasks/0002-b/task.md",
+        "@state/tasks/0002-b/task.md",
         "---\ntitle: b\nagent: team/coder\nafter: [0001-a]\n---\nb\n",
     );
     s.write(
-        ".ensemble/tasks/0003-c/task.md",
+        "@state/tasks/0003-c/task.md",
         "---\ntitle: c\nagent: team/coder\nafter: [0009]\n---\nc\n",
     );
     let out = ensemble(&s, &["check"]);
@@ -1135,10 +1085,10 @@ fn a_light_agent_is_one_request_to_its_backend() {
         r#"{"data":[{"id":"small"},{"id":"qwen3-coder"}],"choices":[{"message":{"content":"three bullets"},"finish_reason":"stop"}]}"#,
     );
     let config = format!(
-        "{}  summariser:\n    prompt: You summarise.\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: direct\n      backend: openai-local\n      model: small\n      max_tokens: 300\n",
-        config_v1("opencode", &url)
+        "{}  summariser:\n    prompt: You summarise.\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: direct\n      try: [{{ backend: openai-local, model: small }}]\n      when_none: fail\n      max_tokens: 300\n",
+        config_yaml("opencode", &url)
     );
-    s.write(".ensemble/config.yaml", &config);
+    s.write("@team/config.yaml", &config);
 
     let out = ensemble(&s, &["run", "team/summariser", "sum", "it", "up"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -1253,8 +1203,8 @@ fn connect_without_the_clients_cli_prints_the_command_and_fails() {
 fn setup_writes_the_node_registers_it_and_checks_its_teams() {
     let s = Scratch::new("setup");
     s.write(
-        ".ensemble/config.yaml",
-        "version: 3\nllm_backends: {}\nlimits: {}\ntracker: { type: local_markdown }\ngates: {}\nagents:\n  reviewer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter: { type: claude-code, model: sonnet, tools: [Read], permission_mode: dontAsk, max_turns: 5, command: claude }\n",
+        "@team/config.yaml",
+        "version: 1\nllm_backends: {}\nlimits: {}\ngates: {}\nagents:\n  reviewer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter: { type: claude-code, model: sonnet, tools: [Read], permission_mode: dontAsk, max_turns: 5, command: claude }\n",
     );
     let bin = stub_clis(&s, &["claude", "opencode"]);
     let out = with_path(&s, &bin)
@@ -1276,7 +1226,7 @@ fn setup_writes_the_node_registers_it_and_checks_its_teams() {
             .join("ensemble/node/node.yaml");
     let written = std::fs::read_to_string(&node).unwrap();
     assert!(
-        written.contains("name: \"desk\"") && written.contains("version: 4"),
+        written.contains("name: \"desk\"") && written.contains("version: 1"),
         "{written}"
     );
     let args = std::fs::read_to_string(bin.join("claude.args")).unwrap();
@@ -1316,7 +1266,7 @@ fn setup_without_any_agent_cli_says_what_to_install() {
 fn doctor_says_what_is_wrong_and_how_to_fix_it() {
     let s = Scratch::new("doctor");
     s.write(
-        ".ensemble/config.yaml",
+        "@team/config.yaml",
         &config_yaml("/nonexistent/opencode", NOWHERE),
     );
     let out = ensemble(&s, &["doctor"]);
@@ -1335,9 +1285,9 @@ fn doctor_says_what_is_wrong_and_how_to_fix_it() {
     assert!(text.contains("fix: start the model server"), "{text}");
 
     let s = Scratch::new("doctor-ok");
-    s.write(".ensemble/config.yaml", &config_yaml("true", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("true", NOWHERE));
     let url = models_stub(r#"{"data":[{"id":"qwen3-coder"}]}"#);
-    s.write(".ensemble/config.yaml", &config_yaml("true", &url));
+    s.write("@team/config.yaml", &config_yaml("true", &url));
     std::fs::create_dir_all(s.path().join(".git")).unwrap();
     let out = ensemble(&s, &["doctor"]);
     let text = stdout_of(&out);
@@ -1348,7 +1298,7 @@ fn doctor_says_what_is_wrong_and_how_to_fix_it() {
 #[test]
 fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
     let s = Scratch::new("add-agent");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let out = ensemble(
         &s,
         &[
@@ -1562,7 +1512,7 @@ fn team_update_shows_what_changed_and_moves_only_once_trusted() {
         stdout_of(&again)
     );
 
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let made = ensemble(&s, &["team", "update", "team"]);
     assert!(!made.status.success());
     assert!(
@@ -1580,7 +1530,7 @@ fn team_update_shows_what_changed_and_moves_only_once_trusted() {
 fn a_task_written_by_submit_is_listed_shown_and_run_by_a_session() {
     let s = Scratch::new("cli-tasks");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
 
     let none = ensemble(&s, &["tasks"]);
@@ -1662,7 +1612,7 @@ fn a_task_written_by_submit_is_listed_shown_and_run_by_a_session() {
 #[test]
 fn submit_refuses_what_a_task_cannot_be() {
     let s = Scratch::new("cli-submit-bad");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let no_text = ensemble(&s, &["submit", "team/coder", "T"]);
     assert!(!no_text.status.success());
     for (args, needle) in [
@@ -1718,13 +1668,13 @@ fn submit_refuses_what_a_task_cannot_be() {
 #[test]
 fn answer_gives_a_waiting_task_its_answer() {
     let s = Scratch::new("cli-answer");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     s.write(
-        ".ensemble/tasks/0001-ask/task.md",
+        "@state/tasks/0001-ask/task.md",
         "---\ntitle: ask\nagent: team/coder\n---\nask\n",
     );
     s.write(
-        ".ensemble/tasks/0001-ask/questions.md",
+        "@state/tasks/0001-ask/questions.md",
         "## Question 1\nWhich name?\n\n",
     );
     let listed = ensemble(&s, &["tasks"]);
@@ -1738,7 +1688,7 @@ fn answer_gives_a_waiting_task_its_answer() {
     let out = ensemble(&s, &["answer", "0001-ask", "use", "bar"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        s.read(".ensemble/tasks/0001-ask/questions.md")
+        s.read("@state/tasks/0001-ask/questions.md")
             .contains("### Answer\nuse bar")
     );
     let again = ensemble(&s, &["answer", "0001-ask", "twice"]);
@@ -1783,7 +1733,7 @@ fn sigterm(child: &Child) {
 fn the_node_runs_a_submitted_task_without_a_session_and_stops_on_sigterm() {
     let s = Scratch::new("serve");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
     let mut node = start_node(&s, &[]);
     // `submit` tells the node about the folder, which no session has opened.
@@ -1805,7 +1755,7 @@ fn the_node_runs_a_submitted_task_without_a_session_and_stops_on_sigterm() {
     );
     assert!(
         wait_for(30, || s
-            .place(".ensemble/tasks/0001-rename-foo/result.md")
+            .place("@state/tasks/0001-rename-foo/result.md")
             .is_file()),
         "the node did not run the task"
     );
@@ -1837,7 +1787,7 @@ fn the_node_runs_a_submitted_task_without_a_session_and_stops_on_sigterm() {
     let status = node.wait().unwrap();
     assert!(status.success(), "the node ends cleanly on SIGTERM");
     assert!(
-        !s.place(".ensemble/worker.lock").exists(),
+        !s.place("@state/worker.lock").exists(),
         "the folder's lock is released"
     );
 }
@@ -1853,7 +1803,7 @@ fn a_task_stopped_in_the_middle_is_run_again_when_the_node_starts_again() {
         marker.display()
     );
     let cli = s.opencode("done", &body);
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     let mut first = start_node(&s, &[]);
     let out = ensemble(
         &s,
@@ -1870,7 +1820,7 @@ fn a_task_stopped_in_the_middle_is_run_again_when_the_node_starts_again() {
     sigterm(&first);
     first.wait().unwrap();
     assert!(
-        !s.place(".ensemble/tasks/0001-slow/result.md").exists(),
+        !s.place("@state/tasks/0001-slow/result.md").exists(),
         "a stopped task has no result"
     );
     let listed = ensemble(&s, &["tasks"]);
@@ -1883,9 +1833,7 @@ fn a_task_stopped_in_the_middle_is_run_again_when_the_node_starts_again() {
     // The node remembers the folder, and runs it again when it starts.
     let _second = start_node(&s, &[]);
     assert!(
-        wait_for(30, || s
-            .place(".ensemble/tasks/0001-slow/result.md")
-            .is_file()),
+        wait_for(30, || s.place("@state/tasks/0001-slow/result.md").is_file()),
         "the node did not run it again"
     );
 }
@@ -1898,7 +1846,7 @@ fn a_task_stopped_in_the_middle_is_run_again_when_the_node_starts_again() {
 fn every_run_leaves_a_record_that_stats_sums_up() {
     let s = Scratch::new("stats");
     let cli = s.opencode("fine", "");
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     let none = ensemble(&s, &["stats"]);
     assert!(
         stdout_of(&none).contains("No runs recorded"),
@@ -1912,7 +1860,7 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
     }
     // A run that cannot start is a failure on the record.
     s.write(
-        ".ensemble/config.yaml",
+        "@team/config.yaml",
         &config_yaml("/nonexistent/opencode", NOWHERE),
     );
     let out = ensemble(&s, &["run", "team/reviewer", "look"]);
@@ -1945,7 +1893,7 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
 fn a_backlog_task_waits_until_it_is_assigned_and_the_helper_team_says_when_it_is_idle() {
     let s = Scratch::new("backlog");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
 
     let out = ensemble(
@@ -1965,15 +1913,12 @@ fn a_backlog_task_waits_until_it_is_assigned_and_the_helper_team_says_when_it_is
         listed.contains("Idle: no active tasks (1 in the backlog, to be assigned)"),
         "{listed}"
     );
-    assert!(s.place(".ensemble/tasks/0001-rename-foo/task.md").is_file());
+    assert!(s.place("@state/tasks/0001-rename-foo/task.md").is_file());
 
     // Nothing runs it while it has no assignee.
     let node = start_node(&s, &[]);
     std::thread::sleep(std::time::Duration::from_secs(3));
-    assert!(
-        !s.place(".ensemble/tasks/0001-rename-foo/result.md")
-            .exists()
-    );
+    assert!(!s.place("@state/tasks/0001-rename-foo/result.md").exists());
 
     let bad = ensemble(&s, &["assign", "0001-rename-foo", "nobody"]);
     assert!(!bad.status.success());
@@ -1986,7 +1931,7 @@ fn a_backlog_task_waits_until_it_is_assigned_and_the_helper_team_says_when_it_is
     );
     assert!(
         wait_for(30, || s
-            .place(".ensemble/tasks/0001-rename-foo/result.md")
+            .place("@state/tasks/0001-rename-foo/result.md")
             .is_file()),
         "the node did not run the task once assigned"
     );
@@ -2003,7 +1948,7 @@ fn a_backlog_task_waits_until_it_is_assigned_and_the_helper_team_says_when_it_is
 #[test]
 fn check_warns_about_what_agents_may_do_without_failing() {
     let s = Scratch::new("check-warn");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let out = ensemble(&s, &["check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
@@ -2019,7 +1964,7 @@ fn check_warns_about_what_agents_may_do_without_failing() {
 #[test]
 fn show_prints_how_a_codex_agent_starts() {
     let s = Scratch::new("show-codex");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let out = ensemble(
         &s,
         &[
@@ -2052,13 +1997,13 @@ fn a_light_agent_on_an_anthropic_backend_shows_a_messages_request() {
     let s = Scratch::new("show-anthropic");
     let v1 = format!(
         "{}\n",
-        config_v1("opencode", NOWHERE).replacen(
+        config_yaml("opencode", NOWHERE).replacen(
             "llm_backends:\n",
             "llm_backends:\n  claude-api:\n    type: anthropic-api\n    base_url: \"https://api.anthropic.com\"\n    api_key_env: ENSEMBLE_TEST_ANTHROPIC_KEY\n    timeout_seconds: 30\n",
             1,
         )
     );
-    s.write(".ensemble/config.yaml", &v1);
+    s.write("@team/config.yaml", &v1);
     let out = ensemble(
         &s,
         &[
@@ -2113,8 +2058,8 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
     let s = Scratch::new("review-merge");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
     s.write(
-        ".ensemble/config.yaml",
-        &config_v1(&cli, NOWHERE).replace("isolation: shared", "isolation: worktree"),
+        "@team/config.yaml",
+        &config_yaml(&cli, NOWHERE).replace("isolation: shared", "isolation: worktree"),
     );
     s.write("a.txt", "foo\n");
     git_in(s.path(), &["init", "--quiet", "-b", "main"]);
@@ -2138,7 +2083,7 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         wait_for(30, || s
-            .place(".ensemble/tasks/0001-rename-foo/result.md")
+            .place("@state/tasks/0001-rename-foo/result.md")
             .is_file()),
         "the node did not run the task"
     );
@@ -2200,7 +2145,7 @@ fn a_worktree_task_is_reviewed_by_anyone_and_merged_only_by_the_person_who_types
         std::fs::read_to_string(s.path().join("a.txt")).unwrap(),
         "bar\n"
     );
-    assert!(!s.place(".ensemble/worktrees/0001-rename-foo").exists());
+    assert!(!s.place("@state/worktrees/0001-rename-foo").exists());
     let again = ensemble(&s, &["review", "0001-rename-foo"]);
     assert!(!again.status.success(), "its branch is gone");
 }
@@ -2210,9 +2155,9 @@ fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
     let s = Scratch::new("show-probe");
     let central = models_stub(r#"{"data":[{"id":"big"}]}"#);
     s.write(
-        ".ensemble/config.yaml",
+        "@team/config.yaml",
         &format!(
-            "version: 3\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"{central}\", timeout_seconds: 5 }}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ backend: home, model: small }}\n        - {{ backend: central, model: big }}\n      when_none: wait\n      max_tokens: 10\n"
+            "version: 1\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"{central}\", timeout_seconds: 5 }}\nlimits: {{}}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ backend: home, model: small }}\n        - {{ backend: central, model: big }}\n      when_none: wait\n      max_tokens: 10\n"
         ),
     );
     let out = ensemble(&s, &["show", "team/summariser"]);
@@ -2321,7 +2266,7 @@ fn share_files(hub: &Path) -> Vec<String> {
 #[test]
 fn knowledge_is_shared_by_hand_or_by_the_agent_through_the_nodes_hub() {
     let s = Scratch::new("hub-share");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let out = ensemble(&s, &["share", "--title", "x", "--text", "y"]);
     assert!(!out.status.success());
     assert!(
@@ -2405,7 +2350,7 @@ fn distill_on(hub: &Path, url: &str) {
 #[test]
 fn shares_become_notes_by_hand_on_the_hub_and_in_the_background_while_it_runs() {
     let s = Scratch::new("hub-distill");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let (hub, address, token) = hub_server(&s);
     // No model can be used yet: the share waits.
     distill_on(&hub, NOWHERE);
@@ -2548,7 +2493,7 @@ fn node_names_hub(scratch: &Scratch, url: &str) {
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
         config.join("node.yaml"),
-        format!("version: 4\nname: desk\naccess: private\nhub: \"{url}\"\noffers: {{}}\n"),
+        format!("version: 1\nname: desk\naccess: private\nhub: \"{url}\"\noffers: {{}}\n"),
     )
     .unwrap();
 }
@@ -2616,10 +2561,6 @@ fn start_node(s: &Scratch, extra: &[&std::ffi::OsStr]) -> Served {
     s.node_yaml();
     let mut c = bare_command(s);
     c.args(["node", "serve"]).args(extra);
-    let env_file = s.org().join(".env");
-    if env_file.exists() {
-        c.arg("--env-file").arg(env_file);
-    }
     let mut node = c
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -2694,7 +2635,7 @@ fn a_hub_server_refuses_a_node_without_a_token_and_stops_on_sigterm() {
 #[test]
 fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
     let s = Scratch::new("hub-remote");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let (hub, address, token) = hub_server(&s);
     let mut child = serve_hub(&s, &hub);
     let url = format!("ws://{address}");
@@ -2825,7 +2766,7 @@ fn post_json(address: &str, path: &str, body: serde_json::Value) -> (u16, serde_
 #[test]
 fn someone_signs_up_is_let_in_and_logs_in_from_a_node_with_a_password() {
     let s = Scratch::new("hub-register");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let (hub, address, _) = hub_server(&s);
     let child = serve_hub(&s, &hub);
     let password = "correct horse battery";
@@ -2925,7 +2866,7 @@ fn a_node_file_is_written_once_and_an_account_names_itself_in_the_tracker() {
 fn an_issue_on_the_hub_server_is_worked_on_a_members_node_and_reported_back() {
     let s = Scratch::new("hub-tasks");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
     let (hub, address, token) = hub_server(&s);
     let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
@@ -2952,7 +2893,7 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_node_and_reported_back() {
     let config = s.0.with_extension("xdg-config").join("ensemble/node");
     std::fs::write(
         config.join("node.yaml"),
-        format!("version: 4\nname: laptop\naccess: private\nhub: \"{url}\"\noffers: {{}}\n"),
+        format!("version: 1\nname: laptop\naccess: private\nhub: \"{url}\"\noffers: {{}}\n"),
     )
     .unwrap();
     let mut node = command(&s)
@@ -3098,7 +3039,7 @@ fn a_session_hook_gives_the_notes_about_a_prompt_once() {
 #[test]
 fn connect_with_hooks_writes_them_into_the_clis_settings() {
     let s = Scratch::new("connect-hooks");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let bin = stub_clis(&s, &["claude", "opencode"]);
     let connect = |client: &str, extra: &[&str]| {
         with_path(&s, &bin)
@@ -3221,7 +3162,7 @@ fn an_agent_runs_on_a_node_and_what_it_changed_comes_back() {
     );
     machine_team(&s, "laptop", "work", &config_yaml(&cli, NOWHERE));
     let node_yaml =
-        "version: 4\nname: laptop\naccess: private\noffers:\n  runs: { agents: [work/reviewer] }\n";
+        "version: 1\nname: laptop\naccess: private\noffers:\n  runs: { agents: [work/reviewer] }\n";
     let _node = serve_node(&s, &url, "laptop", node_yaml);
     node_names_hub(&s, &url);
     let out = command(&s).args(["nodes"]).output().unwrap();
@@ -3238,9 +3179,9 @@ fn an_agent_runs_on_a_node_and_what_it_changed_comes_back() {
     s.write(".gitignore", ".env\n");
     s.write(".env", "KEY=secret");
     s.write(
-        ".ensemble/config.yaml",
+        "@team/config.yaml",
         &format!(
-            "version: 3\nllm_backends: {{}}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: work/reviewer, nodes: [ana/laptop] }}\n"
+            "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: work/reviewer, nodes: [ana/laptop] }}\n"
         ),
     );
     let out = ensemble(&s, &["run", "team/heavy", "change", "a.txt"]);
@@ -3270,9 +3211,9 @@ fn an_agent_runs_on_a_node_and_what_it_changed_comes_back() {
 
     // A node that is not there is said by name.
     s.write(
-        ".ensemble/config.yaml",
+        "@team/config.yaml",
         &format!(
-            "version: 3\nllm_backends: {{}}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: work/reviewer, nodes: [kim/gpu-box] }}\n"
+            "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: work/reviewer, nodes: [kim/gpu-box] }}\n"
         ),
     );
     let out = ensemble(&s, &["run", "team/heavy", "change", "a.txt"]);
@@ -3297,7 +3238,7 @@ fn a_node_serves_its_models_through_the_hub_and_a_shared_node_lends_no_login() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let server = models_stub(r#"{"choices":[{"message":{"content":"hi from the node"}}]}"#);
     let node_yaml = |access: &str, offers: &str| {
-        format!("version: 4\nname: {access}-box\naccess: {access}\nhub: \"{url}\"\n{offers}")
+        format!("version: 1\nname: {access}-box\naccess: {access}\nhub: \"{url}\"\n{offers}")
     };
     let models = format!(
         "offers:\n  models: {{ base_url: \"{server}\", timeout_seconds: 5, names: [small] }}\n"
@@ -3343,7 +3284,7 @@ fn a_node_serves_its_models_through_the_hub_and_a_shared_node_lends_no_login() {
 fn a_session_reaches_the_node_from_its_folder_and_a_task_goes_on_after_it_ends() {
     let s = Scratch::new("node-session");
     let cli = s.opencode("renamed it", "sleep 1; echo bar > a.txt");
-    s.write(".ensemble/config.yaml", &config_yaml(&cli, NOWHERE));
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
     let session = |input: &[serde_json::Value]| {
         let mut child = bare_command(&s)
@@ -3366,7 +3307,7 @@ fn a_session_reaches_the_node_from_its_folder_and_a_task_goes_on_after_it_ends()
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
         config.join("node.yaml"),
-        "version: 4\nname: desk\naccess: private\noffers: {}\n",
+        "version: 1\nname: desk\naccess: private\noffers: {}\n",
     )
     .unwrap();
     let out = session(&[]);
@@ -3417,7 +3358,7 @@ fn a_session_reaches_the_node_from_its_folder_and_a_task_goes_on_after_it_ends()
 #[test]
 fn an_agent_writes_a_team_that_runs_only_once_the_person_approves_it() {
     let s = Scratch::new("team-create");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
 
@@ -3435,7 +3376,7 @@ fn an_agent_writes_a_team_that_runs_only_once_the_person_approves_it() {
     );
     let broken = session.call(
         "team_create",
-        serde_json::json!({"name": "half", "config": "version: 3\n"}),
+        serde_json::json!({"name": "half", "config": "version: 1\n"}),
     );
     assert_eq!(
         broken["result"]["isError"], true,
@@ -3511,7 +3452,7 @@ fn an_agent_writes_a_team_that_runs_only_once_the_person_approves_it() {
 #[test]
 fn a_running_node_reloads_its_teams_and_tells_its_sessions_the_tools_changed() {
     let s = Scratch::new("reload");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     let mut session = McpSession::start(&s);
     session.request("initialize", serde_json::json!({}));
     let tools = session
@@ -3551,7 +3492,7 @@ fn a_running_node_reloads_its_teams_and_tells_its_sessions_the_tools_changed() {
     );
 
     // A team that cannot be loaded leaves the node's teams as they were.
-    std::fs::write(elsewhere.join("config.yaml"), "version: 3\n").unwrap();
+    std::fs::write(elsewhere.join("config.yaml"), "version: 1\n").unwrap();
     let out = ensemble(&s, &["node", "reload"]);
     assert!(!out.status.success());
     assert!(

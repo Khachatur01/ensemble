@@ -641,6 +641,7 @@ llm_backends:
     type: openai-compatible-api
     base_url: "http://127.0.0.1:9/v1"
     timeout_seconds: 600
+limits: {{}}
 gates: {{}}
 agents:
   looker:
@@ -664,7 +665,7 @@ agents:
       type: unlimited
     adapter:
       type: opencode
-      model: {{ type: llm_backend, backend: local, name: qwen3.5-9b, context_window: 32768 }}
+      model: {{ type: llm_backend, try: [{{ backend: local, name: qwen3.5-9b, context_window: 32768 }}], when_none: fail }}
       tools: [read, edit]
       system_prompt: append
       max_steps: 30
@@ -684,7 +685,6 @@ agents:
       command: "{program}"
 "#
         );
-        let yaml = config::migrate::to_v3(&yaml).unwrap();
         let cfg =
             config::parse(&yaml, std::path::Path::new("config.yaml"), &BTreeMap::new()).unwrap();
         Ensemble::new(cfg, workdir)
@@ -701,7 +701,7 @@ agents:
     /// A `direct` agent that tries `home`, then `central`, in a fresh folder.
     fn with_fallback(home: &str, central: &str, when_none: &str) -> (Ensemble, TempDir) {
         let yaml = format!(
-            "version: 3\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"{home}\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"{central}\", timeout_seconds: 5 }}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ backend: home, model: small }}\n        - {{ backend: central, model: big }}\n      when_none: {when_none}\n      max_tokens: 10\n"
+            "version: 1\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"{home}\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"{central}\", timeout_seconds: 5 }}\nlimits: {{}}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ backend: home, model: small }}\n        - {{ backend: central, model: big }}\n      when_none: {when_none}\n      max_tokens: 10\n"
         );
         let cfg =
             config::parse(&yaml, std::path::Path::new("config.yaml"), &BTreeMap::new()).unwrap();

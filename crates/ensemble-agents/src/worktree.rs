@@ -34,7 +34,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// The worktree of task `id`, under `ensemble_dir` (the project's
-/// `.ensemble/`). Made from the project's `HEAD` on the branch
+/// state directory). Made from the project's `HEAD` on the branch
 /// `ensemble/<id>` the first time; found again after that, so a task that is
 /// run again, or was interrupted, carries on where it was.
 pub fn prepare(project: &Path, ensemble_dir: &Path, id: &str) -> Result<Worktree, String> {

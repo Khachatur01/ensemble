@@ -111,7 +111,7 @@ fn team_changed(
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("a.txt"), "hello").unwrap();
     let mut yaml = String::from(
-        "version: 1\nllm_backends: {}\ngates:\n  done-file: { command: \"test -e done.txt\", timeout_seconds: 10 }\nagents:\n",
+        "version: 1\nllm_backends: {}\nlimits: {}\ngates:\n  done-file: { command: \"test -e done.txt\", timeout_seconds: 10 }\nagents:\n",
     );
     for (name, tools, body) in scripts {
         let command = cli(&bin, name, body);
@@ -119,7 +119,6 @@ fn team_changed(
                 "  {name}:\n    prompt: \"The {name}. Second line.\"\n    max_seconds: 1800\n    max_concurrent: {max_concurrent}\n    isolation: {isolation}\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {{ type: provider, name: opencode/m-{name} }}\n      tools: [{tools}]\n      system_prompt: append\n      max_steps: 30\n      command: \"{command}\"\n"
             ));
     }
-    let yaml = config::migrate::to_v3(&yaml).unwrap();
     let mut cfg =
         config::parse(&yaml, std::path::Path::new("config.yaml"), &BTreeMap::new()).unwrap();
     change(&mut cfg);
@@ -500,7 +499,7 @@ fn health_reports_each_cli_and_flags_a_broken_one() {
     assert!(text_of(&good).contains(": ok"), "{}", text_of(&good));
 
     let cfg = config::parse(
-            &config::migrate::to_v3("version: 1\nllm_backends: {}\ngates: {}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 4\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter: { type: opencode, model: { type: provider, name: a/b }, tools: [read], system_prompt: append, max_steps: 3, command: /nonexistent/opencode }\n").unwrap(),
+            "version: 1\nllm_backends: {}\nlimits: {}\ngates: {}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 4\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter: { type: opencode, model: { type: provider, name: a/b }, tools: [read], system_prompt: append, max_steps: 3, command: /nonexistent/opencode }\n",
             std::path::Path::new("config.yaml"),
             &BTreeMap::new(),
         )
@@ -1651,7 +1650,7 @@ fn a_task_whose_agent_has_no_usable_model_waits_and_says_why() {
     std::fs::create_dir_all(&project).unwrap();
     let down = |n: u16| format!("http://127.0.0.1:{n}/v1");
     let yaml = format!(
-        "version: 3\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"{}\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"{}\", timeout_seconds: 5 }}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ backend: home, model: small }}\n        - {{ backend: central, model: big }}\n      when_none: wait\n      max_tokens: 10\n",
+        "version: 1\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"{}\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"{}\", timeout_seconds: 5 }}\nlimits: {{}}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ backend: home, model: small }}\n        - {{ backend: central, model: big }}\n      when_none: wait\n      max_tokens: 10\n",
         down(1),
         down(2)
     );

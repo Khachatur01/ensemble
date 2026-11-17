@@ -8,15 +8,14 @@
     "version",
     "llm_backends",
     "limits",
-    "tracker",
     "gates",
     "agents"
   ],
   "additionalProperties": false,
   "properties": {
     "version": {
-      "description": "Config format version. Always 3.",
-      "const": 3
+      "description": "Config format version. Always 1.",
+      "const": 1
     },
     "llm_backends": {
       "description": "Model endpoints. The key is the backend's name, which an `opencode` agent's model of type `llm_backend` refers to. Ensemble hands the endpoint and key to the agent's CLI for each run, so they are defined only here. `{}` when there are none.",
@@ -31,12 +30,6 @@
       "additionalProperties": {
         "$ref": "#/definitions/limit"
       }
-    },
-    "tracker": {
-      "description": "Where the team's tasks come from.",
-      "oneOf": [
-        { "$ref": "#/definitions/tracker_local_markdown" }
-      ]
     },
     "gates": {
       "description": "Commands a task's work must pass. The key is the gate's name, which a task's `gate` refers to. Defined here so a task names a gate and cannot bring a command of its own. `{}` when there are none.",
@@ -99,17 +92,6 @@
       }
     },
 
-    "tracker_local_markdown": {
-      "type": "object",
-      "required": ["type"],
-      "additionalProperties": false,
-      "properties": {
-        "type": {
-          "description": "local_markdown: tasks are markdown files in Ensemble's state directory.",
-          "const": "local_markdown"
-        }
-      }
-    },
     "budget_unlimited": {
       "type": "object",
       "required": [

@@ -50,8 +50,12 @@ pub fn config_root() -> Result<PathBuf, String> {
     Ok(base.join("ensemble"))
 }
 
-/// This computer's node: `node.yaml`, its helper teams in `teams/`, and its
-/// hub tokens in `hubs.json`.
+/// The file in `node/` and in `hub/` that holds their secrets, such as API
+/// keys, as `NAME=value` lines: hidden, out of the YAML, readable only by you.
+pub const ENV_FILE: &str = ".env";
+
+/// This computer's node: `node.yaml`, its helper teams in `teams/`, its
+/// secrets in `.env`, and its hub tokens in `hubs.json`.
 pub fn node_config_dir() -> Result<PathBuf, String> {
     Ok(config_root()?.join("node"))
 }
@@ -61,8 +65,9 @@ pub fn teams_dir() -> Result<PathBuf, String> {
     Ok(node_config_dir()?.join("teams"))
 }
 
-/// A hub this computer runs (`ensemble hub serve`): `hub.yaml`, its
-/// `database.db` of accounts and deliveries, and its knowledge vault.
+/// A hub this computer runs (`ensemble hub serve`): `hub.yaml`, its secrets
+/// in `.env`, its `database.db` of accounts and deliveries, and its knowledge
+/// vault.
 pub fn hub_config_dir() -> Result<PathBuf, String> {
     Ok(config_root()?.join("hub"))
 }

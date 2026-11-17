@@ -211,15 +211,8 @@ user, outside every project:
 | `.../worktrees/` | a git worktree per task of an agent with `isolation: worktree` |
 | `$XDG_STATE_HOME/ensemble/orgs/teams-<hash>/usage.json` | how many runs each agent started, shared by every project |
 
-An older config, version 1 (one team per project) or version 2 (an organization of teams), becomes a
-version 3 helper team, the new team `<name>`, with `ensemble migrate <file>
---team <name>`: every team's
-agents and gates go into one list, and a name two teams both used becomes
-`<team>-<name>`. Tasks kept in the old `tasks/<team>/` folders are moved up the
-first time they are read.
-
 ```yaml
-version: 3
+version: 1
 
 llm_backends:
   local:
@@ -229,9 +222,6 @@ llm_backends:
     timeout_seconds: 600
 
 limits: {}
-
-tracker:
-  type: local_markdown
 
 gates:
   test:
@@ -365,10 +355,6 @@ A task cannot bring a command of its own, so what runs on your machine is
 what this file says. `gates: {}` says there are none, which is fine: tasks
 then simply have no check. Blocking `delegate` calls never run gates.
 
-The **tracker** says where the team's tasks come from. Today it is
-`{ type: local_markdown }`: markdown files in the state directory (see
-[Tasks](#tasks-and-background-delegations)).
-
 There is no leader in the file: the agent that calls Ensemble decides who does
 what.
 
@@ -473,8 +459,7 @@ Your own OpenCode configuration (providers, models, the project's
 
 A light agent: no CLI, no tools, no loop. The task (after its context) and the
 agent's prompt (as the system prompt) go straight to an LLM backend as one
-`/chat/completions` request, and the answer comes back. Before version 3 it was
-called `llm`; `ensemble migrate` renames it. It reads and changes
+`/chat/completions` request, and the answer comes back. It reads and changes
 nothing, so it suits cheap work on what it is given: summarising a log,
 classifying findings, drafting a commit message, on a small local model.
 
@@ -672,8 +657,7 @@ tool call after about a minute, whatever progress notifications arrive). On a
 slow machine every delegation to a local model can hit that. Two ways around
 it both answer at once:
 
-- **`submit`** writes a **task**: a ticket in the state directory, `tasks/<id>/task.md`. Ids are numbered across the folder, so an id names one task. A ticket from
-  before version 3 that names its agent as `team/agent` is read as `agent`.
+- **`submit`** writes a **task**: a ticket in the state directory, `tasks/<id>/task.md`. Ids are numbered across the folder, so an id names one task.
   While your node runs, agents work through the tasks without a result,
   oldest id first, each agent at most `max_concurrent` at a time, and write
   `result.md` beside the ticket when one ends. You can write a `task.md` by
@@ -834,7 +818,7 @@ systemd user unit (`~/.config/systemd/user/ensemble.service`):
 
 ```ini
 [Service]
-ExecStart=ensemble node serve --env-file %h/.config/ensemble.env
+ExecStart=ensemble node serve
 Restart=on-failure
 
 [Install]
@@ -933,8 +917,8 @@ so:
   only then.
 
 A pulled team is read-only: clone it, change your copy, and `team add` that.
-Its keys are not in it; they come from your environment or `--env-file`, as
-always.
+Its keys are not in it; they come from the node's `.env` or your environment,
+as always.
 
 ### Secrets
 
@@ -942,17 +926,30 @@ API keys are named by the **variable** that holds them (`api_key_env`), never
 written in `config.yaml`: there is no `api_key` field, and a config that tries
 one is rejected by name, before it reaches a commit.
 
-The values come from the environment, or from a file you name with `--env-file`
-(given once, to `ensemble node serve`, which runs the agents):
+The values come from the environment, or from the node's hidden file of
+secrets, `~/.config/ensemble/node/.env`, beside `node.yaml`:
 
 ```sh
-# keys.env — NAME=value per line, # comments, optional quotes
+# ~/.config/ensemble/node/.env — NAME=value per line, # comments, optional quotes
 OPENAI_LOCAL_API_KEY=sk-...
 ```
 
-A variable set in the environment wins over the file. The helper team holds no
-secrets, so nothing is read from beside it, and a pulled or shared helper team
-cannot carry keys by accident. The file feeds only
+```console
+$ touch ~/.config/ensemble/node/.env && chmod 600 ~/.config/ensemble/node/.env
+```
+
+A hub this computer runs has its own, `~/.config/ensemble/hub/.env`, for the
+keys its backends name: the hub and the node are separate services, often run
+by separate users (the NixOS module runs the hub as `ensemble-hub`), so each
+reads only its own secrets. `--env-file <path>` reads another file instead of
+either, such as a secret that sops-nix or agenix puts in `/run`. Neither file
+holds the node's hub tokens: `ensemble login` keeps those in `hubs.json`,
+also readable by you alone, because Ensemble writes them, not you.
+
+A variable set in the environment wins over the file. A `.env` that other users
+can read is still read, with a note saying to `chmod 600` it. The helper team
+holds no secrets, so nothing is read from beside it, and a pulled or shared
+helper team cannot carry keys by accident. The file feeds only
 Ensemble's own settings: a backend's key reaches an agent's CLI only as that
 backend's provider key in `OPENCODE_CONFIG_CONTENT`, in the CLI's environment
 for that run. Nothing else from it is passed on, so it cannot change how the
@@ -983,7 +980,7 @@ Every independent problem is reported in one pass:
 ```console
 $ ensemble check
 ensemble: team 'web': ~/.config/ensemble/node/teams/web/config.yaml is invalid:
-  - version: 4 is not supported; this build understands version 3
+  - version: 2 is not supported; this build understands version 1
   - llm_backends.x: type 'ollama' is unknown. Known types: openai-compatible-api.
   - agents.coder.adapter: LLM backend 'lcoal' is not defined. Defined LLM backends: local.
   - agents.reviewer.adapter: LLM backend 'lcoal' is not defined. Defined LLM backends: local.
@@ -1004,6 +1001,7 @@ Its files are in `~/.config/ensemble/hub/`:
 ```text
 ~/.config/ensemble/hub/
   hub.yaml       its settings
+  .env           the keys its backends name (NAME=value), readable only by you
   database.db    its accounts, tokens and deliveries (Turso), readable only by you
   vault/         its knowledge vault, a git repository
 ```
@@ -1013,6 +1011,7 @@ On the hub's computer:
 ```console
 $ ensemble hub init                       # hub.yaml with every setting, and the vault
 $ $EDITOR ~/.config/ensemble/hub/hub.yaml # its name, models, roles, tracker
+$ $EDITOR ~/.config/ensemble/hub/.env     # the keys its backends name, if any; chmod 600
 $ ensemble hub check                      # validates it; says which model would distill shares now
 $ ensemble hub user add root --role admin # the first admin; prints their token once
 $ ensemble hub user password root         # typed without echo
@@ -1059,8 +1058,7 @@ notes), `tasks` (receive the issues assigned to you; see
 [Tasks from a tracker](#tasks-from-a-tracker)), `admin` (manage users),
 `compute` (use other people's shared nodes) and `host` (connect a shared node;
 see [Nodes](#nodes)). Accounts are not in `hub.yaml`: they are kept in
-`database.db` beside it. (A `users.json` or `deliveries.json` of an older hub,
-put beside it, is taken in once and set aside as `.imported`.) A share is kept
+`database.db` beside it. A share is kept
 under the name of the account that signed in, never a name the node sends.
 
 **Each node names its hub.** On each computer that uses the hub, sign in once
@@ -1313,7 +1311,7 @@ The hub connects them, and keeps no node once it is gone.
 
 ```yaml
 # ~/.config/ensemble/node/node.yaml — `ensemble setup` or `ensemble node init` writes it
-version: 4
+version: 1
 name: gpu-box                    # a hub knows it as <you>/gpu-box
 access: shared                   # private: you alone
 hub: wss://hub.example.com       # the hub it connects to; left out: none
@@ -1452,9 +1450,9 @@ them all).
     enable = true;
     user = "ana";                          # it runs for her alone
     extraPackages = [ pkgs.claude-code ];  # the agent CLIs on its PATH; git is always there
-    environmentFile = "/home/ana/.config/ensemble/keys.env";  # API keys, kept out of the store
+    environmentFile = "/run/secrets/ensemble-node.env";  # API keys, kept out of the store; null: ~/.config/ensemble/node/.env
     settings = {                           # node.yaml
-      version = 4;
+      version = 1;
       name = "laptop";
       access = "private";
       hub = "wss://hub.example.com";       # left out: no hub
@@ -1463,10 +1461,9 @@ them all).
     teams = {
       web.source = inputs.acme-web-team;   # a team repository, pinned by flake.lock
       docs.settings = {                    # or a team written here: its config.yaml
-        version = 3;
+        version = 1;
         llm_backends = { };
         limits = { };
-        tracker.type = "local_markdown";
         gates = { };
         agents.reviewer = {
           prompt = "You review code and report findings as file:line: problem.";
@@ -1504,7 +1501,7 @@ put on the system's `PATH`, for the `ensemble mcp` your agent CLI starts.
   services.ensemble.hub = {
     enable = true;
     openFirewall = false;                  # the port of server.listen
-    environmentFile = "/run/secrets/ensemble-hub.env";  # keys its backends name
+    environmentFile = "/run/secrets/ensemble-hub.env";  # keys its backends name; null: its own hub/.env
     settings = {                           # hub.yaml
       version = 1;
       owner = "acme";
@@ -1568,7 +1565,7 @@ and `extraPackages` as the NixOS module's node, without `user`:
     enable = true;
     extraPackages = [ pkgs.opencode ];
     settings = {
-      version = 4;
+      version = 1;
       name = "macbook";
       access = "private";
       offers = { };
@@ -1691,7 +1688,6 @@ $ ensemble submit <title> --backlog --text T # write a task with no assignee yet
 $ ensemble assign <id> <agent>     # give a task to an agent
 $ ensemble answer <id> <text>      # answer the question a task stopped to ask
 $ ensemble stats [--since 7d] [--json]   # what each agent has done: runs, failures, time, tokens
-$ ensemble migrate <file> --team <name>  # a version 1 or 2 config becomes the version 3 team <name>
 $ ensemble check                   # validate every team, print the gates and agents
 $ ensemble agents                  # the routing table
 $ ensemble show <team>/<agent> [--probe]  # how an agent is started, keys hidden; --probe: which model a run would use now
@@ -1702,7 +1698,7 @@ $ ensemble mcp                     # what your client starts: a session of your 
 ```
 
 `run` prints the answer on stdout and the provenance on stderr, so it pipes
-cleanly. Options: `--team <name>` (the team a command changes; `--org` is its old name), `--env-file <path>`, `--dir <path>` (the working
+cleanly. Options: `--team <name>` (the team a command changes), `--env-file <path>` (read in place of the node's or the hub's `.env`), `--dir <path>` (the working
 folder, default the current directory), `--context <text>` (for `run`).
 
 ## How it fits together

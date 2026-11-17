@@ -8,8 +8,7 @@ going; its build order says what is done and what is not. The questions at the
 end are open; everything else is decided unless marked otherwise.
 
 `README.md` is the user's guide: every setting, command and tool. This document
-is the map behind it. `PLAN.md` is the record of how the first version (level 0
-below) was built, phase by phase.
+is the map behind it.
 
 # Part one: how it works
 
@@ -102,12 +101,12 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 | crate | what it is | files |
 | --- | --- | --- |
 | `ensemble-core` | what everything shares | the error vocabulary (`port.rs`); the per-user state, cache and config directories (`state.rs`); the working folder, a `repo` inside it and what a run changed (`workspace.rs`); the record of runs behind `ensemble stats` (`records.rs`); the one-worker lock (`lock.rs`); dates in UTC (`time.rs`); the files a run on a node carries there and back (`snapshot.rs`); the folders a node served, by project (`folders.rs`); the async runtime and its bridges to code that blocks (`runtime.rs`) |
-| `ensemble-config` | the three files a person writes | `config.yaml`: the document as written (`raw.rs`), the environment and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), versions 1 and 2 to 3 (`migrate.rs`), adding and removing an agent as text, comments kept (`edit.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); `hub.yaml` (`hub.rs`); `node.yaml` (`node.rs`) |
+| `ensemble-config` | the three files a person writes | `config.yaml`: the document as written (`raw.rs`), the environment, `.env` files and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), adding and removing an agent as text, comments kept (`edit.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); `hub.yaml` (`hub.rs`); `node.yaml` (`node.rs`) |
 | `ensemble-backends` | talking to model servers | one chat request in the server's own format (`chat.rs`); which models a server serves (`models.rs`); the first usable model of a `try` list (`resolve.rs`); a stand-in server for tests (`testing.rs`) |
 | `ensemble-knowledge` | the hub's knowledge | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait a session uses (`lib.rs`) |
 | `ensemble-link` | the hub server and the link to it | accounts and hashed tokens (`users.rs`), kept with the relay's deliveries in `database.db`, a Turso database (`store.rs`); the REST API (`api.rs`) over a small HTTP reader (`http.rs`); the frames of the link (`protocol.rs`); the hub's side, a task per connection (`server.rs`); connected nodes, runs and model calls, `/nodes/v1/` (`nodes.rs`); the node's side, `Connection` and `RemoteMemory` (`client.rs`); the token file (`tokens.rs`) |
 | `ensemble-agents` | running one agent once | the adapters (`external/`): `claude_code.rs`, `opencode.rs`, `codex.rs`, `builtin.rs`, `direct.rs`, `node.rs`, the subprocess runner (`process.rs`) and gates (`gate.rs`); a git worktree per task (`worktree.rs`); the router: agents to adapters, models, records, `health` (`router.rs`) |
-| `ensemble-tasks` | work handed to the team | tasks as files (`tasks.rs`); the `Tracker` trait and `LocalMarkdown` (`tracker.rs`); the queue that runs tasks and background delegations within slots and budgets (`queue.rs`); the MCP tools (`delegation.rs`); review and merge of a worktree task (`review.rs`) |
+| `ensemble-tasks` | work handed to the team | tasks as files in the folder's state directory (`tasks.rs`); the queue that runs tasks and background delegations within slots and budgets (`queue.rs`); the MCP tools (`delegation.rs`); review and merge of a worktree task (`review.rs`) |
 | `ensemble-inbox` | issues from a tracker into tasks | the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`); an issue made a task and what the task reports (`work.rs`); the hub's inbox (`relay.rs`); a node's part in it (`node.rs`) |
 | `ensemble-node` | a node's link to a hub | `Worker`: runs and model calls for others (`lib.rs`) |
 | `ensemble-mcp` | MCP over stdio | the session loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`) |
@@ -121,7 +120,7 @@ how a CLI is started and read.
 ## Configuration and state
 
 What a person writes is **configuration**, reviewed and never changed by
-Ensemble except on request (`add-agent`, `migrate`, `team new`, an approved
+Ensemble except on request (`add-agent`, `team new`, an approved
 `team_create`):
 
 | file | where | holds |
@@ -133,7 +132,10 @@ Ensemble except on request (`add-agent`, `migrate`, `team new`, an approved
 No setting has a default: every one is written, and a missing one is refused by
 name. A block that is absent means its module is off. No file holds a secret:
 keys are named by the variable that holds them, read from the environment or
-`--env-file`. Each file has a JSON Schema at the repository root, checked
+from a hidden `.env` beside the file that names them, `node/.env` for the
+node's teams and `hub/.env` for the hub (`--env-file` reads another file in
+their place). The node and the hub keep separate secrets because they are
+separate services, often of separate users. Each file has a JSON Schema at the repository root, checked
 against the code by the tests.
 
 What Ensemble learns while it runs is **state**, per user, never in a project
@@ -146,6 +148,7 @@ or a config directory:
 | `~/.local/state/ensemble/node/` | the node's lock, `folders.json` (the folder last used for each project), `runs/` for others, `inbox/node.json` |
 | `$XDG_RUNTIME_DIR/ensemble/<hash>.sock` | a node's socket, in a folder only its user may enter (`/tmp/ensemble-<user>/` without `XDG_RUNTIME_DIR`) |
 | `~/.config/ensemble/node/hubs.json` | the node's hub tokens, one per URL, mode 0600 |
+| `~/.config/ensemble/node/.env`, `~/.config/ensemble/hub/.env` | the keys the node's teams and the hub's backends name, written by you, mode 0600 |
 | `~/.config/ensemble/node/teams/` | the node's helper teams: a folder per team, its `config.yaml`, a link to a folder elsewhere, or `pulled.json` (repository and commit); `pending` beside a team an agent wrote |
 | `~/.cache/ensemble/` | clones of pulled teams, checked against their commit each time |
 
@@ -416,20 +419,18 @@ and is written to be read by the model that will see it.
 
 ## Names
 
-- **Helper team**: the agents a user works with, described in one `config.yaml`
-  (config version 3). It is flat: a list of professional agents, such as a
+- **Helper team**: the agents a user works with, described in one `config.yaml`.
+  It is flat: a list of professional agents, such as a
   coder, a reviewer, a PCB designer or an RF engineer, with no hierarchy. A
   node holds any number of them in its teams directory and runs them all, its
   agents named `<team>/<agent>`: teams the person makes, links or pulls from a
   git repository like an image, and teams an agent writes at the person's
-  request, which run once the person approves them. (Decided 2026-11-17; a
-  user connected exactly one helper team before.) The description is strict
-  YAML, never natural language. This replaced the version 2 "organization of
-  teams".
+  request, which run once the person approves them. (Decided 2026-11-17.)
+  The description is strict YAML, never natural language.
 - **Hub**: the services: identities, task tracking and the inbox, knowledge
   vaults and the pipeline, integrations (Telegram and others), routing work
   between nodes, model access. The word "organization" is not used for it,
-  to keep it apart from the old agent config.
+  to keep it apart from a helper team.
 - **Node**: a worker: a process that gives computing resources to its owner
   and the hub's users. A computer runs one node. (Decided 2026-11-17; a
   computer could run several before.) A node is
@@ -463,9 +464,9 @@ setting the config rules allow.
 
 Each level works without the next. Knowledge always belongs to a hub: a node
 with no hub has none, and a single user who wants it runs a hub of their own
-on their computer (level 1). (Decided 2026-11-10; on 2026-11-17 the hub
-embedded in a node was dropped: a hub is always its own process, with no team,
-and an easy way to run a node and a hub together is to come.)
+on their computer (level 1). A hub is always its own process, with no team;
+an easy way to run a node and a hub together is to come. (Decided
+2026-11-17.)
 
 ## Hub and node
 
@@ -584,7 +585,7 @@ what happens when nothing fits: fail, or wait in the queue. Every run records
 the model that actually ran.
 
 The light adapter that sends one chat request straight to a backend, with no CLI
-and no tools, is called `direct` (it was `llm` before version 3). The chat
+and no tools, is called `direct`. The chat
 client it uses belongs to the backends module, so the knowledge pipeline and the
 hub's chat API can share it.
 
@@ -592,8 +593,7 @@ An agent loop of Ensemble's own is back, as the `builtin` adapter: harness-rs's
 `AgentLoop`, its file and shell tools, and its model clients, on the user's LLM
 backends, so a helper team (or a shared node) needs no agent CLI installed. It
 is pinned to one exact version because the library is young. (Decided
-2026-11-16; the old `ensemble` type, removed in version 3, was a loop of its
-own written here.)
+2026-11-16.)
 
 Ensemble is async, on tokio: agent runs (CLI processes included), the task
 queue, the MCP session, the node, the link on both ends, and the knowledge a
@@ -802,11 +802,11 @@ crate holds it today.
 
 ## Build order
 
-1. Config version 3: the flat helper team, `direct`, `--team`. (Done.)
+1. The flat helper team, `direct`, `--team`. (Done.)
 2. The module split into a Cargo workspace, behavior-preserving. (Done.)
 3. Per-agent backend fallback and the resolver. (Done: `try` and `when_none`
    for models on LLM backends.)
-4. Memory in the hub role, embedded in the node: vault, pipeline, the `share`
+4. Memory in the hub role: vault, pipeline, the `share`
    tool, recall. (Done: `hub.yaml`; the vault, the secret check,
    the pipeline with the injection guards and a background worker, BM25
    recall; the `share` and `recall` tools and commands; notes for the helper
@@ -821,24 +821,20 @@ crate holds it today.
 6. Async, the `builtin` adapter, and one node per worker that is also the MCP
    server. (Done: tokio throughout, as part one describes; `builtin` on
    harness-rs; the node as the long-running MCP server on a socket, with
-   `ensemble mcp` as a bridge to it and a worker per folder; `node.yaml`
-   version 3.)
-7. One node per computer, and the node as the only way in: no session that
-   runs a team itself (`mcp --team`), no `ensemble serve`, no `--node` or
-   `--state`; `setup` and `connect` register the bridge with the client.
-   (Done.)
+   `ensemble mcp` as a bridge to it and a worker per folder.)
+7. One node per computer, and the node as the only way in: every session
+   is `ensemble mcp`, a bridge to it; `setup` and `connect` register the
+   bridge with the client. (Done.)
 8. Teams in a directory of the node: made, linked, pulled from git pinned
    to a trusted commit, or written by an agent and approved by the person;
-   all run at once as `<team>/<agent>`; `node.yaml` version 4 without
-   `team`. (Done.)
+   all run at once as `<team>/<agent>`. (Done.)
 9. The hub server's accounts, tokens and deliveries in Turso, the Rust
-   rewrite of SQLite, pinned to one exact version, taken over from
-   `users.json` and `deliveries.json` once. (Done; decided 2026-11-17.)
-10. One fixed layout, `~/.config/ensemble/node/` (node.yaml, teams, tokens)
-    and `~/.config/ensemble/hub/` (hub.yaml, database.db, vault), and no
-    hub embedded in a node: a hub is always `ensemble hub serve`, with no
-    team, and a node names it as `hub:`; no `--hub`. (Done; decided
-    2026-11-17.)
+   rewrite of SQLite, pinned to one exact version. (Done; decided
+   2026-11-17.)
+10. One fixed layout, `~/.config/ensemble/node/` (node.yaml, teams, .env,
+    tokens) and `~/.config/ensemble/hub/` (hub.yaml, .env, database.db,
+    vault): a hub is always `ensemble hub serve`, with no team, and a node
+    names it as `hub:`. (Done; decided 2026-11-17.)
 11. Reloading the node's teams without a restart: after every `team`
     command and on `ensemble node reload`, with the open sessions told their
     tools changed. (Done.)

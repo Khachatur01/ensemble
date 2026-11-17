@@ -36,7 +36,7 @@ pub const SAMPLE: &str = include_str!("sample.yaml");
 
 /// The first line of a config, which points an editor at the JSON Schema.
 pub const SCHEMA_URL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json";
-pub const SUPPORTED_VERSION: u32 = 3;
+pub const SUPPORTED_VERSION: u32 = 1;
 
 /// The LLM backend types that ship. Adding one is adding an adapter and a
 /// variant.
@@ -62,17 +62,10 @@ pub const BUILTIN_TOOLS: [&str; 7] = ["read", "list", "grep", "glob", "write", "
 /// An agent a node on a hub server offers: the task and a copy of the files go
 /// there, and what the agent changed comes back.
 pub const NODE_AGENT: &str = "node";
-/// What `direct` was called before version 3. Named only to point someone
-/// whose config still uses it at the new name.
-const RENAMED_LLM_AGENT: &str = "llm";
 
 /// Where an OpenCode agent's model comes from.
 pub const PROVIDER_MODEL: &str = "provider";
 pub const LLM_BACKEND_MODEL: &str = "llm_backend";
-
-/// The type of Ensemble's former built-in harness, which no longer exists.
-/// Named only to tell someone whose config still uses it where to go.
-const REMOVED_ENSEMBLE_AGENT: &str = "ensemble";
 
 // ---------------------------------------------------------------------------
 // The document, resolved
@@ -547,8 +540,6 @@ pub struct Config {
     pub llm_backends: BTreeMap<String, LlmBackend>,
     /// Shared limits, by name.
     pub limits: BTreeMap<String, Limit>,
-    /// Where the team's tasks come from.
-    pub tracker: Tracker,
     /// The team's gates, by name.
     pub gates: BTreeMap<String, Gate>,
     /// The helper team: every agent, by name. There is no leader in the file:
@@ -556,13 +547,6 @@ pub struct Config {
     pub agents: BTreeMap<String, AgentConfig>,
     /// Where it was loaded from, for error messages.
     pub source: PathBuf,
-}
-
-/// Where the team's tasks come from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tracker {
-    /// Markdown files in Ensemble's state directory.
-    LocalMarkdown,
 }
 
 /// A command a task's work must pass.
@@ -667,7 +651,6 @@ impl std::error::Error for ConfigError {}
 pub mod edit;
 mod env;
 pub mod hub;
-pub mod migrate;
 pub mod node;
 mod raw;
 pub mod teams;

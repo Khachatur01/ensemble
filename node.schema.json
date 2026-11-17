@@ -8,8 +8,8 @@
   "additionalProperties": false,
   "properties": {
     "version": {
-      "description": "Node file format version. Always 4.",
-      "const": 4
+      "description": "Node file format version. Always 1.",
+      "const": 1
     },
     "name": {
       "description": "Its name, which a hub knows as <owner>/<name>: letters, digits, '-', '_' or '.'.",

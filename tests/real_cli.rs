@@ -23,27 +23,28 @@ fn on_path(program: &str) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// A scratch project with one agent of each real CLI available.
+/// A scratch computer, with its own XDG directories, whose node has one team,
+/// `probe`, of one agent of a real CLI, and a project to work in.
 struct Project(PathBuf);
 
 impl Project {
     fn new(config: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("ensemble-real-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("org")).unwrap();
+        let team = dir.join("config/ensemble/node/teams/probe");
+        std::fs::create_dir_all(&team).unwrap();
         std::fs::create_dir_all(dir.join("work")).unwrap();
-        let v3 = ensemble::config::migrate::to_v3(config).expect("a sample");
-        std::fs::write(dir.join("org/config.yaml"), v3).unwrap();
+        std::fs::write(team.join("config.yaml"), config).unwrap();
         Project(dir)
     }
 
     fn ensemble(&self, args: &[&str]) -> std::process::Output {
         Command::new(BIN)
             .args(args)
-            .arg("--team")
-            .arg(self.0.join("org"))
-            .arg("--state")
-            .arg(self.0.join("state"))
+            .env("XDG_CONFIG_HOME", self.0.join("config"))
+            .env("XDG_STATE_HOME", self.0.join("state"))
+            .env("XDG_CACHE_HOME", self.0.join("cache"))
+            .env("XDG_DATA_HOME", self.0.join("data"))
             .current_dir(self.0.join("work"))
             .output()
             .expect("run ensemble")
@@ -58,7 +59,7 @@ impl Drop for Project {
 
 fn config(agent: &str, adapter: &str) -> String {
     format!(
-        "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  {agent}:\n    prompt: Reply as briefly as you can.\n    max_seconds: 300\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n{adapter}"
+        "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  {agent}:\n    prompt: Reply as briefly as you can.\n    max_seconds: 300\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n{adapter}"
     )
 }
 
@@ -73,7 +74,7 @@ fn check(agent: &str, adapter: &str) {
     );
     let run = project.ensemble(&[
         "run",
-        agent,
+        &format!("probe/{agent}"),
         "Reply with the single word ok and do nothing else.",
     ]);
     let answer = String::from_utf8_lossy(&run.stdout).to_lowercase();

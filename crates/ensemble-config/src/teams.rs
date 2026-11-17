@@ -179,7 +179,6 @@ pub fn combine(teams: Vec<(String, Config)>, source: PathBuf) -> Config {
         version: SUPPORTED_VERSION,
         llm_backends: BTreeMap::new(),
         limits: BTreeMap::new(),
-        tracker: Tracker::LocalMarkdown,
         gates: BTreeMap::new(),
         agents: BTreeMap::new(),
         source,
@@ -230,7 +229,7 @@ mod tests {
     use super::*;
     use ensemble_core::workspace::testing::TempDir;
 
-    const TEAM: &str = "version: 3\nllm_backends:\n  local: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }\nlimits:\n  box: { max_concurrent: 1, budget: { type: unlimited } }\ntracker: { type: local_markdown }\ngates:\n  test: { command: \"true\", timeout_seconds: 5 }\nagents:\n  coder:\n    prompt: Codes.\n    max_seconds: 60\n    limit: box\n    isolation: shared\n    adapter: { type: direct, try: [{ backend: local, model: small }], when_none: fail, max_tokens: 100 }\n";
+    const TEAM: &str = "version: 1\nllm_backends:\n  local: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }\nlimits:\n  box: { max_concurrent: 1, budget: { type: unlimited } }\ngates:\n  test: { command: \"true\", timeout_seconds: 5 }\nagents:\n  coder:\n    prompt: Codes.\n    max_seconds: 60\n    limit: box\n    isolation: shared\n    adapter: { type: direct, try: [{ backend: local, model: small }], when_none: fail, max_tokens: 100 }\n";
 
     fn loads(text: &str) -> Config {
         parse(
@@ -289,7 +288,7 @@ mod tests {
                 .contains("already")
         );
         assert!(create_pending(&dir, "bad/name", TEAM, "x").is_err());
-        let err = create_pending(&dir, "broken", "version: 3\n", "x").unwrap_err();
+        let err = create_pending(&dir, "broken", "version: 1\n", "x").unwrap_err();
         assert!(err.contains("required"), "{err}");
         assert!(
             !dir.join("broken").exists(),

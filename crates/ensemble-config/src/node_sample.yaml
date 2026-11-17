@@ -11,7 +11,7 @@
 # Nothing has a default value. Each block under `offers` may be left out, which
 # means it is not used; `offers: {}` offers nothing.
 
-version: 4
+version: 1
 
 name: laptop                     # its name; a hub knows it as <you>/laptop
 

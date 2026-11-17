@@ -63,8 +63,8 @@ pub struct Tool {
     pub parameters: Value,
 }
 
-/// What an agent session needs from a hub's knowledge, wherever the hub is:
-/// embedded in this node ([`Memory`]), or a hub server reached over the link.
+/// What an agent session needs from a hub's knowledge: the vault itself
+/// ([`Memory`]), as the hub server uses it, or a hub server reached over the link.
 /// Async, because a hub server answers over the network.
 #[async_trait]
 pub trait KnowledgeAccess: Sync {

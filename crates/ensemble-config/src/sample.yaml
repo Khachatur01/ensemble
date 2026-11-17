@@ -19,7 +19,7 @@
 # Your node runs every team in its teams directory, where `ensemble team new`
 # writes this; the agent you talk to hands work to `<team>/<agent>` through it.
 
-version: 3
+version: 1
 
 # ---------------------------------------------------------------------------
 # LLM backends: model endpoints, such as a local model server. An agent names
@@ -70,13 +70,6 @@ limits:
     budget:
       type: per_hour_tokens
       tokens: 2000000
-
-# ---------------------------------------------------------------------------
-# Where the team's tasks come from. `local_markdown`: markdown files in
-# Ensemble's per-user state directory, one folder each.
-# ---------------------------------------------------------------------------
-tracker:
-  type: local_markdown
 
 # ---------------------------------------------------------------------------
 # Gates: checks a task's work must pass. None here; `{}` says there are none.

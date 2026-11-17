@@ -1,6 +1,6 @@
 //! The node's side of the link: one WebSocket to a hub server ([`Connection`]),
-//! and a hub server's knowledge over it, used by an agent session as if the hub
-//! were embedded ([`RemoteMemory`]), opened when it is first needed and opened
+//! and a hub server's knowledge over it, used by an agent session as if the vault
+//! were here ([`RemoteMemory`]), opened when it is first needed and opened
 //! again once when it breaks.
 
 use crate::protocol::{Event, HELLO, RECALL, Reply, Request, SHARE};

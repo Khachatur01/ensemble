@@ -54,24 +54,23 @@
   services.ensemble.node = {
     enable = true;
     user = "ana";
-    environmentFile = "/home/ana/.config/ensemble/keys.env";
+    environmentFile = "/run/secrets/ensemble-node.env";
     extraPackages = [ pkgs.hello ];
     settings = {
-      version = 4;
+      version = 1;
       name = "laptop";
       access = "private";
       hub = "ws://127.0.0.1:7700";
       offers = { };
     };
     teams.web.settings = {
-      version = 3;
+      version = 1;
       llm_backends.local = {
         type = "openai-compatible-api";
         base_url = "http://127.0.0.1:11434/v1";
         timeout_seconds = 600;
       };
       limits = { };
-      tracker.type = "local_markdown";
       gates = { };
       agents.summariser = {
         prompt = "You summarise what you are given in five bullet points or fewer.";

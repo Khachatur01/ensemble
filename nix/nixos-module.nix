@@ -108,8 +108,9 @@ in
         default = null;
         description = ''
           A file of NAME=value lines, the API keys the hub's backends name in
-          `api_key_env`. A path as a string, so the keys never enter the Nix
-          store.
+          `api_key_env`, given to `ensemble hub serve` as `--env-file`. A path
+          as a string, so the keys never enter the Nix store. Null reads the
+          hub's own `${hubHome}/ensemble/hub/.env`, when there is one.
         '';
       };
 

@@ -19,26 +19,12 @@ pub(crate) struct RawConfig {
     /// Named limits that agents share, such as one model server's concurrency
     /// or one subscription's budget. `{}` when there are none.
     pub(crate) limits: BTreeMap<String, RawLimit>,
-    /// Where the team's tasks come from.
-    pub(crate) tracker: RawTracker,
     /// Commands a task's work must pass. Defined here, by a person, so a task
     /// names a gate and cannot bring a command of its own.
     pub(crate) gates: BTreeMap<String, RawGate>,
     /// The helper team: its agents, by name.
     pub(crate) agents: BTreeMap<String, RawAgent>,
 }
-
-/// Where the team's tasks come from. `type` decides which settings it has.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-pub(crate) enum RawTracker {
-    #[serde(rename = "local_markdown")]
-    LocalMarkdown(RawLocalMarkdown),
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawLocalMarkdown {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -360,9 +360,8 @@ mod tests {
     /// A team of a coder on OpenCode and a reviewer on Claude Code.
     fn team() -> String {
         use crate::config::edit::{NewAgent, add_agent, agent_block};
-        let mut text = String::from(
-            "version: 3\nllm_backends: {}\nlimits: {}\ntracker:\n  type: local_markdown\ngates: {}\nagents: {}\n",
-        );
+        let mut text =
+            String::from("version: 1\nllm_backends: {}\nlimits: {}\ngates: {}\nagents: {}\n");
         for (name, adapter, writes) in [
             ("coder", OPENCODE_AGENT, true),
             ("reviewer", CLAUDE_CODE_AGENT, false),

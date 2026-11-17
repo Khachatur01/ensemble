@@ -24,7 +24,7 @@ in
         '';
         example = lib.literalExpression ''
           {
-            version = 4;
+            version = 1;
             name = "laptop";
             access = "private";
             hub = "wss://hub.example.com";
@@ -67,10 +67,9 @@ in
           {
             web.source = inputs.acme-web-team;
             docs.settings = {
-              version = 3;
+              version = 1;
               llm_backends = { };
               limits = { };
-              tracker.type = "local_markdown";
               gates = { };
               agents = { };
             };
@@ -83,8 +82,10 @@ in
         default = null;
         description = ''
           A file of NAME=value lines, the API keys the teams' backends name in
-          `api_key_env`, given to `ensemble node serve` as `--env-file`. A
-          path as a string, so the keys never enter the Nix store.
+          `api_key_env`, given to `ensemble node serve` as `--env-file`, such
+          as a secret sops-nix or agenix puts in /run. A path as a string, so
+          the keys never enter the Nix store. Null reads the node's own
+          `~/.config/ensemble/node/.env`, when there is one.
         '';
       };
 

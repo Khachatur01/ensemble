@@ -1,13 +1,6 @@
 use super::raw::*;
 use super::*;
 
-/// The documents below are written in version 1 shape, which is how most of
-/// them read best; this turns each into version 3 before loading it.
-fn parse(text: &str, path: &Path, env: &dyn Env) -> Result<Config, ConfigError> {
-    let text = migrate::to_v3(text).unwrap_or_else(|_| text.to_string());
-    super::parse(&text, path, env)
-}
-
 fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs
         .iter()
@@ -48,6 +41,7 @@ llm_backends:
     base_url: "http://10.10.10.5:8000/v1"
     api_key_env: OPENAI_REMOTE_API_KEY
     timeout_seconds: 300
+limits: {}
 gates: {}
 agents:
   planner:
@@ -60,9 +54,9 @@ agents:
       type: opencode
       model:
         type: llm_backend
-        backend: openai-local
-        name: qwen3-coder
-        context_window: 32768
+        try:
+          - { backend: openai-local, name: qwen3-coder, context_window: 32768 }
+        when_none: fail
       tools: [read, glob, grep, list]
       system_prompt: append
       max_steps: 30
@@ -77,9 +71,9 @@ agents:
       type: opencode
       model:
         type: llm_backend
-        backend: openai-remote
-        name: qwen3-coder
-        context_window: 32768
+        try:
+          - { backend: openai-remote, name: qwen3-coder, context_window: 32768 }
+        when_none: fail
       tools: [read, edit, bash]
       system_prompt: append
       max_steps: 30
@@ -121,7 +115,7 @@ fn refusal(doc: &str) -> String {
 #[test]
 fn the_reference_config_loads() {
     let c = parse(REFERENCE, &p(), &env(&[])).expect("reference config must load");
-    assert_eq!(c.version, 3);
+    assert_eq!(c.version, 1);
     assert_eq!(c.llm_backends.len(), 2);
     assert_eq!(c.llm_backends["openai-remote"].timeout_seconds, 300);
     assert_eq!(c.agent_names(), vec!["coder", "planner", "reviewer"]);
@@ -133,28 +127,6 @@ fn the_reference_config_loads() {
     assert!(coder.can_change_files());
     assert_eq!(c.agents["reviewer"].llm_backend(), None);
     assert_eq!(c.agents["reviewer"].context_window(), None);
-}
-
-#[test]
-fn the_removed_ensemble_type_points_to_builtin() {
-    let doc = REFERENCE.replace("type: claude-code", "type: ensemble");
-    let detail = refusal(&doc);
-    assert!(
-        detail.contains("agents.reviewer.adapter")
-            && detail.contains("'ensemble' was removed")
-            && detail.contains("type 'builtin'"),
-        "{detail}"
-    );
-}
-
-#[test]
-fn settings_of_the_removed_harness_are_unknown_fields() {
-    let doc = REFERENCE.replace(
-        "      max_steps: 30\n      command: opencode\n  coder:",
-        "      max_steps: 30\n      temperature: 0.2\n      command: opencode\n  coder:",
-    );
-    let detail = refusal(&doc);
-    assert!(detail.contains("temperature"), "{detail}");
 }
 
 #[test]
@@ -185,7 +157,7 @@ fn a_missing_setting_is_refused_by_name_and_place() {
             "base_url",
         ),
         (
-            "        context_window: 32768\n      tools: [read, edit, bash]",
+            "{ backend: openai-remote, name: qwen3-coder, context_window: 32768 }",
             "agents.coder",
             "context_window",
         ),
@@ -194,7 +166,7 @@ fn a_missing_setting_is_refused_by_name_and_place() {
         let kept = match key {
             "max_steps" => "      command: opencode\n  reviewer:",
             "system_prompt" => "      max_steps: 30\n      command: opencode\n  reviewer:",
-            "context_window" => "      tools: [read, edit, bash]",
+            "context_window" => "{ backend: openai-remote, name: qwen3-coder }",
             _ => "",
         };
         let doc = REFERENCE.replacen(line, kept, 1);
@@ -211,13 +183,13 @@ fn a_missing_setting_is_refused_by_name_and_place() {
 fn a_config_without_its_agents_or_backends_is_refused() {
     let detail = refusal("version: 1\ngates: {}\nagents: {}\n");
     assert!(detail.contains("`llm_backends` is required"), "{detail}");
-    let detail = refusal("version: 1\nllm_backends: {}\ngates: {}\n");
+    let detail = refusal("version: 1\nllm_backends: {}\nlimits: {}\ngates: {}\n");
     assert!(detail.contains("`agents` is required"), "{detail}");
-    let detail = refusal("version: 1\nllm_backends: {}\nagents: {}\n");
+    let detail = refusal("version: 1\nllm_backends: {}\nlimits: {}\nagents: {}\n");
     assert!(detail.contains("`gates` is required"), "{detail}");
     assert!(
         parse(
-            "version: 1\nllm_backends: {}\ngates: {}\nagents: {}\n",
+            "version: 1\nllm_backends: {}\nlimits: {}\ngates: {}\nagents: {}\n",
             &p(),
             &env(&[])
         )
@@ -243,7 +215,7 @@ fn a_setting_of_another_adapter_type_is_unknown_and_so_is_a_stray_context_window
 
     let provider = "model:\n        type: provider\n        name: opencode/big-pickle\n        context_window: 1\n";
     let doc = format!(
-        "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      {provider}      tools: []\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n"
+        "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      {provider}      tools: []\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n"
     );
     assert!(refusal(&doc).contains("context_window"));
 }
@@ -252,7 +224,7 @@ fn a_setting_of_another_adapter_type_is_unknown_and_so_is_a_stray_context_window
 fn an_opencode_model_is_a_provider_model_or_an_llm_backend_model() {
     let doc = |model: &str| {
         format!(
-            "version: 1\nllm_backends: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n"
+            "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n"
         )
     };
     let c = parse(
@@ -280,7 +252,7 @@ fn an_opencode_model_is_a_provider_model_or_an_llm_backend_model() {
 /// kind that runs on a backend, with `try` and `when_none` as given.
 fn with_fallback(opencode_try: &str, direct_try: &str, when_none: &str) -> String {
     format!(
-        "version: 3\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:2/v1\", timeout_seconds: 5 }}\n  claude: {{ type: anthropic-api, base_url: \"https://api.anthropic.com\", timeout_seconds: 5 }}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: opencode\n      model:\n        type: llm_backend\n        try: {opencode_try}\n        when_none: {when_none}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try: {direct_try}\n      when_none: {when_none}\n      max_tokens: 10\n"
+        "version: 1\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:2/v1\", timeout_seconds: 5 }}\n  claude: {{ type: anthropic-api, base_url: \"https://api.anthropic.com\", timeout_seconds: 5 }}\nlimits: {{}}\ngates: {{}}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: opencode\n      model:\n        type: llm_backend\n        try: {opencode_try}\n        when_none: {when_none}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try: {direct_try}\n      when_none: {when_none}\n      max_tokens: 10\n"
     )
 }
 
@@ -578,7 +550,6 @@ fn the_schema_requires_every_key_but_the_optional_two() {
         ("agent_recall", vec![]),
         ("limit", vec![]),
         ("budget_per_hour_tokens", vec![]),
-        ("tracker_local_markdown", vec![]),
         ("gate", vec![]),
         ("budget_unlimited", vec![]),
         ("budget_per_hour", vec![]),
@@ -607,7 +578,6 @@ fn the_schemas_choices_are_the_codes() {
     assert_eq!(tag("anthropic_api_backend"), ANTHROPIC_API);
     assert_eq!(tag("claude_code_adapter"), CLAUDE_CODE_AGENT);
     assert_eq!(tag("codex_adapter"), CODEX_AGENT);
-    assert_eq!(tag("tracker_local_markdown"), "local_markdown");
     assert_eq!(tag("opencode_adapter"), OPENCODE_AGENT);
     assert_eq!(tag("direct_adapter"), DIRECT_AGENT);
     assert_eq!(tag("node_adapter"), NODE_AGENT);
@@ -648,20 +618,16 @@ fn a_malformed_dotenv_line_is_reported_with_its_number() {
 #[test]
 fn an_env_file_fills_in_what_the_environment_lacks() {
     let tmp = ensemble_core::workspace::testing::TempDir::new();
-    let org = tmp.0.join("org");
-    std::fs::create_dir_all(&org).unwrap();
-    std::fs::write(
-        org.join(CONFIG_FILENAME),
-        migrate::to_v3(REFERENCE).unwrap(),
-    )
-    .unwrap();
+    let team = tmp.0.join("team");
+    std::fs::create_dir_all(&team).unwrap();
+    std::fs::write(team.join(CONFIG_FILENAME), REFERENCE).unwrap();
     let vars = tmp.0.join("keys.env");
     std::fs::write(
         &vars,
         "OPENAI_LOCAL_API_KEY=from-file\nOPENAI_REMOTE_API_KEY=remote-file\n",
     )
     .unwrap();
-    let path = config_path(&org);
+    let path = config_path(&team);
     let key = |c: &Config, name: &str| c.llm_backends[name].settings.api_key().map(String::from);
 
     let c = load(&path, Some(&vars), &env(&[])).unwrap();
@@ -681,11 +647,7 @@ fn an_env_file_fills_in_what_the_environment_lacks() {
 #[test]
 fn a_dotenv_beside_the_config_is_not_read() {
     let tmp = ensemble_core::workspace::testing::TempDir::new();
-    std::fs::write(
-        tmp.0.join(CONFIG_FILENAME),
-        migrate::to_v3(REFERENCE).unwrap(),
-    )
-    .unwrap();
+    std::fs::write(tmp.0.join(CONFIG_FILENAME), REFERENCE).unwrap();
     std::fs::write(tmp.0.join(".env"), "OPENAI_LOCAL_API_KEY=from-file\n").unwrap();
     let c = load(&config_path(&tmp.0), None, &env(&[])).unwrap();
     assert_eq!(c.llm_backends["openai-local"].settings.api_key(), None);
@@ -694,11 +656,7 @@ fn a_dotenv_beside_the_config_is_not_read() {
 #[test]
 fn a_named_env_file_that_is_missing_is_an_error() {
     let tmp = ensemble_core::workspace::testing::TempDir::new();
-    std::fs::write(
-        tmp.0.join(CONFIG_FILENAME),
-        migrate::to_v3(REFERENCE).unwrap(),
-    )
-    .unwrap();
+    std::fs::write(tmp.0.join(CONFIG_FILENAME), REFERENCE).unwrap();
     let err = load(
         &config_path(&tmp.0),
         Some(&tmp.0.join("nope.env")),
@@ -750,7 +708,6 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
     fn of_type<'a>(all: &[&'a serde_json::Value], kind: &str) -> Vec<&'a serde_json::Value> {
         all.iter().copied().filter(|b| b["type"] == kind).collect()
     }
-    let trackers: Vec<&serde_json::Value> = vec![&doc["tracker"]];
     let agents: Vec<&serde_json::Value> = doc["agents"].as_object().unwrap().values().collect();
     let adapters = |kind: &str| -> Vec<&serde_json::Value> {
         agents
@@ -779,7 +736,6 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
             of_type(&backends, OPENAI_COMPATIBLE_API),
         ),
         ("anthropic_api_backend", of_type(&backends, ANTHROPIC_API)),
-        ("tracker_local_markdown", trackers),
         ("agent", agents.clone()),
         (
             "agent_recall",
@@ -879,6 +835,7 @@ fn an_opencode_agent_checks_its_fields() {
     let doc = r#"
 version: 1
 llm_backends: {}
+limits: {}
 gates: {}
 agents:
   doer:
@@ -905,6 +862,7 @@ agents:
     let bad = r#"
 version: 1
 llm_backends: {}
+limits: {}
 gates: {}
 agents:
   x:
@@ -1002,7 +960,7 @@ fn a_budget_is_unlimited_or_a_number_of_runs_per_hour() {
 #[test]
 fn an_llm_agent_is_one_request_to_a_defined_backend() {
     let doc = format!(
-        "{REFERENCE}  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: direct\n      backend: openai-local\n      model: small\n      max_tokens: 400\n"
+        "{REFERENCE}  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: direct\n      try: [{{ backend: openai-local, model: small }}]\n      when_none: fail\n      max_tokens: 400\n"
     );
     let c = parse(&doc, &p(), &env(&[])).unwrap();
     let a = &c.agents["summariser"];
@@ -1013,8 +971,8 @@ fn an_llm_agent_is_one_request_to_a_defined_backend() {
     assert_eq!(a.runs_on(), "direct on openai-local");
     assert!(!a.has_tools() && !a.can_change_files());
     let bad = doc.replace(
-        "backend: openai-local\n      model: small\n      max_tokens: 400",
-        "backend: nowhere\n      model: small\n      max_tokens: 0",
+        "try: [{ backend: openai-local, model: small }]\n      when_none: fail\n      max_tokens: 400",
+        "try: [{ backend: nowhere, model: small }]\n      when_none: fail\n      max_tokens: 0",
     );
     let joined = joined_problems(&bad);
     assert!(
@@ -1083,6 +1041,7 @@ fn a_backend_may_name_no_key_at_all() {
 version: 1
 llm_backends:
   x: { type: openai-compatible-api, base_url: "http://127.0.0.1:1/v1", timeout_seconds: 5 }
+limits: {}
 gates: {}
 agents: {}
 "#;
@@ -1100,6 +1059,7 @@ llm_backends:
     base_url: "http://127.0.0.1:1/v1"
     timeout_seconds: 5
     api_key: "sk-oops"
+limits: {}
 gates: {}
 agents: {}
 "#;
@@ -1140,6 +1100,7 @@ fn an_unknown_backend_type_lists_the_known_ones() {
 version: 1
 llm_backends:
   x: { type: ollama }
+limits: {}
 gates: {}
 agents: {}
 "#;
@@ -1155,6 +1116,7 @@ fn a_base_url_without_a_scheme_is_refused() {
 version: 1
 llm_backends:
   x: { type: openai-compatible-api, base_url: "127.0.0.1:8000/v1", timeout_seconds: 5 }
+limits: {}
 gates: {}
 agents: {}
 "#;
@@ -1167,6 +1129,7 @@ fn trailing_slashes_are_normalised_away() {
 version: 1
 llm_backends:
   x: { type: openai-compatible-api, base_url: "http://127.0.0.1:8000/v1/", timeout_seconds: 5 }
+limits: {}
 gates: {}
 agents: {}
 "#;
@@ -1179,7 +1142,7 @@ agents: {}
 
 #[test]
 fn an_unsupported_version_is_refused() {
-    let yaml = "version: 9\nllm_backends: {}\nlimits: {}\ntracker: { type: local_markdown }\ngates: {}\nagents: {}\n";
+    let yaml = "version: 9\nllm_backends: {}\nlimits: {}\ngates: {}\nagents: {}\n";
     assert!(joined_problems(yaml).contains("version"));
 }
 
@@ -1196,6 +1159,7 @@ fn every_independent_problem_is_reported_in_one_pass() {
 version: 9
 llm_backends:
   x: { type: openai-compatible-api, base_url: "nope", timeout_seconds: 0 }
+limits: {}
 gates: {}
 agents:
   r:
@@ -1206,7 +1170,7 @@ agents:
       type: unlimited
     adapter:
       type: opencode
-      model: { type: llm_backend, backend: missing, name: "", context_window: 0 }
+      model: { type: llm_backend, try: [{ backend: missing, name: "", context_window: 0 }], when_none: fail }
       tools: []
       system_prompt: append
       max_steps: 1
@@ -1222,6 +1186,7 @@ fn zero_timeout_is_refused() {
 version: 1
 llm_backends:
   x: { type: openai-compatible-api, base_url: "http://127.0.0.1:1/v1", timeout_seconds: 0 }
+limits: {}
 gates: {}
 agents: {}
 "#;
@@ -1275,7 +1240,7 @@ fn recall_is_optional_absent_means_none_and_needs_a_size() {
 fn flat_team() -> String {
     let agent = "    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: { type: provider, name: opencode/m }\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n";
     format!(
-        "version: 3\nllm_backends: {{}}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates:\n  test: {{ command: make test, timeout_seconds: 5 }}\nagents:\n  coder:\n{agent}  planner:\n{agent}"
+        "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates:\n  test: {{ command: make test, timeout_seconds: 5 }}\nagents:\n  coder:\n{agent}  planner:\n{agent}"
     )
 }
 
@@ -1286,7 +1251,6 @@ fn agents_and_gates_are_found_by_their_plain_names() {
     assert_eq!(c.agent("planner").unwrap().name, "planner");
     assert!(c.agent("software/planner").is_none());
     assert!(c.gate("test").is_some() && c.gate("drc").is_none());
-    assert_eq!(c.tracker, Tracker::LocalMarkdown);
 }
 
 #[test]
@@ -1300,44 +1264,17 @@ fn agent_and_gate_names_must_not_contain_a_slash() {
 }
 
 #[test]
-fn the_team_must_name_its_tracker() {
-    let doc = flat_team().replacen("tracker: { type: local_markdown }\n", "", 1);
-    let detail = refusal(&doc);
-    assert!(detail.contains("`tracker` is required"), "{detail}");
-    let doc = flat_team().replacen("local_markdown", "carrier_pigeon", 1);
-    let detail = refusal(&doc);
-    assert!(
-        detail.contains("carrier_pigeon") || detail.contains("unknown variant"),
-        "{detail}"
-    );
-}
-
-#[test]
-fn version_two_is_refused_with_the_command_that_migrates_it() {
-    let doc = flat_team().replacen("version: 3", "version: 2", 1);
+fn another_version_is_refused() {
+    let doc = flat_team().replacen("version: 1", "version: 2", 1);
     let joined = super::parse(&doc, &p(), &env(&[])).unwrap_err().to_string();
     assert!(joined.contains("version: 2 is not supported"), "{joined}");
-}
-
-#[test]
-fn the_old_llm_adapter_name_says_what_it_is_called_now() {
-    let doc = REFERENCE.to_string()
-        + "  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: llm\n      backend: openai-local\n      model: small\n      max_tokens: 400\n";
-    let doc = migrate::to_v3(&doc)
-        .unwrap()
-        .replace("type: direct", "type: llm");
-    let detail = super::parse(&doc, &p(), &env(&[])).unwrap_err().to_string();
-    assert!(
-        detail.contains("'direct'") && detail.contains("ensemble migrate"),
-        "{detail}"
-    );
 }
 
 /// A document with one shared limit and two agents, written out in full.
 fn with_limits(agent_a: &str, agent_b: &str) -> String {
     let adapter = "    isolation: shared\n    adapter: { type: opencode, model: { type: provider, name: opencode/m }, tools: [read], system_prompt: append, max_steps: 3, command: opencode }\n";
     format!(
-        "version: 3\nllm_backends: {{}}\nlimits:\n  server:\n    max_concurrent: 1\n    budget: {{ type: per_hour_tokens, tokens: 5000 }}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  a:\n    max_seconds: 60\n{agent_a}{adapter}  b:\n    max_seconds: 60\n{agent_b}{adapter}"
+        "version: 1\nllm_backends: {{}}\nlimits:\n  server:\n    max_concurrent: 1\n    budget: {{ type: per_hour_tokens, tokens: 5000 }}\ngates: {{}}\nagents:\n  a:\n    max_seconds: 60\n{agent_a}{adapter}  b:\n    max_seconds: 60\n{agent_b}{adapter}"
     )
 }
 
@@ -1452,16 +1389,16 @@ fn an_anthropic_backend_loads_and_only_an_llm_agent_may_run_on_it() {
 
     // An llm agent may name it.
     let llm = doc.replace(
-        "      type: opencode\n      model:\n        type: llm_backend\n        backend: openai-remote\n        name: qwen3-coder\n        context_window: 32768\n      tools: [read, edit, bash]\n      system_prompt: append\n      max_steps: 30\n      command: opencode",
-        "      type: direct\n      backend: claude-api\n      model: claude-haiku-4-5\n      max_tokens: 500",
+        "      type: opencode\n      model:\n        type: llm_backend\n        try:\n          - { backend: openai-remote, name: qwen3-coder, context_window: 32768 }\n        when_none: fail\n      tools: [read, edit, bash]\n      system_prompt: append\n      max_steps: 30\n      command: opencode",
+        "      type: direct\n      try: [{ backend: claude-api, model: claude-haiku-4-5 }]\n      when_none: fail\n      max_tokens: 500",
     );
     let c = parse(&llm, &p(), &env(&[])).unwrap();
     assert_eq!(c.agents["coder"].llm_backend(), Some("claude-api"));
 
     // An OpenCode agent may not: it needs an openai-compatible one.
     let oc = doc.replace(
-        "        backend: openai-remote\n        name: qwen3-coder",
-        "        backend: claude-api\n        name: claude-haiku-4-5",
+        "{ backend: openai-remote, name: qwen3-coder,",
+        "{ backend: claude-api, name: claude-haiku-4-5,",
     );
     let joined = joined_problems(&oc);
     assert!(
@@ -1551,9 +1488,6 @@ fn a_hub_inbox_names_its_tracker_and_label() {
     }
     let said = hub_refusal(&doc.replace("type: local_markdown", "type: jira"));
     assert!(said.contains("unknown variant `jira`"), "{said}");
-    // The person and their folders belonged to the embedded hub, which is gone.
-    let said = hub_refusal(&doc.replace("  label: ensemble\n", "  label: ensemble\n  user: ana\n"));
-    assert!(said.contains("unknown field `user`"), "{said}");
 }
 
 #[test]
@@ -1781,7 +1715,7 @@ fn a_node_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
             .to_string()
     };
     let said = problems(
-        "version: 4\nname: a/b\naccess: shared\nhub: http://hub\noffers:\n  runs: { agents: [] }\n  models: { base_url: localhost, timeout_seconds: 0, names: [] }\n",
+        "version: 1\nname: a/b\naccess: shared\nhub: http://hub\noffers:\n  runs: { agents: [] }\n  models: { base_url: localhost, timeout_seconds: 0, names: [] }\n",
     );
     for wanted in [
         "name: 'a/b'",
@@ -1794,28 +1728,11 @@ fn a_node_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
         assert!(said.contains(wanted), "{wanted}: {said}");
     }
     let said =
-        problems("version: 4\nname: box\naccess: shared\noffers:\n  runs: { agents: [coder] }\n");
+        problems("version: 1\nname: box\naccess: shared\noffers:\n  runs: { agents: [coder] }\n");
     assert!(said.contains("as `<team>/<agent>`"), "{said}");
     assert!(said.contains("there is no `hub`"), "{said}");
-    let said = problems("version: 3\nname: box\naccess: private\nteam: /t\noffers: {}\n");
-    assert!(
-        said.contains("version: 3 is no longer read") && said.contains("ensemble team add"),
-        "{said}"
-    );
-    let said = problems("version: 1\nprojects: { shop: /code/shop }\n");
-    assert!(
-        said.contains("version: 1 is no longer read") && said.contains("access: private"),
-        "{said}"
-    );
-    let said = problems(
-        "version: 2\nname: box\naccess: private\nprojects: {}\noffers:\n  runs: { team: /t, agents: [a] }\n",
-    );
-    assert!(
-        said.contains("version: 2 is no longer read") && said.contains("teams directory"),
-        "{said}"
-    );
     let bare = parse_node(
-        "version: 4\nname: box\naccess: shared\noffers: {}\n",
+        "version: 1\nname: box\naccess: shared\noffers: {}\n",
         Path::new("node.yaml"),
     )
     .unwrap();
@@ -1862,7 +1779,7 @@ fn a_node_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
 fn a_node_agent_names_a_hub_server_an_agent_and_nodes_as_owner_and_name() {
     let team = |adapter: &str| {
         format!(
-            "version: 3\nllm_backends: {{}}\nlimits: {{}}\ntracker: {{ type: local_markdown }}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: worktree\n    budget: {{ type: unlimited }}\n    adapter: {adapter}\n"
+            "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: worktree\n    budget: {{ type: unlimited }}\n    adapter: {adapter}\n"
         )
     };
     let c = parse(

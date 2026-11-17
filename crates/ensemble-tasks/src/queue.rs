@@ -28,7 +28,6 @@ use crate::tasks::{
     ASK_MARKER, Entry, HANDOFF_MARKER, Status, Store, Ticket, handoff_in, idle_line, minutes,
     question_in, waiting_for,
 };
-use crate::tracker::Tracker;
 use ensemble_agents::external::gate;
 use ensemble_agents::router::Ensemble;
 use ensemble_agents::runtime::blocking;
@@ -624,10 +623,8 @@ impl<'e> Queue<'e> {
                         ticket.id.clone(),
                         Self::live(&ticket.agent, &ticket.title, cancel.clone(), false),
                     );
-                    // The configured tracker keeps the tasks.
-                    let tracker = crate::tracker::for_config(self.ensemble.config().tracker, store);
                     runs.push(Box::pin(async move {
-                        self.run_ticket(tracker, *ticket, slot, &cancel).await
+                        self.run_ticket(store, *ticket, slot, &cancel).await
                     }));
                 }
             }
@@ -639,13 +636,7 @@ impl<'e> Queue<'e> {
         }
     }
 
-    async fn run_ticket(
-        &self,
-        store: &dyn Tracker,
-        ticket: Ticket,
-        slot: Slot<'_>,
-        cancel: &AtomicBool,
-    ) {
+    async fn run_ticket(&self, store: &Store, ticket: Ticket, slot: Slot<'_>, cancel: &AtomicBool) {
         let since = SystemTime::now();
         store.set_state(&ticket.id, "running", since);
         let place = self
@@ -802,7 +793,7 @@ impl<'e> Queue<'e> {
     /// gate's output. Returns the outcome and front matter for `result.md`.
     async fn work_on(
         &self,
-        store: &dyn Tracker,
+        store: &Store,
         ticket: &Ticket,
         dir: &Path,
         cancel: &AtomicBool,

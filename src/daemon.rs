@@ -15,10 +15,10 @@
 use crate::STOP;
 use ensemble::config::{Config, Node};
 use ensemble::folders::Folders;
-use ensemble::harness::mcp;
-use ensemble::harness::queue::Queue;
 use ensemble::knowledge::KnowledgeAccess;
 use ensemble::link::RemoteMemory;
+use ensemble::mcp;
+use ensemble::queue::Queue;
 use ensemble::router::Ensemble;
 use ensemble::tasks::Store;
 use std::collections::HashMap;
@@ -223,8 +223,7 @@ impl<'a> Daemon<'a> {
             return Ok(open.clone());
         }
         let config = self.team.read().unwrap_or_else(|e| e.into_inner()).clone();
-        // Each folder keeps its own state: `--state` would put every folder's
-        // tasks in one place.
+        // Each folder keeps its own state.
         let ensemble: &'static Ensemble =
             Box::leak(Box::new(Ensemble::new(config, Some(dir.clone()))));
         // The hub's knowledge, named for the folder in what is shared.

@@ -1,5 +1,5 @@
-//! The task inbox on a hub server. It watches the tracker as the embedded inbox
-//! does, but the work happens on members' computers:
+//! The task inbox on a hub server. It watches the tracker, and the work
+//! happens on members' computers:
 //!
 //! 1. An open issue with the label, assigned to someone who is an account's
 //!    tracker name and whose role may receive `tasks`, becomes a **delivery**
@@ -34,9 +34,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// Where deliveries were kept before the database; taken into it once.
-const DELIVERIES_FILE: &str = "deliveries.json";
-
 /// Where a delivery stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -70,8 +67,7 @@ pub struct Delivery {
     pub refused: bool,
 }
 
-/// The deliveries kept in `dir`, by issue. Those from before the database,
-/// in `deliveries.json`, are taken into it once.
+/// The deliveries kept in `dir`, by issue.
 fn load(dir: &std::path::Path) -> Result<BTreeMap<String, Delivery>, String> {
     store::with(dir, async |c| {
         let mut out = BTreeMap::new();
@@ -82,25 +78,6 @@ fn load(dir: &std::path::Path) -> Result<BTreeMap<String, Delivery>, String> {
             let delivery = serde_json::from_str(&data)
                 .map_err(|e| format!("the delivery of issue {issue} is unreadable: {e}"))?;
             out.insert(issue, delivery);
-        }
-        let old = dir.join(DELIVERIES_FILE);
-        if out.is_empty()
-            && let Ok(text) = std::fs::read_to_string(&old)
-        {
-            let before: BTreeMap<String, Delivery> = serde_json::from_str(&text)
-                .map_err(|e| format!("{} is not readable: {e}", old.display()))?;
-            let mut statements = Vec::new();
-            for (issue, delivery) in &before {
-                let data = serde_json::to_string(delivery).map_err(|e| e.to_string())?;
-                statements.push((
-                    "INSERT INTO deliveries (issue, data) VALUES (?1, ?2)",
-                    vec![store::Value::Text(issue.clone()), store::Value::Text(data)],
-                ));
-            }
-            store::transaction(c, statements).await?;
-            std::fs::rename(&old, old.with_extension("json.imported"))
-                .map_err(|e| format!("cannot move {} aside: {e}", old.display()))?;
-            out = before;
         }
         Ok(out)
     })
@@ -478,19 +455,6 @@ mod tests {
         let roles = w.inbox.roles.clone();
         let again = ServerInbox::new(&w.inbox.tasks, &roles, state.clone()).unwrap();
         assert_eq!(again.deliveries(), kept);
-
-        // A hub from before the database: its file is read once, then set aside.
-        let old = w.tmp.0.join("old");
-        std::fs::create_dir_all(&old).unwrap();
-        std::fs::write(
-            old.join(DELIVERIES_FILE),
-            serde_json::to_string(&kept).unwrap(),
-        )
-        .unwrap();
-        let taken = ServerInbox::new(&w.inbox.tasks, &roles, old.clone()).unwrap();
-        assert_eq!(taken.deliveries(), kept);
-        assert!(!old.join(DELIVERIES_FILE).exists());
-        assert!(old.join("deliveries.json.imported").exists());
     }
 
     impl World {
