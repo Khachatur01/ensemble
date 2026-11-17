@@ -17,9 +17,8 @@
 //! The deliveries are kept in the hub's database (`ensemble_link::store`), in
 //! its state directory.
 
-use crate::bridge::{AUTHOR, reply_after};
 use crate::tracker::{Issue, IssueTracker, Status};
-use crate::work::{self, Update};
+use crate::work::{self, AUTHOR, Update, reply_after};
 use ensemble_config::{Permission, Tasks};
 use ensemble_link::Users;
 use ensemble_link::protocol::{
@@ -453,7 +452,6 @@ mod tests {
             },
             label: "ensemble".into(),
             poll_seconds: 1,
-            personal: None,
         };
         let inbox = ServerInbox::new(&tasks, &roles, tmp.0.join("state")).unwrap();
         World { tmp, inbox }

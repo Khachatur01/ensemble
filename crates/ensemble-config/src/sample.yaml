@@ -112,7 +112,7 @@ agents:
       You implement exactly what is asked, in the style of the surrounding
       code. Read the relevant files first, make the change, and report what
       you changed.
-    # With a hub that keeps knowledge (--hub), each task and delegation comes
+    # With a hub (named as `hub:` in node.yaml), each task and delegation comes
     # with the notes of the vault about it, at most this many characters. They
     # go to the model the agent runs on. Leave it out for no notes.
     recall:
@@ -253,7 +253,7 @@ agents:
       # The agent the nodes offer, by its name in their helper team.
       agent: coder
       # The nodes that may run it, as <owner>/<name>, tried in order;
-      # `ensemble nodes --hub <url>` lists them.
+      # `ensemble nodes` lists them.
       nodes: [kim/gpu-box]
 
   # The Codex CLI, on your own login.

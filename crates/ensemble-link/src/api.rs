@@ -1,7 +1,7 @@
 //! The hub server's REST API, under `/api/v1/`, for people and the UI to come:
 //! accounts with a password, sign-in sessions, access tokens, and an admin
 //! managing users. JSON in and out, a bearer token where one is needed. It
-//! exists only on a hub server; an embedded hub has one user and no accounts.
+//! is the hub's alone: a node has no accounts.
 //!
 //! A **session** comes from logging in with the password, and only a session
 //! may change the password or make and revoke access tokens, so a stolen access

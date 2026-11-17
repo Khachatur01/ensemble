@@ -1,11 +1,22 @@
 //! The half of the inbox that lives where the work happens: an issue made into
-//! a task in a folder's state directory, and what the task has to say back. An
-//! embedded hub's inbox uses it in the same process as the tracker; on a team,
-//! a member's node uses it, and the hub server writes what it says on the
-//! issue.
+//! a task in a folder's state directory, and what the task has to say back. A
+//! member's node uses it, and the hub server writes what it says on the issue.
 
-use crate::tracker::{Issue, Status};
+use crate::tracker::{Comment, Issue, Status};
 use ensemble_tasks::tasks::{Status as TaskStatus, Store, Ticket};
+
+/// Who the inbox's comments are by.
+pub const AUTHOR: &str = "ensemble";
+
+/// The first comment by `person` after the first `seen` comments: their reply
+/// to a question.
+pub fn reply_after(comments: &[Comment], seen: usize, person: &str) -> Option<String> {
+    comments
+        .iter()
+        .skip(seen)
+        .find(|c| c.author == person)
+        .map(|c| c.text.clone())
+}
 
 /// What a task has to say back on its issue.
 #[derive(Debug, Clone, PartialEq, Eq)]

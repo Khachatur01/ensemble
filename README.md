@@ -12,8 +12,9 @@ provide computing power, with work spread across them.
 - **The hub** provides services: task tracking (issues from a tracker become
   tasks on the right person's node, and report back), a knowledge vault that
   agents share to and recall from, accounts and tokens, and integrations, with
-  Telegram and others to come. It runs on a server for a team, or embedded in
-  your own node when you work alone.
+  Telegram and others to come. It has no team and runs no agents: it is its
+  own process, on a server for a team or on your own computer when you work
+  alone.
 - **MCP is how you reach your node.** The agent CLI you already use connects
   to it as an MCP server and sees the helper team as tools: it hands work to
   an agent by name, submits tasks, and follows them. MCP is one way in, not
@@ -63,9 +64,9 @@ the `builtin` adapter is a loop in Ensemble itself. Six adapters ship:
 
 A team can mix them, and your agent delegates to any of them the same way.
 
-With a hub (`--hub`), Ensemble also keeps your knowledge: what your agent
-shares when you ask becomes notes in a git vault, and later work recalls them.
-See [Knowledge](#knowledge).
+With a hub, Ensemble also keeps your knowledge: what your agent shares when you
+ask becomes notes in a git vault, and later work recalls them. See
+[The hub](#the-hub) and [Knowledge](#knowledge).
 
 ## How it works
 
@@ -98,10 +99,10 @@ See [Knowledge](#knowledge).
 - **Load spreads across nodes.** An agent of `type: node` runs on another
   node through the hub, and a node's model servers can serve the whole team
   through the hub as an OpenAI-compatible endpoint.
-- **The hub provides the services.** On a server (`ensemble hub serve`), it
-  keeps the team's accounts and knowledge, turns tracker issues into tasks on
-  the right person's node, and connects the nodes. Alone, embed it in your
-  node with `--hub <dir>`: your own knowledge vault and tracker.
+- **The hub provides the services.** `ensemble hub serve`, on a server for a
+  team or on your own computer, keeps the accounts and knowledge, turns
+  tracker issues into tasks on the right person's node, and connects the
+  nodes. Each node names its hub in its `node.yaml`.
 - **Work is kept outside your projects**, in a per-user state directory: tasks
   as markdown tickets, run logs, git worktrees, usage and run records.
 
@@ -118,7 +119,7 @@ $ ensemble setup
 `setup` finds the agent CLIs you have (`claude`, `opencode`, `codex`) and any
 local model server, asks which one you talk to (the **client**) and what to
 call this computer's node, writes the node file
-(`~/.config/ensemble/node.yaml`), registers Ensemble with your client and
+(`~/.config/ensemble/node/node.yaml`), registers Ensemble with your client and
 checks the node's helper teams. Give it a team, then run it:
 
 ```console
@@ -192,7 +193,7 @@ serves its agents' models).
 
 A helper team is one directory with one file in it: `config.yaml`, the llm
 backends and the agents. Commit it; it holds no secrets. The node runs every
-team in its teams directory (`~/.local/share/ensemble/teams/`, see
+team in its teams directory (`~/.config/ensemble/node/teams/`, see
 [Teams](#teams)) as one helper team: each name of a team, its agents, model
 servers, limits and gates, is `<team>/<name>`, so two teams may both have a
 `coder`. Commands that change a team name it with `--team <name>`; every other
@@ -887,7 +888,7 @@ permission modes that skip the checks, and about token budgets.
 ### Teams
 
 The node keeps its helper teams in one directory,
-`$XDG_DATA_HOME/ensemble/teams/` (by default `~/.local/share/ensemble/teams/`),
+`~/.config/ensemble/node/teams/` (under `$XDG_CONFIG_HOME` when that is set),
 a folder per team named for it, and runs every team that is ready. A team gets
 there in one of four ways:
 
@@ -975,7 +976,7 @@ Every independent problem is reported in one pass:
 
 ```console
 $ ensemble check
-ensemble: team 'web': ~/.local/share/ensemble/teams/web/config.yaml is invalid:
+ensemble: team 'web': ~/.config/ensemble/node/teams/web/config.yaml is invalid:
   - version: 4 is not supported; this build understands version 3
   - llm_backends.x: type 'ollama' is unknown. Known types: openai-compatible-api.
   - agents.coder.adapter: LLM backend 'lcoal' is not defined. Defined LLM backends: local.
@@ -985,246 +986,97 @@ ensemble: team 'web': ~/.local/share/ensemble/teams/web/config.yaml is invalid:
 A typo'd key is an error, never a silent default, and a missing key is an
 error too: ``agents.coder: `max_seconds` is required at line 12 column 5``.
 
-## Knowledge
+## The hub
 
-A **hub** keeps your knowledge: what your agents share becomes notes in a
-vault, and later work recalls them. It is configured in its own `hub.yaml`, in a
-directory you name with `--hub`, apart from the helper team, which a company may
-share. Without `--hub` there is no knowledge; everything above works the same.
+A **hub** provides services and connects nodes: a knowledge vault, a task
+inbox fed by a tracker, accounts and tokens, and the routing that lets nodes
+lend their agents and models to each other. It has no helper team and runs no
+agents. It is always its own process, `ensemble hub serve`: a team runs one on
+a server, and one person runs one on their own computer beside their node.
+Its files are in `~/.config/ensemble/hub/`:
+
+```text
+~/.config/ensemble/hub/
+  hub.yaml       its settings
+  database.db    its accounts, tokens and deliveries (Turso), readable only by you
+  vault/         its knowledge vault, a git repository
+```
+
+On the hub's computer:
 
 ```console
-$ ensemble hub init --hub ~/hub     # writes ~/hub/hub.yaml and makes ~/hub/vault a git repository
-$ ensemble hub check --hub ~/hub    # validates it; says which model would distill shares now
-$ ensemble node serve --hub ~/hub     # the node runs with that hub
+$ ensemble hub init                       # hub.yaml with every setting, and the vault
+$ $EDITOR ~/.config/ensemble/hub/hub.yaml # its name, models, roles, tracker
+$ ensemble hub check                      # validates it; says which model would distill shares now
+$ ensemble hub user add root --role admin # the first admin; prints their token once
+$ ensemble hub user password root         # typed without echo
+$ ensemble hub serve                      # until Ctrl-C or SIGTERM
 ```
 
 ```yaml
 version: 1
-owner: Ana                  # named in everything you share
-llm_backends:               # the hub's own model servers, the same kinds as config.yaml
-  local: { type: openai-compatible-api, base_url: "http://127.0.0.1:11434/v1", timeout_seconds: 300 }
-knowledge:                  # leave it out for no knowledge
-  vault: vault              # a git repository, relative to this directory
+owner: Acme                 # the hub's name
+llm_backends:               # the models the hub itself calls, to distill knowledge
+  central: { type: openai-compatible-api, base_url: "http://127.0.0.1:8000/v1", timeout_seconds: 300 }
+knowledge:
+  vault: vault              # a git repository, relative to this folder
   distill:                  # the models that turn shares into notes; no tools
     try:
-      - { backend: local, model: qwen3.5:9b }
+      - { backend: central, model: qwen3.5-72b }
     when_none: wait         # or fail: the share goes to review/ with why
     max_tokens: 4000
   recall:
     max_notes: 8
     max_chars: 6000         # all returned notes together
-```
-
-**Sharing is explicit.** Nothing reads your CLI's transcripts and nothing
-proxies its traffic, so a private or throwaway conversation stays private and no
-subscription's rules are touched. When you want something kept, tell your agent
-in plain words ("share what we decided about the deploys"); it picks what is
-worth keeping and calls the `share` tool. `ensemble share --hub <dir> --title T`
-does the same by hand. A share that looks like it holds a key or a private key
-is refused, so the agent shares again without it: the vault keeps everything it
-is given.
-
-**Only Ensemble writes notes.** Each share is kept as it arrived, and the
-pipeline turns it into notes in the background, while your node runs with that
-hub, or now with `ensemble knowledge distill`:
-
-1. One chat request extracts typed items (decision, fact, how-to, lesson,
-   commitment, preference, ownership); chatter gives none and is skipped.
-2. Each item is compared with the notes most like it. It becomes a new note,
-   is merged into one, confirms one, or, when it contradicts one, waits in
-   `review/` for you.
-3. The notes are written and the vault is committed, one commit per share.
-
-To correct a note, share the correction. To read the vault, open it as a
-folder in Obsidian, or anything that reads Markdown:
-
-```text
-vault/
-  shares/<yyyy>/<mm>/<id>.md   each share as it arrived, never changed
-  notes/<slug>.md              one note per topic, frontmatter: kind, title, tags,
-                               scope, sources (share ids), shared_by, pipeline, updated
-  review/<share-id>.md         what the pipeline would not write, and why
-  log.jsonl                    what the pipeline did with each share
-```
-
-Because the notes are made from the shares, a better model or a new note format
-needs no migration: `ensemble knowledge rebuild` deletes the notes and makes
-them again from every share, in one commit.
-
-**Shared text is data, not instructions.** It may carry instructions meant for
-a model, so the model that distills has no tools (one chat request, never an
-agent CLI); shared text goes in between markers with a nonce nobody can guess;
-an answer must be the JSON asked for and may only change the notes it was
-offered, or it goes to `review/`; and every note names the shares it came from.
-
-**Recall.** Your agent calls `recall` with a topic before work where your
-earlier decisions or setup may matter, and gets the matching notes, best first,
-within `max_notes` and `max_chars`, marked as reference data.
-`ensemble recall --hub <dir> <topic>` prints the same. The search is by words
-(BM25, a title's words counting more), with no index to keep.
-
-**Notes in your own sessions.** Your agent recalls when it decides to. With
-session hooks, Claude Code and Codex get the notes without asking: before each
-prompt you send, the notes about it go into the conversation, and at the start
-of a session, those about the project's folder. Each note is given once per
-session, and again after the context is cleared or compacted. A prompt of one
-or two words recalls nothing. Set them up when you register Ensemble:
-
-```sh
-ensemble connect --client claude-code --hub <hub> --hooks
-```
-
-This writes the hook into Claude Code's `.claude/settings.local.json` of the
-project you run it in (not committed), or into your own `~/.claude/settings.json`
-with `--global`. For Codex, it writes `.codex/hooks.json`, or `~/.codex/hooks.json`
-with `--global`, and Codex runs it once you trust it in `/hooks`. Other hooks in
-those files are kept, and running it again replaces only Ensemble's. The hook is
-`ensemble hook --hub <hub>`: it reads the event on stdin and prints the notes. It
-never fails your turn; a hub it cannot reach costs that prompt its notes.
-OpenCode has plugins, not command hooks, so it gets knowledge through the MCP
-tools only.
-
-**Notes for the helper team.** An agent of the helper team gets notes only if
-its block in `config.yaml` asks for them:
-
-```yaml
-agents:
-  coder:
-    recall:
-      max_chars: 3000   # most characters of notes given with one task
-    # ...
-```
-
-Then each task and delegation it gets comes with the vault's notes about it,
-found from the task's text, after the task's context, and still under the header
-that marks them as reference data. Recall happens once per task, not again for
-each gate retry. A question the agent stops to ask keeps the notes for the
-answer. Leave `recall` out and an agent gets no notes. That matters because the
-notes go to whatever model the agent runs on, so give them only to agents whose
-backend may see them. With no hub that keeps knowledge (`--hub`), an agent with
-`recall` gets nothing, and the session says so on stderr. A hub that cannot be
-reached costs the task its notes, not its run.
-
-## Tasks from a tracker
-
-Tasks live in a tracker and are assigned to **people**. When an issue is
-assigned to you and carries the hub's label, the hub's inbox makes it a task for
-your helper team and writes what happens back on the issue. Your helper team
-never touches the tracker itself. The first tracker is a folder of markdown
-files; GitLab, GitHub and Jira come later.
-
-```yaml
-# hub.yaml
-tasks:                         # leave it out for no inbox
-  tracker:
-    type: local_markdown
-    dir: issues                # a folder of <id>.md issues, often a git repo a team shares
-  user: ana                    # who you are in the tracker
-  label: ensemble              # the signal
+tasks:                      # leave it out for no inbox; see Tasks from a tracker
+  tracker: { type: local_markdown, dir: issues }
+  label: ensemble
   poll_seconds: 30
-  projects:                    # an issue's project -> the folder its work happens in
-    shop: /home/ana/code/shop
-```
-
-An issue is a markdown file anyone can write:
-
-```markdown
----
-title: Fix the login redirect
-assignee: ana
-labels: [ensemble, ensemble:web/coder]
-project: shop
-status: open
----
-After logging in, it redirects to /home instead of back to where you were.
-```
-
-What the inbox does, every `poll_seconds`, while your node runs with that hub
-(`ensemble inbox --once` does one pass by hand):
-
-- **An open issue becomes a task** in the folder its `project` maps to: for
-  the agent a second label `ensemble:<team>/<agent>` names, or else in the backlog, for
-  your agent to assign. The issue gets a comment and goes to `in-progress`. An
-  issue whose project is unknown goes to `blocked`, with a comment saying why.
-- **A question** the task stops to ask is posted as a comment, and the issue
-  goes to `blocked`. Your next comment on the issue is the answer.
-- **The result** is posted as a comment, once. The issue goes to `review` when
-  the task is done, or to `blocked` when it failed. You close it: Ensemble
-  never sets `done`.
-- **An issue you close or take the label off** is forgotten; its task is left
-  alone.
-
-Ensemble changes only an issue's `status:` line and appends comments
-(`## Comment by ensemble at <time>`); everything else in the file stays as you
-wrote it. Your node runs the task in that folder. `ensemble inbox --hub <dir>`
-lists your labelled issues, where each stands and the task it became.
-
-**For a team, on the hub server.** A hub server's `tasks` block names only the
-tracker, the label and `poll_seconds`; the rest belongs to each person:
-
-- **Who is who.** An issue goes to the account whose tracker name is its
-  assignee: the account's `tracker_user` when set (`PUT /api/v1/me`, an admin's
-  `PUT /api/v1/users/{name}`, or `ensemble hub user tracker ana ana.petrosyan`),
-  else the account's own name. Its role needs the `tasks` permission.
-- **Which folder.** A member's [node](#nodes), `ensemble node serve --hub
-  wss://…`, takes their tasks: each goes to the folder of its project's name
-  where a session of the node last ran. A project is a folder's name, so
-  `project: shop` is worked in the `shop` folder you last opened a session in.
-
-What a member sees on an issue: "waiting for ana's computer" until one of her
-nodes connects; then "picked up as task 3 on ana's computer" and
-`in-progress`; then the task's question or result, as on an embedded hub, and
-her next comment as the answer. The hub keeps a task waiting until one of her
-nodes takes it; a node that has not served a folder of that name says so on
-the issue, once, and another may still take it. An issue whose assignee is
-nobody's tracker name, or whose account may not receive tasks, is blocked
-with a comment saying why.
-
-## Hub server
-
-A team runs one hub on a server. Each member's node connects to it, and their
-agents share to and recall from the **organization vault** there, as their role
-allows. Personal knowledge stays in each person's own embedded hub: one agent
-session talks to one hub, set per project when you register Ensemble.
-
-On the server:
-
-```console
-$ ensemble hub init --server --hub /srv/hub # hub.yaml for a team, and the vault
-$ $EDITOR /srv/hub/hub.yaml                 # knowledge, server, roles
-$ ensemble hub user add root --role admin --hub /srv/hub   # the first admin
-$ ensemble hub user password root --hub /srv/hub           # typed without echo
-$ ensemble hub serve --hub /srv/hub         # until Ctrl-C or SIGTERM
-```
-
-```yaml
 server:
   listen: 127.0.0.1:7700
   registration:
-    type: approval         # anyone may sign up; an admin lets them in
-    max_pending: 20        # or: registration: { type: closed }, only an admin adds users
+    type: approval          # anyone may sign up; an admin lets them in
+    max_pending: 20         # or: registration: { type: closed }, only an admin adds users
   sessions:
-    hours: 12              # how long a login lasts
+    hours: 12               # how long a login lasts
   lockout:
-    failures: 5            # failed logins before a name is refused
-    minutes: 15            # and for how long
-roles:                     # yours to name; each a list of permissions
+    failures: 5             # failed logins before a name is refused
+    minutes: 15             # and for how long
+roles:                      # yours to name; each a list of permissions
   admin: [admin, share, recall, tasks, compute, host]
   member: [share, recall, tasks, compute]
   reader: [recall]
 ```
 
-The permissions are `share` (keep knowledge in the organization vault),
-`recall` (read its notes), `tasks` (receive the issues assigned to you; see
+The permissions are `share` (keep knowledge in the vault), `recall` (read its
+notes), `tasks` (receive the issues assigned to you; see
 [Tasks from a tracker](#tasks-from-a-tracker)), `admin` (manage users),
 `compute` (use other people's shared nodes) and `host` (connect a shared node;
 see [Nodes](#nodes)). Accounts are not in `hub.yaml`: they are kept in
-`hub.db`, a Turso database in the hub's state directory, readable only by
-whoever runs the hub, with the tracker's deliveries. A hub from before it
-kept them in `users.json` and `deliveries.json`; those are taken in once, and
-set aside as `.imported`. A share is kept
-under the name of the account that signed in, never a name the node sends, and
-the hub distills shares itself, with its own `knowledge.distill` models.
+`database.db` beside it. (A `users.json` or `deliveries.json` of an older hub,
+put beside it, is taken in once and set aside as `.imported`.) A share is kept
+under the name of the account that signed in, never a name the node sends.
+
+**Each node names its hub.** On each computer that uses the hub, sign in once
+and put the hub in the node's file:
+
+```console
+$ ensemble login wss://hub.example.com --user ana    # asks the password; makes a token "ensemble on <host>"
+```
+
+```yaml
+# ~/.config/ensemble/node/node.yaml
+hub: wss://hub.example.com
+```
+
+`ensemble login` logs in, makes an access token for this computer, logs out,
+and keeps the token in `~/.config/ensemble/node/hubs.json`, readable only by
+you; `--token T` keeps a token made elsewhere instead, and `ensemble logout
+<url>` forgets it. From then on the node's sessions are offered the knowledge
+tools the token allows (a reader gets only `recall`), and `ensemble share`,
+`ensemble recall`, the session hooks and `ensemble nodes` all go to that hub.
+For one person alone, the hub listens on `127.0.0.1` and the node names
+`ws://127.0.0.1:7700`.
 
 **Accounts.** An account has a name, a role and a password of at least 12
 characters, kept as a PBKDF2-HMAC-SHA256 hash. There are two kinds of token,
@@ -1248,23 +1100,8 @@ up with a name and password; they can log in once an admin approves them:
 
 ```console
 $ curl -X POST https://hub.example.com/api/v1/register -d '{"name":"ana","password":"..."}'
-$ ensemble hub user approve ana --role member --hub /srv/hub     # or the API, below
+$ ensemble hub user approve ana --role member     # on the hub's computer, or the API, below
 ```
-
-On each member's computer:
-
-```console
-$ ensemble login wss://hub.example.com --user ana    # asks the password; makes a token "ensemble on <host>"
-$ ensemble node serve --hub wss://hub.example.com       # your node, with the hub's knowledge and tasks
-$ ensemble recall --hub wss://hub.example.com deploys
-```
-
-`ensemble login` logs in, makes an access token for this computer, logs out,
-and keeps the token in `~/.config/ensemble/hubs.json`, readable only by you.
-`--token T` keeps a token made elsewhere instead. `--hub <url>` then works like
-`--hub <dir>`: the agent is offered the knowledge tools the token allows (a
-reader gets only `recall`), and `ensemble share` and `ensemble recall` go to
-the hub. `ensemble logout <url>` forgets the token.
 
 **The REST API** lives on the hub's port, under `/api/v1/`, for the web UI to
 come and for scripts. JSON in and out.
@@ -1289,8 +1126,156 @@ come and for scripts. JSON in and out.
 | `DELETE /api/v1/users/{name}/tokens` | admin | revokes every token |
 | `DELETE /api/v1/users/{name}` | admin | removes an account, or turns a sign-up down |
 
-Errors are `{"error": "..."}` with 400, 401, 403, 404, 405, 409 or 429. An
-embedded hub has none of this: it has one user, you, and listens on nothing.
+Errors are `{"error": "..."}` with 400, 401, 403, 404, 405, 409 or 429.
+
+## Knowledge
+
+The hub keeps knowledge: what agents share becomes notes in its vault, and
+later work recalls them. A node with no hub has no knowledge; everything else
+works the same.
+
+**Sharing is explicit.** Nothing reads your CLI's transcripts and nothing
+proxies its traffic, so a private or throwaway conversation stays private and no
+subscription's rules are touched. When you want something kept, tell your agent
+in plain words ("share what we decided about the deploys"); it picks what is
+worth keeping and calls the `share` tool. `ensemble share --title T` does the
+same by hand. A share that looks like it holds a key or a private key is
+refused, so the agent shares again without it: the vault keeps everything it is
+given.
+
+**Only Ensemble writes notes.** Each share is kept as it arrived, and the
+running hub turns it into notes in the background, or now with
+`ensemble hub knowledge distill` on the hub's computer:
+
+1. One chat request extracts typed items (decision, fact, how-to, lesson,
+   commitment, preference, ownership); chatter gives none and is skipped.
+2. Each item is compared with the notes most like it. It becomes a new note,
+   is merged into one, confirms one, or, when it contradicts one, waits in
+   `review/` for you.
+3. The notes are written and the vault is committed, one commit per share.
+
+To correct a note, share the correction. To read the vault, open it as a
+folder in Obsidian, or anything that reads Markdown:
+
+```text
+vault/
+  shares/<yyyy>/<mm>/<id>.md   each share as it arrived, never changed
+  notes/<slug>.md              one note per topic, frontmatter: kind, title, tags,
+                               scope, sources (share ids), shared_by, pipeline, updated
+  review/<share-id>.md         what the pipeline would not write, and why
+  log.jsonl                    what the pipeline did with each share
+```
+
+Because the notes are made from the shares, a better model or a new note format
+needs no migration: `ensemble hub knowledge rebuild` deletes the notes and makes
+them again from every share, in one commit. `ensemble hub knowledge status`
+counts shares, pending shares, notes and what waits in `review/`.
+
+**Shared text is data, not instructions.** It may carry instructions meant for
+a model, so the model that distills has no tools (one chat request, never an
+agent CLI); shared text goes in between markers with a nonce nobody can guess;
+an answer must be the JSON asked for and may only change the notes it was
+offered, or it goes to `review/`; and every note names the shares it came from.
+
+**Recall.** Your agent calls `recall` with a topic before work where your
+earlier decisions or setup may matter, and gets the matching notes, best first,
+within `max_notes` and `max_chars`, marked as reference data.
+`ensemble recall <topic>` prints the same. The search is by words (BM25, a
+title's words counting more), with no index to keep.
+
+**Notes in your own sessions.** Your agent recalls when it decides to. With
+session hooks, Claude Code and Codex get the notes without asking: before each
+prompt you send, the notes about it go into the conversation, and at the start
+of a session, those about the project's folder. Each note is given once per
+session, and again after the context is cleared or compacted. A prompt of one
+or two words recalls nothing. Set them up when you register Ensemble:
+
+```sh
+ensemble connect --client claude-code --hooks
+```
+
+This writes the hook into Claude Code's `.claude/settings.local.json` of the
+project you run it in (not committed), or into your own `~/.claude/settings.json`
+with `--global`. For Codex, it writes `.codex/hooks.json`, or `~/.codex/hooks.json`
+with `--global`, and Codex runs it once you trust it in `/hooks`. Other hooks in
+those files are kept, and running it again replaces only Ensemble's. The hook is
+`ensemble hook`: it reads the event on stdin and prints the notes of the node's
+hub. It never fails your turn; a hub it cannot reach costs that prompt its
+notes. OpenCode has plugins, not command hooks, so it gets knowledge through the
+MCP tools only.
+
+**Notes for the helper team.** An agent of the helper team gets notes only if
+its block in `config.yaml` asks for them:
+
+```yaml
+agents:
+  coder:
+    recall:
+      max_chars: 3000   # most characters of notes given with one task
+    # ...
+```
+
+Then each task and delegation it gets comes with the vault's notes about it,
+found from the task's text, after the task's context, and still under the header
+that marks them as reference data. Recall happens once per task, not again for
+each gate retry. A question the agent stops to ask keeps the notes for the
+answer. Leave `recall` out and an agent gets no notes. That matters because the
+notes go to whatever model the agent runs on, so give them only to agents whose
+backend may see them. With no hub, an agent with `recall` gets nothing, and the
+node says so. A hub that cannot be reached costs the task its notes, not its
+run.
+
+## Tasks from a tracker
+
+Tasks live in a tracker and are assigned to **people**. When an issue is
+assigned to you and carries the hub's label, the hub's inbox hands it to one of
+your nodes, which makes it a task for your helper teams, and writes what happens
+back on the issue. Your helper team never touches the tracker itself. The first
+tracker is a folder of markdown files, on the hub's computer (`tasks` in
+`hub.yaml`, above); GitLab, GitHub and Jira come later.
+
+An issue is a markdown file anyone can write:
+
+```markdown
+---
+title: Fix the login redirect
+assignee: ana
+labels: [ensemble, ensemble:web/coder]
+project: shop
+status: open
+---
+After logging in, it redirects to /home instead of back to where you were.
+```
+
+- **Who is who.** An issue goes to the account whose tracker name is its
+  assignee: the account's `tracker_user` when set (`PUT /api/v1/me`, an admin's
+  `PUT /api/v1/users/{name}`, or `ensemble hub user tracker ana ana.petrosyan`),
+  else the account's own name. Its role needs the `tasks` permission.
+- **Which folder.** Each of that person's [nodes](#nodes) that names the hub
+  takes their tasks: each goes to the folder of its project's name where a
+  session of the node last ran. A project is a folder's name, so
+  `project: shop` is worked in the `shop` folder you last opened a session in.
+- **Which agent.** A second label `ensemble:<team>/<agent>` names the agent;
+  without one the task goes to the backlog, for your agent to assign.
+
+What the hub does, every `poll_seconds`:
+
+- **An open issue becomes a delivery** for that account, and the issue says it
+  waits for their computer. When one of their nodes takes it: "picked up as task
+  3 on ana's computer", and `in-progress`. A node that has not served a folder of
+  that name says so on the issue, once, and another may still take it.
+- **A question** the task stops to ask is posted as a comment, and the issue
+  goes to `blocked`. Your next comment on the issue is the answer.
+- **The result** is posted as a comment, once. The issue goes to `review` when
+  the task is done, or to `blocked` when it failed. You close it: Ensemble
+  never sets `done`.
+- **An issue you close or take the label off** is forgotten; its task is left
+  alone. An issue whose assignee is nobody's tracker name, or whose account may
+  not receive tasks, is blocked with a comment saying why.
+
+Ensemble changes only an issue's `status:` line and appends comments
+(`## Comment by ensemble at <time>`); everything else in the file stays as you
+wrote it.
 
 The hub speaks plain HTTP and WebSocket. For the internet, put a TLS reverse
 proxy in front, so passwords and tokens never cross the network in the clear;
@@ -1314,17 +1299,18 @@ The node keeps a worker for each folder it has served, so a folder's tasks go
 on after the session that submitted them ends, and start again when the node
 does.
 
-With a hub server, a node also keeps one link to it: the tasks the hub sends
-you (see [Tasks from a tracker](#tasks-from-a-tracker)), and what it lends. A
+With the hub its `node.yaml` names, a node also keeps a link to it: the
+knowledge its sessions share and recall, the tasks the hub sends you (see [Tasks from a tracker](#tasks-from-a-tracker)), and what it lends. A
 node is **private**, working for its owner alone, or **shared**, working also
 for everyone whose role has `compute`; connecting a shared one needs `host`.
 The hub connects them, and keeps no node once it is gone.
 
 ```yaml
-# ~/.config/ensemble/node.yaml — `ensemble setup` or `ensemble node init` writes it
+# ~/.config/ensemble/node/node.yaml — `ensemble setup` or `ensemble node init` writes it
 version: 4
 name: gpu-box                    # a hub knows it as <you>/gpu-box
 access: shared                   # private: you alone
+hub: wss://hub.example.com       # the hub it connects to; left out: none
 offers:                          # through a hub; each block may be left out
   runs:                          # agents of its teams others may run here
     agents: [web/coder]
@@ -1337,17 +1323,15 @@ offers:                          # through a hub; each block may be left out
 ```console
 $ ensemble node serve                                          # until Ctrl-C or SIGTERM
 $ cd ~/code/shop && claude                                     # its sessions reach the node
-$ ensemble login wss://hub.example.com --user kim
-$ ensemble node serve --hub wss://hub.example.com              # and lend through a hub
-$ ensemble nodes --hub wss://hub.example.com                   # the nodes you may use now
+$ ensemble login wss://hub.example.com --user kim             # once, for the hub node.yaml names
+$ ensemble nodes                                               # the nodes of the hub you may use now
 ```
 
 A session reaches the node on a socket only you may open (in
 `$XDG_RUNTIME_DIR/ensemble`, else a folder of yours under `/tmp`). A task the hub sends
 you goes to the folder of its project's name where a session of the node last
 ran; one for a project the node has not served is refused, and the issue says
-so. With `--hub <dir>`, an embedded hub, the node also turns shares into notes
-and issues into tasks.
+so.
 
 **Running an agent on a node.** In your helper team, an agent of
 `type: node` names an agent a node offers:
@@ -1472,9 +1456,9 @@ up and for debugging it.
 
 ```console
 $ ensemble setup [--client C] [--name N]   # find the CLIs, write the node, register it with your client, check its teams
-$ ensemble connect --client C [--global] [--hub <hub> --hooks]   # register with claude-code, opencode or codex; sessions reach your node
-$ ensemble hub init --hub <dir> [--server]   # a sample hub (--server: for a team): <dir>/hub.yaml, and its knowledge vault
-$ ensemble node init                # ~/.config/ensemble/node.yaml with every setting: the node and what it offers
+$ ensemble connect --client C [--global] [--hooks]   # register with claude-code, opencode or codex; sessions reach your node
+$ ensemble hub init [--stdout]     # a sample hub in ~/.config/ensemble/hub/: hub.yaml and its knowledge vault
+$ ensemble node init                # ~/.config/ensemble/node/node.yaml with every setting: the node, its hub, what it offers
 $ ensemble teams                    # the node's teams, where each comes from, their agents
 $ ensemble team new <name> [--stdout]        # make a team: a sample config.yaml to edit
 $ ensemble team add <name> <dir>             # link a folder with a config.yaml as a team
@@ -1482,26 +1466,25 @@ $ ensemble team pull <url>[@ref] [--name N] # pull a team from git, pinned to a 
 $ ensemble team update <name> [--ref R]      # move a pulled team to a new commit, once you trust it
 $ ensemble team approve <name>               # read a team your agent wrote, and let it run
 $ ensemble team remove <name>                # take a team out of the node
-$ ensemble node serve [--hub HUB]   # run this computer's node until stopped
-$ ensemble nodes --hub URL         # the nodes of a hub server you may use now
-$ ensemble hook --hub <hub>        # what a Claude Code or Codex session hook runs
-$ ensemble hub user tracker <name> [<tracker name>] --hub <dir>   # who the account is in the tracker
-$ ensemble hub check --hub <dir>   # validate hub.yaml; which model would distill shares now
-$ ensemble hub user add <name> --role <role> --hub <dir>   # a hub server's user; prints their token once
-$ ensemble hub user list|token <name>|revoke <name>|remove <name> --hub <dir>
-$ ensemble hub user password <name> --hub <dir>               # set a password, typed without echo
-$ ensemble hub user approve <name> --role <role> --hub <dir>   # let in someone who signed up
-$ ensemble hub user role <name> --role <role> --hub <dir>      # give a user another role
-$ ensemble hub serve --hub <dir>   # run the hub for a team, until stopped
-$ ensemble login <wss://url> --user <name>     # sign in to a hub server with your account; then --hub <url> works like --hub <dir>
+$ ensemble node serve               # run this computer's node until stopped
+$ ensemble nodes                    # the nodes of your node's hub you may use now
+$ ensemble hook                     # what a Claude Code or Codex session hook runs
+$ ensemble hub user tracker <name> [<tracker name>]   # who the account is in the tracker
+$ ensemble hub check                # validate hub.yaml; which model would distill shares now
+$ ensemble hub user add <name> --role <role>   # a hub's user; prints their token once
+$ ensemble hub user list|token <name>|revoke <name>|remove <name>
+$ ensemble hub user password <name>   # set a password, typed without echo
+$ ensemble hub user approve <name> --role <role>   # let in someone who signed up
+$ ensemble hub user role <name> --role <role>   # give a user another role
+$ ensemble hub serve                # run this computer's hub until stopped
+$ ensemble login <wss://url> --user <name>     # sign in to a hub with your account; name it as `hub:` in node.yaml
 $ ensemble login <wss://url> --token <token>   # or with a token made elsewhere
 $ ensemble logout <wss://url>
-$ ensemble share --hub <dir> --title T [--text T]   # keep knowledge by hand; text from stdin without --text
-$ ensemble knowledge status --hub <dir>    # shares, pending, notes, what waits in review/
-$ ensemble knowledge distill --hub <dir>   # turn pending shares into notes now
-$ ensemble knowledge rebuild --hub <dir> [--yes]   # delete the notes and make them again from every share
-$ ensemble recall --hub <dir> <topic>      # the notes about a topic, as an agent's `recall` gets them
-$ ensemble inbox --hub <dir> [--once]   # your labelled issues and their tasks; --once: one pass now
+$ ensemble share --title T [--text T]   # keep knowledge by hand; text from stdin without --text
+$ ensemble hub knowledge status     # shares, pending, notes, what waits in review/
+$ ensemble hub knowledge distill    # turn pending shares into notes now
+$ ensemble hub knowledge rebuild [--yes]   # delete the notes and make them again from every share
+$ ensemble recall <topic>            # the notes about a topic, as an agent's `recall` gets them
 $ ensemble doctor                  # what is wrong, and how to fix each thing
 $ ensemble add-agent <name> --team T --adapter A   # add an agent to the team T, every setting written
 $ ensemble remove-agent <name> --team T
@@ -1526,7 +1509,7 @@ $ ensemble mcp                     # what your client starts: a session of your 
 ```
 
 `run` prints the answer on stdout and the provenance on stderr, so it pipes
-cleanly. Options: `--team <name>` (the team a command changes; `--org` is its old name), `--hub <dir>` (the hub, which keeps your knowledge), `--env-file <path>`, `--dir <path>` (the working
+cleanly. Options: `--team <name>` (the team a command changes; `--org` is its old name), `--env-file <path>`, `--dir <path>` (the working
 folder, default the current directory), `--context <text>` (for `run`).
 
 ## How it fits together

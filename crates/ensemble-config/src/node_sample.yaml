@@ -20,6 +20,8 @@ name: laptop                     # its name; a hub knows it as <you>/laptop
 # llm_backends, never on your agent CLI's subscription.
 access: private
 
+hub: wss://hub.example.com       # the hub server it connects to (`ensemble login` first); leave out for none
+
 offers:
   # Agents of its teams, which others name with an agent of `type: node`. A task
   # sent here gets a copy of the files git tracks, works in a folder of its own,

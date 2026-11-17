@@ -450,7 +450,7 @@ pub(crate) mod tests {
         let hub =
             ensemble_config::parse_hub(&yaml, std::path::Path::new("hub.yaml"), &BTreeMap::new())
                 .unwrap();
-        let memory = Memory::new(&hub, None).unwrap();
+        let memory = Memory::new(&hub, None);
         memory.vault().init().unwrap();
         memory
             .vault()
@@ -480,7 +480,7 @@ pub(crate) mod tests {
         let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
         let memory: &'static Memory = Box::leak(Box::new(memory));
         let hub: &'static ensemble_config::Hub = Box::leak(Box::new(hub));
-        let mut server = Server::new(memory, &hub.roles, hub.server.unwrap(), tmp.0.join("state"));
+        let mut server = Server::new(memory, &hub.roles, hub.server, tmp.0.join("state"));
         if let Some(relay) = relay {
             server = server.with_relay(relay);
         }

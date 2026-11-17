@@ -12,11 +12,13 @@
 //! What it keeps for a folder lives as long as the node, so it is leaked on
 //! purpose: a folder served once is served until the node stops.
 
-use crate::{Args, Knowledge, STOP, knowledge_for};
+use crate::STOP;
 use ensemble::config::{Config, Node};
 use ensemble::folders::Folders;
 use ensemble::harness::mcp;
 use ensemble::harness::queue::Queue;
+use ensemble::knowledge::KnowledgeAccess;
+use ensemble::link::RemoteMemory;
 use ensemble::router::Ensemble;
 use ensemble::tasks::Store;
 use std::collections::HashMap;
@@ -35,14 +37,15 @@ const STOP_GRACE: Duration = Duration::from_secs(10);
 /// What a node keeps for one folder.
 struct Folder {
     ensemble: &'static Ensemble,
-    knowledge: Option<&'static Knowledge>,
+    knowledge: Option<&'static RemoteMemory>,
     queue: &'static Queue<'static>,
 }
 
 /// The node: its team, and the folders it serves.
 pub struct Daemon<'a> {
-    args: &'a Args,
     node: Node,
+    /// The hub server it names, and its token.
+    hub: Option<(String, String)>,
     /// Its teams, as one helper team: `<team>/<agent>`.
     team: Config,
     folders: Folders,
@@ -56,15 +59,15 @@ impl<'a> Daemon<'a> {
     /// A node from `node`, its teams loaded as `team`, keeping its state in
     /// `dir`.
     pub fn new(
-        args: &'a Args,
         node: Node,
+        hub: Option<(String, String)>,
         team: Config,
         dir: &Path,
         say: &'a (dyn Fn(&str) + Sync),
     ) -> Self {
         Daemon {
-            args,
             node,
+            hub,
             team,
             folders: Folders::new(dir),
             open: Mutex::new(HashMap::new()),
@@ -103,7 +106,7 @@ impl<'a> Daemon<'a> {
                         let (input, output) = stream.into_split();
                         let _ = mcp::serve_session(
                             folder.ensemble,
-                            folder.knowledge.map(Knowledge::access),
+                            folder.knowledge.map(|k| k as &dyn KnowledgeAccess),
                             folder.queue,
                             tokio::io::BufReader::new(input),
                             output,
@@ -167,9 +170,12 @@ impl<'a> Daemon<'a> {
         // tasks in one place.
         let ensemble: &'static Ensemble =
             Box::leak(Box::new(Ensemble::new(config, Some(dir.clone()))));
-        let knowledge: Option<&'static Knowledge> =
-            knowledge_for(self.args, &dir)?.map(|k| &*Box::leak(Box::new(k)));
-        let memory = knowledge.map(Knowledge::access);
+        // The hub's knowledge, named for the folder in what is shared.
+        let knowledge: Option<&'static RemoteMemory> = self.hub.as_ref().map(|(url, token)| {
+            let project = dir.file_name().map(|n| n.to_string_lossy().into_owned());
+            &*Box::leak(Box::new(RemoteMemory::new(url, token, project)))
+        });
+        let memory = knowledge.map(|k| k as &dyn KnowledgeAccess);
         let state = ensemble.state_dir().map_err(|e| e.to_string())?;
         let mut store = Store::new(&state);
         if let Some(usage) = ensemble.usage_dir() {

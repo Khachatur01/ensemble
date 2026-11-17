@@ -1478,7 +1478,7 @@ fn hub_schema() -> serde_json::Value {
     serde_json::from_str(hub::HUB_SCHEMA).expect("the hub schema is JSON")
 }
 
-const HUB: &str = "version: 1\nowner: Ana\nllm_backends:\n  local: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }\nknowledge:\n  vault: vault\n  distill:\n    try:\n      - { backend: local, model: small }\n    when_none: wait\n    max_tokens: 100\n  recall: { max_notes: 3, max_chars: 1000 }\n";
+const HUB: &str = "version: 1\nowner: Ana\nllm_backends:\n  local: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }\nknowledge:\n  vault: vault\n  distill:\n    try:\n      - { backend: local, model: small }\n    when_none: wait\n    max_tokens: 100\n  recall: { max_notes: 3, max_chars: 1000 }\nserver: { listen: \"127.0.0.1:7700\", registration: { type: approval, max_pending: 2 }, sessions: { hours: 1 }, lockout: { failures: 3, minutes: 1 } }\nroles:\n  member: [share, recall]\n  reader: [recall]\n";
 
 fn hub_refusal(doc: &str) -> String {
     parse_hub(doc, Path::new("/hubs/ana/hub.yaml"), &env(&[]))
@@ -1490,7 +1490,7 @@ fn hub_refusal(doc: &str) -> String {
 fn a_hub_names_its_owner_its_backends_and_its_knowledge() {
     let hub = parse_hub(HUB, Path::new("/hubs/ana/hub.yaml"), &env(&[])).unwrap();
     assert_eq!(hub.owner, "Ana");
-    let k = hub.knowledge.unwrap();
+    let k = hub.knowledge;
     assert_eq!(
         k.vault,
         PathBuf::from("/hubs/ana/vault"),
@@ -1499,10 +1499,9 @@ fn a_hub_names_its_owner_its_backends_and_its_knowledge() {
     assert_eq!(k.distill.backend(), "local");
     assert_eq!(k.distill.fallback.when_none, WhenNone::Wait);
     assert_eq!(k.recall.max_notes, 3);
-
-    let without = HUB.split("knowledge:").next().unwrap();
-    let hub = parse_hub(without, Path::new("hub.yaml"), &env(&[])).unwrap();
-    assert!(hub.knowledge.is_none(), "no block, no knowledge");
+    assert!(hub.tasks.is_none(), "no block, no inbox");
+    let without = HUB.replace("knowledge:", "knowledgee:");
+    assert!(hub_refusal(&without).contains("unknown field `knowledgee`"));
 }
 
 #[test]
@@ -1528,9 +1527,9 @@ fn a_hub_is_checked_like_a_team_and_every_problem_is_named() {
 }
 
 #[test]
-fn a_hub_inbox_names_its_tracker_user_label_and_projects() {
+fn a_hub_inbox_names_its_tracker_and_label() {
     let doc = format!(
-        "{HUB}tasks:\n  tracker: {{ type: local_markdown, dir: issues }}\n  user: ana\n  label: ensemble\n  poll_seconds: 30\n  projects:\n    shop: /code/shop\n    docs: docs\n"
+        "{HUB}tasks:\n  tracker: {{ type: local_markdown, dir: issues }}\n  label: ensemble\n  poll_seconds: 30\n"
     );
     let hub = parse_hub(&doc, Path::new("/hubs/ana/hub.yaml"), &env(&[])).unwrap();
     let tasks = hub.tasks.unwrap();
@@ -1540,38 +1539,27 @@ fn a_hub_inbox_names_its_tracker_user_label_and_projects() {
             dir: PathBuf::from("/hubs/ana/issues")
         }
     );
-    assert_eq!(
-        tasks.personal.as_ref().unwrap().projects["shop"],
-        PathBuf::from("/code/shop")
-    );
-    assert_eq!(
-        tasks.personal.as_ref().unwrap().projects["docs"],
-        PathBuf::from("/hubs/ana/docs")
-    );
-
     let said = hub_refusal(
         &doc.replace("label: ensemble", "label: \"ens:x\"")
-            .replace("poll_seconds: 30", "poll_seconds: 0")
-            .replace("user: ana", "user: \"\""),
+            .replace("poll_seconds: 30", "poll_seconds: 0"),
     );
     for expected in [
         "tasks.label: 'ens:x' must be one word",
         "tasks: `poll_seconds` must be greater than 0",
-        "tasks.user: is empty",
     ] {
         assert!(said.contains(expected), "{expected} in {said}");
     }
     let said = hub_refusal(&doc.replace("type: local_markdown", "type: jira"));
     assert!(said.contains("unknown variant `jira`"), "{said}");
+    // The person and their folders belonged to the embedded hub, which is gone.
+    let said = hub_refusal(&doc.replace("  label: ensemble\n", "  label: ensemble\n  user: ana\n"));
+    assert!(said.contains("unknown field `user`"), "{said}");
 }
 
 #[test]
-fn a_hub_server_listens_somewhere_and_names_its_roles() {
-    let doc = format!(
-        "{HUB}server: {{ listen: \"127.0.0.1:7700\", registration: {{ type: approval, max_pending: 2 }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles:\n  member: [share, recall]\n  reader: [recall]\n"
-    );
-    let hub = parse_hub(&doc, Path::new("hub.yaml"), &env(&[])).unwrap();
-    let server = hub.server.unwrap();
+fn a_hub_is_always_a_server_that_listens_somewhere_and_names_its_roles() {
+    let hub = parse_hub(HUB, Path::new("hub.yaml"), &env(&[])).unwrap();
+    let server = hub.server;
     assert_eq!(server.listen.port(), 7700);
     assert_eq!(
         server.registration,
@@ -1586,7 +1574,7 @@ fn a_hub_server_listens_somewhere_and_names_its_roles() {
         (1, 3, 1)
     );
     let said = hub_refusal(
-        &doc.replace("max_pending: 2", "max_pending: 0")
+        &HUB.replace("max_pending: 2", "max_pending: 0")
             .replace("hours: 1", "hours: 0")
             .replace("failures: 3", "failures: 0"),
     );
@@ -1596,29 +1584,28 @@ fn a_hub_server_listens_somewhere_and_names_its_roles() {
     );
     assert!(said.contains("server.sessions: `hours`"), "{said}");
     assert!(said.contains("server.lockout:"), "{said}");
-    let closed = doc.replace("{ type: approval, max_pending: 2 }", "{ type: closed }");
+    let closed = HUB.replace("{ type: approval, max_pending: 2 }", "{ type: closed }");
     let hub_closed = parse_hub(&closed, Path::new("hub.yaml"), &env(&[])).unwrap();
-    assert_eq!(
-        hub_closed.server.unwrap().registration,
-        Registration::Closed
-    );
-    let said = hub_refusal(&doc.replace("{ type: approval, max_pending: 2 }", "{ type: open }"));
+    assert_eq!(hub_closed.server.registration, Registration::Closed);
+    let said = hub_refusal(&HUB.replace("{ type: approval, max_pending: 2 }", "{ type: open }"));
     assert!(said.contains("unknown variant `open`"), "{said}");
     assert_eq!(hub.roles["reader"], vec![Permission::Recall]);
 
-    let said = hub_refusal(&doc.replace("[recall]\n", "[recall, delete]\n"));
+    let said = hub_refusal(&HUB.replace("[recall]\n", "[recall, delete]\n"));
     assert!(said.contains("unknown variant `delete`"), "{said}");
-    let said = hub_refusal(&doc.replace("127.0.0.1:7700", "localhost"));
+    let said = hub_refusal(&HUB.replace("127.0.0.1:7700", "localhost"));
     assert!(said.contains("server.listen: 'localhost'"), "{said}");
-    let no_roles = doc.split("roles:").next().unwrap().to_string();
-    assert!(hub_refusal(&no_roles).contains("needs `roles`"));
-    let no_server = doc.replace(
+    let no_roles = HUB.split("roles:").next().unwrap().to_string();
+    assert!(hub_refusal(&no_roles).contains("`roles` is required"));
+    let no_server = HUB.replace(
         "server: { listen: \"127.0.0.1:7700\", registration: { type: approval, max_pending: 2 }, sessions: { hours: 1 }, lockout: { failures: 3, minutes: 1 } }\n",
         "",
     );
-    assert!(hub_refusal(&no_server).contains("only a hub with a `server` has roles"));
-    let no_knowledge = "version: 1\nowner: Ana\nllm_backends: {}\nserver: { listen: \"127.0.0.1:7700\", registration: { type: closed }, sessions: { hours: 1 }, lockout: { failures: 3, minutes: 1 } }\nroles: { member: [share] }\n";
-    assert!(hub_refusal(no_knowledge).contains("needs `knowledge`"));
+    let said = hub_refusal(&no_server);
+    assert!(said.contains("a hub is always a server now"), "{said}");
+    let no_knowledge = HUB.split("knowledge:").next().unwrap().to_string()
+        + "server: { listen: \"127.0.0.1:7700\", registration: { type: closed }, sessions: { hours: 1 }, lockout: { failures: 3, minutes: 1 } }\nroles: { member: [share] }\n";
+    assert!(hub_refusal(&no_knowledge).contains("`knowledge` is required"));
 }
 
 #[test]
@@ -1626,7 +1613,7 @@ fn a_missing_hub_file_says_how_to_make_one() {
     let err = load_hub(Path::new("/nonexistent/hub.yaml"), None, &env(&[]))
         .unwrap_err()
         .to_string();
-    assert!(err.contains("ensemble hub init --hub <dir>"), "{err}");
+    assert!(err.contains("ensemble hub init"), "{err}");
 }
 
 #[test]
@@ -1639,12 +1626,8 @@ fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
         "top level"
     );
     let mut top = accepted_keys::<hub::RawHub>();
-    top.retain(|k| !["knowledge", "tasks", "server", "roles"].contains(&k.as_str()));
-    assert_eq!(
-        schema_required(&schema),
-        top,
-        "only knowledge, tasks, server and roles may be left out"
-    );
+    top.retain(|k| k != "tasks");
+    assert_eq!(schema_required(&schema), top, "only tasks may be left out");
     let permissions: Vec<String> = defs["permission"]["enum"]
         .as_array()
         .unwrap()
@@ -1668,11 +1651,7 @@ fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
         ),
         ("sessions", accepted_keys::<hub::RawSessions>(), vec![]),
         ("lockout", accepted_keys::<hub::RawLockout>(), vec![]),
-        (
-            "tasks",
-            accepted_keys::<hub::RawTasks>(),
-            vec!["user", "projects"],
-        ),
+        ("tasks", accepted_keys::<hub::RawTasks>(), vec![]),
         (
             "tracker_local_markdown",
             accepted_keys::<hub::RawLocalMarkdownIssues>(),
@@ -1715,17 +1694,12 @@ fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
 #[test]
 fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
     let hub = parse_hub(hub::HUB_SAMPLE, Path::new("hub.yaml"), &env(&[])).unwrap();
-    let k = hub.knowledge.expect("the sample keeps knowledge");
     assert!(
-        k.distill.fallback.candidates.len() > 1,
+        hub.knowledge.distill.fallback.candidates.len() > 1,
         "the sample shows a fallback"
     );
-    let server = parse_hub(hub::HUB_SERVER_SAMPLE, Path::new("hub.yaml"), &env(&[]))
-        .expect("the server sample is a valid hub");
-    assert!(server.server.is_some() && server.tasks.as_ref().unwrap().personal.is_none());
-    assert!(server.roles["member"].contains(&Permission::Tasks));
+    assert!(hub.roles["member"].contains(&Permission::Tasks));
     let doc: serde_json::Value = serde_norway::from_str(hub::HUB_SAMPLE).unwrap();
-    let served: serde_json::Value = serde_norway::from_str(hub::HUB_SERVER_SAMPLE).unwrap();
     let schema = hub_schema();
     let defs = &schema["definitions"];
     let backends: Vec<&serde_json::Value> =
@@ -1740,16 +1714,15 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
     let knowledge = &doc["knowledge"];
     let tasks = hub.tasks.expect("the sample has an inbox");
     assert_eq!(tasks.label, "ensemble");
-    assert!(tasks.personal.is_some(), "the sample is a personal hub");
     for (def, objects) in [
         ("tasks", vec![&doc["tasks"]]),
-        ("server", vec![&served["server"]]),
+        ("server", vec![&doc["server"]]),
         (
             "registration_approval",
-            vec![&served["server"]["registration"]],
+            vec![&doc["server"]["registration"]],
         ),
-        ("sessions", vec![&served["server"]["sessions"]]),
-        ("lockout", vec![&served["server"]["lockout"]]),
+        ("sessions", vec![&doc["server"]["sessions"]]),
+        ("lockout", vec![&doc["server"]["lockout"]]),
         ("tracker_local_markdown", vec![&doc["tasks"]["tracker"]]),
         ("knowledge", vec![knowledge]),
         ("distill", vec![&knowledge["distill"]]),
@@ -1776,36 +1749,18 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
         assert_eq!(missing, Vec::<String>::new(), "{def}");
     }
     let id = schema["$id"].as_str().unwrap();
-    for sample in [hub::HUB_SAMPLE, hub::HUB_SERVER_SAMPLE] {
-        assert!(sample.starts_with(&format!("# yaml-language-server: $schema={id}")));
-    }
-}
-
-#[test]
-fn a_hub_servers_inbox_takes_no_person_and_an_embedded_one_needs_one() {
-    let server =
-        hub::HUB_SERVER_SAMPLE.replace("  poll_seconds: 30\n", "  poll_seconds: 30\n  user: ana\n");
-    let said = hub_refusal(&server);
-    assert!(
-        said.contains("a hub server takes no `user` or `projects`"),
-        "{said}"
-    );
-    let embedded = hub::HUB_SAMPLE.replace(
-        "  user: you                      # who you are in the tracker\n",
-        "",
-    );
-    assert_ne!(embedded, hub::HUB_SAMPLE);
-    let said = hub_refusal(&embedded);
-    assert!(said.contains("an embedded hub needs `user`"), "{said}");
+    assert!(hub::HUB_SAMPLE.starts_with(&format!("# yaml-language-server: $schema={id}")));
 }
 
 // ---------------------------------------------------------------------------
 // node.yaml
+
 // ---------------------------------------------------------------------------
 
 #[test]
 fn a_node_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
     let node = parse_node(node::NODE_SAMPLE, Path::new("node.yaml")).unwrap();
+    assert_eq!(node.hub.as_deref(), Some("wss://hub.example.com"));
     assert_eq!(
         (node.name.as_str(), node.access),
         ("laptop", node::Access::Private)
@@ -1826,10 +1781,11 @@ fn a_node_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
             .to_string()
     };
     let said = problems(
-        "version: 4\nname: a/b\naccess: shared\noffers:\n  runs: { agents: [] }\n  models: { base_url: localhost, timeout_seconds: 0, names: [] }\n",
+        "version: 4\nname: a/b\naccess: shared\nhub: http://hub\noffers:\n  runs: { agents: [] }\n  models: { base_url: localhost, timeout_seconds: 0, names: [] }\n",
     );
     for wanted in [
         "name: 'a/b'",
+        "hub: 'http://hub' must start with ws://",
         "offers.runs.agents: name at least one",
         "offers.models.base_url",
         "timeout_seconds",
@@ -1840,6 +1796,7 @@ fn a_node_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
     let said =
         problems("version: 4\nname: box\naccess: shared\noffers:\n  runs: { agents: [coder] }\n");
     assert!(said.contains("as `<team>/<agent>`"), "{said}");
+    assert!(said.contains("there is no `hub`"), "{said}");
     let said = problems("version: 3\nname: box\naccess: private\nteam: /t\noffers: {}\n");
     assert!(
         said.contains("version: 3 is no longer read") && said.contains("ensemble team add"),
@@ -1876,7 +1833,9 @@ fn a_node_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
     );
     let schema: serde_json::Value = serde_json::from_str(node::NODE_SCHEMA).unwrap();
     assert_eq!(schema_keys(&schema), accepted_keys::<node::RawNode>());
-    assert_eq!(schema_required(&schema), accepted_keys::<node::RawNode>());
+    let mut required = accepted_keys::<node::RawNode>();
+    required.retain(|k| k != "hub");
+    assert_eq!(schema_required(&schema), required);
     let defs = &schema["definitions"];
     assert_eq!(
         schema_keys(&schema["properties"]["offers"]),

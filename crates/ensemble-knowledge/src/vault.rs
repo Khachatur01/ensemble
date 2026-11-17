@@ -37,7 +37,7 @@ pub struct Share {
     pub id: String,
     /// `2026-11-10T15:30:12Z`.
     pub at: String,
-    /// The person it came from: the hub's owner, for an embedded hub.
+    /// The person it came from: the account that shared it.
     pub shared_by: String,
     /// The agent CLI that sent it, as it named itself, when it did.
     pub client: Option<String>,
@@ -66,7 +66,7 @@ pub struct Note {
     pub kind: String,
     pub title: String,
     pub tags: Vec<String>,
-    /// `personal`: the only scope of an embedded hub.
+    /// `personal`: the only scope so far.
     pub scope: String,
     /// The shares it was distilled from, oldest first.
     pub sources: Vec<String>,

@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/node.schema.json",
   "title": "Ensemble node: node.yaml",
-  "description": "This computer's node: a worker that runs the helper teams in its teams directory for its owner's agent sessions, from any folder, and, through a hub server, lends this computer's power. In ~/.config/ensemble/node.yaml; a computer runs one node. Nothing has a default value; a block under `offers` that is left out is not used.",
+  "description": "This computer's node: a worker that runs the helper teams in its teams directory for its owner's agent sessions, from any folder, and, through a hub server, lends this computer's power. In ~/.config/ensemble/node/node.yaml; a computer runs one node. Nothing has a default value; `hub` and a block under `offers` that are left out are not used.",
   "type": "object",
   "required": ["version", "name", "access", "offers"],
   "additionalProperties": false,
@@ -19,6 +19,11 @@
     "access": {
       "description": "private: it works for its owner alone. shared: also for everyone whose role has `compute`; connecting it needs `host`. A shared node offers only agents that run on llm_backends, never on an agent CLI's subscription.",
       "enum": ["private", "shared"]
+    },
+    "hub": {
+      "description": "The hub server it connects to, ws:// or wss://, signed in to with `ensemble login`: the hub's knowledge for its sessions, the tasks the hub has for you, and what it offers. Leave it out for no hub.",
+      "type": "string",
+      "pattern": "^wss?://"
     },
     "offers": {
       "description": "What it offers through a hub server. `{}` offers nothing.",

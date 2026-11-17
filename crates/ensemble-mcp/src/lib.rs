@@ -385,7 +385,7 @@ pub fn note_recall_without_knowledge(ensemble: &Ensemble, memory: Option<&dyn Kn
         .collect();
     if memory.is_none() && !wanting.is_empty() {
         eprintln!(
-            "ensemble: note: {} {} `recall`, but no hub that keeps knowledge was given (--hub), so no notes are given",
+            "ensemble: note: {} {} `recall`, but this node names no hub (`hub:` in node.yaml), so no notes are given",
             wanting.join(", "),
             if wanting.len() == 1 { "has" } else { "have" }
         );

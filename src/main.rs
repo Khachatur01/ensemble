@@ -7,6 +7,7 @@
 
 use ensemble::config::{self, Adapter, Config, SystemEnv};
 use ensemble::external::{claude_code, opencode};
+use ensemble::knowledge::KnowledgeAccess;
 use ensemble::remote;
 use ensemble::router::Ensemble;
 use ensemble::setup;
@@ -36,7 +37,7 @@ COMMANDS:
                             its agents, named <team>/<agent>.
     team new NAME [--stdout]
                             Make a team: a sample config.yaml with every setting
-                            in the teams directory (~/.local/share/ensemble/
+                            in the teams directory (~/.config/ensemble/node/
                             teams/NAME). --stdout prints the sample instead.
     team add NAME DIR       Link a folder with a config.yaml, such as a checkout
                             of your company's team, as the team NAME.
@@ -59,44 +60,44 @@ COMMANDS:
                             NAME: every agent in one flat list.
     setup [--client C] [--name N] [--yes]
                             Set this computer up: find the agent CLIs, write
-                            its node (~/.config/ensemble/node.yaml) if there is
+                            its node (~/.config/ensemble/node/node.yaml) if there is
                             none, register Ensemble with the agent you talk to,
                             and check the node's teams. Asks what it needs.
-    connect --client C [--hub DIR] [--env-file F] [--global] [--hooks]
+    connect --client C [--env-file F] [--global] [--hooks]
                             Register Ensemble with the agent you talk to:
                             claude-code, opencode or codex, so its sessions
                             reach your node. Prints the command it runs.
-                            --hooks (Claude Code, Codex; needs --hub)
-                            also adds session hooks that put the vault's notes
+                            --hooks (Claude Code, Codex) also adds session
+                            hooks that put the notes of the node's hub's vault
                             about each prompt into the conversation: in the
                             project's .claude/settings.local.json or
                             .codex/hooks.json, or your own with --global.
-    hub init [--server] [--force]
-                            Write a sample hub: hub.yaml in the --hub directory,
-                            with every setting, and make its knowledge vault a
-                            git repository. --server writes a hub server for a
-                            team instead of a hub for you alone.
+    hub init [--force|--stdout]
+                            Write a sample hub in ~/.config/ensemble/hub/:
+                            hub.yaml with every setting, and its knowledge vault,
+                            a git repository. A hub provides services and
+                            connects nodes; it has no team and runs no agents.
     node init [--force|--stdout]
-                            Write this computer's node: ~/.config/ensemble/node.yaml.
-                            It names the node, says whom it works for (private:
-                            you; shared: also those whose role has `compute`),
-                            and what it offers through a hub: agents of its
-                            teams, models.
-    node serve [--hub HUB]
-                            Run that node until stopped (Ctrl-C or SIGTERM):
+                            Write this computer's node: ~/.config/ensemble/node/
+                            node.yaml. It names the node, says whom it works for
+                            (private: you; shared: also those whose role has
+                            `compute`), the hub it connects to, and what it
+                            offers through the hub: agents of its teams, models.
+    node serve              Run that node until stopped (Ctrl-C or SIGTERM):
                             `ensemble mcp` sessions from any folder reach its
-                            team, and each folder's tasks go on between them.
-                            With a hub server it also takes your tasks from the
+                            teams, and each folder's tasks go on between them.
+                            With the hub its node.yaml names it also takes your tasks from the
                             hub (into the folder of the project's name where a
                             session last ran), and runs the agents and serves
                             the models it offers. A computer runs one node.
-    nodes --hub URL         The nodes of a hub server you may use now, with the
-                            agents and models each offers.
+    nodes                   The nodes of your node's hub you may use now, with
+                            the agents and models each offers.
     hub check               Load and validate hub.yaml, and say which model
                             would distill shares now.
-    hub serve               Run the --hub as a server for a team, until stopped
-                            (Ctrl-C or SIGTERM): members' nodes connect, share
-                            to and recall from its vault, as their roles allow.
+    hub serve               Run this computer's hub until stopped (Ctrl-C or
+                            SIGTERM): nodes connect, share to and recall from
+                            its vault, take their tasks and lend their power,
+                            as their roles allow.
     hub user add NAME --role R | list | password NAME | tracker NAME [TRACKER_NAME]
              | approve NAME --role R | role NAME --role R | token NAME
              | revoke NAME | remove NAME
@@ -106,7 +107,7 @@ COMMANDS:
                             the user's sessions. `approve` lets in someone who
                             signed up; `remove` turns them down.
     share --title T [--text T]
-                            Keep knowledge in the --hub vault, as an agent's
+                            Keep knowledge in the vault of your node's hub, as an agent's
                             `share` tool does; the text is read from stdin
                             when --text is not given.
     login URL --user NAME | --token T
@@ -114,25 +115,20 @@ COMMANDS:
                             account (the password is asked, or read from stdin),
                             which makes an access token for this computer, or
                             with a token made elsewhere. The token is kept in
-                            ~/.config/ensemble/hubs.json, readable only by you.
-                            Then --hub URL works like --hub <dir>.
+                            ~/.config/ensemble/node/hubs.json, readable only by
+                            you; name the hub as `hub:` in node.yaml to use it.
     logout URL              Forget a hub server's token.
-    inbox [--once]          The issues assigned to you in the --hub tracker
-                            with its label, where each stands and the task it
-                            became. --once first makes new
-                            issues into tasks and reports tasks back, as a
-                            running node does.
-    recall TOPIC            Print the notes of the --hub vault about TOPIC, as
+    recall TOPIC            Print the notes of your node's hub about TOPIC, as
                             an agent's `recall` tool gets them.
-    hook --hub HUB          What a Claude Code or Codex session hook runs: reads
+    hook                    What a Claude Code or Codex session hook runs: reads
                             the event on stdin and prints the notes about the
                             prompt (or, at the start, the project) not given in
                             the session yet. Set up by `connect --hooks`.
-    knowledge status        Shares, those not yet distilled, notes, and what
-                            waits in review/.
-    knowledge distill       Turn every pending share into notes now, instead of
-                            waiting for the node to.
-    knowledge rebuild [--yes]
+    hub knowledge status    This computer's hub's vault: shares, those not yet
+                            distilled, notes, and what waits in review/.
+    hub knowledge distill   Turn every pending share into notes now, instead of
+                            waiting for the running hub to.
+    hub knowledge rebuild [--yes]
                             Delete the notes and make them again from every
                             share, in one commit.
     doctor                  Say what is wrong with the node's teams and the
@@ -182,10 +178,6 @@ OPTIONS:
     -t, --team <NAME>       The team a command changes, by its name in the
                             teams directory. Every other command reads all the
                             node's teams, whose agents are <team>/<agent>.
-        --hub <DIR|URL>     The hub: the directory with hub.yaml, which keeps
-                            your knowledge, or a hub server's ws:// or wss://
-                            URL after `ensemble login`. Without it there is no
-                            knowledge.
         --env-file <PATH>   A file of NAME=value lines read for variables the
                             environment does not set.
     -d, --dir <PATH>        The project directory agents work in.
@@ -193,6 +185,11 @@ OPTIONS:
         --context <TEXT>    Extra context for `run`.
     -h, --help              This.
     -V, --version           Print the version.
+
+FILES:
+    ~/.config/ensemble/node/  node.yaml, teams/ (one folder per team), hubs.json
+    ~/.config/ensemble/hub/   hub.yaml, database.db, vault/ (a hub this computer runs)
+    ~/.local/state/ensemble/  tasks, run logs and worktrees, per working folder
 
 ENVIRONMENT:
     LLM backends name the variables they read; `ensemble check` lists them. API keys
@@ -220,8 +217,6 @@ struct Args {
     command: String,
     rest: Vec<String>,
     team: Option<String>,
-    /// The hub's directory, with `hub.yaml`. None: no hub, so no knowledge.
-    hub: Option<PathBuf>,
     env_file: Option<PathBuf>,
     dir: Option<PathBuf>,
     context: Option<String>,
@@ -234,7 +229,6 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
     let mut command: Option<String> = None;
     let mut rest = Vec::new();
     let mut team = None;
-    let mut hub = None;
     let mut env_file = None;
     let mut dir = None;
     let mut context = None;
@@ -261,7 +255,9 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
                 );
                 team = Some(value("--org")?);
             }
-            "--hub" => hub = Some(PathBuf::from(value("--hub")?)),
+            "--hub" => {
+                return Err("--hub is gone: this computer's node names its hub in ~/.config/ensemble/node/node.yaml (`hub: wss://…`), and a hub this computer runs keeps its files in ~/.config/ensemble/hub/".into());
+            }
             "--env-file" => env_file = Some(PathBuf::from(value("--env-file")?)),
             "-d" | "--dir" => dir = Some(PathBuf::from(value("--dir")?)),
             "--context" => context = Some(value("--context")?),
@@ -288,7 +284,6 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
             command,
             rest,
             team,
-            hub,
             env_file,
             dir,
             context,
@@ -301,6 +296,7 @@ fn run() -> Result<ExitCode, String> {
     let Some(args) = parse_args(std::env::args().skip(1).collect())? else {
         return Ok(ExitCode::SUCCESS);
     };
+    move_old_layout();
 
     if args.command == "schema" {
         print!("{}", config::SCHEMA);
@@ -340,29 +336,18 @@ fn run() -> Result<ExitCode, String> {
         return cmd_node(&args);
     }
     if args.command == "nodes" {
-        return cmd_nodes(&args);
+        return cmd_nodes();
     }
     if args.command == "share" {
         return cmd_share(&args, &dir);
     }
-    if args.command == "knowledge" {
-        return cmd_knowledge(&args, &dir);
-    }
-    if args.command == "inbox" {
-        return cmd_inbox(&args);
-    }
     if args.command == "recall" {
-        if args.hub.is_none() {
-            hub_of(&args, "recall")?;
-        }
-        let knowledge = knowledge_for(&args, &dir)?.ok_or("recall: the hub keeps no knowledge")?;
+        let knowledge = knowledge_for(&dir, "recall")?;
         let query = args.rest.join(" ");
         if query.trim().is_empty() {
-            return Err(
-                "recall: needs a topic, such as `ensemble recall --hub <dir> deploys`".into(),
-            );
+            return Err("recall: needs a topic, such as `ensemble recall deploys`".into());
         }
-        let notes = ensemble::runtime::block_on(knowledge.access().call(
+        let notes = ensemble::runtime::block_on(knowledge.call(
             ensemble::knowledge::RECALL,
             &serde_json::json!({ "query": query }),
         ))
@@ -371,7 +356,7 @@ fn run() -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
     if args.command == "hook" {
-        return cmd_hook(&args);
+        return cmd_hook();
     }
     if args.command == "mcp" {
         return cmd_mcp(&dir);
@@ -415,69 +400,17 @@ fn team_of(args: &Args, command: &str) -> Result<PathBuf, String> {
     teams::editable(name).map_err(|e| format!("{command}: {e}"))
 }
 
-/// The hub's directory, for a command that needs one.
-fn hub_of(args: &Args, command: &str) -> Result<PathBuf, String> {
-    if let Some(url) = hub_url(args) {
-        return Err(format!(
-            "{command}: needs the hub's directory, with hub.yaml; {url} is a hub server, and this runs on the server itself"
-        ));
-    }
-    args.hub.clone().ok_or_else(|| {
-        format!(
-            "{command}: no hub given. Pass --hub <dir>, the directory with hub.yaml. `ensemble hub init --hub <dir>` makes one."
-        )
-    })
-}
-
-/// The hub server `--hub` names, when it is a `ws://` or `wss://` URL rather
-/// than a directory.
-fn hub_url(args: &Args) -> Option<String> {
-    let hub = args.hub.as_ref()?.to_str()?;
-    (hub.starts_with("ws://") || hub.starts_with("wss://")).then(|| hub.to_string())
-}
-
-/// A hub's knowledge: embedded in this node, or on a hub server.
-enum Knowledge {
-    Local(Box<ensemble::knowledge::Memory>),
-    Remote(Box<ensemble::link::RemoteMemory>),
-}
-
-impl Knowledge {
-    fn access(&self) -> &dyn ensemble::knowledge::KnowledgeAccess {
-        match self {
-            Knowledge::Local(m) => m.as_ref(),
-            Knowledge::Remote(r) => r.as_ref(),
-        }
-    }
-}
-
-/// The knowledge of the hub `--hub` names, embedded or on a server, for work
-/// in `dir`.
-fn knowledge_for(args: &Args, dir: &Path) -> Result<Option<Knowledge>, String> {
-    let Some(url) = hub_url(args) else {
-        return Ok(memory_for(args, dir)?.map(|m| Knowledge::Local(Box::new(m))));
-    };
-    let tokens = ensemble::link::Tokens::load()?;
-    let token = tokens.get(&url).ok_or_else(|| {
-        format!("no token for the hub {url}. Sign in first: ensemble login {url} --token <token>")
-    })?;
-    let project = dir.file_name().map(|n| n.to_string_lossy().into_owned());
-    Ok(Some(Knowledge::Remote(Box::new(
-        ensemble::link::RemoteMemory::new(&url, token, project),
-    ))))
-}
-
-/// `ensemble hook --hub H`: what a CLI's session hook prints, the vault's notes
+/// `ensemble hook`: what a CLI's session hook prints, the vault's notes
 /// about the prompt or the project, each once per session. It never fails the
 /// CLI's turn: a problem is said on stderr, and nothing is printed.
-fn cmd_hook(args: &Args) -> Result<ExitCode, String> {
-    if let Err(e) = hook(args) {
+fn cmd_hook() -> Result<ExitCode, String> {
+    if let Err(e) = hook() {
         eprintln!("ensemble: hook: {e}");
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn hook(args: &Args) -> Result<(), String> {
+fn hook() -> Result<(), String> {
     use ensemble::hooks::{Given, MAX_PRINTED, fresh_notes, read_event};
     use std::io::Read;
     let mut input = String::new();
@@ -496,10 +429,12 @@ fn hook(args: &Args) -> Result<(), String> {
         Some(cwd) => cwd.clone(),
         None => std::env::current_dir().map_err(|e| e.to_string())?,
     };
-    let Some(knowledge) = knowledge_for(args, &dir)? else {
+    // A node with no hub has no notes to give: nothing to say.
+    if this_node()?.hub.is_none() {
         return Ok(());
-    };
-    let answer = match ensemble::runtime::block_on(knowledge.access().call(
+    }
+    let knowledge = knowledge_for(&dir, "hook")?;
+    let answer = match ensemble::runtime::block_on(knowledge.call(
         ensemble::knowledge::RECALL,
         &serde_json::json!({ "query": topic }),
     )) {
@@ -629,10 +564,14 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
         .rest
         .first()
         .map(String::as_str)
-        .ok_or("hub: needs init, check, user or serve. Try --help.")?;
+        .ok_or("hub: needs init, check, user, knowledge or serve. Try --help.")?;
     match what {
         "init" => {
-            let dir = hub_of(args, "hub init")?;
+            if has(args, "--stdout") {
+                print!("{}", config::hub::HUB_SAMPLE);
+                return Ok(ExitCode::SUCCESS);
+            }
+            let dir = state::hub_config_dir()?;
             let path = config::hub_path(&dir);
             if path.exists() && !has(args, "--force") {
                 return Err(format!(
@@ -640,35 +579,25 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
                     path.display()
                 ));
             }
-            let (sample, what) = if has(args, "--server") {
-                (
-                    config::hub::HUB_SERVER_SAMPLE,
-                    "a sample hub server for a team",
-                )
-            } else {
-                (config::hub::HUB_SAMPLE, "a sample hub for you alone")
-            };
+            let (sample, what) = (config::hub::HUB_SAMPLE, "a sample hub");
             std::fs::create_dir_all(&dir)
                 .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
             std::fs::write(&path, sample)
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
             println!("wrote {}: {what}, with every setting", path.display());
             let hub = config::parse_hub(sample, &path, &SystemEnv).map_err(|e| e.to_string())?;
-            if let Some(knowledge) = &hub.knowledge {
-                ensemble::knowledge::Vault::new(&knowledge.vault).init()?;
-                println!(
-                    "made the knowledge vault, a git repository: {}",
-                    knowledge.vault.display()
-                );
-            }
+            ensemble::knowledge::Vault::new(&hub.knowledge.vault).init()?;
             println!(
-                "Name yourself as `owner`, choose the models that distill, then run `ensemble hub check --hub {}`.",
-                dir.display()
+                "made the knowledge vault, a git repository: {}",
+                hub.knowledge.vault.display()
+            );
+            println!(
+                "Name the hub as `owner`, choose the models that distill and the roles, then run `ensemble hub check`, add the first admin with `ensemble hub user add`, and `ensemble hub serve`."
             );
             Ok(ExitCode::SUCCESS)
         }
         "check" => {
-            let dir = hub_of(args, "hub check")?;
+            let dir = state::hub_config_dir()?;
             let hub = config::load_hub(
                 &config::hub_path(&dir),
                 args.env_file.as_deref(),
@@ -676,10 +605,7 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
             )
             .map_err(|e| e.to_string())?;
             println!("{}: valid, for {}", hub.source.display(), hub.owner);
-            let Some(knowledge) = &hub.knowledge else {
-                println!("knowledge: not used (no `knowledge` block)");
-                return Ok(ExitCode::SUCCESS);
-            };
+            let knowledge = &hub.knowledge;
             println!("knowledge vault: {}", knowledge.vault.display());
             if !ensemble::knowledge::Vault::new(&knowledge.vault).exists() {
                 println!("  it is not a git repository yet; `ensemble hub init` makes it");
@@ -716,16 +642,88 @@ fn cmd_hub(args: &Args) -> Result<ExitCode, String> {
         }
         "user" => cmd_hub_user(args),
         "serve" => cmd_hub_serve(args),
+        "knowledge" => cmd_knowledge(args),
         other => Err(format!(
-            "hub: unknown '{other}'. Use init, check, user or serve."
+            "hub: unknown '{other}'. Use init, check, user, knowledge or serve."
         )),
     }
 }
 
-/// This computer's node file, `~/.config/ensemble/node.yaml`: a computer runs
-/// one node.
+/// Move what an older Ensemble kept elsewhere into the fixed layout under
+/// `~/.config/ensemble/`, once: the node file and hub tokens from the top of
+/// it, and the teams from `~/.local/share/ensemble/teams/`.
+fn move_old_layout() {
+    let (Ok(config), Ok(node)) = (state::config_root(), state::node_config_dir()) else {
+        return;
+    };
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+    let mut moves = vec![
+        (config.join("node.yaml"), node.join("node.yaml")),
+        (config.join("hubs.json"), node.join("hubs.json")),
+    ];
+    if let Some(data) = data {
+        moves.push((data.join("ensemble/teams"), node.join("teams")));
+    }
+    for (old, new) in moves {
+        if old.exists() && !new.exists() {
+            let moved = std::fs::create_dir_all(&node).and_then(|()| std::fs::rename(&old, &new));
+            match moved {
+                Ok(()) => eprintln!("ensemble: moved {} to {}", old.display(), new.display()),
+                Err(e) => eprintln!(
+                    "ensemble: cannot move {} to {}: {e}",
+                    old.display(),
+                    new.display()
+                ),
+            }
+        }
+    }
+}
+
+/// This computer's node file, `~/.config/ensemble/node/node.yaml`: a computer
+/// runs one node.
 fn node_file() -> Result<PathBuf, String> {
-    Ok(config::node_path(&state::config_root()?))
+    Ok(config::node_path(&state::node_config_dir()?))
+}
+
+/// This computer's node, from its node file.
+fn this_node() -> Result<config::Node, String> {
+    let path = node_file()?;
+    config::load_node(&path)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "no node file at {}; `ensemble setup` or `ensemble node init` writes one",
+                path.display()
+            )
+        })
+}
+
+/// The hub server this computer's node names, and its token.
+fn node_hub(command: &str) -> Result<(String, String), String> {
+    let node = this_node().map_err(|e| format!("{command}: {e}"))?;
+    let url = node.hub.ok_or_else(|| {
+        format!(
+            "{command}: this computer's node names no hub; add `hub: wss://…` to {}",
+            node.source.display()
+        )
+    })?;
+    let token = ensemble::link::Tokens::load()?
+        .get(&url)
+        .ok_or_else(|| {
+            format!("{command}: no token for the hub {url}. Sign in first: ensemble login {url} --user <name>")
+        })?
+        .to_string();
+    Ok((url, token))
+}
+
+/// The knowledge of this computer's node's hub, for work in `dir`.
+fn knowledge_for(dir: &Path, command: &str) -> Result<ensemble::link::RemoteMemory, String> {
+    let (url, token) = node_hub(command)?;
+    let project = dir.file_name().map(|n| n.to_string_lossy().into_owned());
+    Ok(ensemble::link::RemoteMemory::new(&url, &token, project))
 }
 
 fn cmd_node(args: &Args) -> Result<ExitCode, String> {
@@ -759,7 +757,7 @@ fn cmd_node(args: &Args) -> Result<ExitCode, String> {
     }
 }
 
-/// `ensemble node serve [--node FILE] [--hub HUB]`: run a node until stopped.
+/// `ensemble node serve`: run this computer's node until stopped.
 /// It serves `ensemble mcp` sessions from any folder with its team; with a hub
 /// server, it also takes your tasks from the hub and offers what it offers.
 fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
@@ -790,22 +788,17 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
     for line in &waiting {
         say(line);
     }
-    let daemon = daemon::Daemon::new(args, node.clone(), team.clone(), &dir, &say);
-
-    // With a hub server: the link that offers what the node offers, and the
-    // tasks the hub sends you.
-    let url = hub_url(args);
-    let token = match &url {
-        Some(url) => Some(
-            ensemble::link::Tokens::load()?
-                .get(url)
-                .ok_or_else(|| {
-                    format!("node serve: no token for the hub {url}. Sign in first: ensemble login {url} --user <name>")
-                })?
-                .to_string(),
-        ),
+    // With a hub: the link that offers what the node offers, and the tasks
+    // the hub sends you.
+    let hub = match &node.hub {
+        Some(_) => Some(node_hub("node serve")?),
         None => None,
     };
+    let (url, token) = match &hub {
+        Some((url, token)) => (Some(url.clone()), Some(token.clone())),
+        None => (None, None),
+    };
+    let daemon = daemon::Daemon::new(node.clone(), hub.clone(), team.clone(), &dir, &say);
     let worker = match (&url, &token) {
         (Some(url), Some(token)) if node.offers.runs.is_some() || node.offers.models.is_some() => {
             Some(
@@ -831,25 +824,10 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
         )),
         _ => None,
     };
-    // An embedded hub's own workers: shares into notes, issues into tasks.
-    let agents: Vec<String> = team.agent_names().into_iter().map(String::from).collect();
-    let local_inbox = inbox_for(args, agents)?;
-    let distill = match hub_url(args) {
-        None => memory_for(args, &dir)?,
-        Some(_) => None,
-    };
-
     let socket = state::node_socket(&dir);
     let refused = std::sync::Mutex::new(None);
-    std::thread::scope(|scope| {
+    let served = {
         let stop = &STOP;
-        // What is not async yet runs on threads of its own.
-        if let Some(inbox) = &local_inbox {
-            scope.spawn(move || inbox.work(stop, &say));
-        }
-        if let Some(memory) = &distill {
-            scope.spawn(move || memory.work(stop, &say));
-        }
         let link = async {
             if let Some(worker) = &worker
                 && let Err(e) = worker.work(stop, &say).await
@@ -867,8 +845,8 @@ fn cmd_node_serve(args: &Args) -> Result<ExitCode, String> {
             .block_on(async { tokio::join!(daemon.serve(&socket), link, tasks) });
         STOP.store(true, std::sync::atomic::Ordering::Relaxed);
         served
-    })
-    .map_err(|e| format!("node serve: {e}"))?;
+    };
+    served.map_err(|e| format!("node serve: {e}"))?;
     if let Some(e) = refused.into_inner().unwrap() {
         return Err(format!("node serve: the hub refused this node: {e}"));
     }
@@ -894,15 +872,10 @@ fn cmd_mcp(dir: &Path) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `ensemble nodes --hub URL`: the nodes of a hub server you may use now.
-fn cmd_nodes(args: &Args) -> Result<ExitCode, String> {
-    let url = hub_url(args).ok_or("nodes: needs --hub, a hub server's ws:// or wss:// address")?;
-    let tokens = ensemble::link::Tokens::load()?;
-    let token = tokens.get(&url).ok_or_else(|| {
-        format!(
-            "nodes: no token for the hub {url}. Sign in first: ensemble login {url} --user <name>"
-        )
-    })?;
+/// `ensemble nodes`: the nodes of your node's hub you may use now.
+fn cmd_nodes() -> Result<ExitCode, String> {
+    let (url, token) = node_hub("nodes")?;
+    let token = token.as_str();
     let listed = ensemble::runtime::block_on(async {
         let mut link = ensemble::link::client::Connection::open(&url, token).await?;
         let listed = link
@@ -949,25 +922,22 @@ fn cmd_nodes(args: &Args) -> Result<ExitCode, String> {
 
 /// `ensemble hub serve`: the hub as a server for a team, until stopped.
 fn cmd_hub_serve(args: &Args) -> Result<ExitCode, String> {
-    let dir = hub_of(args, "hub serve")?;
+    let dir = state::hub_config_dir()?;
     let hub = config::load_hub(
         &config::hub_path(&dir),
         args.env_file.as_deref(),
         &SystemEnv,
     )
     .map_err(|e| e.to_string())?;
-    let server = hub
-        .server
-        .ok_or("hub serve: hub.yaml has no `server` block; add one with `listen` and `roles`")?;
-    let memory = ensemble::knowledge::Memory::new(&hub, None)
-        .ok_or("hub serve: a hub server needs `knowledge`")?;
+    let server = hub.server;
+    let memory = ensemble::knowledge::Memory::new(&hub, None);
     if !memory.vault().exists() {
         return Err(format!(
             "hub serve: the knowledge vault {} is not a git repository yet; `ensemble hub init` makes it",
             memory.vault().root().display()
         ));
     }
-    let users = state::hub_dir(&dir)?;
+    let users = dir.clone();
     let listener = std::net::TcpListener::bind(server.listen)
         .map_err(|e| format!("hub serve: cannot listen on {}: {e}", server.listen))?;
     #[cfg(unix)]
@@ -1012,19 +982,14 @@ fn cmd_hub_serve(args: &Args) -> Result<ExitCode, String> {
 /// `ensemble hub user add|list|token|revoke|remove`: a hub server's users,
 /// managed on the server by whoever can read the hub, which is its admin.
 fn cmd_hub_user(args: &Args) -> Result<ExitCode, String> {
-    let dir = hub_of(args, "hub user")?;
+    let dir = state::hub_config_dir()?;
     let hub = config::load_hub(
         &config::hub_path(&dir),
         args.env_file.as_deref(),
         &SystemEnv,
     )
     .map_err(|e| e.to_string())?;
-    if hub.server.is_none() {
-        return Err(
-            "hub user: only a hub server has users; add `server` and `roles` to hub.yaml".into(),
-        );
-    }
-    let state = state::hub_dir(&dir)?;
+    let state = dir.clone();
     let mut users = ensemble::link::Users::load(&state)?;
     let what = args.rest.get(1).map(String::as_str).unwrap_or("");
     let name = || {
@@ -1211,120 +1176,26 @@ fn cmd_migrate(args: &Args) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The knowledge of the hub `--hub` names, for work in `dir`. None without a
-/// hub, or with one that keeps no knowledge, which is said on stderr.
-fn memory_for(args: &Args, dir: &Path) -> Result<Option<ensemble::knowledge::Memory>, String> {
-    let Some(hub_dir) = &args.hub else {
-        return Ok(None);
-    };
+/// The knowledge vault of the hub this computer runs.
+fn hub_memory(args: &Args) -> Result<ensemble::knowledge::Memory, String> {
     let hub = config::load_hub(
-        &config::hub_path(hub_dir),
+        &config::hub_path(&state::hub_config_dir()?),
         args.env_file.as_deref(),
         &SystemEnv,
     )
     .map_err(|e| e.to_string())?;
-    let project = dir.file_name().map(|n| n.to_string_lossy().into_owned());
-    let memory = ensemble::knowledge::Memory::new(&hub, project);
-    if memory.is_none() {
-        eprintln!(
-            "ensemble: the hub {} has no `knowledge` block, so it keeps no knowledge",
-            hub_dir.display()
-        );
-    }
-    Ok(memory)
+    Ok(ensemble::knowledge::Memory::new(&hub, None))
 }
 
-/// The inbox of the hub `--hub` names, for a helper team with `agents`. None
-/// without a hub, or with one that has no `tasks` block.
-fn inbox_for(args: &Args, agents: Vec<String>) -> Result<Option<ensemble::inbox::Inbox>, String> {
-    // A hub server's inbox runs on the server; a node takes its tasks.
-    if hub_url(args).is_some() {
-        return Ok(None);
-    }
-    let Some(hub_dir) = &args.hub else {
-        return Ok(None);
-    };
-    let hub = config::load_hub(
-        &config::hub_path(hub_dir),
-        args.env_file.as_deref(),
-        &SystemEnv,
-    )
-    .map_err(|e| e.to_string())?;
-    // A hub server's inbox runs in `ensemble hub serve`, not here.
-    let Some(tasks) = hub.tasks.as_ref().filter(|t| t.personal.is_some()) else {
-        return Ok(None);
-    };
-    let dir = state::hub_dir(hub_dir).map_err(|e| format!("--hub {e}"))?;
-    ensemble::inbox::Inbox::new(tasks, agents, dir).map(Some)
-}
-
-/// `ensemble inbox [--once]`: the issues the hub's inbox sees and the task each
-/// became; with `--once`, one pass over the tracker first.
-fn cmd_inbox(args: &Args) -> Result<ExitCode, String> {
-    hub_of(args, "inbox")?;
-    let once = has(args, "--once");
-    // `<label>:<agent>` names an agent of the helper team, so a pass needs it.
-    let agents = if once {
-        let (config, _) = teams::load_all(args.env_file.as_deref(), &SystemEnv)?;
-        config.agent_names().into_iter().map(String::from).collect()
-    } else {
-        Vec::new()
-    };
-    let inbox =
-        inbox_for(args, agents)?.ok_or(
-            "inbox: the hub has no `tasks` block for one person; a hub server's inbox runs in `ensemble hub serve`",
-        )?;
-    if once {
-        let _lock = inbox.lock()?;
-        for line in inbox.pass()? {
-            println!("{line}");
-        }
-    }
-    let (tasks, user) = (inbox.settings(), &inbox.personal().user);
-    let issues = inbox.tracker().assigned(user, &tasks.label);
-    let seen = inbox.seen();
-    println!(
-        "issues assigned to {user} with the label {}: {}",
-        tasks.label,
-        issues.len()
-    );
-    for issue in &issues {
-        let task = seen
-            .get(&issue.id)
-            .and_then(|s| s.task.as_deref())
-            .map(|t| format!("  -> task {t}"))
-            .unwrap_or_default();
-        println!(
-            "  {:<12} {:<12} {}{}{task}",
-            issue.id,
-            issue.status.as_str(),
-            issue.title,
-            issue
-                .project
-                .as_deref()
-                .map(|p| format!("  [{p}]"))
-                .unwrap_or_default()
-        );
-    }
-    let bad = inbox.tracker().unreadable();
-    if !bad.is_empty() {
-        println!("issues that cannot be read:");
-        for (id, why) in &bad {
-            println!("  {id}: {why}");
-        }
-    }
-    Ok(ExitCode::SUCCESS)
-}
-
-/// `ensemble knowledge status|distill|rebuild`.
-fn cmd_knowledge(args: &Args, dir: &Path) -> Result<ExitCode, String> {
+/// `ensemble hub knowledge status|distill|rebuild`: the vault of the hub this
+/// computer runs.
+fn cmd_knowledge(args: &Args) -> Result<ExitCode, String> {
     let what = args
         .rest
-        .first()
+        .get(1)
         .map(String::as_str)
-        .ok_or("knowledge: needs status, distill or rebuild. Try --help.")?;
-    hub_of(args, &format!("knowledge {what}"))?;
-    let memory = memory_for(args, dir)?.ok_or("knowledge: the hub keeps no knowledge")?;
+        .ok_or("hub knowledge: needs status, distill or rebuild. Try --help.")?;
+    let memory = hub_memory(args)?;
     let vault = memory.vault();
     let report = |run: &ensemble::knowledge::Run| {
         for line in &run.done {
@@ -1374,18 +1245,15 @@ fn cmd_knowledge(args: &Args, dir: &Path) -> Result<ExitCode, String> {
             Ok(report(&memory.rebuild()?))
         }
         other => Err(format!(
-            "knowledge: unknown '{other}'. Use status, distill or rebuild."
+            "hub knowledge: unknown '{other}'. Use status, distill or rebuild."
         )),
     }
 }
 
-/// `ensemble share`: keep knowledge in the hub's vault by hand, as the `share`
-/// tool does for an agent.
+/// `ensemble share`: keep knowledge in the vault of this node's hub by hand, as
+/// the `share` tool does for an agent.
 fn cmd_share(args: &Args, dir: &Path) -> Result<ExitCode, String> {
-    if args.hub.is_none() {
-        hub_of(args, "share")?;
-    }
-    let knowledge = knowledge_for(args, dir)?.ok_or("share: the hub keeps no knowledge")?;
+    let knowledge = knowledge_for(dir, "share")?;
     let title = opt(args, "--title").ok_or("share: needs --title, what it is about")?;
     let text = match opt(args, "--text") {
         Some(text) => text.to_string(),
@@ -1399,7 +1267,6 @@ fn cmd_share(args: &Args, dir: &Path) -> Result<ExitCode, String> {
     if text.trim().is_empty() {
         return Err("share: the text is empty; give it with --text or on stdin".into());
     }
-    let knowledge = knowledge.access();
     knowledge.set_client("ensemble-cli");
     let said = ensemble::runtime::block_on(knowledge.call(
         ensemble::knowledge::SHARE,
@@ -1798,16 +1665,6 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-/// The `--hub` to register: a directory made absolute, or a hub server's URL
-/// as it is.
-fn hub_for_registration(args: &Args) -> Result<Option<PathBuf>, String> {
-    match (&args.hub, hub_url(args)) {
-        (_, Some(url)) => Ok(Some(PathBuf::from(url))),
-        (Some(dir), None) => absolute(dir).map(Some),
-        (None, None) => Ok(None),
-    }
-}
-
 /// Run a registration, saying first what it is. The client's own words come
 /// through, and so does its exit status.
 fn run_registration(reg: &setup::Registration) -> Result<(), String> {
@@ -1831,7 +1688,7 @@ fn run_registration(reg: &setup::Registration) -> Result<(), String> {
 
 /// `ensemble connect --client C`: register Ensemble with the agent CLI you
 /// talk to, so that its sessions reach this computer's node; with `--hooks`,
-/// the session hooks of the `--hub` vault too.
+/// the session hooks that recall from the node's hub too.
 fn cmd_connect(args: &Args) -> Result<ExitCode, String> {
     let client = opt(args, "--client").ok_or(format!(
         "connect: needs --client, the agent CLI you talk to: {}",
@@ -1841,9 +1698,12 @@ fn cmd_connect(args: &Args) -> Result<ExitCode, String> {
     // The hooks are checked before anything is registered, so that a request
     // that cannot be met changes nothing.
     let hooks = if has(args, "--hooks") {
-        let hub = hub_for_registration(args)?.ok_or(
-            "connect: --hooks needs --hub: the hooks put the notes of its vault into your sessions",
-        )?;
+        // The hooks recall from the hub the node names; without one they say nothing.
+        if this_node().is_ok_and(|n| n.hub.is_none()) {
+            println!(
+                "note: this computer's node names no hub yet, so the hooks give no notes until it does"
+            );
+        }
         let env_file = args.env_file.as_deref().map(absolute).transpose()?;
         let home =
             setup::home().ok_or("connect: cannot find your home directory: HOME is not set")?;
@@ -1856,7 +1716,7 @@ fn cmd_connect(args: &Args) -> Result<ExitCode, String> {
         let path = ensemble::hooks::settings_path(client, has(args, "--global"), &home, &dir)
             .map_err(|e| format!("connect: --hooks: {e}"))?;
         let command =
-            ensemble::hooks::hook_command(&setup::ensemble_command(), &hub, env_file.as_deref());
+            ensemble::hooks::hook_command(&setup::ensemble_command(), env_file.as_deref());
         Some((path, command))
     } else {
         None

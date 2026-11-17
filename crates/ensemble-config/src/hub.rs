@@ -1,11 +1,11 @@
-//! `hub.yaml`: the hub role's settings, kept apart from the helper team's
-//! `config.yaml`, which a company may share. The hub is the people layer: here,
-//! embedded in one person's node, it keeps that person's knowledge vault and
-//! names the models that distill it.
+//! `hub.yaml`: a hub's settings, in `~/.config/ensemble/hub/`. A hub provides
+//! services and connects nodes: it has no helper team and runs no agents. It is
+//! always a server (`ensemble hub serve`), for a team or for one person on
+//! their own computer: its `server`, the `roles` of its accounts, its
+//! `knowledge`, and, optionally, the `tasks` it hands out from a tracker.
 //!
 //! The same rules as `config.yaml`: no default values, unknown keys refused,
-//! secrets named by the variable that holds them. A block that is absent means
-//! the feature is not used: a hub without `knowledge` keeps no knowledge.
+//! secrets named by the variable that holds them.
 
 use super::raw::{RawDirectAdapter, RawLlmBackend};
 use super::validate::{direct_adapter, explain, read_env_file, resolve_backend};
@@ -22,24 +22,19 @@ pub const HUB_SCHEMA: &str = include_str!("../../../hub.schema.json");
 /// The hub file `ensemble hub init` writes, with what each setting does.
 pub const HUB_SAMPLE: &str = include_str!("hub_sample.yaml");
 
-/// The hub file `ensemble hub init --server` writes: a hub server for a team.
-pub const HUB_SERVER_SAMPLE: &str = include_str!("hub_server_sample.yaml");
-
 /// The hub's settings, resolved.
 #[derive(Debug, Clone)]
 pub struct Hub {
     pub version: u32,
-    /// The person the hub works for, named in everything they share.
+    /// The hub's name, for its log and its listings.
     pub owner: String,
     /// Model endpoints the hub itself uses.
     pub llm_backends: BTreeMap<String, LlmBackend>,
-    /// Absent: the hub keeps no knowledge.
-    pub knowledge: Option<Knowledge>,
+    pub knowledge: Knowledge,
     /// Absent: no task inbox.
     pub tasks: Option<Tasks>,
-    /// Absent: the hub is embedded only, and nothing listens.
-    pub server: Option<Server>,
-    /// What each role may do, by the role's name. Empty without a server.
+    pub server: Server,
+    /// What each role may do, by the role's name.
     pub roles: BTreeMap<String, Vec<Permission>>,
     /// Where it was loaded from, for error messages.
     pub source: PathBuf,
@@ -64,20 +59,6 @@ pub struct Tasks {
     /// `<label>:<agent>` gives it to that agent.
     pub label: String,
     pub poll_seconds: u32,
-    /// On an embedded hub, the one person and their folders. None on a hub
-    /// server, where each account names itself in the tracker and each
-    /// member's computer maps projects to folders in its `node.yaml`.
-    pub personal: Option<Personal>,
-}
-
-/// The person an embedded hub works for, as its inbox needs them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Personal {
-    /// Who the person is in the tracker.
-    pub user: String,
-    /// An issue's `project`, and the folder its work happens in, made absolute
-    /// against the hub's directory.
-    pub projects: BTreeMap<String, PathBuf>,
 }
 
 /// Where issues are kept.
@@ -164,10 +145,10 @@ pub(crate) struct RawHub {
     pub(crate) version: u32,
     pub(crate) owner: String,
     pub(crate) llm_backends: BTreeMap<String, RawLlmBackend>,
-    pub(crate) knowledge: Option<RawKnowledge>,
+    pub(crate) knowledge: RawKnowledge,
     pub(crate) tasks: Option<RawTasks>,
-    pub(crate) server: Option<RawServer>,
-    pub(crate) roles: Option<BTreeMap<String, Vec<Permission>>>,
+    pub(crate) server: RawServer,
+    pub(crate) roles: BTreeMap<String, Vec<Permission>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,10 +196,8 @@ pub(crate) struct RawClosed {}
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawTasks {
     pub(crate) tracker: RawIssueTracker,
-    pub(crate) user: Option<String>,
     pub(crate) label: String,
     pub(crate) poll_seconds: u32,
-    pub(crate) projects: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -284,6 +263,18 @@ pub fn load_hub(path: &Path, env_file: Option<&Path>, env: &dyn Env) -> Result<H
 }
 
 pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigError> {
+    // Say what changed rather than which key is missing.
+    if let Ok(v) = serde_norway::from_str::<serde_norway::Value>(text)
+        && v.get("server").is_none()
+    {
+        return Err(ConfigError::Invalid {
+            path: path.to_path_buf(),
+            problems: vec![
+                "server: a hub is always a server now, never part of a node: add `server` and `roles` (`ensemble hub init --stdout` prints them), and remove `tasks.user` and `tasks.projects`. One person runs it on their own computer, and their node names it as `hub:` in node.yaml"
+                    .into(),
+            ],
+        });
+    }
     let raw: RawHub = serde_norway::from_str(text).map_err(|e| ConfigError::Syntax {
         path: path.to_path_buf(),
         detail: explain(&e),
@@ -296,7 +287,7 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
         ));
     }
     if raw.owner.trim().is_empty() {
-        problems.push("owner: is empty; name the person this hub works for".into());
+        problems.push("owner: is empty; name the hub, such as acme or ana".into());
     }
     let mut backends = BTreeMap::new();
     for (name, rb) in &raw.llm_backends {
@@ -307,7 +298,8 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             Err(mut errs) => problems.append(&mut errs),
         }
     }
-    let knowledge = raw.knowledge.as_ref().map(|k| {
+    let knowledge = {
+        let k = &raw.knowledge;
         if k.vault.trim().is_empty() {
             problems.push("knowledge.vault: is empty".into());
         }
@@ -336,7 +328,7 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
                 max_chars: k.recall.max_chars,
             },
         }
-    });
+    };
     let base = path.parent().unwrap_or(Path::new("."));
     let tasks = raw.tasks.as_ref().map(|t| {
         let tracker = match &t.tracker {
@@ -358,51 +350,14 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
         if t.poll_seconds == 0 {
             problems.push("tasks: `poll_seconds` must be greater than 0".into());
         }
-        let personal = match (raw.server.is_some(), &t.user, &t.projects) {
-            (true, None, None) => None,
-            (true, _, _) => {
-                problems.push(
-                    "tasks: a hub server takes no `user` or `projects`: each account names itself in the tracker, and each member's computer maps projects to folders in its node.yaml"
-                        .into(),
-                );
-                None
-            }
-            (false, Some(user), Some(raw_projects)) => {
-                if user.trim().is_empty() {
-                    problems.push(
-                        "tasks.user: is empty; name yourself as the tracker knows you".into(),
-                    );
-                }
-                let mut projects = BTreeMap::new();
-                for (name, dir) in raw_projects {
-                    if name.trim().is_empty() || dir.trim().is_empty() {
-                        problems.push(format!(
-                            "tasks.projects: '{name}' needs a name and a folder"
-                        ));
-                    }
-                    projects.insert(name.trim().to_string(), base.join(dir.trim()));
-                }
-                Some(Personal {
-                    user: user.trim().to_string(),
-                    projects,
-                })
-            }
-            (false, _, _) => {
-                problems.push(
-                    "tasks: an embedded hub needs `user`, who you are in the tracker, and `projects`, each project's folder"
-                        .into(),
-                );
-                None
-            }
-        };
         Tasks {
             tracker,
             label: label.to_string(),
             poll_seconds: t.poll_seconds,
-            personal,
         }
     });
-    let server = raw.server.as_ref().and_then(|s| {
+    let server = {
+        let s = &raw.server;
         let registration = match &s.registration {
             RawRegistration::Approval(a) => {
                 if a.max_pending == 0 {
@@ -437,46 +392,31 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
                 None
             }
         }
-    });
-    let roles = raw.roles.clone().unwrap_or_default();
-    match (&raw.server, &raw.roles) {
-        (Some(_), None) => problems.push(
-            "roles: a hub with a `server` needs `roles`, saying what each role may do".into(),
-        ),
-        (None, Some(_)) => problems
-            .push("roles: only a hub with a `server` has roles; add one or remove them".into()),
-        (Some(_), Some(r)) if r.is_empty() => {
-            problems.push("roles: name at least one role, such as member: [share, recall]".into())
-        }
-        _ => {}
+    };
+    let roles = raw.roles.clone();
+    if roles.is_empty() {
+        problems.push("roles: name at least one role, such as member: [share, recall]".into());
     }
     for name in roles.keys() {
         if name.trim().is_empty() || name.contains(char::is_whitespace) {
             problems.push(format!("roles: the role name '{name}' must be one word"));
         }
     }
-    if raw.server.is_some() && raw.knowledge.is_none() {
-        problems.push(
-            "server: a hub server keeps the organization's knowledge, so it needs `knowledge`"
-                .into(),
-        );
-    }
     for name in backends.keys() {
-        let used = knowledge.as_ref().is_some_and(|k| {
-            k.distill
-                .fallback
-                .candidates
-                .iter()
-                .any(|c| &c.backend == name)
-        });
+        let used = knowledge
+            .distill
+            .fallback
+            .candidates
+            .iter()
+            .any(|c| &c.backend == name);
         if !used {
             eprintln!(
                 "ensemble: note: LLM backend '{name}' is defined but nothing in the hub uses it"
             );
         }
     }
-    if problems.is_empty() {
-        Ok(Hub {
+    match (problems.is_empty(), server) {
+        (true, Some(server)) => Ok(Hub {
             version: raw.version,
             owner: raw.owner.trim().to_string(),
             llm_backends: backends,
@@ -485,11 +425,10 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             server,
             roles,
             source: path.to_path_buf(),
-        })
-    } else {
-        Err(ConfigError::Invalid {
+        }),
+        _ => Err(ConfigError::Invalid {
             path: path.to_path_buf(),
             problems,
-        })
+        }),
     }
 }

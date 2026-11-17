@@ -33,6 +33,9 @@ pub struct Node {
     /// Its name, which a hub knows as `<owner>/<name>`.
     pub name: String,
     pub access: Access,
+    /// The hub server it connects to, `ws://` or `wss://`, signed in to with
+    /// `ensemble login`. None: it uses no hub.
+    pub hub: Option<String>,
     pub offers: Offers,
     pub source: PathBuf,
 }
@@ -90,6 +93,7 @@ pub(crate) struct RawNode {
     pub(crate) version: u32,
     pub(crate) name: String,
     pub(crate) access: Access,
+    pub(crate) hub: Option<String>,
     pub(crate) offers: RawOffers,
 }
 
@@ -180,6 +184,18 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
             "name: '{name}' must be letters, digits, '-', '_' or '.', such as laptop or gpu-box"
         ));
     }
+    let hub = raw.hub.as_ref().map(|h| h.trim().to_string());
+    if let Some(h) = &hub
+        && !(h.starts_with("ws://") || h.starts_with("wss://"))
+    {
+        problems.push(format!(
+            "hub: '{h}' must start with ws:// or wss://, such as wss://hub.example.com"
+        ));
+    }
+    if hub.is_none() && (raw.offers.runs.is_some() || raw.offers.models.is_some()) {
+        problems
+            .push("offers: a node offers what it has through a hub, and there is no `hub`".into());
+    }
     let runs = raw.offers.runs.as_ref().map(|r| {
         let agents: Vec<String> = r.agents.iter().map(|a| a.trim().to_string()).collect();
         if agents.is_empty() {
@@ -228,6 +244,7 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
             version: raw.version,
             name,
             access: raw.access,
+            hub,
             offers: Offers { runs, models },
             source: path.to_path_buf(),
         })

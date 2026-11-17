@@ -34,28 +34,9 @@ pub fn cache_root() -> Result<PathBuf, String> {
     Ok(base.join("ensemble"))
 }
 
-/// `$XDG_DATA_HOME/ensemble`, or `~/.local/share/ensemble`: what a person keeps
-/// on this computer, such as its helper teams.
-pub fn data_root() -> Result<PathBuf, String> {
-    let base = match std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => {
-            let home = std::env::var_os("HOME")
-                .filter(|v| !v.is_empty())
-                .ok_or("cannot find a data directory: neither XDG_DATA_HOME nor HOME is set")?;
-            PathBuf::from(home).join(".local/share")
-        }
-    };
-    Ok(base.join("ensemble"))
-}
-
-/// The node's helper teams: a folder per team, named for it.
-pub fn teams_dir() -> Result<PathBuf, String> {
-    Ok(data_root()?.join("teams"))
-}
-
-/// `$XDG_CONFIG_HOME/ensemble`, or `~/.config/ensemble`: what a person sets
-/// up on this computer, such as hub tokens and `node.yaml`.
+/// `$XDG_CONFIG_HOME/ensemble`, or `~/.config/ensemble`: everything a person
+/// sets up on this computer, in two fixed folders: `node/` for its node and
+/// `hub/` for a hub it runs.
 pub fn config_root() -> Result<PathBuf, String> {
     let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
         Some(dir) => PathBuf::from(dir),
@@ -67,6 +48,23 @@ pub fn config_root() -> Result<PathBuf, String> {
         }
     };
     Ok(base.join("ensemble"))
+}
+
+/// This computer's node: `node.yaml`, its helper teams in `teams/`, and its
+/// hub tokens in `hubs.json`.
+pub fn node_config_dir() -> Result<PathBuf, String> {
+    Ok(config_root()?.join("node"))
+}
+
+/// The node's helper teams: a folder per team, named for it.
+pub fn teams_dir() -> Result<PathBuf, String> {
+    Ok(node_config_dir()?.join("teams"))
+}
+
+/// A hub this computer runs (`ensemble hub serve`): `hub.yaml`, its
+/// `database.db` of accounts and deliveries, and its knowledge vault.
+pub fn hub_config_dir() -> Result<PathBuf, String> {
+    Ok(config_root()?.join("hub"))
 }
 
 /// The state of the work done in `workdir`: its tasks, runs and worktrees.
@@ -92,16 +90,6 @@ pub fn team_dir(config: &Path) -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|e| format!("{}: {e}", config.display()))?;
     Ok(root()?.join("orgs").join(labelled(&canonical)))
-}
-
-/// What the hub in directory `hub` keeps while it runs: the inbox's record,
-/// a hub server's users. Never in the hub's directory, which may be a shared
-/// repository.
-pub fn hub_dir(hub: &Path) -> Result<PathBuf, String> {
-    let canonical = hub
-        .canonicalize()
-        .map_err(|e| format!("{}: {e}", hub.display()))?;
-    Ok(root()?.join("hubs").join(labelled(&canonical)))
 }
 
 /// What this computer's node keeps: its lock, the folders it worked in, its

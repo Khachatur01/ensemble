@@ -1,7 +1,7 @@
 //! The hub server's state that changes while it runs: its accounts and their
 //! tokens (`users`), and the tracker relay's deliveries. One Turso database,
-//! `hub.db`, in the hub's state directory, which only whoever runs the hub may
-//! enter.
+//! `database.db`, in the hub's folder (`~/.config/ensemble/hub/`), which only
+//! whoever runs the hub may enter.
 //!
 //! Turso locks the file while it is open, and another process cannot open it
 //! then. So each read or change opens it, does its work (a change in one
@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 pub use turso::Value;
 
 /// The database file in the hub's state directory.
-pub const DB_FILE: &str = "hub.db";
+pub const DB_FILE: &str = "database.db";
 /// How long an open waits for another process to let go of the file.
 const WAIT: Duration = Duration::from_secs(5);
 

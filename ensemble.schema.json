@@ -267,7 +267,7 @@
           "minimum": 1
         },
         "recall": {
-          "description": "Give the agent, with each task and delegation, the notes the hub's knowledge vault has about it, within the hub's recall limits and `max_chars`. It needs a hub that keeps knowledge (`--hub`). Leave it out and the agent is given no notes; with it, the notes go to whatever model the agent runs on.",
+          "description": "Give the agent, with each task and delegation, the notes the hub's knowledge vault has about it, within the hub's recall limits and `max_chars`. It needs the hub the node names (`hub:` in node.yaml). Leave it out and the agent is given no notes; with it, the notes go to whatever model the agent runs on.",
           "$ref": "#/definitions/agent_recall"
         },
         "limit": {
@@ -345,7 +345,7 @@
           "minLength": 1
         },
         "nodes": {
-          "description": "The nodes that may run it, as <owner>/<name>, tried in order: the first one connected that offers the agent runs it. `ensemble nodes --hub <url>` lists them.",
+          "description": "The nodes that may run it, as <owner>/<name>, tried in order: the first one connected that offers the agent runs it. `ensemble nodes` lists them.",
           "type": "array",
           "minItems": 1,
           "items": { "type": "string", "pattern": "^[^/]+/[A-Za-z0-9._-]+$" }

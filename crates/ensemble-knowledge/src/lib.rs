@@ -122,17 +122,16 @@ pub struct Run {
 }
 
 impl Memory {
-    /// The knowledge of `hub`, for work in the folder called `project`. None
-    /// when the hub keeps no knowledge.
-    pub fn new(hub: &Hub, project: Option<String>) -> Option<Memory> {
-        Some(Memory {
+    /// The knowledge of `hub`, for work in the folder called `project`.
+    pub fn new(hub: &Hub, project: Option<String>) -> Memory {
+        Memory {
             owner: hub.owner.clone(),
-            knowledge: hub.knowledge.clone()?,
+            knowledge: hub.knowledge.clone(),
             project,
             client: Mutex::new(None),
             backends: hub.llm_backends.clone(),
             resolver: Resolver::default(),
-        })
+        }
     }
 
     pub(crate) fn backends(&self) -> &BTreeMap<String, LlmBackend> {
@@ -466,7 +465,7 @@ mod tests {
 
     pub(crate) fn memory(tmp: &TempDir) -> Memory {
         let yaml = format!(
-            "version: 1\nowner: Ana\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\n",
+            "version: 1\nowner: Ana\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: closed }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles: {{ member: [share, recall] }}\n",
             tmp.0.join("vault").display()
         );
         let hub = ensemble_config::parse_hub(
@@ -475,7 +474,7 @@ mod tests {
             &std::collections::BTreeMap::new(),
         )
         .unwrap();
-        let memory = Memory::new(&hub, Some("shop".into())).unwrap();
+        let memory = Memory::new(&hub, Some("shop".into()));
         memory.vault().init().unwrap();
         memory
     }
@@ -591,16 +590,5 @@ mod tests {
             .unwrap();
         assert!(said.starts_with("No note"), "{said}");
         assert!(m.call(RECALL, &json!({})).unwrap().is_err());
-    }
-
-    #[test]
-    fn a_hub_without_knowledge_has_no_memory() {
-        let hub = ensemble_config::parse_hub(
-            "version: 1\nowner: Ana\nllm_backends: {}\n",
-            Path::new("hub.yaml"),
-            &std::collections::BTreeMap::new(),
-        )
-        .unwrap();
-        assert!(Memory::new(&hub, None).is_none());
     }
 }

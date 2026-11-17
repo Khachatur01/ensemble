@@ -40,8 +40,8 @@ impl Scratch {
     /// directory, so its agents are `team/<agent>`.
     fn org(&self) -> PathBuf {
         self.0
-            .with_extension("xdg-data")
-            .join("ensemble/teams/team")
+            .with_extension("xdg-config")
+            .join("ensemble/node/teams/team")
     }
 
     /// Where the project's tasks and runs go: its state directory, under
@@ -56,7 +56,7 @@ impl Scratch {
 
     /// This scratch computer's node file, `node.yaml`: the node `desk`.
     fn node_yaml(&self) -> PathBuf {
-        let config = self.0.with_extension("xdg-config").join("ensemble");
+        let config = self.0.with_extension("xdg-config").join("ensemble/node");
         std::fs::create_dir_all(&config).unwrap();
         let path = config.join("node.yaml");
         if !path.exists() {
@@ -1267,7 +1267,9 @@ fn setup_writes_the_node_registers_it_and_checks_its_teams() {
     let said = stdout_of(&out);
     assert!(out.status.success(), "{said}\n{}", stderr_of(&out));
     assert!(said.contains("Done."), "{said}");
-    let node = s.0.with_extension("xdg-config").join("ensemble/node.yaml");
+    let node =
+        s.0.with_extension("xdg-config")
+            .join("ensemble/node/node.yaml");
     let written = std::fs::read_to_string(&node).unwrap();
     assert!(
         written.contains("name: \"desk\"") && written.contains("version: 4"),
@@ -1301,7 +1303,7 @@ fn setup_without_any_agent_cli_says_what_to_install() {
     assert!(stderr_of(&out).contains("Install"), "{}", stderr_of(&out));
     assert!(
         !s.0.with_extension("xdg-config")
-            .join("ensemble/node.yaml")
+            .join("ensemble/node/node.yaml")
             .exists()
     );
 }
@@ -1433,8 +1435,8 @@ fn origin(scratch: &Scratch, config: &str) -> (String, String) {
 fn pinned_commit(scratch: &Scratch, name: &str) -> String {
     let file = scratch
         .0
-        .with_extension("xdg-data")
-        .join("ensemble/teams")
+        .with_extension("xdg-config")
+        .join("ensemble/node/teams")
         .join(name)
         .join("pulled.json");
     let pulled: serde_json::Value =
@@ -1498,7 +1500,7 @@ fn a_pulled_team_is_pinned_shown_trusted_and_then_used() {
 
     // A pin nobody trusted is not used, and says how to trust it.
     let (_, other) = origin(&s, &config_yaml("opencode", NOWHERE));
-    let teams = s.0.with_extension("xdg-data").join("ensemble/teams");
+    let teams = s.0.with_extension("xdg-config").join("ensemble/node/teams");
     std::fs::create_dir_all(teams.join("sneaky")).unwrap();
     std::fs::write(
         teams.join("sneaky/pulled.json"),
@@ -2246,49 +2248,42 @@ fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
 #[test]
 fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
     let scratch = Scratch::new("hub-init");
-    let hub = scratch.0.with_extension("hub");
+    let hub = hub_dir(&scratch);
     let out = ensemble(&scratch, &["hub", "check"]);
     assert!(!out.status.success());
     assert!(
-        stderr_of(&out).contains("no hub given"),
+        stderr_of(&out).contains("ensemble hub init"),
         "{}",
         stderr_of(&out)
     );
 
-    let out = command(&scratch)
-        .args(["hub", "init", "--hub"])
-        .arg(&hub)
-        .output()
-        .unwrap();
+    let out = ensemble(&scratch, &["hub", "init"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(hub.join("hub.yaml").exists());
     assert!(
         hub.join("vault/.git").exists(),
         "the vault is a git repository"
     );
-    let again = command(&scratch)
-        .args(["hub", "init", "--hub"])
-        .arg(&hub)
-        .output()
-        .unwrap();
+    let again = ensemble(&scratch, &["hub", "init"]);
     assert!(
         !again.status.success(),
         "it does not overwrite without --force"
     );
 
     let url = models_stub(r#"{"data":[{"id":"small"}]}"#);
+    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    let (head, tail) = text.split_once("llm_backends:").unwrap();
+    let (_, rest) = tail.split_once("# ---").unwrap();
+    let rest = rest.split_once("knowledge:").unwrap().1;
+    let rest = rest.split_once("  recall:").unwrap().1;
     std::fs::write(
         hub.join("hub.yaml"),
         format!(
-            "version: 1\nowner: Ana\nllm_backends:\n  down: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}\n  up: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\nknowledge:\n  vault: vault\n  distill:\n    try:\n      - {{ backend: down, model: small }}\n      - {{ backend: up, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\n"
+            "{head}llm_backends:\n  down: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}\n  up: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\n\nknowledge:\n  vault: vault\n  distill:\n    try:\n      - {{ backend: down, model: small }}\n      - {{ backend: up, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall:{rest}"
         ),
     )
     .unwrap();
-    let out = command(&scratch)
-        .args(["hub", "check", "--hub"])
-        .arg(&hub)
-        .output()
-        .unwrap();
+    let out = ensemble(&scratch, &["hub", "check"]);
     assert!(
         out.status.success(),
         "{}{}",
@@ -2300,18 +2295,6 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
         "{}",
         stdout_of(&out)
     );
-}
-
-/// A hub made by `ensemble hub init`, beside the project.
-fn hub_of(scratch: &Scratch) -> PathBuf {
-    let hub = scratch.0.with_extension("hub");
-    let out = command(scratch)
-        .args(["hub", "init", "--hub"])
-        .arg(&hub)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    hub
 }
 
 /// The files under the vault's `shares/`.
@@ -2332,23 +2315,30 @@ fn share_files(hub: &Path) -> Vec<String> {
 }
 
 #[test]
-fn knowledge_is_shared_by_hand_or_by_the_agent_through_mcp() {
+fn knowledge_is_shared_by_hand_or_by_the_agent_through_the_nodes_hub() {
     let s = Scratch::new("hub-share");
     s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
-    let hub = hub_of(&s);
+    let out = ensemble(&s, &["share", "--title", "x", "--text", "y"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("no node file"),
+        "without a node there is no hub: {}",
+        stderr_of(&out)
+    );
+    let (hub, address, token) = hub_server(&s);
+    let _hub = serve_hub(&s, &hub);
+    node_with_hub(&s, &format!("ws://{address}"), &token);
 
-    let out = command(&s)
-        .args([
+    let out = ensemble(
+        &s,
+        &[
             "share",
             "--title",
             "Ports",
             "--text",
             "The shop listens on 8080.",
-            "--hub",
-        ])
-        .arg(&hub)
-        .output()
-        .unwrap();
+        ],
+    );
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).starts_with("Shared as "),
@@ -2364,7 +2354,7 @@ fn knowledge_is_shared_by_hand_or_by_the_agent_through_mcp() {
         files[0]
     );
 
-    let mut session = McpSession::start_with(&s, &["--hub".as_ref(), hub.as_os_str()]);
+    let mut session = McpSession::start(&s);
     session.request(
         "initialize",
         serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {},
@@ -2388,19 +2378,6 @@ fn knowledge_is_shared_by_hand_or_by_the_agent_through_mcp() {
     );
 }
 
-/// A hub whose knowledge is distilled on `url`, made beside the project.
-fn hub_on(scratch: &Scratch, url: &str) -> PathBuf {
-    let hub = hub_of(scratch);
-    std::fs::write(
-        hub.join("hub.yaml"),
-        format!(
-            "version: 1\nowner: Ana\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\nknowledge:\n  vault: vault\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 500\n  recall: {{ max_notes: 3, max_chars: 2000 }}\n"
-        ),
-    )
-    .unwrap();
-    hub
-}
-
 /// A model that answers every chat request with these items.
 fn items_stub(items: &str) -> String {
     let chat = serde_json::json!({
@@ -2409,40 +2386,52 @@ fn items_stub(items: &str) -> String {
     models_stub(&chat.to_string())
 }
 
+/// Point the scratch hub's distilling models at `url`, the first of them.
+fn distill_on(hub: &Path, url: &str) {
+    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    let start = text.find("base_url: ").unwrap() + "base_url: ".len();
+    let end = start + text[start..].find('\n').unwrap();
+    std::fs::write(
+        hub.join("hub.yaml"),
+        format!("{}\"{url}\"{}", &text[..start], &text[end..]),
+    )
+    .unwrap();
+}
+
 #[test]
-fn shares_become_notes_by_hand_and_in_the_background_of_a_session() {
+fn shares_become_notes_by_hand_on_the_hub_and_in_the_background_while_it_runs() {
     let s = Scratch::new("hub-distill");
     s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
-    let url = items_stub(
-        r#"{"items":[{"kind":"decision","title":"Deploy day","body":"Deploys go out on Tuesdays.","tags":["ops"]}]}"#,
-    );
-    let hub = hub_on(&s, &url);
-    let with_hub = |args: &[&str]| {
-        command(&s)
-            .args(args)
-            .arg("--hub")
-            .arg(&hub)
-            .output()
-            .unwrap()
-    };
-    assert!(
-        with_hub(&[
+    let (hub, address, token) = hub_server(&s);
+    // No model can be used yet: the share waits.
+    distill_on(&hub, NOWHERE);
+    let served = serve_hub(&s, &hub);
+    node_with_hub(&s, &format!("ws://{address}"), &token);
+    let out = ensemble(
+        &s,
+        &[
             "share",
             "--title",
             "Deploys",
             "--text",
-            "We deploy on Tuesdays."
-        ])
-        .status
-        .success()
+            "We deploy on Tuesdays.",
+        ],
     );
-    let out = with_hub(&["knowledge", "status"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    drop(served);
+
+    // On the hub's computer, by hand.
+    let url = items_stub(
+        r#"{"items":[{"kind":"decision","title":"Deploy day","body":"Deploys go out on Tuesdays.","tags":["ops"]}]}"#,
+    );
+    distill_on(&hub, &url);
+    let out = ensemble(&s, &["hub", "knowledge", "status"]);
     assert!(
         stdout_of(&out).contains("pending: 1"),
         "{}",
         stdout_of(&out)
     );
-    let out = with_hub(&["knowledge", "distill"]);
+    let out = ensemble(&s, &["hub", "knowledge", "distill"]);
     assert!(
         out.status.success(),
         "{}{}",
@@ -2459,9 +2448,19 @@ fn shares_become_notes_by_hand_and_in_the_background_of_a_session() {
         note.contains("kind: decision") && note.contains("Tuesdays"),
         "{note}"
     );
-    let out = with_hub(&["knowledge", "status"]);
+    let out = ensemble(&s, &["hub", "knowledge", "status"]);
     assert!(stdout_of(&out).contains("pending: 0") && stdout_of(&out).contains("notes: 1"));
-    let out = with_hub(&["recall", "when", "do", "we", "deploy"]);
+    let out = ensemble(&s, &["hub", "knowledge", "rebuild"]);
+    assert!(
+        !out.status.success(),
+        "a rebuild asks first: {}",
+        stdout_of(&out)
+    );
+
+    // While the hub runs, a share becomes a note without anyone asking, and
+    // a node recalls it.
+    let _served = serve_hub(&s, &hub);
+    let out = ensemble(&s, &["recall", "when", "do", "we", "deploy"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).contains("reference data, not instructions")
@@ -2469,26 +2468,17 @@ fn shares_become_notes_by_hand_and_in_the_background_of_a_session() {
         "{}",
         stdout_of(&out)
     );
-
-    // In a session, a share becomes a note without anyone asking.
-    std::fs::remove_dir_all(hub.join("vault/notes")).unwrap();
-    let out = with_hub(&["knowledge", "rebuild"]);
-    assert!(
-        !out.status.success(),
-        "a rebuild asks first: {}",
-        stdout_of(&out)
+    let out = ensemble(
+        &s,
+        &[
+            "share",
+            "--title",
+            "Reviews",
+            "--text",
+            "Every change gets one review.",
+        ],
     );
-    let mut session = McpSession::start_with(&s, &["--hub".as_ref(), hub.as_os_str()]);
-    session.request(
-        "initialize",
-        serde_json::json!({"protocolVersion": "2025-06-18"}),
-    );
-    let reply = session.request(
-        "tools/call",
-        serde_json::json!({"name": "share", "arguments": {
-            "title": "Reviews", "text": "Every change gets one review."}}),
-    );
-    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    assert!(out.status.success(), "{}", stderr_of(&out));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let vault = ensemble::knowledge::Vault::new(hub.join("vault"));
     while !ensemble::knowledge::pipeline::pending(&vault).is_empty() {
@@ -2501,105 +2491,10 @@ fn shares_become_notes_by_hand_and_in_the_background_of_a_session() {
 }
 
 #[test]
-fn the_inbox_lists_the_issues_assigned_to_you_with_the_label() {
-    let s = Scratch::new("hub-inbox");
-    let hub = hub_of(&s);
-    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
-    std::fs::write(hub.join("hub.yaml"), text.replace("user: you", "user: ana")).unwrap();
-    std::fs::create_dir_all(hub.join("issues")).unwrap();
-    let issue = "---\ntitle: Fix the login redirect\nassignee: ana\nlabels: [ensemble]\nproject: shop\nstatus: open\n---\nIt redirects to /home.\n";
-    std::fs::write(hub.join("issues/7.md"), issue).unwrap();
-    std::fs::write(
-        hub.join("issues/8.md"),
-        issue.replace("assignee: ana", "assignee: bob"),
-    )
-    .unwrap();
-    std::fs::write(hub.join("issues/9.md"), "no front matter\n").unwrap();
-    let out = command(&s)
-        .args(["inbox", "--hub"])
-        .arg(&hub)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    let said = stdout_of(&out);
-    assert!(said.contains("with the label ensemble: 1"), "{said}");
-    assert!(
-        said.contains("7") && said.contains("Fix the login redirect  [shop]"),
-        "{said}"
-    );
-    assert!(
-        said.contains("cannot be read") && said.contains("9:"),
-        "{said}"
-    );
-}
-
-#[test]
-fn an_issue_assigned_to_you_becomes_a_task_in_its_projects_folder() {
-    let s = Scratch::new("hub-inbox-once");
-    s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
-    let hub = hub_of(&s);
-    let project = s.0.with_extension("shop");
-    std::fs::create_dir_all(&project).unwrap();
-    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
-    std::fs::write(
-        hub.join("hub.yaml"),
-        text.replace("user: you", "user: ana")
-            .replace("/home/you/code/shop", &project.display().to_string()),
-    )
-    .unwrap();
-    std::fs::create_dir_all(hub.join("issues")).unwrap();
-    std::fs::write(
-        hub.join("issues/7.md"),
-        "---\ntitle: Fix the login redirect\nassignee: ana\nlabels: [ensemble]\nproject: shop\nstatus: open\n---\nIt redirects to /home.\n",
-    )
-    .unwrap();
-
-    let out = command(&s)
-        .args(["inbox", "--once", "--hub"])
-        .arg(&hub)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(
-        stdout_of(&out).contains("issue 7 -> task"),
-        "{}",
-        stdout_of(&out)
-    );
-    assert!(
-        stdout_of(&out).contains("in-progress"),
-        "{}",
-        stdout_of(&out)
-    );
-    let issue = std::fs::read_to_string(hub.join("issues/7.md")).unwrap();
-    assert!(issue.contains("status: in-progress") && issue.contains("## Comment by ensemble"));
-
-    // The task waits in the project's own state, in the backlog.
-    let out = Command::new(BIN)
-        .env("XDG_STATE_HOME", s.0.with_extension("xdg-state"))
-        .args(["tasks", "--dir"])
-        .arg(&project)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(
-        stdout_of(&out).contains("Fix the login redirect"),
-        "{}",
-        stdout_of(&out)
-    );
-}
-
-#[test]
 fn a_hub_servers_admin_adds_users_whose_tokens_are_shown_once() {
     let s = Scratch::new("hub-users");
-    let hub = hub_server_of(&s);
-    let run = |args: &[&str]| {
-        command(&s)
-            .args(args)
-            .arg("--hub")
-            .arg(&hub)
-            .output()
-            .unwrap()
-    };
+    hub_server_of(&s);
+    let run = |args: &[&str]| command(&s).args(args).output().unwrap();
     let out = run(&["hub", "user", "add", "ana", "--role", "member"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let token = stdout_of(&out).trim().to_string();
@@ -2621,15 +2516,48 @@ fn a_hub_servers_admin_adds_users_whose_tokens_are_shown_once() {
 /// A hub server made by `hub init`, listening on a free loopback port, with
 /// `ana` a member. Returns the hub, its address and ana's token.
 /// A hub server made by `hub init --server`, beside the project.
+/// The scratch computer's hub folder, `~/.config/ensemble/hub/`.
+fn hub_dir(scratch: &Scratch) -> PathBuf {
+    scratch.0.with_extension("xdg-config").join("ensemble/hub")
+}
+
+/// A hub made by `ensemble hub init` on the scratch computer.
 fn hub_server_of(scratch: &Scratch) -> PathBuf {
-    let hub = scratch.0.with_extension("hub");
+    let out = command(scratch).args(["hub", "init"]).output().unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    // No test reaches a hosted model: the sample's Anthropic backend goes.
+    let hub = hub_dir(scratch);
+    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    let start = text.find("  claude:\n").unwrap();
+    let end = start + text[start..].find("\n\n").unwrap() + 1;
+    let text = format!("{}{}", &text[..start], &text[end..]).replace(
+        "      - backend: claude\n        model: claude-haiku-4-5\n",
+        "",
+    );
+    std::fs::write(hub.join("hub.yaml"), text).unwrap();
+    hub
+}
+
+/// The scratch computer's node, naming the hub at `url`.
+fn node_names_hub(scratch: &Scratch, url: &str) {
+    let config = scratch.0.with_extension("xdg-config").join("ensemble/node");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("node.yaml"),
+        format!("version: 4\nname: desk\naccess: private\nhub: \"{url}\"\noffers: {{}}\n"),
+    )
+    .unwrap();
+}
+
+/// The scratch computer's node, naming the hub at `url` and signed in to it
+/// with `token`.
+fn node_with_hub(scratch: &Scratch, url: &str, token: &str) {
+    node_names_hub(scratch, url);
     let out = command(scratch)
-        .args(["hub", "init", "--server", "--hub"])
-        .arg(&hub)
+        .args(["login", url, "--token", token])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
-    hub
 }
 
 fn hub_server(scratch: &Scratch) -> (PathBuf, String, String) {
@@ -2646,8 +2574,7 @@ fn hub_server(scratch: &Scratch) -> (PathBuf, String, String) {
     )
     .unwrap();
     let out = command(scratch)
-        .args(["hub", "user", "add", "ana", "--role", "member", "--hub"])
-        .arg(&hub)
+        .args(["hub", "user", "add", "ana", "--role", "member"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2711,10 +2638,9 @@ fn start_node(s: &Scratch, extra: &[&std::ffi::OsStr]) -> Served {
     Served(node)
 }
 
-fn serve_hub(scratch: &Scratch, hub: &Path) -> Served {
+fn serve_hub(scratch: &Scratch, _hub: &Path) -> Served {
     let mut child = command(scratch)
-        .args(["hub", "serve", "--hub"])
-        .arg(hub)
+        .args(["hub", "serve"])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -2768,6 +2694,7 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
     let (hub, address, token) = hub_server(&s);
     let mut child = serve_hub(&s, &hub);
     let url = format!("ws://{address}");
+    node_names_hub(&s, &url);
 
     let out = command(&s)
         .args(["login", &url, "--token", "ens_wrong"])
@@ -2780,7 +2707,7 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
         stderr_of(&out)
     );
     let out = command(&s)
-        .args(["share", "--title", "x", "--text", "y", "--hub", &url])
+        .args(["share", "--title", "x", "--text", "y"])
         .output()
         .unwrap();
     assert!(
@@ -2802,8 +2729,7 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
     // An admin adds an account on the server while the hub runs: the database
     // is shared between the two processes, and the new token works at once.
     let added = command(&s)
-        .args(["hub", "user", "add", "kim", "--role", "member", "--hub"])
-        .arg(&hub)
+        .args(["hub", "user", "add", "kim", "--role", "member"])
         .output()
         .unwrap();
     assert!(added.status.success(), "{}", stderr_of(&added));
@@ -2815,7 +2741,9 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(stdout_of(&out).contains("as kim"), "{}", stdout_of(&out));
-    let tokens = s.0.with_extension("xdg-config").join("ensemble/hubs.json");
+    let tokens =
+        s.0.with_extension("xdg-config")
+            .join("ensemble/node/hubs.json");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -2832,8 +2760,6 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
             "Deploys",
             "--text",
             "Deploys go out on Tuesdays.",
-            "--hub",
-            &url,
         ])
         .output()
         .unwrap();
@@ -2844,7 +2770,7 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
         stdout_of(&out)
     );
 
-    let mut session = McpSession::start_with(&s, &["--hub".as_ref(), url.as_ref()]);
+    let mut session = McpSession::start(&s);
     session.request(
         "initialize",
         serde_json::json!({"protocolVersion": "2025-06-18", "clientInfo": {"name": "claude-code", "version": "2"}}),
@@ -2921,14 +2847,7 @@ fn someone_signs_up_is_let_in_and_logs_in_from_a_node_with_a_password() {
     assert!(!out.status.success());
     assert!(stderr_of(&out).contains("approval"), "{}", stderr_of(&out));
 
-    let run = |args: &[&str]| {
-        command(&s)
-            .args(args)
-            .arg("--hub")
-            .arg(&hub)
-            .output()
-            .unwrap()
-    };
+    let run = |args: &[&str]| command(&s).args(args).output().unwrap();
     let out = run(&["hub", "user", "list"]);
     assert!(stdout_of(&out).contains("dana") && stdout_of(&out).contains("pending"));
     let out = run(&["hub", "user", "approve", "dana", "--role", "member"]);
@@ -2940,10 +2859,8 @@ fn someone_signs_up_is_let_in_and_logs_in_from_a_node_with_a_password() {
         "{}",
         stdout_of(&out)
     );
-    let out = command(&s)
-        .args(["recall", "deploys", "--hub", &url])
-        .output()
-        .unwrap();
+    node_names_hub(&s, &url);
+    let out = command(&s).args(["recall", "deploys"]).output().unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     drop(child);
 
@@ -2969,7 +2886,9 @@ fn a_node_file_is_written_once_and_an_account_names_itself_in_the_tracker() {
     let s = Scratch::new("node-init");
     let out = command(&s).args(["node", "init"]).output().unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let node = s.0.with_extension("xdg-config").join("ensemble/node.yaml");
+    let node =
+        s.0.with_extension("xdg-config")
+            .join("ensemble/node/node.yaml");
     assert!(std::fs::read_to_string(&node).unwrap().contains("offers:"));
     let again = command(&s).args(["node", "init"]).output().unwrap();
     assert!(
@@ -2977,15 +2896,8 @@ fn a_node_file_is_written_once_and_an_account_names_itself_in_the_tracker() {
         "it does not overwrite without --force"
     );
 
-    let hub = hub_server_of(&s);
-    let run = |args: &[&str]| {
-        command(&s)
-            .args(args)
-            .arg("--hub")
-            .arg(&hub)
-            .output()
-            .unwrap()
-    };
+    hub_server_of(&s);
+    let run = |args: &[&str]| command(&s).args(args).output().unwrap();
     assert!(
         run(&["hub", "user", "add", "ana", "--role", "member"])
             .status
@@ -3019,8 +2931,7 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_node_and_reported_back() {
     )
     .unwrap();
     let out = command(&s)
-        .args(["hub", "user", "tracker", "ana", "ana.p", "--hub"])
-        .arg(&hub)
+        .args(["hub", "user", "tracker", "ana", "ana.p"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -3034,14 +2945,14 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_node_and_reported_back() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let config = s.0.with_extension("xdg-config").join("ensemble");
+    let config = s.0.with_extension("xdg-config").join("ensemble/node");
     std::fs::write(
         config.join("node.yaml"),
-        "version: 4\nname: laptop\naccess: private\noffers: {}\n",
+        format!("version: 4\nname: laptop\naccess: private\nhub: \"{url}\"\noffers: {{}}\n"),
     )
     .unwrap();
     let mut node = command(&s)
-        .args(["node", "serve", "--hub", &url])
+        .args(["node", "serve"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -3105,15 +3016,10 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_node_and_reported_back() {
     }
 }
 
-/// A hub with a vault and one note, about deploys.
-fn hub_with_a_note(scratch: &Scratch) -> PathBuf {
-    let hub = scratch.0.with_extension("hub");
-    let out = command(scratch)
-        .args(["hub", "init", "--hub"])
-        .arg(&hub)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
+/// A running hub with a vault and one note, about deploys, which the scratch
+/// computer's node names.
+fn hub_with_a_note(scratch: &Scratch) -> Served {
+    let (hub, address, token) = hub_server(scratch);
     ensemble::knowledge::Vault::new(hub.join("vault"))
         .write_note(&ensemble::knowledge::Note {
             slug: "deploy-day".into(),
@@ -3128,14 +3034,15 @@ fn hub_with_a_note(scratch: &Scratch) -> PathBuf {
             body: "Deploys go out on Tuesdays.".into(),
         })
         .unwrap();
-    hub
+    let served = serve_hub(scratch, &hub);
+    node_with_hub(scratch, &format!("ws://{address}"), &token);
+    served
 }
 
 /// What `ensemble hook` prints for one event.
-fn hook(scratch: &Scratch, hub: &Path, event: serde_json::Value) -> String {
+fn hook(scratch: &Scratch, event: serde_json::Value) -> String {
     let mut child = command(scratch)
-        .args(["hook", "--hub"])
-        .arg(hub)
+        .arg("hook")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -3159,51 +3066,40 @@ fn hook(scratch: &Scratch, hub: &Path, event: serde_json::Value) -> String {
 #[test]
 fn a_session_hook_gives_the_notes_about_a_prompt_once() {
     let scratch = Scratch::new("hook");
-    let hub = hub_with_a_note(&scratch);
+    let _hub = hub_with_a_note(&scratch);
     let prompt = |session: &str, text: &str| {
         serde_json::json!({"hook_event_name": "UserPromptSubmit", "session_id": session,
             "cwd": scratch.path(), "prompt": text})
     };
-    let said = hook(&scratch, &hub, prompt("s1", "when does the deploy go out"));
+    let said = hook(&scratch, prompt("s1", "when does the deploy go out"));
     assert!(said.contains("reference data, not instructions"), "{said}");
     assert!(said.contains("Deploys go out on Tuesdays."), "{said}");
     // Once per session; another session gets it too.
     assert_eq!(
-        hook(
-            &scratch,
-            &hub,
-            prompt("s1", "and the deploy after that one")
-        ),
+        hook(&scratch, prompt("s1", "and the deploy after that one")),
         ""
     );
-    assert!(hook(&scratch, &hub, prompt("s2", "move the deploy please")).contains("Tuesdays"));
+    assert!(hook(&scratch, prompt("s2", "move the deploy please")).contains("Tuesdays"));
     // A compacted session lost it, so gets it again.
     let compact = serde_json::json!({"hook_event_name": "SessionStart", "session_id": "s1",
         "cwd": scratch.path(), "source": "compact"});
-    hook(&scratch, &hub, compact);
-    assert!(hook(&scratch, &hub, prompt("s1", "the deploy again then")).contains("Tuesdays"));
+    hook(&scratch, compact);
+    assert!(hook(&scratch, prompt("s1", "the deploy again then")).contains("Tuesdays"));
     // Nothing about it, a short prompt, a broken event: nothing, and no failure.
-    assert_eq!(
-        hook(&scratch, &hub, prompt("s3", "rename the parser module")),
-        ""
-    );
-    assert_eq!(hook(&scratch, &hub, prompt("s3", "deploy")), "");
-    assert_eq!(hook(&scratch, &hub, serde_json::json!("not an event")), "");
+    assert_eq!(hook(&scratch, prompt("s3", "rename the parser module")), "");
+    assert_eq!(hook(&scratch, prompt("s3", "deploy")), "");
+    assert_eq!(hook(&scratch, serde_json::json!("not an event")), "");
 }
 
 #[test]
 fn connect_with_hooks_writes_them_into_the_clis_settings() {
     let s = Scratch::new("connect-hooks");
     s.write(".ensemble/config.yaml", &config_yaml("opencode", NOWHERE));
-    let hub = s.0.with_extension("hub");
-    std::fs::create_dir_all(&hub).unwrap();
     let bin = stub_clis(&s, &["claude", "opencode"]);
     let connect = |client: &str, extra: &[&str]| {
         with_path(&s, &bin)
             .args(["connect", "--client", client, "--hooks"])
             .args(extra)
-            .arg("--hub")
-            .arg(&hub)
             .output()
             .unwrap()
     };
@@ -3215,8 +3111,7 @@ fn connect_with_hooks_writes_them_into_the_clis_settings() {
     let command = written["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
-    assert!(command.contains(" hook --hub "), "{command}");
-    assert!(command.contains(&hub.display().to_string()), "{command}");
+    assert!(command.ends_with(" hook"), "{command}");
 
     // OpenCode has no command hooks; nothing is registered then.
     let _ = std::fs::remove_file(bin.join("opencode.args"));
@@ -3238,13 +3133,13 @@ fn connect_with_hooks_writes_them_into_the_clis_settings() {
 /// hubs the scratch signed in to.
 fn on_machine(scratch: &Scratch, machine: &str, node_yaml: &str) -> Command {
     let home = scratch.0.with_extension("machines").join(machine);
-    let config = home.join("config").join("ensemble");
+    let config = home.join("config").join("ensemble/node");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(config.join("node.yaml"), node_yaml).unwrap();
     let tokens = scratch
         .0
         .with_extension("xdg-config")
-        .join("ensemble/hubs.json");
+        .join("ensemble/node/hubs.json");
     if tokens.exists() {
         std::fs::copy(&tokens, config.join("hubs.json")).unwrap();
     }
@@ -3264,7 +3159,7 @@ fn machine_team(scratch: &Scratch, machine: &str, team: &str, config: &str) {
         .0
         .with_extension("machines")
         .join(machine)
-        .join("data/ensemble/teams")
+        .join("config/ensemble/node/teams")
         .join(team);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("config.yaml"), config).unwrap();
@@ -3273,8 +3168,14 @@ fn machine_team(scratch: &Scratch, machine: &str, team: &str, config: &str) {
 /// `ensemble node serve` on the computer `machine`, whose node is
 /// `node_yaml`, started and waited for until it is connected.
 fn serve_node(scratch: &Scratch, url: &str, machine: &str, node_yaml: &str) -> Served {
-    let mut child = on_machine(scratch, machine, node_yaml)
-        .args(["node", "serve", "--hub", url])
+    // The node names the hub it connects to.
+    let node_yaml = if node_yaml.contains("\nhub:") {
+        node_yaml.to_string()
+    } else {
+        node_yaml.replacen("\noffers:", &format!("\nhub: \"{url}\"\noffers:"), 1)
+    };
+    let mut child = on_machine(scratch, machine, &node_yaml)
+        .args(["node", "serve"])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -3318,7 +3219,8 @@ fn an_agent_runs_on_a_node_and_what_it_changed_comes_back() {
     let node_yaml =
         "version: 4\nname: laptop\naccess: private\noffers:\n  runs: { agents: [work/reviewer] }\n";
     let _node = serve_node(&s, &url, "laptop", node_yaml);
-    let out = command(&s).args(["nodes", "--hub", &url]).output().unwrap();
+    node_names_hub(&s, &url);
+    let out = command(&s).args(["nodes"]).output().unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).contains("ana/laptop  (private, 0 running)\n  agents: work/reviewer"),
@@ -3391,7 +3293,7 @@ fn a_node_serves_its_models_through_the_hub_and_a_shared_node_lends_no_login() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let server = models_stub(r#"{"choices":[{"message":{"content":"hi from the node"}}]}"#);
     let node_yaml = |access: &str, offers: &str| {
-        format!("version: 4\nname: {access}-box\naccess: {access}\n{offers}")
+        format!("version: 4\nname: {access}-box\naccess: {access}\nhub: \"{url}\"\n{offers}")
     };
     let models = format!(
         "offers:\n  models: {{ base_url: \"{server}\", timeout_seconds: 5, names: [small] }}\n"
@@ -3406,7 +3308,7 @@ fn a_node_serves_its_models_through_the_hub_and_a_shared_node_lends_no_login() {
 
     // A member may not host a shared node.
     let out = on_machine(&s, "shared-box", &node_yaml("shared", &models))
-        .args(["node", "serve", "--hub", &url])
+        .args(["node", "serve"])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -3422,7 +3324,7 @@ fn a_node_serves_its_models_through_the_hub_and_a_shared_node_lends_no_login() {
         "shared-box",
         &node_yaml("shared", "offers:\n  runs: { agents: [work/reviewer] }\n"),
     )
-    .args(["node", "serve", "--hub", &url])
+    .args(["node", "serve"])
     .output()
     .unwrap();
     assert!(!out.status.success());
@@ -3456,7 +3358,7 @@ fn a_session_reaches_the_node_from_its_folder_and_a_task_goes_on_after_it_ends()
     };
 
     // With no node running, `mcp` says how to start one.
-    let config = s.0.with_extension("xdg-config").join("ensemble");
+    let config = s.0.with_extension("xdg-config").join("ensemble/node");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
         config.join("node.yaml"),

@@ -233,13 +233,9 @@ pub fn install_into(path: &Path, command: &str) -> Result<(), String> {
 }
 
 /// The command a CLI runs for each hook event.
-pub fn hook_command(ensemble: &str, hub: &Path, env_file: Option<&Path>) -> String {
+pub fn hook_command(ensemble: &str, env_file: Option<&Path>) -> String {
     let word = |s: &str| crate::setup::shell_word(s);
-    let mut command = format!(
-        "{} hook --hub {}",
-        word(ensemble),
-        word(&hub.display().to_string())
-    );
+    let mut command = format!("{} hook", word(ensemble));
     if let Some(env_file) = env_file {
         command.push_str(&format!(
             " --env-file {}",
@@ -355,16 +351,16 @@ mod tests {
         assert!(settings_path("opencode", false, home, dir).is_err());
         let tmp = TempDir::new();
         let path = tmp.0.join("a/settings.json");
-        install_into(&path, "ensemble hook --hub '/my hub'").unwrap();
+        install_into(&path, "ensemble hook --env-file '/my keys.env'").unwrap();
         let written: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             written["hooks"][PROMPT_EVENT][0]["hooks"][0]["command"],
-            "ensemble hook --hub '/my hub'"
+            "ensemble hook --env-file '/my keys.env'"
         );
         assert_eq!(
-            hook_command("ensemble", Path::new("/my hub"), None),
-            "ensemble hook --hub '/my hub'"
+            hook_command("ensemble", Some(Path::new("/my keys.env"))),
+            "ensemble hook --env-file '/my keys.env'"
         );
     }
 }

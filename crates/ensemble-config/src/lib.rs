@@ -611,7 +611,7 @@ pub enum ConfigError {
     NotFound {
         path: PathBuf,
     },
-    /// No `hub.yaml` where `--hub` points.
+    /// No `hub.yaml` in the hub's folder.
     HubNotFound {
         path: PathBuf,
     },
@@ -642,7 +642,7 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::HubNotFound { path } => write!(
                 f,
-                "no {HUB_FILENAME} at {}. Check the --hub directory, or make one with `ensemble hub init --hub <dir>`.",
+                "no {HUB_FILENAME} at {}. Make one with `ensemble hub init`, or run the hub on the computer that has it.",
                 path.display()
             ),
             ConfigError::Unreadable { path, detail } => {
@@ -675,8 +675,8 @@ mod validate;
 
 pub use env::*;
 pub use hub::{
-    HUB_FILENAME, Hub, IssueTracker, Knowledge, Permission, Personal, Recall, Registration, Server,
-    Tasks, hub_path, load_hub, parse_hub,
+    HUB_FILENAME, Hub, IssueTracker, Knowledge, Permission, Recall, Registration, Server, Tasks,
+    hub_path, load_hub, parse_hub,
 };
 pub use node::{
     Access, NODE_FILENAME, Node, OfferedModels, OfferedRuns, Offers, load_node, node_path,
