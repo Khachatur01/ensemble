@@ -26,17 +26,17 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 /// The hub's accounts, in its database, and what changing them needs.
 pub struct Accounts {
     /// The hub's folder, with its database.
     dir: PathBuf,
-    roles: Roles,
-    /// How people join, how long a login lasts, and when failed logins lock a
-    /// name.
-    server: ensemble_config::Server,
+    /// The roles, and how people join, how long a login lasts and when failed
+    /// logins lock a name: as hub.yaml says now ([`Accounts::apply`]).
+    roles: RwLock<Roles>,
+    server: RwLock<ensemble_config::Server>,
     /// Held while the accounts are read, changed and written, so two requests
     /// at once cannot lose a change.
     changing: Mutex<()>,
@@ -48,15 +48,25 @@ impl Accounts {
     pub fn new(dir: &Path, roles: Roles, server: ensemble_config::Server) -> Self {
         Accounts {
             dir: dir.to_path_buf(),
-            roles,
-            server,
+            roles: RwLock::new(roles),
+            server: RwLock::new(server),
             changing: Mutex::new(()),
             failures: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn roles(&self) -> &Roles {
-        &self.roles
+    /// Use `roles` and `server`, as hub.yaml says them now.
+    pub fn apply(&self, roles: Roles, server: ensemble_config::Server) {
+        *self.roles.write().unwrap_or_else(|e| e.into_inner()) = roles;
+        *self.server.write().unwrap_or_else(|e| e.into_inner()) = server;
+    }
+
+    pub fn roles(&self) -> Roles {
+        self.roles.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn server(&self) -> ensemble_config::Server {
+        *self.server.read().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn users(&self) -> Result<Users, Error> {
@@ -76,7 +86,7 @@ impl Accounts {
     /// Who a request signed in with `token` is: an account, with the
     /// permissions of its role and token, or no one.
     pub fn caller(&self, token: Option<&str>) -> Caller {
-        let signed = token.and_then(|t| self.users().ok()?.authenticate(t, &self.roles));
+        let signed = token.and_then(|t| self.users().ok()?.authenticate(t, &self.roles()));
         match signed {
             Some(s) => Caller::Account {
                 name: s.user.name,
@@ -115,9 +125,13 @@ pub struct HubContext {
     /// hub.yaml, loaded: its roles and server settings, or why not.
     load: Box<Load>,
     settings: SettingsFile,
+    /// What the running hub does once its hub.yaml changed, and says of it:
+    /// set by the hub ([`HubContext::when_changed`]); nothing otherwise.
+    changed: Arc<OnceLock<Box<Changed>>>,
 }
 
 type Load = dyn Fn() -> Result<(Roles, ensemble_config::Server), String> + Send + Sync;
+type Changed = dyn Fn() -> Option<String> + Send + Sync;
 
 impl HubContext {
     /// The hub in `dir`: its accounts, from what `load` reads of hub.yaml when
@@ -128,23 +142,29 @@ impl HubContext {
     ) -> Self {
         let path = ensemble_config::hub_path(dir);
         let checked = path.clone();
+        let changed: Arc<OnceLock<Box<Changed>>> = Arc::default();
         let settings = SettingsFile::new(path, "`ensemble hub init`", move |text| {
             ensemble_config::parse_hub(text, &checked, &ensemble_config::SystemEnv)
                 .map(|_| ())
                 .map_err(|e| e.to_string())
         })
-        .on_change(|| {
-            Some(
-                "A running hub read hub.yaml when it started: restart it to use the change (`sudo systemctl restart ensemble-hub` with the NixOS module)."
-                    .into(),
-            )
+        .on_change({
+            let changed = changed.clone();
+            move || changed.get().and_then(|apply| apply())
         });
         HubContext {
             dir: dir.to_path_buf(),
             accounts: OnceLock::new(),
             load: Box::new(load),
             settings,
+            changed,
         }
+    }
+
+    /// Have `apply` run once hub.yaml changed, and say what it returns: what
+    /// the running hub does with the change.
+    pub fn when_changed(&self, apply: impl Fn() -> Option<String> + Send + Sync + 'static) {
+        let _ = self.changed.set(Box::new(apply));
     }
 
     /// Its settings file alone, for what only a command line does with it.
@@ -305,14 +325,14 @@ fn user_operations() -> Vec<Operation<HubContext>> {
                 let (name, role) = (input.name.as_str(), input.role.as_str());
                 match &input.password {
                     Some(password) => {
-                        accounts.change(|u| u.create(name, role, password, accounts.roles()))?;
+                        accounts.change(|u| u.create(name, role, password, &accounts.roles()))?;
                         Ok(json!({
                             "name": name, "role": role, "status": "active",
                             "said": format!("added {name} as {role}; they log in with their password"),
                         }))
                     }
                     None => {
-                        let token = accounts.change(|u| u.add(name, role, accounts.roles()))?;
+                        let token = accounts.change(|u| u.add(name, role, &accounts.roles()))?;
                         Ok(json!({
                             "name": name, "role": role, "status": "active", "token": token,
                             "said": token, "note": token_note(name),
@@ -330,7 +350,7 @@ fn user_operations() -> Vec<Operation<HubContext>> {
             },
             |c: &HubContext, _: &Caller, input: NamedRole| {
                 let accounts = c.accounts()?;
-                accounts.change(|u| u.approve(&input.name, &input.role, accounts.roles()))?;
+                accounts.change(|u| u.approve(&input.name, &input.role, &accounts.roles()))?;
                 Ok(json!({
                     "name": input.name, "role": input.role, "status": "active",
                     "said": format!("approved {} as {}; their token works now", input.name, input.role),
@@ -346,7 +366,7 @@ fn user_operations() -> Vec<Operation<HubContext>> {
             },
             |c: &HubContext, _: &Caller, input: NamedRole| {
                 let accounts = c.accounts()?;
-                accounts.change(|u| u.set_role(&input.name, &input.role, accounts.roles()))?;
+                accounts.change(|u| u.set_role(&input.name, &input.role, &accounts.roles()))?;
                 Ok(json!({
                     "name": input.name, "role": input.role,
                     "said": format!("{} is {} now", input.name, input.role),
@@ -533,7 +553,7 @@ fn own_operations() -> Vec<Operation<HubContext>> {
             },
             |c: &HubContext, _: &Caller, input: Login| {
                 let accounts = c.accounts()?;
-                let Registration::Approval { max_pending } = accounts.server.registration else {
+                let Registration::Approval { max_pending } = accounts.server().registration else {
                     return Err(Error::new(
                         Code::Forbidden,
                         "this hub does not take sign-ups; ask its admin to add you",
@@ -679,7 +699,7 @@ fn own_operations() -> Vec<Operation<HubContext>> {
                         &input.name,
                         input.expires_days,
                         scopes.clone(),
-                        accounts.roles(),
+                        &accounts.roles(),
                     )
                 })?;
                 Ok(json!({
@@ -722,7 +742,7 @@ fn login(accounts: &Accounts, input: &Login) -> Result<Value, Error> {
             ));
         }
     }
-    let hours = accounts.server.session_hours;
+    let hours = accounts.server().session_hours;
     match accounts.change(|users| users.login(name, &input.password, hours)) {
         Ok((token, expires)) => {
             accounts
@@ -736,8 +756,8 @@ fn login(accounts: &Accounts, input: &Login) -> Result<Value, Error> {
             let mut failures = accounts.failures.lock().unwrap_or_else(|e| e.into_inner());
             let entry = failures.entry(name.clone()).or_insert((0, None));
             entry.0 += 1;
-            if entry.0 >= accounts.server.lockout_failures {
-                let minutes = u64::from(accounts.server.lockout_minutes);
+            if entry.0 >= accounts.server().lockout_failures {
+                let minutes = u64::from(accounts.server().lockout_minutes);
                 *entry = (0, Some(Instant::now() + Duration::from_secs(minutes * 60)));
             }
             Err(e)

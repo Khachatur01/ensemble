@@ -146,8 +146,34 @@ fn status(ctx: &Ctx) -> Result<ExitCode, String> {
 
 /// `ensemble node serve`: run this computer's node until stopped.
 /// It serves `ensemble mcp` sessions from any folder with its teams, and runs
-/// the tasks of its folders; with a hub, it also offers what it offers.
+/// the tasks of its folders; with a hub, it also offers what it offers. A
+/// change to node.yaml has it start again, in this process: sessions carry on
+/// through their `ensemble mcp`, and running tasks start again from where
+/// their work was last pushed.
 fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
+    let dir = state::node_dir()?;
+    let _lock = ensemble::lock::acquire(&dir).map_err(|pid| {
+        let name = this_node().map(|n| n.name).unwrap_or_default();
+        format!("node serve: process {pid} already runs the node '{name}'")
+    })?;
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+    }
+    loop {
+        serve_once(ctx, &dir)?;
+        if !crate::restarting() {
+            break;
+        }
+        eprintln!("ensemble: starting again with node.yaml as it is now");
+    }
+    eprintln!("ensemble: stopped");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The node, as node.yaml says now, until it stops or starts again.
+fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
     let path = node_file()?;
     let node = config::load_node(&path)
         .map_err(|e| e.to_string())?
@@ -159,18 +185,6 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
         })?;
     let (team, waiting) = teams::load_all(ctx.node_env()?.as_deref(), &SystemEnv)
         .map_err(|e| format!("node serve: {e}"))?;
-    let dir = state::node_dir()?;
-    let _lock = ensemble::lock::acquire(&dir).map_err(|pid| {
-        format!(
-            "node serve: process {pid} already runs the node '{}'",
-            node.name
-        )
-    })?;
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
-    }
     let say = |line: &str| eprintln!("ensemble: {line}");
     for line in &waiting {
         say(line);
@@ -196,7 +210,7 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
         hub.clone(),
         team.clone(),
         ctx.node_env()?,
-        &dir,
+        dir,
         &operations,
         &say,
     )
@@ -223,7 +237,7 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
         }
         Ok(())
     };
-    let socket = state::node_socket(&dir);
+    let socket = state::node_socket(dir);
     let refused = std::sync::Mutex::new(None);
     let served = {
         let stop = &STOP;
@@ -244,8 +258,7 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
     if let Some(e) = refused.into_inner().unwrap() {
         return Err(format!("node serve: the hub refused this node: {e}"));
     }
-    say("stopped");
-    Ok(ExitCode::SUCCESS)
+    Ok(())
 }
 
 /// `ensemble mcp`: a session of this computer's running node, in `dir`.
@@ -360,7 +373,8 @@ impl NodeContext {
         relink: impl Fn() -> Result<String, String> + Send + Sync + 'static,
     ) -> Result<Self, String> {
         let settings = node_settings()?.on_change(|| {
-            Some("The running node uses it once it starts again: `systemctl --user restart ensemble-node` where a service runs it.".into())
+            crate::restart();
+            Some("The running node starts again with it; open sessions carry on.".into())
         });
         Ok(NodeContext {
             settings,

@@ -145,19 +145,37 @@ fn check(ctx: &Ctx) -> Result<ExitCode, String> {
     })
 }
 
-/// `ensemble hub serve`: the hub as a server for a team, until stopped.
+/// `ensemble hub serve`: the hub as a server for a team, until stopped. A
+/// change to hub.yaml that cannot be used as it runs has it start again, in
+/// this process.
 fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
-    let dir = state::hub_config_dir()?;
-    let hub = config::load_hub(
-        &config::hub_path(&dir),
-        ctx.hub_env()?.as_deref(),
-        &SystemEnv,
-    )
-    .map_err(|e| e.to_string())?;
     // One hub per computer; the lock also tells `ensemble hub …` it runs.
     let hub_dir = state::hub_dir()?;
     let _lock = ensemble::lock::acquire(&hub_dir)
         .map_err(|pid| format!("hub serve: process {pid} already runs the hub"))?;
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+    }
+    loop {
+        serve_once(ctx, &hub_dir)?;
+        if !crate::restarting() {
+            break;
+        }
+        eprintln!("ensemble: starting again with hub.yaml as it is now");
+    }
+    eprintln!("ensemble: stopped");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The hub, as hub.yaml says now, until it stops or starts again.
+fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
+    let dir = state::hub_config_dir()?;
+    let env_file = ctx.hub_env()?;
+    let path = config::hub_path(&dir);
+    let hub =
+        config::load_hub(&path, env_file.as_deref(), &SystemEnv).map_err(|e| e.to_string())?;
     let server = hub.server;
     let memory = ensemble::knowledge::Memory::new(&hub, None);
     // A hub written by hand, or by a NixOS module, gets its vault here.
@@ -168,11 +186,17 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
     let users = dir.clone();
     let listener = std::net::TcpListener::bind(server.listen)
         .map_err(|e| format!("hub serve: cannot listen on {}: {e}", server.listen))?;
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
-    }
+    // `ensemble hub …` reaches it on its socket, open before it says it
+    // listens, so a command right after finds it.
+    let commands_at = hub.interfaces.cli.then(|| state::hub_socket(hub_dir));
+    let commands_listener = match &commands_at {
+        Some(socket) => Some(
+            ensemble::runtime::shared()
+                .block_on(async { crate::daemon::listen(socket) })
+                .map_err(|e| format!("hub serve: {e}"))?,
+        ),
+        None => None,
+    };
     let say = |line: &str| eprintln!("ensemble: {line}");
     say(&format!(
         "hub {} listening on {}",
@@ -210,8 +234,28 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
     let tasks: &'static ensemble::board::Service = Box::leak(Box::new(tasks));
     let server = ensemble::link::Server::new(memory, &hub.roles, server, users).with_tasks(tasks);
     let server: &'static ensemble::link::Server<'static> = Box::leak(Box::new(server));
-    // `ensemble hub …` reaches it on its socket, while it runs.
-    let socket = hub.interfaces.cli.then(|| state::hub_socket(&hub_dir));
+    // A change to hub.yaml: used at once where it can be, else it starts again.
+    server.operations().1.when_changed(move || {
+        let now = match config::load_hub(&path, env_file.as_deref(), &SystemEnv) {
+            Ok(now) => now,
+            Err(e) => return Some(format!("The running hub could not read it: {e}")),
+        };
+        if now.server.listen != hub.server.listen
+            || now.knowledge.vault != hub.knowledge.vault
+            || now.tasks != hub.tasks
+            || now.interfaces != hub.interfaces
+        {
+            crate::restart();
+            return Some(
+                "The running hub starts again to use it; nodes connect again by themselves.".into(),
+            );
+        }
+        if let Ok(accounts) = server.operations().1.accounts() {
+            accounts.apply(now.roles.clone(), now.server);
+        }
+        memory.apply(&now);
+        Some("The running hub uses it now.".into())
+    });
     std::thread::scope(|scope| {
         scope.spawn(|| memory.work(&STOP, &say));
         if let Some(inbox) = inbox {
@@ -219,8 +263,8 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
         }
         ensemble::runtime::shared().block_on(async {
             let commands = async {
-                if let Some(socket) = &socket {
-                    commands(socket, server, &say).await;
+                if let (Some(listener), Some(socket)) = (commands_listener, &commands_at) {
+                    commands(listener, socket, server).await;
                 }
             };
             tokio::join!(
@@ -229,24 +273,16 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
             );
         });
     });
-    say("stopped");
-    Ok(ExitCode::SUCCESS)
+    Ok(())
 }
 
-/// Run the operations `ensemble hub …` asks for on `socket`, until [`STOP`]
-/// is set: the one who runs the hub asks, on its computer.
+/// Run the operations `ensemble hub …` asks for on `listener`, at `socket`,
+/// until [`STOP`] is set: the one who runs the hub asks, on its computer.
 async fn commands(
+    listener: tokio::net::UnixListener,
     socket: &std::path::Path,
     server: &'static ensemble::link::Server<'static>,
-    say: &(dyn Fn(&str) + Sync),
 ) {
-    let listener = match crate::daemon::listen(socket) {
-        Ok(listener) => listener,
-        Err(e) => {
-            say(&format!("no commands: {e}"));
-            return;
-        }
-    };
     while !STOP.load(std::sync::atomic::Ordering::Relaxed) {
         let accepted = tokio::select! {
             accepted = listener.accept() => accepted,

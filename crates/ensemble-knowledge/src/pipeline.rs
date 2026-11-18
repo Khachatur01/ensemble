@@ -348,16 +348,13 @@ impl Memory {
 
     /// One chat request on the first distill model that can be used.
     fn ask(&self, system: &str, user: &str) -> Result<String, Failed> {
-        let distill = &self.knowledge().distill;
+        let (knowledge, backends) = (self.knowledge(), self.backends());
+        let distill = &knowledge.distill;
         let candidates: Vec<(&ensemble_config::LlmBackend, &str)> = distill
             .fallback
             .candidates
             .iter()
-            .filter_map(|c| {
-                self.backends()
-                    .get(&c.backend)
-                    .map(|b| (b, c.model.as_str()))
-            })
+            .filter_map(|c| backends.get(&c.backend).map(|b| (b, c.model.as_str())))
             .collect();
         let index = self
             .resolver()

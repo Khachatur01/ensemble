@@ -83,9 +83,9 @@ Every process is the same binary. What runs in each:
 
 | command | what it runs | ends |
 | --- | --- | --- |
-| `ensemble mcp` | a bridge: it connects to the node's socket, sends `{"dir": "<folder>"}`, and copies bytes between stdio and the socket | when the node closes the session |
-| `ensemble node serve` | the node, one per computer: a socket for sessions, a worker per folder that runs the tasks the hub keeps for its project, and with the hub its `node.yaml` names, a link that offers runs and models (`Worker`) | on SIGINT or SIGTERM |
-| `ensemble hub serve` | the hub, from `~/.config/ensemble/hub/`: one port for the link, the REST API and `/nodes/v1/`; the tasks; the vault's distiller; the tracker inbox | on SIGINT or SIGTERM |
+| `ensemble mcp` | a bridge: it connects to the node's socket, sends `{"dir": "<folder>"}`, and carries MCP between stdio and the socket a message a line; when the node goes away while the session goes on, it answers the requests left with an error to try again, waits for the node to come back, says the session's `initialize` again and tells the client its tools may have changed | when the node closes the session |
+| `ensemble node serve` | the node, one per computer: a socket for sessions and for the operations `ensemble node …` asks of it, a worker per folder that runs the tasks the hub keeps for its project, and with the hub its `node.yaml` names, a link that offers runs and models (`Worker`) | on SIGINT or SIGTERM; a change to `node.yaml` has it start again in the same process |
+| `ensemble hub serve` | the hub, from `~/.config/ensemble/hub/`: one port for the link, the REST API and `/nodes/v1/`; a socket for the operations `ensemble hub …` asks of it; the tasks; the vault's distiller; the tracker inbox | on SIGINT or SIGTERM; a change to `hub.yaml` it cannot use as it runs has it start again in the same process |
 | everything else | one command: read the config and the state, or ask the hub, do one thing, print; `task new`, `task assign` and `task answer` also tell the node about the folder, so that its worker runs there | at once |
 
 A folder's tasks are run by one worker of the computer at a time: whoever
@@ -1046,7 +1046,11 @@ crate holds it today.
     too; a team's settings and the other commands are not operations yet.)
 16. `interfaces` in `hub.yaml` and `node.yaml`; the hub's socket; each
     operation run by the process whose state it changes; `hub.yaml` and
-    `node.yaml` applied without a restart.
+    `node.yaml` applied without a restart. (Done: the hub uses a change of
+    its roles, sign-up, sessions, lockout, models, knowledge settings and
+    owner at once, and starts again in its process for the rest; the node
+    starts again in its process, its sessions carrying on through their
+    bridges.)
 17. Signing in and joining over the link, with join codes; no HTTP from a
     node to the hub.
 18. The REST API as an interface: one route per operation, OpenAPI, its own

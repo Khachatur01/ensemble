@@ -418,6 +418,25 @@ fn tell_node(dir: &Path) -> String {
 /// Set by SIGINT and SIGTERM, so that a node or a hub server stops cleanly.
 static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Set with [`STOP`] when the running hub or node stops to start again in the
+/// same process, with its settings as they are now.
+static RESTART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Have the running hub or node stop and start again, in this process.
+fn restart() {
+    RESTART.store(true, std::sync::atomic::Ordering::Relaxed);
+    STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether it stopped to start again; if so, it may run again.
+fn restarting() -> bool {
+    let again = RESTART.swap(false, std::sync::atomic::Ordering::Relaxed);
+    if again {
+        STOP.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    again
+}
+
 #[cfg(unix)]
 extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, std::sync::atomic::Ordering::Relaxed);

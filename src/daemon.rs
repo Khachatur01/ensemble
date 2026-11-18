@@ -64,6 +64,8 @@ pub struct Daemon<'a> {
     open: Mutex<HashMap<PathBuf, Arc<Folder>>>,
     /// The folders' workers, which stopping waits for.
     workers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// The open sessions, which stopping ends.
+    sessions: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     say: &'a (dyn Fn(&str) + Sync),
 }
 
@@ -100,6 +102,7 @@ impl<'a> Daemon<'a> {
             folders: Folders::new(dir),
             open: Mutex::new(HashMap::new()),
             workers: Mutex::new(Vec::new()),
+            sessions: Mutex::new(Vec::new()),
             say,
         })
     }
@@ -133,7 +136,7 @@ impl<'a> Daemon<'a> {
                 Ok(Some((folder, stream))) => {
                     let changed = self.tools_changed.subscribe();
                     // The folder outlives the session.
-                    tokio::spawn(async move {
+                    let session = tokio::spawn(async move {
                         let (input, output) = stream.into_split();
                         let _ = mcp::serve_session(
                             folder.ensemble,
@@ -146,11 +149,18 @@ impl<'a> Daemon<'a> {
                         )
                         .await;
                     });
+                    let mut sessions = self.sessions.lock().unwrap();
+                    sessions.retain(|s| !s.is_finished());
+                    sessions.push(session);
                 }
                 Err(e) => (self.say)(&format!("a session was refused: {e}")),
             }
         }
         let _ = std::fs::remove_file(socket);
+        // Their `ensemble mcp` connects again, to the node that runs next.
+        for session in std::mem::take(&mut *self.sessions.lock().unwrap()) {
+            session.abort();
+        }
         (self.say)("stopping: running tasks are stopped and queued again");
         for folder in self.open.lock().unwrap().values() {
             folder.queue.close();
@@ -360,10 +370,125 @@ pub(crate) async fn read_line(stream: &mut UnixStream) -> Result<String, String>
     }
 }
 
+/// How long a session waits for its node to come back once it went away.
+const COME_BACK: Duration = Duration::from_secs(30);
+/// The id of the `initialize` a session says again to a node started anew.
+const AGAIN: &str = "ensemble-again";
+
 /// `ensemble mcp` with no `--team`: carry MCP between stdio and the node on
-/// `socket`, as a session in `dir`. Ends when the node closes the session,
-/// which it does once stdin ends and its calls are answered.
+/// `socket`, as a session in `dir`, one message a line. Ends when the node
+/// closes the session once stdin ended and its calls are answered.
+///
+/// A node that goes away while the session goes on, as when it starts again
+/// with a changed node.yaml, is waited for: the requests it left unanswered
+/// are answered with an error to try again, the session's `initialize` is
+/// said again to the node that comes back, and the client is told its tools
+/// may have changed. The client never sees the session end.
 pub async fn bridge(socket: &Path, dir: &Path, node: &str) -> Result<(), String> {
+    use std::collections::HashSet;
+    use tokio::io::AsyncBufReadExt;
+    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+    let mut stdout = tokio::io::stdout();
+    // The client's `initialize` and `notifications/initialized`, as it said
+    // them, and the ids of its requests the node has not answered yet.
+    let mut opening: Vec<serde_json::Value> = Vec::new();
+    let mut waiting: HashSet<String> = HashSet::new();
+    let mut again = false;
+    loop {
+        let stream = if again {
+            reopen(socket, dir, node).await?
+        } else {
+            open(socket, dir, node).await?
+        };
+        let (from_node, mut to_node) = stream.into_split();
+        let mut from_node = tokio::io::BufReader::new(from_node).lines();
+        if again && !opening.is_empty() {
+            for said in &opening {
+                let mut said = said.clone();
+                if said.get("id").is_some() {
+                    said["id"] = serde_json::json!(AGAIN);
+                }
+                send(&mut to_node, &said.to_string()).await?;
+                // Its answer is the bridge's, not the client's.
+                if said["id"] == AGAIN {
+                    while let Some(line) = from_node.next_line().await.map_err(|e| e.to_string())? {
+                        let answer: serde_json::Value =
+                            serde_json::from_str(&line).unwrap_or_default();
+                        if answer["id"] == AGAIN {
+                            break;
+                        }
+                        send(&mut stdout, &line).await?;
+                    }
+                }
+            }
+            let changed = serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" });
+            send(&mut stdout, &changed.to_string()).await?;
+        }
+        // Carry messages both ways until stdin ends or the node goes away.
+        let gone = loop {
+            tokio::select! {
+                line = stdin.next_line() => match line {
+                    Ok(Some(line)) => {
+                        let said: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                        match said["method"].as_str() {
+                            Some("initialize") => opening = vec![said.clone()],
+                            Some("notifications/initialized") => opening.push(said.clone()),
+                            _ => {}
+                        }
+                        if said.get("method").is_some() && let Some(id) = said.get("id") {
+                            waiting.insert(id.to_string());
+                        }
+                        if send(&mut to_node, &line).await.is_err() {
+                            break true;
+                        }
+                    }
+                    // The client is done: the node answers what it has, then
+                    // closes the session.
+                    _ => {
+                        let _ = to_node.shutdown().await;
+                        while let Ok(Some(line)) = from_node.next_line().await {
+                            send(&mut stdout, &line).await?;
+                        }
+                        return Ok(());
+                    }
+                },
+                line = from_node.next_line() => match line {
+                    Ok(Some(line)) => {
+                        let said: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                        if said.get("method").is_none() && let Some(id) = said.get("id") {
+                            waiting.remove(&id.to_string());
+                        }
+                        send(&mut stdout, &line).await?;
+                    }
+                    _ => break true,
+                },
+            }
+        };
+        if gone {
+            for id in waiting.drain() {
+                let id: serde_json::Value = serde_json::from_str(&id).unwrap_or_default();
+                let answer = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32000, "message": "the node started again while this ran; try again" },
+                });
+                send(&mut stdout, &answer.to_string()).await?;
+            }
+            again = true;
+        }
+    }
+}
+
+/// Write `line`, and its end, and flush it.
+async fn send(to: &mut (impl AsyncWriteExt + Unpin), line: &str) -> Result<(), String> {
+    to.write_all(format!("{line}\n").as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    to.flush().await.map_err(|e| e.to_string())
+}
+
+/// A session of the node on `socket`, in `dir`.
+async fn open(socket: &Path, dir: &Path, node: &str) -> Result<UnixStream, String> {
     let mut stream = UnixStream::connect(socket).await.map_err(|e| {
         format!("no node '{node}' is running ({e}). Start it with `ensemble node serve`")
     })?;
@@ -377,21 +502,20 @@ pub async fn bridge(socket: &Path, dir: &Path, node: &str) -> Result<(), String>
     if let Some(e) = reply["error"].as_str() {
         return Err(format!("node '{node}' refused the session: {e}"));
     }
-    let (mut from_node, mut to_node) = stream.into_split();
-    let up = async {
-        let _ = tokio::io::copy(&mut tokio::io::stdin(), &mut to_node).await;
-        let _ = to_node.shutdown().await;
-    };
-    let down = async {
-        let mut stdout = tokio::io::stdout();
-        let copied = tokio::io::copy(&mut from_node, &mut stdout).await;
-        let _ = stdout.flush().await;
-        copied
-    };
-    // The session is over when the node closes it; stdin may never end.
-    tokio::select! {
-        copied = down => copied.map(|_| ()).map_err(|e| e.to_string()),
-        () = async { up.await; std::future::pending::<()>().await } => Ok(()),
+    Ok(stream)
+}
+
+/// [`open`], once the node comes back, waiting for it up to [`COME_BACK`].
+async fn reopen(socket: &Path, dir: &Path, node: &str) -> Result<UnixStream, String> {
+    let until = std::time::Instant::now() + COME_BACK;
+    loop {
+        match open(socket, dir, node).await {
+            Ok(stream) => return Ok(stream),
+            Err(e) if std::time::Instant::now() >= until => {
+                return Err(format!("the node went away, and did not come back: {e}"));
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+        }
     }
 }
 

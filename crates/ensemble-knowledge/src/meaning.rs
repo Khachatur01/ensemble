@@ -73,8 +73,8 @@ impl Memory {
     /// Those of `notes` at least `min_similarity` alike to `query`, most
     /// alike first.
     fn by_meaning<'n>(&self, notes: &'n [Note], query: &str) -> Result<Vec<&'n Note>, String> {
-        let e = self
-            .knowledge()
+        let knowledge = self.knowledge();
+        let e = knowledge
             .recall
             .embed
             .as_ref()
@@ -191,14 +191,14 @@ impl Memory {
 
     /// The vectors of `texts`, from the hub's embedding model.
     fn vectors(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-        let e = self
-            .knowledge()
+        let knowledge = self.knowledge();
+        let e = knowledge
             .recall
             .embed
             .as_ref()
             .ok_or("no embedding model")?;
-        let backend = self
-            .backends()
+        let backends = self.backends();
+        let backend = backends
             .get(&e.backend)
             .ok_or_else(|| format!("no backend '{}'", e.backend))?;
         embed(backend, &e.model, texts).map_err(|e| e.to_string())

@@ -18,8 +18,8 @@ use ensemble_config::{Hub, Knowledge, LlmBackend};
 use ensemble_core::runtime;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 mod meaning;
@@ -105,14 +105,15 @@ impl KnowledgeAccess for Memory {
 
 /// The knowledge of one hub, as one session uses it.
 pub struct Memory {
-    owner: String,
-    knowledge: Knowledge,
+    /// The hub's owner, its knowledge settings and its model endpoints, as
+    /// its hub.yaml says now: replaced when that changes ([`Memory::apply`]).
+    owner: RwLock<String>,
+    knowledge: RwLock<Arc<Knowledge>>,
     /// The working folder's name, never its path.
     project: Option<String>,
     /// The agent CLI on the other end, once it has said its name.
     client: Mutex<Option<String>>,
-    /// The hub's own model endpoints.
-    backends: BTreeMap<String, LlmBackend>,
+    backends: RwLock<Arc<BTreeMap<String, LlmBackend>>>,
     resolver: Resolver,
     /// The last failure to find notes by their meaning, said once.
     meaning: meaning::Meaning,
@@ -131,18 +132,35 @@ impl Memory {
     /// The knowledge of `hub`, for work in the folder called `project`.
     pub fn new(hub: &Hub, project: Option<String>) -> Memory {
         Memory {
-            owner: hub.owner.clone(),
-            knowledge: hub.knowledge.clone(),
+            owner: RwLock::new(hub.owner.clone()),
+            knowledge: RwLock::new(Arc::new(hub.knowledge.clone())),
             project,
             client: Mutex::new(None),
-            backends: hub.llm_backends.clone(),
+            backends: RwLock::new(Arc::new(hub.llm_backends.clone())),
             resolver: Resolver::default(),
             meaning: meaning::Meaning::default(),
         }
     }
 
-    pub(crate) fn backends(&self) -> &BTreeMap<String, LlmBackend> {
-        &self.backends
+    /// Use what `hub` says from now on: its owner, its knowledge settings and
+    /// its model endpoints. Its vault stays the one it was made with.
+    pub fn apply(&self, hub: &Hub) {
+        *self.owner.write().unwrap_or_else(|e| e.into_inner()) = hub.owner.clone();
+        *self.knowledge.write().unwrap_or_else(|e| e.into_inner()) =
+            Arc::new(hub.knowledge.clone());
+        *self.backends.write().unwrap_or_else(|e| e.into_inner()) =
+            Arc::new(hub.llm_backends.clone());
+    }
+
+    pub(crate) fn backends(&self) -> Arc<BTreeMap<String, LlmBackend>> {
+        self.backends
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn owner(&self) -> String {
+        self.owner.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub(crate) fn meaning(&self) -> &meaning::Meaning {
@@ -302,11 +320,14 @@ impl Memory {
     }
 
     pub fn vault(&self) -> Vault {
-        Vault::new(&self.knowledge.vault)
+        Vault::new(&self.knowledge().vault)
     }
 
-    pub fn knowledge(&self) -> &Knowledge {
-        &self.knowledge
+    pub fn knowledge(&self) -> Arc<Knowledge> {
+        self.knowledge
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Remember which agent CLI this session talks to, as it named itself.
@@ -330,7 +351,7 @@ impl Memory {
     /// The notes about `query` the hub's owner may see: [`recall_as`](Self::recall_as)
     /// them.
     pub fn recall(&self, query: &str) -> String {
-        self.recall_as(&self.owner, query)
+        self.recall_as(&self.owner(), query)
     }
 
     /// The notes about `query` the account `who` may see, best first, within
@@ -342,7 +363,8 @@ impl Memory {
             .into_iter()
             .filter(|n| n.audience.sees(who))
             .collect();
-        let limits = &self.knowledge.recall;
+        let knowledge = self.knowledge();
+        let limits = &knowledge.recall;
         let found = self.find(&notes, query, limits.max_notes as usize);
         if found.is_empty() {
             return format!(
@@ -442,7 +464,7 @@ impl Memory {
         text: &str,
     ) -> Result<Share, String> {
         self.share_as(
-            &self.owner,
+            &self.owner(),
             client,
             self.project.as_deref(),
             visibility,

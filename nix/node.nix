@@ -149,7 +149,7 @@ in
           ''
             # A node to merge into: as `ensemble node setup` makes one.
             if [ ! -e "$dir/node.yaml" ]; then
-              printf 'version: 1\nname: %s\naccess: private\noffers: {}\n' \
+              printf 'version: 1\nname: %s\naccess: private\noffers: {}\ninterfaces:\n  cli: {}\n' \
                 "$(${pkgs.hostname}/bin/hostname -s)" > "$dir/node.yaml"
             fi
             ${lib.getExe package} node config merge ${files.nodeYaml}

@@ -999,12 +999,24 @@ A value is written as YAML when it reads as YAML (`laptop`, `8`, `true`,
 `[a, b]`, `{}`), and as a string otherwise. The file is changed as text, so its
 comments and order stay; the change is loaded before it is written, and one
 that would not load is refused with what is wrong, and nothing changes (`edit`
-keeps your edit beside the file to try again). A team's change reaches the
-running node at once. The node reads `node.yaml` when it starts, so a change to
-it restarts the node's user service when one runs it (as the Nix modules do),
-and otherwise says to restart the node; the hub reads `hub.yaml` when it
-starts, and says to restart it. `ensemble node login <url>` names the hub in
+keeps your edit beside the file to try again). While the hub or the node
+runs, `ensemble hub …` and `ensemble node …` ask it, over its socket, and it
+makes the change itself and uses it at once: a team, the hub's roles, how
+people sign up and how long a login lasts, its models and knowledge settings,
+its owner. A change the hub cannot use as it runs (where it listens, its
+vault, its inbox, its interfaces) has it start again, in the same process;
+nodes connect again by themselves. A change to `node.yaml` has the node start
+again, in the same process: open agent sessions carry on, as their `ensemble
+mcp` connects again by itself (a request in flight is answered to try again),
+and running tasks start again from where their work was last pushed. When
+neither runs, the command makes the change in the file, and the hub or the
+node reads it when it starts. `ensemble node login <url>` names the hub in
 `node.yaml` by itself, and `ensemble node logout` takes it out.
+
+The command line reaches a hub or a node because its file turns it on:
+`interfaces: { cli: {} }`, which `ensemble hub init` and `ensemble node
+setup` write. Left out, the command line is on; a file that turns on no
+interface is refused, since nothing could manage it.
 
 ### Editor support
 

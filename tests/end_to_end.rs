@@ -3957,3 +3957,76 @@ fn a_running_node_makes_a_change_to_its_settings_itself() {
     sigterm(&node);
     let _ = node.wait();
 }
+
+#[test]
+fn a_session_carries_on_while_its_node_starts_again_with_a_changed_node_yaml() {
+    let s = Scratch::new("restart-session");
+    s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
+    let mut session = McpSession::start(&s);
+    session.request(
+        "initialize",
+        serde_json::json!({"protocolVersion": "2025-06-18", "clientInfo": {"name": "claude-code", "version": "2"}}),
+    );
+    session.notify("notifications/initialized");
+    let before = session.request("tools/list", serde_json::json!({}));
+    let out = ensemble(&s, &["node", "config", "set", "access", "shared"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("starts again with it"),
+        "{}",
+        stderr_of(&out)
+    );
+    // The node stops and comes back; the session waits for it, says its
+    // `initialize` again, and goes on.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let after = session.request("tools/list", serde_json::json!({}));
+    assert_eq!(
+        after["result"]["tools"], before["result"]["tools"],
+        "{after}"
+    );
+    assert!(
+        session
+            .notes
+            .iter()
+            .any(|n| n["method"] == "notifications/tools/list_changed"),
+        "the client is told its tools may have changed: {:?}",
+        session.notes
+    );
+}
+
+#[test]
+fn a_running_hub_uses_a_changed_hub_yaml_at_once_or_starts_again() {
+    let s = Scratch::new("hub-live");
+    let (hub, _address, _token) = hub_server(&s);
+    let _served = serve_hub(&s, &hub);
+    // Roles: used at once.
+    let out = ensemble(
+        &s,
+        &["hub", "config", "set", "roles.reader", "[recall, share]"],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("uses it now"),
+        "{}",
+        stderr_of(&out)
+    );
+    let roles = stdout_of(&ensemble(&s, &["hub", "role", "list"]));
+    assert!(roles.contains("reader:\n  - recall\n  - share"), "{roles}");
+    // Where it listens: it starts again, there.
+    let port = free_port();
+    let listen = format!("127.0.0.1:{port}");
+    let out = ensemble(&s, &["hub", "config", "set", "server.listen", &listen]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("starts again"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(
+        wait_for(15, || std::net::TcpStream::connect(&listen).is_ok()),
+        "the hub listens on {listen}"
+    );
+    assert!(wait_for(5, || ensemble(&s, &["hub", "user", "list"])
+        .status
+        .success()));
+}

@@ -45,7 +45,6 @@ type Sender = SplitSink<WebSocketStream<http::Replay<TcpStream>>, Message>;
 /// users are kept.
 pub struct Server<'a> {
     pub(crate) memory: &'a Memory,
-    pub(crate) roles: &'a BTreeMap<String, Vec<Permission>>,
     /// Its accounts and settings, as its operations reach them.
     pub(crate) hub: HubContext,
     /// The hub's operations, which its REST API runs.
@@ -71,7 +70,6 @@ impl<'a> Server<'a> {
     ) -> Self {
         Server {
             memory,
-            roles,
             hub: {
                 let roles = roles.clone();
                 HubContext::new(&users, move || Ok((roles.clone(), settings)))
@@ -129,6 +127,11 @@ impl<'a> Server<'a> {
     /// the one who runs it, on its socket.
     pub fn operations(&self) -> (&ensemble_ops::Registry<HubContext>, &HubContext) {
         (&self.operations, &self.hub)
+    }
+
+    /// Its roles, as hub.yaml says them now.
+    pub(crate) fn roles(&self) -> BTreeMap<String, Vec<Permission>> {
+        self.hub.accounts().map(|a| a.roles()).unwrap_or_default()
     }
 
     pub(crate) fn users(&self) -> Result<Users, String> {
@@ -249,7 +252,7 @@ impl<'a> Server<'a> {
         let user = self
             .users()
             .ok()?
-            .authenticate(&token, self.roles)?
+            .authenticate(&token, &self.roles())?
             .user
             .name;
         Some(Session { token, user })
@@ -261,7 +264,7 @@ impl<'a> Server<'a> {
     fn permissions(&self, session: &Session) -> Result<Vec<Permission>, String> {
         let users = self.users()?;
         let signed = users
-            .authenticate(&session.token, self.roles)
+            .authenticate(&session.token, &self.roles())
             .filter(|s| s.user.name == session.user)
             .ok_or("your token was revoked or expired; make a new one")?;
         Ok(signed.permissions)

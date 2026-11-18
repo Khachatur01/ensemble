@@ -156,7 +156,7 @@ pub fn node_file(name: &str) -> Result<String, String> {
         "{NODE_SCHEMA_URL_LINE}\n\n# This computer's node, which `ensemble node serve` runs. `ensemble node init\n# --stdout` prints every setting.\n\nversion: {NODE_SUPPORTED_VERSION}\n\nname: {}\naccess: private\n",
         quoted(name)
     );
-    text.push_str("offers: {}\n");
+    text.push_str("offers: {}\n\n# How the node is managed: `ensemble node …` on this computer.\ninterfaces:\n  cli: {}\n");
     crate::config::parse_node(&text, Path::new(NODE_FILENAME)).map_err(|e| e.to_string())?;
     Ok(text)
 }

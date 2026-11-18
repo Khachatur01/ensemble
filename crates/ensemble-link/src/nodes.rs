@@ -458,7 +458,7 @@ impl Server<'_> {
         let signed = blocking(|| {
             self.users()
                 .ok()
-                .and_then(|u| head.bearer().and_then(|t| u.authenticate(t, self.roles)))
+                .and_then(|u| head.bearer().and_then(|t| u.authenticate(t, &self.roles())))
         });
         let Some(signed) = signed else {
             return refuse(
