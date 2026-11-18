@@ -1203,8 +1203,11 @@ running hub turns it into notes in the background, or now with
    commitment, preference, ownership); chatter gives none and is skipped.
 2. Each item is compared with the notes most like it. It becomes a new note,
    is merged into one, confirms one, or, when it contradicts one, waits in
-   `review/` for you.
+   `review/` for you. The model also says which of those notes it relates to.
 3. The notes are written and the vault is committed, one commit per share.
+   Related notes link to each other, both ways, in a `## Related` list of
+   `[[links]]` at the end of each: Obsidian's graph shows them, and `recall`
+   names them so an agent can recall them too.
 
 To correct a note, share the correction. To read the vault, open it as a
 folder in Obsidian, or anything that reads Markdown:
@@ -1212,8 +1215,9 @@ folder in Obsidian, or anything that reads Markdown:
 ```text
 vault/
   shares/<yyyy>/<mm>/<id>.md   each share as it arrived, never changed
-  notes/<slug>.md              one note per topic, frontmatter: kind, title, tags,
-                               scope, sources (share ids), shared_by, pipeline, updated
+  notes/<slug>.md              one note per topic, its related notes linked at the end;
+                               frontmatter: kind, title, tags, scope,
+                               sources (share ids), shared_by, pipeline, updated
   review/<share-id>.md         what the pipeline would not write, and why
   log.jsonl                    what the pipeline did with each share
 ```

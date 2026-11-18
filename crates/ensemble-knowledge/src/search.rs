@@ -101,6 +101,7 @@ mod tests {
             pipeline: 1,
             updated: "2026-11-10T00:00:00Z".into(),
             body: body.into(),
+            related: Vec::new(),
         }
     }
 

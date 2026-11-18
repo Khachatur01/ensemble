@@ -331,8 +331,9 @@ that runs it, which is how `status` shows what an agent is doing there.
 ```
 
 - **The vault** is a git repository: `shares/` as they arrived, never changed;
-  `notes/`, one per topic, which only the pipeline writes; `review/`, what the
-  pipeline would not write; `log.jsonl`. Notes are a product of the shares, so
+  `notes/`, one per topic, linked to related notes with `[[...]]`, which only
+  the pipeline writes; `review/`, what the pipeline would not write;
+  `log.jsonl`. Notes are a product of the shares, so
   `ensemble hub knowledge rebuild` makes them again from scratch.
 - **The pipeline** distills with the hub's own `knowledge.distill` models, by
   one chat request per step, with no tools. Shared text goes between markers

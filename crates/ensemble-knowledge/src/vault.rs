@@ -76,6 +76,9 @@ pub struct Note {
     pub pipeline: u32,
     pub updated: String,
     pub body: String,
+    /// The notes it relates to, by slug: written after the body as a
+    /// `## Related` list of `[[links]]`, which Obsidian and the like follow.
+    pub related: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -248,7 +251,8 @@ impl Vault {
             updated: note.updated.clone(),
         };
         let path = dir.join(format!("{}.md", note.slug));
-        write_atomically(&path, &with_front_matter(&head, &note.body))
+        let text = format!("{}{}", note.body.trim_end(), related_section(&note.related));
+        write_atomically(&path, &with_front_matter(&head, &text))
             .map_err(|e| format!("cannot write {}: {e}", path.display()))
     }
 
@@ -389,6 +393,7 @@ fn read_note(path: &Path) -> Option<Note> {
     let file = fs::read_to_string(path).ok()?;
     let (head, body) = split_front_matter(&file)?;
     let head: NoteHead = serde_norway::from_str(head).ok()?;
+    let (body, related) = split_related(body.trim_end());
     Some(Note {
         slug: path.file_stem()?.to_string_lossy().into_owned(),
         kind: head.kind,
@@ -399,8 +404,54 @@ fn read_note(path: &Path) -> Option<Note> {
         shared_by: head.shared_by,
         pipeline: head.pipeline,
         updated: head.updated,
-        body: body.trim_end().to_string(),
+        body: body.to_string(),
+        related,
     })
+}
+
+const RELATED: &str = "## Related";
+
+/// The `## Related` list after a note's body; nothing when it relates to none.
+fn related_section(related: &[String]) -> String {
+    if related.is_empty() {
+        return String::new();
+    }
+    let links: Vec<String> = related.iter().map(|s| format!("- [[{s}]]")).collect();
+    format!("\n\n{RELATED}\n\n{}", links.join("\n"))
+}
+
+/// A note's text as its body and the slugs of its `## Related` list: the last
+/// heading of the text, when every line under it is a `- [[link]]`.
+fn split_related(text: &str) -> (&str, Vec<String>) {
+    let start = if text.starts_with(&format!("{RELATED}\n")) {
+        0
+    } else {
+        match text.rfind(&format!("\n{RELATED}\n")) {
+            Some(i) => i + 1,
+            None => return (text, Vec::new()),
+        }
+    };
+    let mut related: Vec<String> = Vec::new();
+    for line in text[start + RELATED.len()..].lines().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        let slug = line
+            .strip_prefix("- [[")
+            .and_then(|l| l.strip_suffix("]]"))
+            // `[[slug|shown as]]` links to slug.
+            .and_then(|l| l.split('|').next())
+            .map(str::trim);
+        match slug {
+            Some(slug) if !slug.is_empty() => {
+                if !related.iter().any(|r| r == slug) {
+                    related.push(slug.to_string());
+                }
+            }
+            _ => return (text, Vec::new()),
+        }
+    }
+    (text[..start].trim_end(), related)
 }
 
 /// The entries of `dir`, sorted; none when it does not exist.
@@ -496,6 +547,22 @@ mod tests {
     }
 
     #[test]
+    fn a_related_list_is_the_last_heading_of_links_only() {
+        let (body, related) = split_related("Text.\n\n## Related\n\n- [[a]]\n- [[b|B]]\n- [[a]]");
+        assert_eq!((body, related), ("Text.", vec!["a".into(), "b".into()]));
+        let (body, related) = split_related("## Related\n- [[a]]");
+        assert_eq!((body, related), ("", vec!["a".to_string()]));
+        for text in [
+            "Text.\n\n## Related\n\nSee [[a]].",
+            "## Related\n\n- [[a]]\n\n## Later\n\nMore.",
+            "Text.\n## Related work\n- [[a]]",
+            "Text.",
+        ] {
+            assert_eq!(split_related(text), (text, Vec::new()), "{text}");
+        }
+    }
+
+    #[test]
     fn notes_reviews_and_the_log_are_written_and_committed() {
         let tmp = TempDir::new();
         let vault = Vault::new(tmp.0.join("vault"));
@@ -512,8 +579,14 @@ mod tests {
             pipeline: 1,
             updated: "2026-11-10T00:00:00Z".into(),
             body: "The shop listens on 8080.".into(),
+            related: vec!["deploys".into()],
         };
         vault.write_note(&note).unwrap();
+        let file = fs::read_to_string(vault.notes_dir().join("ports.md")).unwrap();
+        assert!(
+            file.ends_with("on 8080.\n\n## Related\n\n- [[deploys]]\n"),
+            "{file}"
+        );
         assert_eq!(vault.note("ports"), Some(note.clone()));
         assert_eq!(vault.notes(), vec![note]);
         vault.write_review(&share, "contradicts", "a").unwrap();

@@ -3057,6 +3057,7 @@ fn hub_with_a_note(scratch: &Scratch) -> Served {
             pipeline: 1,
             updated: "2026-11-10T00:00:00Z".into(),
             body: "Deploys go out on Tuesdays.".into(),
+            related: Vec::new(),
         })
         .unwrap();
     let served = serve_hub(scratch, &hub);

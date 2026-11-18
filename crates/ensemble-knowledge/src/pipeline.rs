@@ -6,15 +6,17 @@
 //! 2. **Integrate**: each item is compared with the notes most like it, found
 //!    by [`search`](crate::search). With none, it is a new note; otherwise one
 //!    more request says whether it is new, adds to a note, says what a note
-//!    already says, or contradicts one.
-//! 3. **Write**: notes are written, the share is logged, and the vault is
-//!    committed, the share with them.
+//!    already says, or contradicts one, and which of the notes offered it
+//!    relates to.
+//! 3. **Write**: notes are written, each with a `## Related` list of links,
+//!    made both ways, the share is logged, and the vault is committed, the
+//!    share with them.
 //!
 //! What was shared may hold instructions meant for a model, so (as decided in
 //! ARCHITECTURE.md) the model has no tools: it is one chat request, never an
 //! agent CLI. Shared text goes in as quoted data, between markers with a nonce
 //! nobody can guess, so it cannot close them. The answer must be the JSON asked
-//! for, an item or a merge may only touch the notes it was offered, and
+//! for, an item, a merge or a link may only touch the notes it was offered, and
 //! everything is capped in size; anything else goes to `review/` with why. Every
 //! note names the shares it came from, so what one source brought in can be
 //! found and removed.
@@ -43,8 +45,8 @@ pub const KINDS: [&str; 7] = [
     "ownership",
 ];
 
-/// The notes an item is compared with.
-const SIMILAR: usize = 3;
+/// The notes an item is compared with, and may be linked to.
+const SIMILAR: usize = 5;
 const MAX_ITEMS: usize = 10;
 const MAX_TITLE: usize = 120;
 const MAX_BODY: usize = 4000;
@@ -77,9 +79,13 @@ one, say what changed.\n\
 - same: one offered note already says what the item says. Give its slug.\n\
 - contradicts: the item disagrees with one offered note and you cannot tell which is right. \
 Give its slug.\n\
+With new and merge, also list as related the slugs of the other offered notes that someone \
+reading the item would want to read too: about the same system, project, person or decision, \
+or one that explains or depends on the other. Leave out notes that only share a word with it. \
+The list may be empty.\n\
 Answer with JSON only, no prose and no code fence, one of:\n\
-{\"action\":\"new\"}\n\
-{\"action\":\"merge\",\"note\":\"<slug>\",\"body\":\"...\"}\n\
+{\"action\":\"new\",\"related\":[\"<slug>\"]}\n\
+{\"action\":\"merge\",\"note\":\"<slug>\",\"body\":\"...\",\"related\":[\"<slug>\"]}\n\
 {\"action\":\"same\",\"note\":\"<slug>\"}\n\
 {\"action\":\"contradicts\",\"note\":\"<slug>\"}";
 
@@ -103,13 +109,24 @@ struct Item {
     tags: Vec<String>,
 }
 
-/// What the integrate request decided for one item.
+/// What the integrate request decided for one item. `related` holds offered
+/// notes only, never the merged one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
-    New,
-    Merge { note: String, body: String },
-    Same { note: String },
-    Contradicts { note: String },
+    New {
+        related: Vec<String>,
+    },
+    Merge {
+        note: String,
+        body: String,
+        related: Vec<String>,
+    },
+    Same {
+        note: String,
+    },
+    Contradicts {
+        note: String,
+    },
 }
 
 /// The shares the pipeline has not processed at its current version, oldest
@@ -165,7 +182,9 @@ impl Memory {
             let similar: Vec<&Note> =
                 search::rank(&notes, &format!("{} {}", item.title, item.body), SIMILAR);
             let action = if similar.is_empty() {
-                Action::New
+                Action::New {
+                    related: Vec::new(),
+                }
             } else {
                 match self.ask(INTEGRATE, &integrate_request(item, &similar)) {
                     Ok(answer) => match parse_action(&answer, &similar) {
@@ -201,7 +220,7 @@ impl Memory {
             };
             let now = ensemble_core::time::utc(std::time::SystemTime::now());
             match action {
-                Action::New => {
+                Action::New { related } => {
                     let note = Note {
                         slug: unique_slug(&vault, &item.title),
                         kind: item.kind.clone(),
@@ -213,12 +232,16 @@ impl Memory {
                         pipeline: PIPELINE_VERSION,
                         updated: now,
                         body: item.body.clone(),
+                        related: Vec::new(),
                     };
-                    vault.write_note(&note)?;
-                    touched.push(note.slug);
+                    link(&vault, note, &related, &mut touched)?;
                     counts[0] += 1;
                 }
-                Action::Merge { note, body } => {
+                Action::Merge {
+                    note,
+                    body,
+                    related,
+                } => {
                     let mut existing = vault.note(&note).ok_or("a merged note disappeared")?;
                     existing.body = body;
                     for tag in &item.tags {
@@ -227,15 +250,14 @@ impl Memory {
                         }
                     }
                     cite(&mut existing, share, now);
-                    vault.write_note(&existing)?;
-                    touched.push(existing.slug);
+                    link(&vault, existing, &related, &mut touched)?;
                     counts[1] += 1;
                 }
                 Action::Same { note } => {
                     let mut existing = vault.note(&note).ok_or("a confirmed note disappeared")?;
                     cite(&mut existing, share, now);
                     vault.write_note(&existing)?;
-                    touched.push(existing.slug);
+                    touch(&mut touched, existing.slug);
                     counts[2] += 1;
                 }
                 Action::Contradicts { note } => {
@@ -248,7 +270,6 @@ impl Memory {
                 }
             }
         }
-        touched.dedup();
         let outcome = if touched.is_empty() {
             "review"
         } else {
@@ -358,6 +379,44 @@ impl Memory {
                 why: e.to_string(),
             }),
         }
+    }
+}
+
+/// Write `note`, related to the notes `related` names as well as those it was
+/// already, and link each of them back to it. The notes it changed go in
+/// `touched`, `note` first; a related note that is gone is left out.
+fn link(
+    vault: &Vault,
+    mut note: Note,
+    related: &[String],
+    touched: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut others = Vec::new();
+    for slug in related {
+        if note.related.contains(slug) || *slug == note.slug {
+            continue;
+        }
+        if let Some(other) = vault.note(slug) {
+            note.related.push(slug.clone());
+            others.push(other);
+        }
+    }
+    vault.write_note(&note)?;
+    touch(touched, note.slug.clone());
+    for mut other in others {
+        if !other.related.contains(&note.slug) {
+            other.related.push(note.slug.clone());
+            vault.write_note(&other)?;
+            touch(touched, other.slug);
+        }
+    }
+    Ok(())
+}
+
+/// Note that a share changed `slug`, once.
+fn touch(touched: &mut Vec<String>, slug: String) {
+    if !touched.contains(&slug) {
+        touched.push(slug);
     }
 }
 
@@ -516,8 +575,31 @@ fn parse_action(answer: &str, offered: &[&Note]) -> Result<Action, String> {
             ))
         }
     };
+    // The offered notes it names as related, but for `but`: a slug it was not
+    // offered is only a link not made.
+    let related = |but: &str| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for slug in json
+            .get("related")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+        {
+            if slug != but
+                && offered.iter().any(|n| n.slug == slug)
+                && !out.iter().any(|s| s == slug)
+            {
+                out.push(slug.to_string());
+            }
+        }
+        out
+    };
     match text("action") {
-        Some("new") => Ok(Action::New),
+        Some("new") => Ok(Action::New {
+            related: related(""),
+        }),
         Some("merge") => {
             let note = note()?;
             let body = text("body").unwrap_or("");
@@ -527,6 +609,7 @@ fn parse_action(answer: &str, offered: &[&Note]) -> Result<Action, String> {
                 ));
             }
             Ok(Action::Merge {
+                related: related(&note),
                 note,
                 body: body.into(),
             })
@@ -689,6 +772,53 @@ mod tests {
             user.contains("slug: shop-port") && user.contains("<<notes-"),
             "{user}"
         );
+    }
+
+    #[test]
+    fn related_notes_are_linked_both_ways_and_only_to_notes_offered() {
+        let tmp = TempDir::new();
+        let server = model_server(
+            &["small"],
+            &[
+                r#"{"items":[{"kind":"fact","title":"Shop port","body":"The shop listens on port 8080.","tags":[]}]}"#,
+                r#"{"items":[{"kind":"fact","title":"Shop proxy","body":"The proxy sends port 443 on to the shop port.","tags":[]}]}"#,
+                r#"{"action":"new","related":["shop-port","made-up","shop-port"]}"#,
+                r#"{"items":[{"kind":"fact","title":"Shop port","body":"The shop listens on port 8081.","tags":[]}]}"#,
+                r#"{"action":"merge","note":"shop-port","body":"The shop listens on port 8081.","related":["shop-port","shop-proxy"]}"#,
+            ],
+        );
+        let m = memory_on(&tmp, &server.url, "fail");
+        for title in ["a", "b", "c"] {
+            m.share(None, title, "x").unwrap();
+        }
+        let run = m.distill().unwrap();
+        assert_eq!(run.done.len(), 3);
+        assert_eq!(
+            run.done[1].notes,
+            vec!["shop-proxy", "shop-port"],
+            "the note linked back changed too"
+        );
+        let vault = m.vault();
+        let proxy = vault.note("shop-proxy").unwrap();
+        assert_eq!(proxy.related, vec!["shop-port"], "never a note not offered");
+        assert_eq!(proxy.body, "The proxy sends port 443 on to the shop port.");
+        let port = vault.note("shop-port").unwrap();
+        assert_eq!(
+            port.related,
+            vec!["shop-proxy"],
+            "never itself, never twice"
+        );
+        assert_eq!(port.body, "The shop listens on port 8081.");
+        let file = std::fs::read_to_string(vault.root().join("notes/shop-proxy.md")).unwrap();
+        assert!(
+            file.ends_with("\n## Related\n\n- [[shop-port]]\n"),
+            "{file}"
+        );
+        let recalled = m.recall("shop port");
+        assert!(recalled.contains("Related: [[shop-proxy]]."), "{recalled}");
+        let integrate: Value = serde_json::from_str(&server.requests.lock().unwrap()[2]).unwrap();
+        let system = integrate["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("\"related\""), "{system}");
     }
 
     #[test]

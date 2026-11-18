@@ -444,6 +444,7 @@ pub mod testing {
                 pipeline: 1,
                 updated: "2026-11-11T00:00:00Z".into(),
                 body: "Deploys go out on Tuesdays.".into(),
+                related: Vec::new(),
             })
             .unwrap();
         let mut users = Users::load(&tmp.0.join("state")).unwrap();

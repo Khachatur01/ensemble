@@ -283,14 +283,20 @@ impl Memory {
         let mut out = format!("{RECALL_HEADER}\n");
         let mut left = limits.max_chars as usize;
         for note in found {
+            let related: Vec<String> = note.related.iter().map(|s| format!("[[{s}]]")).collect();
             let head = format!(
-                "\n## {} ({}, [[{}]])\nFrom shares {}, by {}; updated {}.\n\n",
+                "\n## {} ({}, [[{}]])\nFrom shares {}, by {}; updated {}.{}\n\n",
                 note.title,
                 note.kind,
                 note.slug,
                 note.sources.join(", "),
                 note.shared_by.join(", "),
-                note.updated
+                note.updated,
+                if related.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Related: {}.", related.join(", "))
+                }
             );
             let body: String = note
                 .body
@@ -540,6 +546,7 @@ mod tests {
             pipeline: 1,
             updated: "2026-11-10T00:00:00Z".into(),
             body: body.into(),
+            related: Vec::new(),
         }
     }
 
