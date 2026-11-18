@@ -113,7 +113,7 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 | `ensemble-node` | a node's link to a hub | `Worker`: runs and model calls for others (`lib.rs`) |
 | `ensemble-mcp` | MCP over stdio | the session loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`) |
 | `ensemble` (the root) | the binary | the command line, parsed with clap (`src/cli.rs`), and what each group of commands does (`src/cmd/`: `node`, `team`, `agent`, `task`, `knowledge`, `hub`); the node's sessions and the bridge (`src/daemon.rs`); what `node setup`, `node connect` and `node doctor` find and register (`src/setup.rs`); session hooks (`src/hooks.rs`); the node's teams, loaded, made, linked, pulled and approved (`src/teams.rs`), over git repositories pinned and trusted per commit (`src/remote.rs`) |
-| `nix/` | not a crate: the NixOS module (`nixos-module.nix`: a hub as a system service of its user, the node as a user service), the Home Manager module (`home-manager-module.nix`: the node on Linux or macOS), and an example configuration the flake's checks build (`example.nix`). They install and run Ensemble and write no configuration: that is made with `ensemble`, as on any platform |
+| `nix/` | not a crate: the NixOS module (`nixos-module.nix`: a hub as a system service, the node as a user service, each run as the person it is for), the Home Manager module (`home-manager-module.nix`: the node on Linux or macOS), what they share about a node (`node.nix`), and an example configuration the flake's checks build (`example.nix`). Settings and teams may be written in Nix or made with `ensemble`; either way they are in the person's `~/.config/ensemble/`, managed with `ensemble` as on any platform |
 
 Two rules keep the layers apart. The MCP session knows the tools and the
 router, not which CLIs exist. The router knows agents; only the adapters know
@@ -877,11 +877,12 @@ crate holds it today.
 11. Reloading the node's teams without a restart: after every `team`
     command and on `ensemble node reload`, with the open sessions told their
     tools changed. (Done.)
-12. Installing on NixOS and with Home Manager: a hub as a system service of
-    its user, this computer's node as a user service (systemd, or launchd on
-    macOS), each started once `ensemble` has set it up. Configuration is not
-    written in Nix: it is made with `ensemble`, as on every platform.
-    (Done; decided 2026-11-18.)
+12. Installing on NixOS and with Home Manager: a hub as a system service and
+    this computer's node as a user service (systemd, or launchd on macOS),
+    each run as the person it is for and managed with `ensemble` as on any
+    platform, with `node.yaml`, `hub.yaml` and the teams written from Nix or
+    made with `ensemble`. (Done; no `ensemble-hub` wrapper, decided
+    2026-11-18.)
 13. Tasks kept on the hub and leased by nodes, so another node takes up the
     task of one that stopped; the hub's inbox makes issues into tasks there.
     (Done; decided 2026-11-17.)
