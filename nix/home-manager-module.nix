@@ -1,8 +1,8 @@
 # The Home Manager module: this computer's node, `ensemble node serve`, for
 # the person whose home it is, on Linux (a systemd user service) and on macOS
-# (a launchd agent). Its settings and teams may be written in Nix, like the
-# NixOS module's node, or made with `ensemble` as on any platform; it runs once
-# there is a node.
+# (a launchd agent). What its settings and teams should always be may be
+# written in Nix, like the NixOS module's node; the rest is made with
+# `ensemble`, as on any platform. It runs once there is a node.
 { self }:
 {
   config,
@@ -16,9 +16,12 @@ let
   yaml = pkgs.formats.yaml { };
   node = import ./node.nix { inherit lib; };
   files = node.files { inherit pkgs yaml cfg; };
-  links = node.linkScript { inherit pkgs files; };
+  links = node.linkScript {
+    inherit pkgs files;
+    inherit (cfg) package;
+  };
   path = lib.makeBinPath ([ cfg.package pkgs.git ] ++ cfg.extraPackages);
-  # Linked in from `settings`, or written by `ensemble node setup`.
+  # Written by `ensemble node setup`, with what `settings` declares merged in.
   nodeYaml = "${config.xdg.configHome}/ensemble/node/node.yaml";
   command = [
     (lib.getExe cfg.package)

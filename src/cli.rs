@@ -132,6 +132,9 @@ pub enum NodeCommand {
     Logout { url: String },
     /// The other nodes of your hub you may use, with their agents and models.
     Peers,
+    /// The node's settings, node.yaml.
+    #[command(subcommand)]
+    Config(ConfigCommand),
     /// The node's helper teams.
     #[command(subcommand)]
     Team(TeamCommand),
@@ -191,6 +194,12 @@ pub enum TeamCommand {
     Check,
     /// Print the JSON Schema of config.yaml, for an editor.
     Schema,
+    /// A team's settings, its config.yaml: one made here or linked.
+    Config {
+        name: String,
+        #[command(subcommand)]
+        action: ConfigCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -363,6 +372,33 @@ pub enum HubCommand {
     /// The hub's knowledge vault.
     #[command(subcommand)]
     Knowledge(HubKnowledgeCommand),
+    /// The hub's settings, hub.yaml.
+    #[command(subcommand)]
+    Config(ConfigCommand),
+}
+
+/// One settings file, changed by its settings: each named by its keys joined
+/// by dots, such as `server.listen`. Comments and order are kept, and a change
+/// that would not load is refused. Settings declared in Nix are kept by the
+/// Nix module, and refused here.
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// Print a setting, or the whole file.
+    Get { key: Option<String> },
+    /// Set a setting. The value is YAML: `laptop`, `8`, `true`, `[a, b]`,
+    /// `{}`; anything else is written as a string.
+    Set { key: String, value: String },
+    /// Take a setting out.
+    Unset { key: String },
+    /// Open the file in $VISUAL or $EDITOR, and keep the change only if it
+    /// loads.
+    Edit,
+    /// Print where the file is.
+    Path,
+    /// Merge the settings of a YAML file into it and keep them as declared in
+    /// Nix: what the Nix modules run.
+    #[command(hide = true)]
+    Merge { file: PathBuf },
 }
 
 #[derive(Debug, Subcommand)]

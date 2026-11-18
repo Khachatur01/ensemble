@@ -1,10 +1,12 @@
 # The NixOS module: a hub, `ensemble hub serve`, as a system service, and this
 # computer's node, `ensemble node serve`, as a user service. Each runs as the
 # person it is for, from their `~/.config/ensemble/`, so they manage it with
-# `ensemble` as on any platform. `hub.yaml`, `node.yaml` and the node's teams
-# may be written in Nix; left out, they are made with `ensemble` (`ensemble
-# hub init`, `ensemble node setup`, `ensemble node team …`), and each process
-# starts once its file is there.
+# `ensemble` as on any platform. What should always hold is written in Nix:
+# the settings declared here are merged into `hub.yaml` and `node.yaml` when
+# each starts, and teams are linked in. The rest is made and changed with
+# `ensemble` (`ensemble hub init`, `ensemble node setup`, `… config set`,
+# `ensemble node team …`), which refuses to change what Nix declares. Each
+# process starts once its file is there.
 { self }:
 {
   config,
@@ -66,12 +68,14 @@ in
         type = types.nullOr yaml.type;
         default = null;
         description = ''
-          The hub's `hub.yaml`, as Nix: `version`, `owner`, `llm_backends`,
-          `knowledge`, `server`, `roles`, and optionally `tasks`.
-          `ensemble hub init --stdout` prints every setting. Written into the
-          hub's folder on every start. Null leaves `hub.yaml` to
-          `ensemble hub init` or your own hand, and the hub starts once it is
-          there.
+          Settings of the hub's `hub.yaml`, as Nix: any of `version`, `owner`,
+          `llm_backends`, `knowledge`, `server`, `roles` and `tasks`, down to
+          one setting such as `server.listen`. They are merged into the hub's
+          `hub.yaml` whenever it starts; the rest is made and changed with
+          `ensemble` (`ensemble hub init`, `ensemble hub config set`), which
+          refuses to change those declared here. `ensemble hub init --stdout`
+          prints every setting. Null leaves the whole file to `ensemble`, and
+          the hub starts once `ensemble hub init` has written it.
         '';
         example = lib.literalExpression ''
           {
@@ -122,7 +126,7 @@ in
         default = false;
         description = ''
           Open the port `settings.server.listen` names. Without a TLS proxy in
-          front, only on a network you trust. Needs `settings`.
+          front, only on a network you trust. Needs `settings.server.listen`.
         '';
       };
     };
@@ -151,8 +155,8 @@ in
     (mkIf hub.enable {
       assertions = [
         {
-          assertion = hub.openFirewall -> hub.settings != null;
-          message = "services.ensemble.hub.openFirewall needs services.ensemble.hub.settings, whose server.listen names the port";
+          assertion = hub.openFirewall -> (hub.settings.server.listen or null) != null;
+          message = "services.ensemble.hub.openFirewall needs services.ensemble.hub.settings.server.listen, which names the port";
         }
       ];
 
@@ -172,10 +176,17 @@ in
         };
         # The vault is a git repository.
         path = [ pkgs.git ];
-        preStart = lib.optionalString (hubYaml != null) ''
-          install -d -m 700 ${hubDir}
-          install -m 600 ${hubYaml} ${hubDir}/hub.yaml
-        '';
+        preStart =
+          if hubYaml != null then
+            ''
+              # A hub to merge into: the sample, with its vault.
+              [ -e ${hubDir}/hub.yaml ] || ${lib.getExe package} hub init
+              ${lib.getExe package} hub config merge ${hubYaml}
+            ''
+          else
+            ''
+              rm -f ${hubDir}/.nix-managed
+            '';
         serviceConfig = {
           ExecStart = lib.escapeShellArgs (
             [
@@ -217,7 +228,7 @@ in
         ++ nodeCfg.extraPackages;
         serviceConfig = {
           ExecStartPre = node.linkScript {
-            inherit pkgs;
+            inherit pkgs package;
             files = nodeFiles;
           };
           ExecStart = lib.escapeShellArgs (

@@ -48,6 +48,7 @@ pub fn run(ctx: &Ctx, command: NodeCommand) -> Result<ExitCode, String> {
         NodeCommand::Login { url, user, token } => login(&url, user.as_deref(), token.as_deref()),
         NodeCommand::Logout { url } => logout(&url),
         NodeCommand::Peers => peers(),
+        NodeCommand::Config(c) => with_node_file(|file| super::config::run(file, c)),
         NodeCommand::Team(c) => super::team::run(ctx, c),
         NodeCommand::Agent(c) => super::agent::run(ctx, c),
     }
@@ -329,7 +330,63 @@ fn login(url: &str, user: Option<&str>, token: Option<&str>) -> Result<ExitCode,
         hello.role,
         hello.permissions.join(", ")
     );
+    // The node names the hub it uses.
+    if !node_file()?.exists() {
+        println!(
+            "There is no node yet: `ensemble node setup` writes one; then name this hub in it with `ensemble node config set hub {url}`."
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    with_node_file(|file| {
+        let named = ensemble::config::settings::get(
+            &std::fs::read_to_string(&file.path).unwrap_or_default(),
+            "hub",
+        )?;
+        if named.as_deref() == Some(url) {
+            return Ok(());
+        }
+        match file.set("hub", url) {
+            Ok(()) => {
+                match named {
+                    Some(before) => println!("The node names this hub now, in place of {before}."),
+                    None => println!("The node names this hub now."),
+                }
+                (file.changed)();
+            }
+            Err(e) => println!("The node's hub was not changed: {e}"),
+        }
+        Ok(())
+    })?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// node.yaml, changed by `ensemble node config`, `node login` and `node
+/// logout`: checked as a node before it is written.
+fn with_node_file<T>(
+    work: impl FnOnce(&super::config::File<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    let path = node_file()?;
+    let check = |text: &str| {
+        config::parse_node(text, &path)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    };
+    let changed = || {
+        let running = state::node_dir().is_ok_and(|dir| {
+            std::os::unix::net::UnixStream::connect(state::node_socket(&dir)).is_ok()
+        });
+        if running {
+            println!(
+                "The running node read node.yaml when it started: restart it to use the change (`systemctl --user restart ensemble-node` where a service runs it)."
+            );
+        }
+    };
+    work(&super::config::File {
+        path: path.clone(),
+        made_by: "`ensemble node setup`",
+        check: &check,
+        changed: &changed,
+    })
 }
 
 /// Log in to the hub at `url` as `user`, with the password typed or on stdin,
@@ -396,6 +453,22 @@ fn logout(url: &str) -> Result<ExitCode, String> {
         println!("signed out of {url}");
     } else {
         println!("no token kept for {url}");
+    }
+    // A node that names it would reach no hub: it names none now.
+    if node_file()?.exists() {
+        with_node_file(|file| {
+            let text = std::fs::read_to_string(&file.path).unwrap_or_default();
+            if ensemble::config::settings::get(&text, "hub")?.as_deref() == Some(url) {
+                match file.unset("hub") {
+                    Ok(()) => {
+                        println!("The node names no hub now.");
+                        (file.changed)();
+                    }
+                    Err(e) => println!("The node still names it: {e}"),
+                }
+            }
+            Ok(())
+        })?;
     }
     Ok(ExitCode::SUCCESS)
 }

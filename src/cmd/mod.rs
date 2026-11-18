@@ -3,6 +3,7 @@
 //! `knowledge` of the folder you work in.
 
 pub mod agent;
+pub mod config;
 pub mod hub;
 pub mod knowledge;
 pub mod node;

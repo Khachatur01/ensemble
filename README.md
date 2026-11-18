@@ -978,6 +978,32 @@ for that run. Nothing else from it is passed on, so it cannot change how the
 CLIs log in. `ensemble node agent show` and `ensemble node team check` never print a key.
 Keep the file readable by you alone, and out of any repository.
 
+### Changing settings from the command line
+
+Every settings file can be changed without opening it: node.yaml with
+`ensemble node config`, hub.yaml with `ensemble hub config`, and a team's
+config.yaml (one made here or linked) with `ensemble node team config <team>`.
+A setting is named by its keys joined by dots:
+
+```console
+$ ensemble node config get hub
+$ ensemble node config set access shared
+$ ensemble hub config set server.listen 0.0.0.0:7700
+$ ensemble node team config web set agents.coder.max_concurrent 2
+$ ensemble node config unset offers.models
+$ ensemble hub config edit            # in $VISUAL or $EDITOR
+$ ensemble node config path
+```
+
+A value is written as YAML when it reads as YAML (`laptop`, `8`, `true`,
+`[a, b]`, `{}`), and as a string otherwise. The file is changed as text, so its
+comments and order stay; the change is loaded before it is written, and one
+that would not load is refused with what is wrong, and nothing changes (`edit`
+keeps your edit beside the file to try again). A team's change reaches the
+running node at once; the node reads `node.yaml`, and the hub `hub.yaml`, when
+it starts, so they say to restart them. `ensemble node login <url>` names the
+hub in `node.yaml` by itself, and `ensemble node logout` takes it out.
+
 ### Editor support
 
 `config.yaml` has a JSON Schema, [`ensemble.schema.json`](ensemble.schema.json):
@@ -1463,11 +1489,21 @@ system flake, and import the module:
 
 The module has two parts, each enabled on its own. Each runs as the person it
 is for, from their `~/.config/ensemble/`, so they manage it with `ensemble` as
-on any platform: `ensemble hub user add`, `ensemble node team pull` and the
-rest, as themselves, with no `sudo`. The files may be written in Nix
-(`settings`, `teams`), with every setting as Ensemble wants it (the module adds
-none; `ensemble node init --stdout`, `ensemble node team new --stdout` and
-`ensemble hub init --stdout` print them all), or left to `ensemble`.
+on any platform: `ensemble hub user add`, `ensemble node team pull`,
+`ensemble node config set` and the rest, as themselves, with no `sudo`.
+
+Configuration comes from both. **What should always hold is written in Nix**:
+the settings under `settings` are merged into the real `node.yaml` and
+`hub.yaml` whenever the service starts, setting by setting, and may be as few
+as one (`settings.server.listen`); teams under `teams` are linked in whole and
+are read-only. **What belongs to this deployment is made with `ensemble`**:
+every other setting, other teams, the hub's accounts and the keys. `ensemble`
+refuses to change a setting Nix declares, and says to change it in Nix, so a
+change is never silently undone at the next start. Without `settings`, the
+files are `ensemble`'s alone, and each service starts once its file is there.
+The module adds no setting of its own; `ensemble node init --stdout`,
+`ensemble node team new --stdout` and `ensemble hub init --stdout` print them
+all.
 
 **This computer's node**, a systemd user service of one person, with its teams:
 
@@ -1480,7 +1516,7 @@ none; `ensemble node init --stdout`, `ensemble node team new --stdout` and
     user = "ana";                          # it runs for her alone
     extraPackages = [ pkgs.claude-code ];  # the agent CLIs on its PATH; git is always there
     environmentFile = "/run/secrets/ensemble-node.env";  # API keys, kept out of the store; null: ~/.config/ensemble/node/.env
-    settings = {                           # node.yaml; null: `ensemble node setup` writes it
+    settings = {                           # merged into node.yaml; the rest is `ensemble`'s
       version = 1;
       name = "laptop";
       access = "private";
@@ -1518,13 +1554,16 @@ none; `ensemble node init --stdout`, `ensemble node team new --stdout` and
 }
 ```
 
-`node.yaml` and each team are linked into `~/.config/ensemble/node/` when the
-service starts, beside what is not declared: `hubs.json` from `ensemble node
-login`, and teams made by hand (`ensemble node team new`, `pull`, `link`),
-which are left alone. A team declared in Nix is a link into the store, so it
-is read-only to `ensemble`; its trust is your review of the Nix configuration.
-Without `settings`, the node waits until `ensemble node setup` has written
-`node.yaml`; start it then with `systemctl --user start ensemble-node`.
+When the service starts, the declared settings are merged into
+`~/.config/ensemble/node/node.yaml` (made first, as `ensemble node setup`
+makes one, when there is none), and each team is linked into
+`~/.config/ensemble/node/teams/`, beside what is not declared: `hubs.json` from
+`ensemble node login`, and teams made by hand (`ensemble node team new`,
+`pull`, `link`), which are left alone. A team declared in Nix is a link into
+the store, so it is read-only to `ensemble`; its trust is your review of the
+Nix configuration. Without `settings`, the node waits until `ensemble node
+setup` has written `node.yaml`; start it then with `systemctl --user start
+ensemble-node`.
 `ensemble` is put on the system's `PATH`, for the `ensemble mcp` your agent CLI
 starts.
 
@@ -1538,7 +1577,7 @@ starts.
     user = "ana";                          # her hub: she runs `ensemble hub …` as herself
     openFirewall = false;                  # the port of server.listen
     environmentFile = "/run/secrets/ensemble-hub.env";  # keys its backends name; null: her hub/.env
-    settings = {                           # hub.yaml; null: `ensemble hub init` writes it
+    settings = {                           # merged into hub.yaml; the rest is `ensemble`'s
       version = 1;
       owner = "acme";
       llm_backends.central = {
@@ -1570,11 +1609,12 @@ starts.
 }
 ```
 
-`hub.yaml` is written again on every start, and the vault is made on the first.
-Accounts live in the hub's `database.db`, not in Nix: `ensemble hub user add
-root --role admin`, `ensemble hub knowledge status` and the rest, run as
-`user`. Without `settings`, the hub waits until `ensemble hub init` has written
-`hub.yaml`; start it then with `sudo systemctl start ensemble-hub`. For a hub
+The declared settings are merged into `hub.yaml` on every start (made first
+from the sample, with its vault, when there is none). Accounts live in the
+hub's `database.db`, not in Nix: `ensemble hub user add root --role admin`,
+`ensemble hub config set …`, `ensemble hub knowledge status` and the rest, run
+as `user`. Without `settings`, the hub waits until `ensemble hub init` has
+written `hub.yaml`; start it then with `sudo systemctl start ensemble-hub`. For a hub
 of an account of its own, make that user and run `ensemble hub …` as it.
 
 For the internet, put a TLS proxy in front (`services.caddy`, see
@@ -1687,9 +1727,10 @@ $ ensemble node reload                    # the running node reads its teams aga
 $ ensemble node status                    # its name, its hub, whether it runs, its teams
 $ ensemble node doctor                    # what is wrong, and how to fix each thing
 $ ensemble node connect <client> [--global] [--hooks]   # register with claude-code, opencode or codex
-$ ensemble node login <wss://url> --user <name>   # sign in to a hub with your account (or --token <token>)
+$ ensemble node login <wss://url> --user <name>   # sign in to a hub with your account (or --token <token>), and name it in node.yaml
 $ ensemble node logout <wss://url>
 $ ensemble node peers                     # the other nodes of your hub you may use now
+$ ensemble node config get|set|unset|edit|path   # node.yaml, setting by setting
 
 # Its helper teams
 $ ensemble node team list                 # each team, where it comes from, its agents
@@ -1701,6 +1742,7 @@ $ ensemble node team approve <name>                 # read a team your agent wro
 $ ensemble node team remove <name>
 $ ensemble node team check                # validate every team, print the gates and agents
 $ ensemble node team schema               # the JSON Schema of config.yaml
+$ ensemble node team config <name> get|set|unset|edit|path   # a team's config.yaml
 
 # Their agents, named <team>/<agent>
 $ ensemble node agent list                # the routing table
@@ -1737,6 +1779,7 @@ $ ensemble hub user approve|role <name> --role <role>
 $ ensemble hub user password|token|revoke|remove <name>
 $ ensemble hub user tracker <name> [<tracker name>]
 $ ensemble hub knowledge status|distill|rebuild
+$ ensemble hub config get|set|unset|edit|path    # hub.yaml, setting by setting
 
 $ ensemble completions zsh|bash|fish|elvish|powershell   # a completion script for your shell
 ```

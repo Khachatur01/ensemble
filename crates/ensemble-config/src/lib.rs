@@ -653,6 +653,7 @@ mod env;
 pub mod hub;
 pub mod node;
 mod raw;
+pub mod settings;
 pub mod teams;
 mod validate;
 

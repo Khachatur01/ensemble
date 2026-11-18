@@ -1,10 +1,13 @@
 # What the NixOS and Home Manager modules share about a node: its options,
-# and the files they become. A node's settings are `node.yaml` written as Nix;
-# each team is a folder with a `config.yaml`, written from Nix or taken from a
-# path (such as a flake input that pins a company's team repository), and
-# linked into the node's teams directory, `~/.config/ensemble/node/teams/`.
-# Nothing here adds a setting: Ensemble refuses a file with one missing, and
-# says which.
+# and the files they become. The settings declared in Nix are merged into the
+# node's own `node.yaml`, each time, setting by setting, so the rest of it stays
+# the person's to change with `ensemble node config`; `ensemble` refuses to
+# change one Nix declares. Each team declared in Nix is a folder with a
+# `config.yaml`, written from Nix or taken from a path (such as a flake input
+# that pins a company's team repository), linked into the node's teams
+# directory, `~/.config/ensemble/node/teams/`, and read-only there. Nothing
+# here adds a setting: Ensemble refuses a file with one missing, and says
+# which.
 { lib }:
 let
   inherit (lib) mkOption types;
@@ -17,10 +20,15 @@ in
         type = types.nullOr yaml.type;
         default = null;
         description = ''
-          The node's `node.yaml`, as Nix: `version`, `name`, `access`, and
-          optionally `hub` and `offers`. `ensemble node init --stdout` prints
-          every setting. Null leaves `~/.config/ensemble/node/node.yaml` alone,
-          for `ensemble node setup` or your own hand.
+          Settings of the node's `node.yaml`, as Nix: any of `version`, `name`,
+          `access`, `hub` and `offers`, down to one setting such as
+          `offers.models.base_url`. They are merged into
+          `~/.config/ensemble/node/node.yaml` whenever the node starts; the
+          settings not declared here are made and changed with `ensemble`
+          (`ensemble node setup`, `ensemble node config set`, `ensemble node
+          login`), which refuses to change those declared here.
+          `ensemble node init --stdout` prints every setting. Null leaves the
+          whole file to `ensemble`.
         '';
         example = lib.literalExpression ''
           {
@@ -119,10 +127,15 @@ in
       ) cfg.teams;
     };
 
-  # A script that links the node file and the teams into the node's folder,
-  # and takes away links to teams this configuration no longer declares.
+  # A script that merges the settings declared in Nix into the node file,
+  # links the teams into the node's folder, and takes away links to teams this
+  # configuration no longer declares.
   linkScript =
-    { pkgs, files }:
+    {
+      pkgs,
+      files,
+      package,
+    }:
     let
       teams = lib.concatStringsSep " " (lib.attrNames files.teams);
     in
@@ -131,7 +144,19 @@ in
       dir="''${XDG_CONFIG_HOME:-$HOME/.config}/ensemble/node"
       mkdir -p "$dir/teams"
       chmod 700 "$dir"
-      ${lib.optionalString (files.nodeYaml != null) ''ln -sfn ${files.nodeYaml} "$dir/node.yaml"''}
+      ${
+        if files.nodeYaml != null then
+          ''
+            # A node to merge into: as `ensemble node setup` makes one.
+            if [ ! -e "$dir/node.yaml" ]; then
+              printf 'version: 1\nname: %s\naccess: private\noffers: {}\n' \
+                "$(${pkgs.hostname}/bin/hostname -s)" > "$dir/node.yaml"
+            fi
+            ${lib.getExe package} node config merge ${files.nodeYaml}
+          ''
+        else
+          ''rm -f "$dir/.nix-managed"''
+      }
       ${lib.concatStringsSep "\n" (
         lib.mapAttrsToList (name: path: ''ln -sfn ${path} "$dir/teams/${name}"'') files.teams
       )}

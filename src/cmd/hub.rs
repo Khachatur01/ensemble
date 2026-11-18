@@ -17,6 +17,28 @@ pub fn run(ctx: &Ctx, command: HubCommand) -> Result<ExitCode, String> {
         HubCommand::Serve => serve(ctx),
         HubCommand::User(c) => user(ctx, c),
         HubCommand::Knowledge(c) => knowledge(ctx, c),
+        HubCommand::Config(c) => {
+            let path = config::hub_path(&state::hub_config_dir()?);
+            let check = |text: &str| {
+                config::parse_hub(text, &path, &SystemEnv)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            };
+            let changed = || {
+                println!(
+                    "A running hub read hub.yaml when it started: restart it to use the change (`sudo systemctl restart ensemble-hub` with the NixOS module)."
+                )
+            };
+            super::config::run(
+                &super::config::File {
+                    path: path.clone(),
+                    made_by: "`ensemble hub init`",
+                    check: &check,
+                    changed: &changed,
+                },
+                c,
+            )
+        }
     }
 }
 

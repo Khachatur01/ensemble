@@ -103,7 +103,7 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 | crate | what it is | files |
 | --- | --- | --- |
 | `ensemble-core` | what everything shares | the error vocabulary (`port.rs`); the per-user state, cache and config directories (`state.rs`); the working folder, a `repo` inside it and what a run changed (`workspace.rs`); the record of runs behind `ensemble node agent stats` (`records.rs`); the one-worker lock (`lock.rs`); dates in UTC (`time.rs`); the files a run on a node carries there and back (`snapshot.rs`); the folders a node served, by project (`folders.rs`); the async runtime and its bridges to code that blocks (`runtime.rs`) |
-| `ensemble-config` | the three files a person writes | `config.yaml`: the document as written (`raw.rs`), the environment, `.env` files and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), adding and removing an agent as text, comments kept (`edit.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); `hub.yaml` (`hub.rs`); `node.yaml` (`node.rs`) |
+| `ensemble-config` | the three files a person writes | `config.yaml`: the document as written (`raw.rs`), the environment, `.env` files and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), adding and removing an agent as text, comments kept (`edit.rs`); one setting read, set or merged as text (`settings.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); `hub.yaml` (`hub.rs`); `node.yaml` (`node.rs`) |
 | `ensemble-backends` | talking to model servers | one chat request in the server's own format (`chat.rs`); which models a server serves (`models.rs`); the first usable model of a `try` list (`resolve.rs`); a stand-in server for tests (`testing.rs`) |
 | `ensemble-knowledge` | the hub's knowledge | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait a session uses (`lib.rs`) |
 | `ensemble-link` | the hub server and the link to it | accounts and hashed tokens (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db`, a Turso database (`store.rs`); the REST API (`api.rs`) over a small HTTP reader (`http.rs`); the frames of the link (`protocol.rs`); the hub's side, a task per connection (`server.rs`); connected nodes, runs and model calls, `/nodes/v1/` (`nodes.rs`); the node's side, `Connection`, `Link` (one reconnecting) and `RemoteMemory` (`client.rs`); the token file (`tokens.rs`) |
@@ -113,7 +113,7 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 | `ensemble-node` | a node's link to a hub | `Worker`: runs and model calls for others (`lib.rs`) |
 | `ensemble-mcp` | MCP over stdio | the session loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`) |
 | `ensemble` (the root) | the binary | the command line, parsed with clap (`src/cli.rs`), and what each group of commands does (`src/cmd/`: `node`, `team`, `agent`, `task`, `knowledge`, `hub`); the node's sessions and the bridge (`src/daemon.rs`); what `node setup`, `node connect` and `node doctor` find and register (`src/setup.rs`); session hooks (`src/hooks.rs`); the node's teams, loaded, made, linked, pulled and approved (`src/teams.rs`), over git repositories pinned and trusted per commit (`src/remote.rs`) |
-| `nix/` | not a crate: the NixOS module (`nixos-module.nix`: a hub as a system service, the node as a user service, each run as the person it is for), the Home Manager module (`home-manager-module.nix`: the node on Linux or macOS), what they share about a node (`node.nix`), and an example configuration the flake's checks build (`example.nix`). Settings and teams may be written in Nix or made with `ensemble`; either way they are in the person's `~/.config/ensemble/`, managed with `ensemble` as on any platform |
+| `nix/` | not a crate: the NixOS module (`nixos-module.nix`: a hub as a system service, the node as a user service, each run as the person it is for), the Home Manager module (`home-manager-module.nix`: the node on Linux or macOS), what they share about a node (`node.nix`), and an example configuration the flake's checks build (`example.nix`). Settings declared in Nix are merged into the person's own files at each start, and `ensemble` refuses to change them (`.nix-managed` names them); the rest is made and changed with `ensemble`, as on any platform |
 
 Two rules keep the layers apart. The MCP session knows the tools and the
 router, not which CLIs exist. The router knows agents; only the adapters know
@@ -132,7 +132,10 @@ Ensemble except on request (`node agent add`, `node team new`, an approved
 | `node.yaml` | `~/.config/ensemble/node/`, one per computer | `name`, `access`, `hub`, `offers` |
 
 No setting has a default: every one is written, and a missing one is refused by
-name. A block that is absent means its module is off. No file holds a secret:
+name. Each file is changed by hand or setting by setting from the command line
+(`ensemble node config`, `ensemble hub config`, `ensemble node team config`;
+`settings.rs` changes one setting as text, keeping comments), loaded before it
+is written. A block that is absent means its module is off. No file holds a secret:
 keys are named by the variable that holds them, read from the environment or
 from a hidden `.env` beside the file that names them, `node/.env` for the
 node's teams and `hub/.env` for the hub (`--env-file` reads another file in

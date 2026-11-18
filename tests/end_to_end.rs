@@ -3755,3 +3755,112 @@ fn a_task_stopped_on_one_computer_is_carried_on_by_another_from_its_pushed_branc
         "{text}"
     );
 }
+
+#[test]
+fn settings_are_changed_from_the_command_line_and_those_nix_declares_are_kept() {
+    let s = Scratch::new("config");
+    let node = s.node_yaml();
+    let get = |key: &str| {
+        stdout_of(&ensemble(&s, &["node", "config", "get", key]))
+            .trim()
+            .to_string()
+    };
+    assert_eq!(get("name"), "desk");
+
+    let out = ensemble(&s, &["node", "config", "set", "access", "shared"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(get("access"), "shared");
+    // One that would not load is refused, and nothing changes.
+    let out = ensemble(&s, &["node", "config", "set", "name", "a b/c"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("nothing was changed"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(get("name"), "desk");
+    let out = ensemble(&s, &["node", "config", "unset", "name"]);
+    assert!(!out.status.success(), "a node needs a name");
+    assert_eq!(
+        stdout_of(&ensemble(&s, &["node", "config", "path"])).trim(),
+        node.display().to_string()
+    );
+
+    // What Nix declares is merged in, kept, and refused here.
+    let declared = s.write("declared.yaml", "access: private\noffers: {}\n");
+    let out = ensemble(&s, &["node", "config", "merge", declared.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(get("access"), "private");
+    let out = ensemble(&s, &["node", "config", "set", "access", "shared"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("`access` is set in your Nix configuration"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = ensemble(&s, &["node", "config", "set", "name", "rogstrix"]);
+    assert!(
+        out.status.success(),
+        "the rest stays the CLI's: {}",
+        stderr_of(&out)
+    );
+
+    // A team made here, too; the running node would reload it.
+    let out = ensemble(&s, &["node", "team", "new", "web"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let out = ensemble(
+        &s,
+        &[
+            "node",
+            "team",
+            "config",
+            "web",
+            "set",
+            "gates.test.timeout_seconds",
+            "60",
+        ],
+    );
+    assert!(
+        !out.status.success(),
+        "a gate needs its command: {}",
+        stdout_of(&out)
+    );
+    let out = ensemble(&s, &["node", "team", "config", "web", "get", "version"]);
+    assert_eq!(stdout_of(&out).trim(), "1");
+}
+
+#[test]
+fn signing_in_to_a_hub_names_it_in_the_node_and_signing_out_takes_it_out() {
+    let s = Scratch::new("login-names-hub");
+    let (hub, address, token) = hub_server(&s);
+    let _hub = serve_hub(&s, &hub);
+    s.node_yaml();
+    let url = format!("ws://{address}");
+    let out = ensemble(&s, &["node", "login", &url, "--token", &token]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("The node names this hub now"),
+        "{}",
+        stdout_of(&out)
+    );
+    let hub_now = stdout_of(&ensemble(&s, &["node", "config", "get", "hub"]));
+    assert_eq!(hub_now.trim(), url);
+    let status = stdout_of(&ensemble(&s, &["node", "status"]));
+    assert!(
+        status.contains(&format!("hub: {url}, signed in")),
+        "{status}"
+    );
+
+    let out = ensemble(&s, &["node", "logout", &url]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("The node names no hub now"),
+        "{}",
+        stdout_of(&out)
+    );
+    assert!(
+        !ensemble(&s, &["node", "config", "get", "hub"])
+            .status
+            .success()
+    );
+}
