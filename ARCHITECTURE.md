@@ -103,11 +103,12 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 | crate | what it is | files |
 | --- | --- | --- |
 | `ensemble-core` | what everything shares | the error vocabulary (`port.rs`); the per-user state, cache and config directories (`state.rs`); the working folder, a `repo` inside it and what a run changed (`workspace.rs`); the record of runs behind `ensemble node agent stats` (`records.rs`); the one-worker lock (`lock.rs`); dates in UTC (`time.rs`); the files a run on a node carries there and back (`snapshot.rs`); the folders a node served, by project (`folders.rs`); the async runtime and its bridges to code that blocks (`runtime.rs`) |
-| `ensemble-config` | the three files a person writes | `config.yaml`: the document as written (`raw.rs`), the environment, `.env` files and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), adding and removing an agent as text, comments kept (`edit.rs`); one setting read, set or merged as text (`settings.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); `hub.yaml` (`hub.rs`); `node.yaml` (`node.rs`) |
+| `ensemble-ops` | operations, defined once for every interface | the operation, its spec (name, summary, who may run it, input fields), errors as data, the caller, and the registry that checks both before it runs one (`lib.rs`) |
+| `ensemble-config` | the three files a person writes | `config.yaml`: the document as written (`raw.rs`), the environment, `.env` files and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), adding and removing an agent as text, comments kept (`edit.rs`); one setting read, set or merged as text (`settings.rs`); a settings file, with the Nix-declared settings kept, and its `config.*` operations (`settings_file.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); `hub.yaml` (`hub.rs`); `node.yaml` (`node.rs`) |
 | `ensemble-backends` | talking to model servers | one chat request in the server's own format (`chat.rs`); which models a server serves (`models.rs`); the first usable model of a `try` list (`resolve.rs`); texts as vectors (`embed.rs`); a stand-in server for tests (`testing.rs`) |
 | `ensemble-store` | Turso files | the hub's `database.db`, opened for each read or change, and any other Turso file, such as the vault's cache of vectors (`lib.rs`) |
 | `ensemble-knowledge` | the hub's knowledge | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); notes by meaning, with their vectors in `.ensemble/embeddings.db` (`meaning.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait a session uses (`lib.rs`) |
-| `ensemble-link` | the hub server and the link to it | accounts and hashed tokens (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API (`api.rs`) over a small HTTP reader (`http.rs`); the frames of the link (`protocol.rs`); the hub's side, a task per connection (`server.rs`); connected nodes, runs and model calls, `/nodes/v1/` (`nodes.rs`); the node's side, `Connection`, `Link` (one reconnecting) and `RemoteMemory` (`client.rs`); the token file (`tokens.rs`) |
+| `ensemble-link` | the hub server and the link to it | the hub's operations, its accounts, tokens, sessions and settings (`accounts.rs`); accounts and hashed tokens (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API, each route one of the operations (`api.rs`), over a small HTTP reader (`http.rs`); the frames of the link (`protocol.rs`); the hub's side, a task per connection (`server.rs`); connected nodes, runs and model calls, `/nodes/v1/` (`nodes.rs`); the node's side, `Connection`, `Link` (one reconnecting) and `RemoteMemory` (`client.rs`); the token file (`tokens.rs`) |
 | `ensemble-agents` | running one agent once | the adapters (`external/`): `claude_code.rs`, `opencode.rs`, `codex.rs`, `builtin.rs`, `direct.rs`, `node.rs`, the subprocess runner (`process.rs`) and gates (`gate.rs`); a git worktree per task (`worktree.rs`); the router: agents to adapters, models, records, `health` (`router.rs`) |
 | `ensemble-tasks` | work handed to the team | tickets and tasks as the hub has them (`tasks.rs`); where they are kept and leased: the `Board` trait, the hub's `DbBoard` and the `Service` that answers the link, a node's `RemoteBoard` (`board.rs`); what a node keeps of its runs (`runs.rs`); the queue that runs tasks and background delegations within slots and budgets (`queue.rs`); the MCP tools (`delegation.rs`); review and merge of a worktree task (`review.rs`) |
 | `ensemble-inbox` | issues from a tracker into tasks | the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`); an issue made a task and what the task reports (`work.rs`); the hub's inbox (`relay.rs`) |
@@ -980,8 +981,8 @@ crate holds it today.
 | capture | recorder, quick capture, privacy gate | pipeline | not built |
 | connectors | chats, mail, CRM, tracker events, each its own | pipeline or tasks | not built |
 | wiring | MCP, hooks in the user's CLIs | — | `ensemble-mcp`, `src/setup.rs`, `src/hooks.rs` |
-| operations | every action on a hub or a node, once, for every interface | identity, config | not built |
-| interfaces | the CLI, the REST API, and later a web UI or a desktop app, as adapters over the operations | operations | the CLI, by hand, in `src/cmd/` |
+| operations | every action on a hub or a node, once, for every interface | identity, config | `ensemble-ops`; the hub's in `ensemble-link` (`accounts.rs`), the node's in `src/cmd/node.rs` (accounts, tokens, settings, signing in so far) |
+| interfaces | the CLI, the REST API, and later a web UI or a desktop app, as adapters over the operations | operations | the CLI made from the operations (`src/ops_cli.rs`), the rest by hand in `src/cmd/`; the REST routes in `ensemble-link` (`api.rs`) |
 | api | chat API, MCP endpoint, REST | identity | `ensemble-link` (REST only) |
 | web | the UI | api | not built |
 | link | hub-to-node connection | identity | `ensemble-link`, `ensemble-node` |
@@ -1039,7 +1040,10 @@ crate holds it today.
 15. Operations (decided 2026-11-18, as "Operations and interfaces" says): an
     `ensemble-ops` crate with the operation, its registry and errors as data;
     the accounts, tokens, settings and signing in that the CLI and the REST
-    routes do today, as operations; the CLI made from the registry.
+    routes do today, as operations; the CLI made from the registry. (Done:
+    `hub user`, `hub role`, `hub config`, `node config`, `node login` and
+    `node logout` are made from the operations, which the REST routes run
+    too; a team's settings and the other commands are not operations yet.)
 16. `interfaces` in `hub.yaml` and `node.yaml`; the hub's socket; each
     operation run by the process whose state it changes; `hub.yaml` and
     `node.yaml` applied without a restart.

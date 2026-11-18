@@ -6,8 +6,9 @@
 use std::path::Path;
 
 /// Bottom to top: a crate may depend only on crates before it.
-const ORDER: [&str; 11] = [
+const ORDER: [&str; 12] = [
     "ensemble-core",
+    "ensemble-ops",
     "ensemble-config",
     "ensemble-backends",
     "ensemble-store",

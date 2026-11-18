@@ -20,7 +20,7 @@ serde_norway = "0.9"
 ureq = "3"
 # The command line: its commands, each with its own help, typo suggestions,
 # and completions for the shells.
-clap = { version = "4", features = ["derive", "wrap_help"] }
+clap = { version = "4", features = ["derive", "wrap_help", "string"] }
 clap_complete = "4"
 # Async HTTP for what streams for long: a node's model calls. Already in the
 # tree through harness-rs, with these features.
@@ -55,6 +55,7 @@ harness-rs-models = "=0.0.72"
 harness-rs-tools = "=0.0.72"
 harness-rs-context = "=0.0.72"
 ensemble-core = { path = "crates/ensemble-core" }
+ensemble-ops = { path = "crates/ensemble-ops" }
 ensemble-config = { path = "crates/ensemble-config" }
 ensemble-backends = { path = "crates/ensemble-backends" }
 ensemble-store = { path = "crates/ensemble-store" }
@@ -92,6 +93,7 @@ ensemble-knowledge.workspace = true
 ensemble-link.workspace = true
 ensemble-mcp.workspace = true
 ensemble-node.workspace = true
+ensemble-ops.workspace = true
 ensemble-tasks.workspace = true
 serde.workspace = true
 serde_json.workspace = true

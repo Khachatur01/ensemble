@@ -1816,9 +1816,11 @@ $ ensemble hub init [--force|--stdout]    # hub.yaml in ~/.config/ensemble/hub/,
 $ ensemble hub check                      # validate hub.yaml; which model would distill now
 $ ensemble hub serve                      # run the hub until stopped
 $ ensemble hub user list
+$ ensemble hub user show <name>
+$ ensemble hub role list                  # the roles, and what each may do
 $ ensemble hub user add <name> --role <role>        # prints their token once
 $ ensemble hub user approve|role <name> --role <role>
-$ ensemble hub user password|token|revoke|remove <name>
+$ ensemble hub user password|token|revoke|remove <name>   # a password is asked, or read from stdin
 $ ensemble hub user tracker <name> [<tracker name>]
 $ ensemble hub knowledge status|distill|rebuild
 $ ensemble hub config get|set|unset|edit|path    # hub.yaml, setting by setting

@@ -6,10 +6,12 @@ use crate::cli::NodeCommand;
 use crate::on_signal;
 use crate::{
     Ctx, STOP, absolute, ask, daemon, host_name, hostname, knowledge_for, node_file, node_hub,
-    read_secret, run_registration, this_node,
+    run_registration, this_node,
 };
+use ensemble::config::settings_file::{self, SettingsFile, WithSettings};
 use ensemble::config::{self, Config, SystemEnv};
 use ensemble::knowledge::KnowledgeAccess;
+use ensemble::ops::{Access, Caller, Code, Error, Field, Registry, Spec, operation};
 use ensemble::router::Ensemble;
 use ensemble::{setup, state, teams};
 use std::io::IsTerminal;
@@ -45,10 +47,7 @@ pub fn run(ctx: &Ctx, command: NodeCommand) -> Result<ExitCode, String> {
             global,
             hooks,
         } => connect(ctx, &client, global, hooks),
-        NodeCommand::Login { url, user, token } => login(&url, user.as_deref(), token.as_deref()),
-        NodeCommand::Logout { url } => logout(&url),
         NodeCommand::Peers => peers(),
-        NodeCommand::Config(c) => with_node_file(|file| super::config::run(file, c)),
         NodeCommand::Team(c) => super::team::run(ctx, c),
         NodeCommand::Agent(c) => super::agent::run(ctx, c),
     }
@@ -311,96 +310,194 @@ fn notes() -> Result<(), String> {
     given.save()
 }
 
-/// `ensemble node login URL`: check a hub's token, made here from your
-/// account or elsewhere, and keep it.
-fn login(url: &str, user: Option<&str>, token: Option<&str>) -> Result<ExitCode, String> {
-    if !url.starts_with("ws://") && !url.starts_with("wss://") {
-        return Err(format!(
-            "node login: '{url}' is not a hub's URL, such as wss://hub.example.com"
-        ));
+/// What the node's operations are given: its settings file, node.yaml.
+pub struct NodeContext {
+    settings: SettingsFile,
+}
+
+impl WithSettings for NodeContext {
+    fn settings_file(&self) -> Result<&SettingsFile, Error> {
+        Ok(&self.settings)
     }
-    let token = match (user, token) {
-        (Some(user), None) => token_from_account(url, user)?,
-        (None, Some(t)) => t.to_string(),
+}
+
+impl NodeContext {
+    /// This computer's node: node.yaml, checked as a node before it is
+    /// written; a change restarts the running node.
+    pub fn new() -> Result<Self, String> {
+        let path = node_file()?;
+        let checked = path.clone();
+        let settings = SettingsFile::new(path, "`ensemble node setup`", move |text| {
+            config::parse_node(text, &checked)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .on_change(|| node_running().then(restart_node));
+        Ok(NodeContext { settings })
+    }
+
+    /// Its settings file alone, for what only a command line does with it.
+    pub fn into_settings(self) -> SettingsFile {
+        self.settings
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct Login {
+    url: String,
+    user: Option<String>,
+    token: Option<String>,
+    password: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct Logout {
+    url: String,
+}
+
+const URL: Field = Field::text("url", "The hub's address, such as wss://hub.example.com.")
+    .required()
+    .positional();
+const LOGIN: &[Field] = &[
+    URL,
+    Field::text(
+        "user",
+        "Your account on the hub: your password is asked, or read from stdin.",
+    ),
+    Field::text("token", "A token made elsewhere, in place of your account."),
+    Field::secret("password", "Your password on the hub"),
+];
+const LOGOUT: &[Field] = &[URL];
+
+/// Every operation of the node.
+pub fn operations() -> Registry<NodeContext> {
+    let mut all = settings_file::operations::<NodeContext>(Access::Local);
+    all.push(operation(
+        Spec {
+            name: "login",
+            summary: "Sign in to a hub (ws:// or wss://) and keep its token for the node.",
+            access: Access::Local,
+            input: LOGIN,
+        },
+        |c: &NodeContext, _: &Caller, input: Login| login(c, input),
+    ));
+    all.push(operation(
+        Spec {
+            name: "logout",
+            summary: "Forget a hub's token.",
+            access: Access::Local,
+            input: LOGOUT,
+        },
+        |c: &NodeContext, _: &Caller, input: Logout| logout(c, &input.url),
+    ));
+    Registry::new(all)
+}
+
+/// `login`: check a hub's token, made here from your account or elsewhere,
+/// keep it, and have the node name the hub.
+fn login(c: &NodeContext, input: Login) -> Result<serde_json::Value, Error> {
+    let url = input.url.as_str();
+    if !url.starts_with("ws://") && !url.starts_with("wss://") {
+        return Err(Error::invalid(format!(
+            "'{url}' is not a hub's URL, such as wss://hub.example.com"
+        ))
+        .on("url"));
+    }
+    let token = match (&input.user, &input.token) {
+        (Some(user), None) => {
+            let password = input.password.as_deref().ok_or_else(|| {
+                Error::invalid(format!("a password is needed to sign in as {user}")).on("password")
+            })?;
+            token_from_account(url, user, password)?
+        }
+        (None, Some(t)) => t.clone(),
         _ => {
             return Err(
-                "login: give either --user NAME (your password is asked) or --token TOKEN".into(),
+                Error::invalid("give either `user` (your password is asked) or `token`").on("user"),
             );
         }
     };
     let hello =
         ensemble::runtime::block_on(ensemble::link::RemoteMemory::new(url, &token, None).hello())
-            .map_err(|e| format!("login: {e}"))?;
+            .map_err(|e| Error::new(Code::Unauthorized, e).on("token"))?;
     let mut tokens = ensemble::link::Tokens::load()?;
     tokens.set(url, &token);
     tokens.save()?;
-    println!(
+    let mut said = vec![format!(
         "signed in to {url} as {} ({}: {})",
         hello.user,
         hello.role,
         hello.permissions.join(", ")
-    );
+    )];
     // The node names the hub it uses.
-    if !node_file()?.exists() {
-        println!(
+    let file = c.settings_file()?;
+    if !file.path.exists() {
+        said.push(format!(
             "There is no node yet: `ensemble node setup` writes one; then name this hub in it with `ensemble node config set hub {url}`."
-        );
-        return Ok(ExitCode::SUCCESS);
-    }
-    with_node_file(|file| {
-        let named = ensemble::config::settings::get(
-            &std::fs::read_to_string(&file.path).unwrap_or_default(),
-            "hub",
-        )?;
+        ));
+    } else {
+        let named =
+            ensemble::config::settings::get(&file.read()?, "hub").map_err(Error::invalid)?;
         if named.as_deref() == Some(url) {
             // The running node takes the new token as it is.
             if node_running() {
-                match ensemble::runtime::block_on(daemon::relink(&state::node_socket(
-                    &state::node_dir()?,
-                ))) {
-                    Ok(said) => println!("The running node: {said}."),
-                    Err(e) => println!("{e}"),
-                }
+                let socket = state::node_socket(&state::node_dir()?);
+                said.push(match ensemble::runtime::block_on(daemon::relink(&socket)) {
+                    Ok(relinked) => format!("The running node: {relinked}."),
+                    Err(e) => e,
+                });
             }
-            return Ok(());
-        }
-        match file.set("hub", url) {
-            Ok(()) => {
-                match named {
-                    Some(before) => println!("The node names this hub now, in place of {before}."),
-                    None => println!("The node names this hub now."),
+        } else {
+            match file.set("hub", url) {
+                Ok(note) => {
+                    said.push(match named {
+                        Some(before) => {
+                            format!("The node names this hub now, in place of {before}.")
+                        }
+                        None => "The node names this hub now.".into(),
+                    });
+                    said.extend(note);
                 }
-                (file.changed)();
+                Err(e) => said.push(format!("The node's hub was not changed: {e}")),
             }
-            Err(e) => println!("The node's hub was not changed: {e}"),
         }
-        Ok(())
-    })?;
-    Ok(ExitCode::SUCCESS)
+    }
+    Ok(serde_json::json!({
+        "said": said.join("\n"),
+        "user": hello.user,
+        "role": hello.role,
+        "permissions": hello.permissions,
+    }))
 }
 
-/// node.yaml, changed by `ensemble node config`, `node login` and `node
-/// logout`: checked as a node before it is written.
-fn with_node_file<T>(
-    work: impl FnOnce(&super::config::File<'_>) -> Result<T, String>,
-) -> Result<T, String> {
-    let path = node_file()?;
-    let check = |text: &str| {
-        config::parse_node(text, &path)
-            .map(|_| ())
-            .map_err(|e| e.to_string())
-    };
-    let changed = || {
-        if node_running() {
-            restart_node();
+/// `logout`: forget a hub's token, and have the node name no hub when it
+/// named that one.
+fn logout(c: &NodeContext, url: &str) -> Result<serde_json::Value, Error> {
+    let mut tokens = ensemble::link::Tokens::load()?;
+    let mut said = Vec::new();
+    if tokens.remove(url) {
+        tokens.save()?;
+        said.push(format!("signed out of {url}"));
+    } else {
+        said.push(format!("no token kept for {url}"));
+    }
+    // A node that names it would reach no hub: it names none now.
+    let file = c.settings_file()?;
+    if file.path.exists()
+        && ensemble::config::settings::get(&file.read()?, "hub")
+            .map_err(Error::invalid)?
+            .as_deref()
+            == Some(url)
+    {
+        match file.unset("hub") {
+            Ok(note) => {
+                said.push("The node names no hub now.".into());
+                said.extend(note);
+            }
+            Err(e) => said.push(format!("The node still names it: {e}")),
         }
-    };
-    work(&super::config::File {
-        path: path.clone(),
-        made_by: "`ensemble node setup`",
-        check: &check,
-        changed: &changed,
-    })
+    }
+    Ok(serde_json::json!({ "said": said.join("\n") }))
 }
 
 /// Whether this computer's node runs: it answers on its socket.
@@ -411,7 +508,7 @@ fn node_running() -> bool {
 
 /// The running node read node.yaml when it started: start it again, so it
 /// reads the change, when its user service runs it; else say how.
-fn restart_node() {
+fn restart_node() -> String {
     let systemctl = |args: &[&str]| {
         std::process::Command::new("systemctl")
             .arg("--user")
@@ -429,29 +526,26 @@ fn restart_node() {
     let service = systemctl(&["show", "--property=MainPID", "--value", SERVICE])
         .and_then(|pid| pid.parse::<u32>().ok());
     if node.is_none() || service != node {
-        println!(
-            "The running node read node.yaml when it started: stop it and start it again (`ensemble node serve`) to use the change."
-        );
+        "The running node read node.yaml when it started: stop it and start it again (`ensemble node serve`) to use the change.".into()
     } else if systemctl(&["restart", SERVICE]).is_some() {
-        println!("The node's service was restarted, so it uses the change.");
+        "The node's service was restarted, so it uses the change.".into()
     } else {
-        println!(
+        format!(
             "The node's service could not be restarted: `systemctl --user restart {SERVICE}` uses the change."
-        );
+        )
     }
 }
 
 /// The user service that runs the node, as the Nix modules name it.
 const SERVICE: &str = "ensemble-node";
 
-/// Log in to the hub at `url` as `user`, with the password typed or on stdin,
-/// make an access token for this computer, and log out again.
-fn token_from_account(url: &str, user: &str) -> Result<String, String> {
+/// Log in to the hub at `url` as `user` with `password`, make an access token
+/// for this computer, and log out again.
+fn token_from_account(url: &str, user: &str, password: &str) -> Result<String, Error> {
     let base = url
         .replacen("wss://", "https://", 1)
         .replacen("ws://", "http://", 1);
     let base = base.trim_end_matches('/');
-    let password = read_secret(&format!("Password for {user} at {url}: "))?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(std::time::Duration::from_secs(30)))
@@ -464,18 +558,26 @@ fn token_from_account(url: &str, user: &str) -> Result<String, String> {
         if let Some(b) = bearer {
             req = req.header("authorization", &format!("Bearer {b}"));
         }
-        let mut resp = req
-            .send(body.to_string())
-            .map_err(|e| format!("login: cannot reach {base}: {e}"))?;
+        let mut resp = req.send(body.to_string()).map_err(|e| {
+            Error::new(Code::Unavailable, format!("cannot reach {base}: {e}")).on("url")
+        })?;
         let status = resp.status().as_u16();
         let text = resp.body_mut().read_to_string().unwrap_or_default();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
         if (200..300).contains(&status) {
             Ok(value)
         } else {
-            Err(format!(
-                "login: the hub said {status}: {}",
-                value["error"].as_str().unwrap_or(&text)
+            let code = if status == 401 {
+                Code::Unauthorized
+            } else {
+                Code::Failed
+            };
+            Err(Error::new(
+                code,
+                format!(
+                    "the hub said {status}: {}",
+                    value["error"].as_str().unwrap_or(&text)
+                ),
             ))
         }
     };
@@ -486,7 +588,7 @@ fn token_from_account(url: &str, user: &str) -> Result<String, String> {
     )?;
     let session = session["token"]
         .as_str()
-        .ok_or("login: the hub sent no session")?
+        .ok_or_else(|| Error::failed("the hub sent no session"))?
         .to_string();
     let made = call(
         "/api/v1/me/tokens",
@@ -497,35 +599,7 @@ fn token_from_account(url: &str, user: &str) -> Result<String, String> {
     made?["token"]
         .as_str()
         .map(String::from)
-        .ok_or_else(|| "login: the hub sent no token".to_string())
-}
-
-/// `ensemble node logout URL`: forget a hub's token.
-fn logout(url: &str) -> Result<ExitCode, String> {
-    let mut tokens = ensemble::link::Tokens::load()?;
-    if tokens.remove(url) {
-        tokens.save()?;
-        println!("signed out of {url}");
-    } else {
-        println!("no token kept for {url}");
-    }
-    // A node that names it would reach no hub: it names none now.
-    if node_file()?.exists() {
-        with_node_file(|file| {
-            let text = std::fs::read_to_string(&file.path).unwrap_or_default();
-            if ensemble::config::settings::get(&text, "hub")?.as_deref() == Some(url) {
-                match file.unset("hub") {
-                    Ok(()) => {
-                        println!("The node names no hub now.");
-                        (file.changed)();
-                    }
-                    Err(e) => println!("The node still names it: {e}"),
-                }
-            }
-            Ok(())
-        })?;
-    }
-    Ok(ExitCode::SUCCESS)
+        .ok_or_else(|| Error::failed("the hub sent no token"))
 }
 
 /// `ensemble node peers`: the nodes of your node's hub you may use now.

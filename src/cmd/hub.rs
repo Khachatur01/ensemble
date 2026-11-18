@@ -2,10 +2,10 @@
 //! its accounts, and its knowledge vault. Whoever can read the hub's folder
 //! administers it.
 
-use crate::cli::{HubCommand, HubKnowledgeCommand, UserCommand};
+use crate::cli::{HubCommand, HubKnowledgeCommand};
 #[cfg(unix)]
 use crate::on_signal;
-use crate::{Ctx, STOP, confirm, read_secret};
+use crate::{Ctx, STOP, confirm};
 use ensemble::config::{self, SystemEnv};
 use ensemble::state;
 use std::process::ExitCode;
@@ -15,31 +15,21 @@ pub fn run(ctx: &Ctx, command: HubCommand) -> Result<ExitCode, String> {
         HubCommand::Init { force, stdout } => init(force, stdout),
         HubCommand::Check => check(ctx),
         HubCommand::Serve => serve(ctx),
-        HubCommand::User(c) => user(ctx, c),
         HubCommand::Knowledge(c) => knowledge(ctx, c),
-        HubCommand::Config(c) => {
-            let path = config::hub_path(&state::hub_config_dir()?);
-            let check = |text: &str| {
-                config::parse_hub(text, &path, &SystemEnv)
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-            };
-            let changed = || {
-                println!(
-                    "A running hub read hub.yaml when it started: restart it to use the change (`sudo systemctl restart ensemble-hub` with the NixOS module)."
-                )
-            };
-            super::config::run(
-                &super::config::File {
-                    path: path.clone(),
-                    made_by: "`ensemble hub init`",
-                    check: &check,
-                    changed: &changed,
-                },
-                c,
-            )
-        }
     }
+}
+
+/// What the hub's operations are given, on this computer: its accounts, when
+/// hub.yaml loads, and hub.yaml.
+pub fn context(ctx: &Ctx) -> Result<ensemble::link::accounts::HubContext, String> {
+    let dir = state::hub_config_dir()?;
+    let env_file = ctx.hub_env()?;
+    let path = config::hub_path(&dir);
+    Ok(ensemble::link::accounts::HubContext::new(&dir, move || {
+        config::load_hub(&path, env_file.as_deref(), &SystemEnv)
+            .map(|h| (h.roles, h.server))
+            .map_err(|e| e.to_string())
+    }))
 }
 
 /// The hub this computer runs, loaded.
@@ -225,91 +215,6 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
             .block_on(server.run(listener, &STOP, &|line| eprintln!("ensemble: {line}")));
     });
     say("stopped");
-    Ok(ExitCode::SUCCESS)
-}
-
-/// `ensemble hub user …`: the hub's accounts, kept in its database.
-fn user(ctx: &Ctx, command: UserCommand) -> Result<ExitCode, String> {
-    let hub = load(ctx)?;
-    let mut users = ensemble::link::Users::load(&state::hub_config_dir()?)?;
-    let show_token = |name: &str, token: &str| {
-        println!("{token}");
-        eprintln!(
-            "This is {name}'s token, shown once. On their computer: ensemble node login <hub-url> --token <token>"
-        );
-    };
-    match command {
-        UserCommand::Add { name, role } => {
-            let (name, role) = (name.as_str(), role.as_str());
-            let token = users.add(name, role, &hub.roles)?;
-            users.save()?;
-            show_token(name, &token);
-        }
-        UserCommand::Token { name } => {
-            let name = name.as_str();
-            let token = users.token(name)?;
-            users.save()?;
-            show_token(name, &token);
-        }
-        UserCommand::Tracker { name, tracker_name } => {
-            let (name, tracker) = (name.as_str(), tracker_name.as_deref());
-            users.set_tracker_user(name, tracker)?;
-            users.save()?;
-            match tracker {
-                Some(t) => println!("{name} is {t} in the tracker"),
-                None => println!("{name} is {name} in the tracker, the account's own name"),
-            }
-        }
-        UserCommand::Password { name } => {
-            let name = name.as_str();
-            if users.get(name).is_none() {
-                return Err(format!("hub user password: no user called {name}"));
-            }
-            let password = read_secret(&format!("New password for {name}: "))?;
-            users.set_password(name, &password)?;
-            users.save()?;
-            println!("set {name}'s password; their sessions were ended");
-        }
-        UserCommand::Approve { name, role } => {
-            users.approve(&name, &role, &hub.roles)?;
-            users.save()?;
-            println!("approved {name} as {role}; their token works now");
-        }
-        UserCommand::Role { name, role } => {
-            users.set_role(&name, &role, &hub.roles)?;
-            users.save()?;
-            println!("{name} is {role} now");
-        }
-        UserCommand::Revoke { name } => {
-            let name = name.as_str();
-            let n = users.revoke(name)?;
-            users.save()?;
-            println!(
-                "revoked {n} token(s) of {name}; their nodes are signed out at their next request"
-            );
-        }
-        UserCommand::Remove { name } => {
-            let name = name.as_str();
-            users.remove(name)?;
-            users.save()?;
-            println!("removed {name}");
-        }
-        UserCommand::List => {
-            for user in users.list() {
-                println!(
-                    "{:<16} {:<8} {:<12} {} token(s)",
-                    user.name,
-                    user.status.as_str(),
-                    if user.role.is_empty() {
-                        "-"
-                    } else {
-                        &user.role
-                    },
-                    user.tokens.len()
-                );
-            }
-        }
-    }
     Ok(ExitCode::SUCCESS)
 }
 

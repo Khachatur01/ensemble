@@ -3,7 +3,8 @@
 //! agents too), a `hub` this computer runs, and the `task`s and `knowledge` of
 //! the folder you work in.
 
-use clap::{ArgGroup, Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use ensemble::ops::Registry;
 use std::path::PathBuf;
 
 const AFTER_HELP: &str = "\
@@ -32,6 +33,30 @@ pub struct Cli {
     pub dir: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Command,
+}
+
+/// The whole command line: the commands below, with those made from the
+/// hub's and the node's operations (`ops_cli`) under `hub` and `node`.
+pub fn command<H, N>(hub: &Registry<H>, node: &Registry<N>) -> clap::Command {
+    let hub_groups = [
+        ("user", "The hub's accounts."),
+        ("role", "The hub's roles."),
+        (
+            "config",
+            "The hub's settings, hub.yaml, by their keys joined by dots, such as server.listen",
+        ),
+    ];
+    let node_groups = [(
+        "config",
+        "The node's settings, node.yaml, by their keys joined by dots, such as hub",
+    )];
+    Cli::command()
+        .mut_subcommand("hub", |c| {
+            crate::cmd::config::extras(crate::ops_cli::mount(c, hub, &hub_groups))
+        })
+        .mut_subcommand("node", |c| {
+            crate::cmd::config::extras(crate::ops_cli::mount(c, node, &node_groups))
+        })
 }
 
 #[derive(Debug, Subcommand)]
@@ -117,24 +142,8 @@ pub enum NodeCommand {
         #[arg(long)]
         hooks: bool,
     },
-    /// Sign in to a hub (ws:// or wss://) and keep its token for the node.
-    #[command(group(ArgGroup::new("how").required(true).args(["user", "token"])))]
-    Login {
-        url: String,
-        /// Your account: the password is asked, or read from stdin.
-        #[arg(long)]
-        user: Option<String>,
-        /// A token made elsewhere.
-        #[arg(long)]
-        token: Option<String>,
-    },
-    /// Forget a hub's token.
-    Logout { url: String },
     /// The other nodes of your hub you may use, with their agents and models.
     Peers,
-    /// The node's settings, node.yaml.
-    #[command(subcommand)]
-    Config(ConfigCommand),
     /// The node's helper teams.
     #[command(subcommand)]
     Team(TeamCommand),
@@ -369,15 +378,9 @@ pub enum HubCommand {
     Check,
     /// Run the hub until Ctrl-C or SIGTERM.
     Serve,
-    /// The hub's accounts.
-    #[command(subcommand)]
-    User(UserCommand),
     /// The hub's knowledge vault.
     #[command(subcommand)]
     Knowledge(HubKnowledgeCommand),
-    /// The hub's settings, hub.yaml.
-    #[command(subcommand)]
-    Config(ConfigCommand),
 }
 
 /// One settings file, changed by its settings: each named by its keys joined
@@ -405,44 +408,6 @@ pub enum ConfigCommand {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum UserCommand {
-    /// Every account: its status, role and tokens.
-    List,
-    /// Add an account, and print its token once.
-    Add {
-        name: String,
-        #[arg(long)]
-        role: String,
-    },
-    /// Let in someone who signed up.
-    Approve {
-        name: String,
-        #[arg(long)]
-        role: String,
-    },
-    /// Give an account another role.
-    Role {
-        name: String,
-        #[arg(long)]
-        role: String,
-    },
-    /// Set a password, typed without echo or read from stdin; ends the
-    /// account's sessions.
-    Password { name: String },
-    /// Who the account is in the tracker; without TRACKER_NAME, its own name.
-    Tracker {
-        name: String,
-        tracker_name: Option<String>,
-    },
-    /// Make a new token, and print it once.
-    Token { name: String },
-    /// Revoke every token of an account.
-    Revoke { name: String },
-    /// Remove an account, or turn down a sign-up.
-    Remove { name: String },
-}
-
-#[derive(Debug, Subcommand)]
 pub enum HubKnowledgeCommand {
     /// Shares, those not distilled yet, notes, and what waits in review/.
     Status,
@@ -458,11 +423,56 @@ pub enum HubKnowledgeCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
+
+    fn whole() -> clap::Command {
+        command(
+            &ensemble::link::accounts::operations(),
+            &crate::cmd::node::operations(),
+        )
+    }
 
     #[test]
     fn the_command_line_is_well_formed() {
-        Cli::command().debug_assert();
+        whole().debug_assert();
+    }
+
+    #[test]
+    fn operations_are_commands_with_their_fields_as_arguments() {
+        let hub = ensemble::link::accounts::operations();
+        let matches = whole()
+            .try_get_matches_from(["ensemble", "hub", "user", "add", "ana", "--role", "member"])
+            .unwrap();
+        let (_, under) = matches.subcommand().unwrap();
+        let (name, leaf) = crate::ops_cli::matched(&hub, under).unwrap();
+        assert_eq!(name, "user.add");
+        assert_eq!(leaf.get_one::<String>("name").unwrap(), "ana");
+        assert_eq!(leaf.get_one::<String>("role").unwrap(), "member");
+        // A secret is never an argument; an operation only for accounts is no
+        // command.
+        assert!(
+            whole()
+                .try_get_matches_from([
+                    "ensemble",
+                    "hub",
+                    "user",
+                    "password",
+                    "ana",
+                    "--password",
+                    "x"
+                ])
+                .is_err()
+        );
+        assert!(
+            whole()
+                .try_get_matches_from(["ensemble", "hub", "me", "show"])
+                .is_err()
+        );
+        let matches = whole()
+            .try_get_matches_from(["ensemble", "node", "login", "wss://hub", "--user", "ana"])
+            .unwrap();
+        let node = crate::cmd::node::operations();
+        let (_, under) = matches.subcommand().unwrap();
+        assert_eq!(crate::ops_cli::matched(&node, under).unwrap().0, "login");
     }
 
     #[test]
@@ -483,13 +493,5 @@ mod tests {
         };
         assert_eq!(t.after, ["0001-a", "0002-b"]);
         assert_eq!(t.agent.as_deref(), Some("web/coder"));
-    }
-
-    #[test]
-    fn login_needs_a_user_or_a_token() {
-        assert!(Cli::try_parse_from(["ensemble", "node", "login", "wss://hub"]).is_err());
-        assert!(
-            Cli::try_parse_from(["ensemble", "node", "login", "wss://hub", "--token", "t"]).is_ok()
-        );
     }
 }

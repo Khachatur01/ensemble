@@ -38,4 +38,5 @@ pub use ensemble_knowledge as knowledge;
 pub use ensemble_link as link;
 pub use ensemble_mcp as mcp;
 pub use ensemble_node as node;
+pub use ensemble_ops as ops;
 pub use ensemble_tasks::{board, delegation, queue, review, runs, tasks};

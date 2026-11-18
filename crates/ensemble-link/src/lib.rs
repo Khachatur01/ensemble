@@ -10,6 +10,7 @@
 //! serves a REST API (`api`, over a little `http`) for signing up and for
 //! admins.
 
+pub mod accounts;
 mod api;
 pub mod client;
 mod http;

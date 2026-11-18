@@ -659,6 +659,7 @@ dependencies = [
  "ensemble-link",
  "ensemble-mcp",
  "ensemble-node",
+ "ensemble-ops",
  "ensemble-tasks",
  "libc",
  "serde",
@@ -702,6 +703,7 @@ name = "ensemble-config"
 version = "0.1.0"
 dependencies = [
  "ensemble-core",
+ "ensemble-ops",
  "serde",
  "serde_json",
  "serde_norway",
@@ -753,6 +755,7 @@ dependencies = [
  "ensemble-config",
  "ensemble-core",
  "ensemble-knowledge",
+ "ensemble-ops",
  "ensemble-store",
  "futures-util",
  "ring",
@@ -790,6 +793,15 @@ dependencies = [
  "reqwest",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "ensemble-ops"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_norway",
 ]
 
 [[package]]

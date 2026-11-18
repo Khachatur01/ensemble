@@ -10,6 +10,7 @@
 //! (such as Caddy) turns `https://` and `wss://` into it; on a LAN or a VPN it
 //! can be reached directly.
 
+use crate::accounts::HubContext;
 use crate::http::{self, Replay};
 use crate::nodes::Routes;
 use crate::protocol::{
@@ -23,11 +24,10 @@ use ensemble_knowledge::Memory;
 use futures_util::SinkExt;
 use futures_util::stream::{SplitSink, StreamExt};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::server::{
@@ -46,16 +46,10 @@ type Sender = SplitSink<WebSocketStream<http::Replay<TcpStream>>, Message>;
 pub struct Server<'a> {
     pub(crate) memory: &'a Memory,
     pub(crate) roles: &'a BTreeMap<String, Vec<Permission>>,
-    /// Where it listens, how people join, how long a login lasts, and when
-    /// failed logins lock a name.
-    pub(crate) settings: ensemble_config::Server,
-    /// The hub's state directory, with its database.
-    users: PathBuf,
-    /// Held while the users file is read, changed and written, so two
-    /// requests at once cannot lose a change.
-    pub(crate) changing: Mutex<()>,
-    /// Failed logins by name: how many, and until when the name is refused.
-    pub(crate) failures: Mutex<HashMap<String, (u32, Option<Instant>)>>,
+    /// Its accounts and settings, as its operations reach them.
+    pub(crate) hub: HubContext,
+    /// The hub's operations, which its REST API runs.
+    pub(crate) operations: ensemble_ops::Registry<HubContext>,
     /// The tasks it keeps for its accounts.
     tasks: Option<&'a dyn TaskService>,
     /// The connected nodes, and the runs and model calls between them.
@@ -78,10 +72,11 @@ impl<'a> Server<'a> {
         Server {
             memory,
             roles,
-            settings,
-            users,
-            changing: Mutex::new(()),
-            failures: Mutex::new(HashMap::new()),
+            hub: {
+                let roles = roles.clone();
+                HubContext::new(&users, move || Ok((roles.clone(), settings)))
+            },
+            operations: crate::accounts::operations(),
             tasks: None,
             routes: Routes::default(),
         }
@@ -131,7 +126,8 @@ impl<'a> Server<'a> {
     }
 
     pub(crate) fn users(&self) -> Result<Users, String> {
-        Users::load(&self.users).map_err(String::from)
+        let accounts = self.hub.accounts().map_err(|e| e.to_string())?;
+        accounts.users().map_err(|e| e.to_string())
     }
 
     async fn connection(

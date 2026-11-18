@@ -1,9 +1,10 @@
-//! The `ensemble` binary: the command line (`cli`), and what each group of
+//! The `ensemble` binary: the command line (`cli`), the commands made from the
+//! hub's and the node's operations (`ops_cli`), and what each other group of
 //! commands does (`cmd`). `ensemble mcp` is what an agent CLI starts, a
 //! session of the node; everything else is for the person who runs the node,
 //! or a hub, and the work in their folders.
 
-use clap::Parser;
+use clap::FromArgMatches;
 use ensemble::config::{self, Config, SystemEnv};
 use ensemble::teams;
 use ensemble::{setup, state};
@@ -11,6 +12,7 @@ use ensemble::{setup, state};
 mod cli;
 mod cmd;
 mod daemon;
+mod ops_cli;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -22,14 +24,52 @@ fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let cli = cli::Cli::parse();
-    match run(cli) {
+    let hub = ensemble::link::accounts::operations();
+    let node = cmd::node::operations();
+    let matches = cli::command(&hub, &node).get_matches();
+    match dispatch(&matches, &hub, &node) {
         Ok(code) => code,
         Err(message) => {
             eprintln!("ensemble: {message}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// Run what `matches` names: one of the hub's or the node's operations, or
+/// one of the other commands.
+fn dispatch(
+    matches: &clap::ArgMatches,
+    hub: &ensemble::ops::Registry<ensemble::link::accounts::HubContext>,
+    node: &ensemble::ops::Registry<cmd::node::NodeContext>,
+) -> Result<ExitCode, String> {
+    let ctx = Ctx::new(
+        matches.get_one::<PathBuf>("env_file").cloned(),
+        matches.get_one::<PathBuf>("dir"),
+    )?;
+    match matches.subcommand() {
+        Some(("hub", under)) => {
+            if let Some((name, leaf)) = ops_cli::matched(hub, under) {
+                return ops_cli::run(hub, &cmd::hub::context(&ctx)?, name, leaf);
+            }
+            let file = || cmd::hub::context(&ctx).map(|c| c.into_settings());
+            if let Some(done) = cmd::config::run_extra(under, file) {
+                return done;
+            }
+        }
+        Some(("node", under)) => {
+            if let Some((name, leaf)) = ops_cli::matched(node, under) {
+                return ops_cli::run(node, &cmd::node::NodeContext::new()?, name, leaf);
+            }
+            let file = || cmd::node::NodeContext::new().map(|c| c.into_settings());
+            if let Some(done) = cmd::config::run_extra(under, file) {
+                return done;
+            }
+        }
+        _ => {}
+    }
+    let cli = cli::Cli::from_arg_matches(matches).map_err(|e| e.to_string())?;
+    run(&ctx, cli, hub, node)
 }
 
 /// What every command is given: the global options, resolved.
@@ -40,6 +80,19 @@ struct Ctx {
 }
 
 impl Ctx {
+    /// From the global options: `--env-file`, and `--dir`, or else the current
+    /// directory.
+    fn new(env_file: Option<PathBuf>, dir: Option<&PathBuf>) -> Result<Self, String> {
+        let dir = match dir {
+            Some(d) => d
+                .canonicalize()
+                .map_err(|e| format!("--dir {}: {e}", d.display()))?,
+            None => std::env::current_dir()
+                .map_err(|e| format!("cannot read the current directory: {e}"))?,
+        };
+        Ok(Ctx { env_file, dir })
+    }
+
     /// The file of `NAME=value` lines read for the variables the environment
     /// does not set, such as API keys: `--env-file` when it is given, or else
     /// `.env` in `dir` when there is one.
@@ -84,34 +137,27 @@ impl Ctx {
     }
 }
 
-fn run(cli: cli::Cli) -> Result<ExitCode, String> {
+fn run(
+    ctx: &Ctx,
+    cli: cli::Cli,
+    hub: &ensemble::ops::Registry<ensemble::link::accounts::HubContext>,
+    node: &ensemble::ops::Registry<cmd::node::NodeContext>,
+) -> Result<ExitCode, String> {
     use cli::Command;
-    let dir = match &cli.dir {
-        Some(d) => d
-            .canonicalize()
-            .map_err(|e| format!("--dir {}: {e}", d.display()))?,
-        None => std::env::current_dir()
-            .map_err(|e| format!("cannot read the current directory: {e}"))?,
-    };
-    let ctx = Ctx {
-        env_file: cli.env_file,
-        dir,
-    };
     match cli.command {
-        Command::Node(c) => cmd::node::run(&ctx, c),
-        Command::Hub(c) => cmd::hub::run(&ctx, c),
-        Command::Task(c) => cmd::task::run(&ctx, c),
-        Command::Knowledge(c) => cmd::knowledge::run(&ctx, c),
+        Command::Node(c) => cmd::node::run(ctx, c),
+        Command::Hub(c) => cmd::hub::run(ctx, c),
+        Command::Task(c) => cmd::task::run(ctx, c),
+        Command::Knowledge(c) => cmd::knowledge::run(ctx, c),
         Command::Completions { shell } => {
-            use clap::CommandFactory;
             use std::io::Write;
             let mut script = Vec::new();
-            clap_complete::generate(shell, &mut cli::Cli::command(), "ensemble", &mut script);
+            clap_complete::generate(shell, &mut cli::command(hub, node), "ensemble", &mut script);
             // Piped into `head` or the like, the rest is not wanted: no error.
             let _ = std::io::stdout().write_all(&script);
             Ok(ExitCode::SUCCESS)
         }
-        Command::Mcp => cmd::node::mcp(&ctx),
+        Command::Mcp => cmd::node::mcp(ctx),
         Command::Hook => cmd::node::hook(),
     }
 }

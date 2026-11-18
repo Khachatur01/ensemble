@@ -654,6 +654,7 @@ pub mod hub;
 pub mod node;
 mod raw;
 pub mod settings;
+pub mod settings_file;
 pub mod teams;
 mod validate;
 
@@ -666,6 +667,7 @@ pub use node::{
     Access, NODE_FILENAME, Node, OfferedModels, OfferedRuns, Offers, load_node, node_path,
     parse_node,
 };
+pub use settings_file::{SettingsFile, WithSettings};
 pub use validate::{load, parse};
 
 #[cfg(test)]

@@ -26,20 +26,17 @@ pub fn run(ctx: &Ctx, command: TeamCommand) -> Result<ExitCode, String> {
         }
         TeamCommand::Config { name, action } => {
             let path = config::config_path(&teams::editable(&name)?);
-            let check = |text: &str| {
-                config::parse(text, &path, &std::collections::BTreeMap::new())
+            let checked = path.clone();
+            let file = config::SettingsFile::new(path, "`ensemble node team new`", move |text| {
+                config::parse(text, &checked, &std::collections::BTreeMap::new())
                     .map(|_| ())
                     .map_err(|e| e.to_string())
-            };
-            super::config::run(
-                &super::config::File {
-                    path: path.clone(),
-                    made_by: "`ensemble node team new`",
-                    check: &check,
-                    changed: &reload_node,
-                },
-                action,
-            )
+            })
+            .on_change(|| {
+                reload_node();
+                None
+            });
+            super::config::run(&file, action)
         }
     }
 }

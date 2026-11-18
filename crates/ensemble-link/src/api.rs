@@ -1,71 +1,50 @@
 //! The hub server's REST API, under `/api/v1/`, for people and the UI to come:
-//! accounts with a password, sign-in sessions, access tokens, and an admin
-//! managing users. JSON in and out, a bearer token where one is needed. It
-//! is the hub's alone: a node has no accounts.
+//! each route runs one of the hub's operations ([`accounts`](crate::accounts)),
+//! signed in with the request's bearer token. JSON in and out; an error is
+//! `{error, code, field?, hint?}`.
 //!
-//! A **session** comes from logging in with the password, and only a session
-//! may change the password or make and revoke access tokens, so a stolen access
-//! token cannot make more. An **access token** may be narrowed by scopes, and
-//! is what nodes and scripts use.
-//!
-//! | Method and path | Who |
+//! | Method and path | Operation |
 //! |---|---|
-//! | `POST /api/v1/register` `{name, password}` | anyone, when registration is `approval` |
-//! | `POST /api/v1/login` `{name, password}` | anyone |
-//! | `POST /api/v1/logout` | a session |
-//! | `GET /api/v1/me` | any token |
-//! | `PUT /api/v1/me` `{tracker_user}` | a session |
-//! | `PUT /api/v1/me/password` `{current, new}` | a session |
-//! | `GET /api/v1/me/tokens` | a session |
-//! | `POST /api/v1/me/tokens` `{name, expires_days?, scopes?}` | a session |
-//! | `DELETE /api/v1/me/tokens/{id}` | a session |
-//! | `GET /api/v1/users` | admin |
-//! | `POST /api/v1/users` `{name, role, password}` | admin |
-//! | `GET /api/v1/roles` | admin |
-//! | `POST /api/v1/users/{name}/approve` `{role}` | admin |
-//! | `PUT /api/v1/users/{name}` `{role?, tracker_user?}` | admin |
-//! | `PUT /api/v1/users/{name}/password` `{password}` | admin |
-//! | `DELETE /api/v1/users/{name}/tokens` | admin |
-//! | `DELETE /api/v1/users/{name}` | admin |
+//! | `POST /api/v1/register` `{name, password}` | `account.register` |
+//! | `POST /api/v1/login` `{name, password}` | `account.login` |
+//! | `POST /api/v1/logout` | `account.logout` |
+//! | `GET /api/v1/me` | `me.show` |
+//! | `PUT /api/v1/me` `{tracker_user}` | `me.tracker` |
+//! | `PUT /api/v1/me/password` `{current, new}` | `me.password` |
+//! | `GET /api/v1/me/tokens` | `me.tokens` |
+//! | `POST /api/v1/me/tokens` `{name, expires_days?, scopes?}` | `me.token` |
+//! | `DELETE /api/v1/me/tokens/{id}` | `me.revoke` |
+//! | `GET /api/v1/users` | `user.list` |
+//! | `POST /api/v1/users` `{name, role, password}` | `user.add` |
+//! | `GET /api/v1/roles` | `role.list` |
+//! | `POST /api/v1/users/{name}/approve` `{role}` | `user.approve` |
+//! | `PUT /api/v1/users/{name}` `{role?, tracker_user?}` | `user.role`, `user.tracker` |
+//! | `PUT /api/v1/users/{name}/password` `{password}` | `user.password` |
+//! | `DELETE /api/v1/users/{name}/tokens` | `user.revoke` |
+//! | `DELETE /api/v1/users/{name}` | `user.remove` |
 
+use crate::accounts::view;
 use crate::http::{self, Head};
 use crate::server::Server;
-use crate::users::{Kind, Signed, Token, User, Users, UsersError};
-use ensemble_config::{Permission, Registration};
 use ensemble_core::runtime::blocking;
-use serde_json::{Value, json};
-use std::time::{Duration, Instant};
+use ensemble_ops::{Caller, Code, Error};
+use serde_json::{Map, Value, json};
 use tokio::net::TcpStream;
 
-/// A refusal: the status, and why.
-struct Refusal(u16, String);
+/// What a request is answered with: the status and the body.
+type Answer = Result<(u16, Value), Error>;
 
-type Answer = Result<(u16, Value), Refusal>;
-
-impl From<UsersError> for Refusal {
-    fn from(e: UsersError) -> Refusal {
-        let status = match e {
-            UsersError::NotFound(_) => 404,
-            UsersError::Conflict(_) => 409,
-            UsersError::Invalid(_) => 400,
-            UsersError::Unauthorized(_) => 401,
-            UsersError::Forbidden(_) => 403,
-            UsersError::Io(_) => 500,
-        };
-        Refusal(status, e.to_string())
-    }
-}
-
-/// The body's JSON, and its fields.
-struct Body(Value);
-
-impl Body {
-    fn text(&self, key: &str) -> Result<String, Refusal> {
-        self.0
-            .get(key)
-            .and_then(Value::as_str)
-            .map(String::from)
-            .ok_or_else(|| Refusal(400, format!("`{key}` is required")))
+/// The status of an operation's error.
+fn status(code: Code) -> u16 {
+    match code {
+        Code::Invalid => 400,
+        Code::Unauthorized => 401,
+        Code::Forbidden => 403,
+        Code::NotFound => 404,
+        Code::Conflict => 409,
+        Code::TooMany => 429,
+        Code::Failed => 500,
+        Code::Unavailable => 503,
     }
 }
 
@@ -83,12 +62,16 @@ impl Server<'_> {
             Ok(body) => blocking(|| self.route(head, &body)),
             Err(e) => {
                 unread = true;
-                Err(Refusal(400, e))
+                Err(Error::invalid(e))
             }
         };
         let (status, body) = match answer {
             Ok(ok) => ok,
-            Err(Refusal(status, why)) => (status, json!({ "error": why })),
+            Err(e) => {
+                let mut body = serde_json::to_value(&e).unwrap_or_default();
+                body["error"] = json!(e.message);
+                (status(e.code), body)
+            }
         };
         let who = blocking(|| {
             head.bearer()
@@ -109,351 +92,104 @@ impl Server<'_> {
 
     fn route(&self, head: &Head, body: &[u8]) -> Answer {
         let Some(rest) = head.path.strip_prefix("/api/v1/") else {
-            return Err(Refusal(404, format!("no such path: {}", head.path)));
+            return Err(Error::not_found(format!("no such path: {}", head.path)));
         };
         let parts: Vec<&str> = rest.trim_end_matches('/').split('/').collect();
-        let body = || -> Result<Body, Refusal> {
+        let body = || -> Result<Map<String, Value>, Error> {
             if body.is_empty() {
-                return Ok(Body(json!({})));
+                return Ok(Map::new());
             }
-            serde_json::from_slice(body)
-                .map(Body)
-                .map_err(|e| Refusal(400, format!("the body is not JSON: {e}")))
+            match serde_json::from_slice(body) {
+                Ok(Value::Object(fields)) => Ok(fields),
+                Ok(_) => Err(Error::invalid("the body must be a JSON object")),
+                Err(e) => Err(Error::invalid(format!("the body is not JSON: {e}"))),
+            }
         };
+        // The body, with what the path names.
+        let with = |name: &str, value: &str| -> Result<Value, Error> {
+            let mut fields = body()?;
+            fields.insert(name.into(), json!(value));
+            Ok(Value::Object(fields))
+        };
+        let caller = self
+            .hub
+            .accounts()
+            .map_or(Caller::Anyone, |a| a.caller(head.bearer()));
+        let run = |name: &str, input: Value| self.operations.run(&self.hub, &caller, name, input);
+        let ok = |out: Value| Ok((200, out));
+        let made = |out: Value| Ok((201, out));
         match (head.method.as_str(), parts.as_slice()) {
-            ("POST", ["register"]) => self.register(&body()?),
-            ("POST", ["login"]) => self.login(&body()?),
-            ("POST", ["logout"]) => {
-                let session = self.session(head)?;
-                self.change(|u| u.revoke_token(&session.user.name, &session.token_id))?;
-                Ok((200, json!({ "signed_out": true })))
-            }
-            ("GET", ["me"]) => self.me(head),
+            ("POST", ["register"]) => made(run("account.register", Value::Object(body()?))?),
+            ("POST", ["login"]) => ok(run("account.login", Value::Object(body()?))?),
+            ("POST", ["logout"]) => ok(run("account.logout", json!({}))?),
+            ("GET", ["me"]) => match run("me.show", json!({})) {
+                // One who signed up and waits is told so, with nothing allowed.
+                Err(e) if e.code == Code::Unauthorized => {
+                    let users = self.users().map_err(Error::failed)?;
+                    let user = head.bearer().and_then(|t| users.identify(t)).ok_or(e)?;
+                    let mut out = view(user);
+                    out["permissions"] = json!([]);
+                    ok(out)
+                }
+                answer => ok(answer?),
+            },
             ("PUT", ["me"]) => {
-                let session = self.session(head)?;
-                let body = body()?;
-                let tracker_user = body.0.get("tracker_user").and_then(Value::as_str);
-                if body.0.get("tracker_user").is_none() {
-                    return Err(Refusal(
-                        400,
-                        "`tracker_user` is required; empty clears it".into(),
-                    ));
+                let fields = body()?;
+                if !fields.contains_key("tracker_user") {
+                    return Err(
+                        Error::invalid("`tracker_user` is required; empty clears it")
+                            .on("tracker_user"),
+                    );
                 }
-                self.change(|u| u.set_tracker_user(&session.user.name, tracker_user))?;
-                Ok((
-                    200,
-                    json!({ "name": session.user.name, "tracker_user": tracker_user }),
-                ))
+                ok(run("me.tracker", Value::Object(fields))?)
             }
-            ("PUT", ["me", "password"]) => {
-                let session = self.session(head)?;
-                let body = body()?;
-                let (current, new) = (body.text("current")?, body.text("new")?);
-                let name = session.user.name.clone();
-                self.change(|users| {
-                    users.login(&name, &current, 1).map_err(|_| {
-                        UsersError::Unauthorized("the current password is wrong".into())
-                    })?;
-                    users.set_password(&name, &new)
-                })?;
-                Ok((
-                    200,
-                    json!({ "changed": true, "note": "Every session was ended; log in again." }),
-                ))
-            }
-            ("GET", ["me", "tokens"]) => {
-                let session = self.session(head)?;
-                let users = self.users().map_err(|e| Refusal(500, e))?;
-                let tokens = users.tokens(&session.user.name)?;
-                Ok((
-                    200,
-                    json!({ "tokens": tokens.into_iter().map(token_view).collect::<Vec<_>>() }),
-                ))
-            }
-            ("POST", ["me", "tokens"]) => self.make_token(head, &body()?),
-            ("DELETE", ["me", "tokens", id]) => {
-                let session = self.session(head)?;
-                self.change(|u| u.revoke_token(&session.user.name, id))?;
-                Ok((200, json!({ "id": id, "revoked": true })))
-            }
-            ("GET", ["users"]) => {
-                self.admin(head)?;
-                let users = self.users().map_err(|e| Refusal(500, e))?;
-                Ok((
-                    200,
-                    json!({ "users": users.list().map(view).collect::<Vec<_>>() }),
-                ))
-            }
+            ("PUT", ["me", "password"]) => ok(run("me.password", Value::Object(body()?))?),
+            ("GET", ["me", "tokens"]) => ok(run("me.tokens", json!({}))?),
+            ("POST", ["me", "tokens"]) => made(run("me.token", Value::Object(body()?))?),
+            ("DELETE", ["me", "tokens", id]) => ok(run("me.revoke", json!({ "id": id }))?),
+            ("GET", ["users"]) => ok(run("user.list", json!({}))?),
             ("POST", ["users"]) => {
-                self.admin(head)?;
-                let body = body()?;
-                let (name, role, password) = (
-                    body.text("name")?,
-                    body.text("role")?,
-                    body.text("password")?,
-                );
-                self.change(|u| u.create(&name, &role, &password, self.roles))?;
-                Ok((
-                    201,
-                    json!({ "name": name, "role": role, "status": "active" }),
-                ))
-            }
-            ("GET", ["roles"]) => {
-                self.admin(head)?;
-                let roles: serde_json::Map<String, Value> = self
-                    .roles
-                    .iter()
-                    .map(|(name, perms)| (name.clone(), json!(names(perms))))
-                    .collect();
-                Ok((200, json!({ "roles": roles })))
-            }
-            ("POST", ["users", name, "approve"]) => {
-                self.admin(head)?;
-                let role = body()?.text("role")?;
-                self.change(|users| users.approve(name, &role, self.roles))?;
-                Ok((
-                    200,
-                    json!({ "name": name, "role": role, "status": "active" }),
-                ))
-            }
-            ("PUT", ["users", name]) => {
-                self.admin(head)?;
-                let body = body()?;
-                let role = body.0.get("role").and_then(Value::as_str);
-                let tracker = body.0.get("tracker_user");
-                if role.is_none() && tracker.is_none() {
-                    return Err(Refusal(400, "give `role`, `tracker_user`, or both".into()));
+                let fields = body()?;
+                if !fields.contains_key("password") {
+                    return Err(Error::invalid("`password` is required").on("password"));
                 }
-                self.change(|users| {
-                    if let Some(role) = role {
-                        users.set_role(name, role, self.roles)?;
-                    }
-                    if let Some(tracker) = tracker {
-                        users.set_tracker_user(name, tracker.as_str())?;
-                    }
-                    Ok(())
-                })?;
-                let users = self.users().map_err(|e| Refusal(500, e))?;
-                let user = users
-                    .get(name)
-                    .ok_or_else(|| Refusal(404, format!("no user called {name}")))?;
-                Ok((200, view(user)))
+                made(run("user.add", Value::Object(fields))?)
             }
-            ("PUT", ["users", name, "password"]) => {
-                self.admin(head)?;
-                let password = body()?.text("password")?;
-                self.change(|users| users.set_password(name, &password))?;
-                Ok((200, json!({ "name": name, "changed": true })))
+            ("GET", ["roles"]) => ok(run("role.list", json!({}))?),
+            ("POST", ["users", name, "approve"]) => ok(run("user.approve", with("name", name)?)?),
+            ("PUT", ["users", name]) => {
+                let fields = body()?;
+                let (role, tracker) = (fields.get("role"), fields.get("tracker_user"));
+                if role.is_none() && tracker.is_none() {
+                    return Err(Error::invalid("give `role`, `tracker_user`, or both"));
+                }
+                if let Some(role) = role {
+                    run("user.role", json!({ "name": name, "role": role }))?;
+                }
+                if let Some(tracker) = tracker {
+                    run(
+                        "user.tracker",
+                        json!({ "name": name, "tracker_user": tracker }),
+                    )?;
+                }
+                ok(run("user.show", json!({ "name": name }))?)
             }
+            ("PUT", ["users", name, "password"]) => ok(run("user.password", with("name", name)?)?),
             ("DELETE", ["users", name, "tokens"]) => {
-                self.admin(head)?;
-                let revoked = self.change(|users| users.revoke(name))?;
-                Ok((200, json!({ "name": name, "revoked": revoked })))
+                ok(run("user.revoke", json!({ "name": name }))?)
             }
-            ("DELETE", ["users", name]) => {
-                self.admin(head)?;
-                self.change(|users| users.remove(name))?;
-                Ok((200, json!({ "name": name, "removed": true })))
-            }
+            ("DELETE", ["users", name]) => ok(run("user.remove", json!({ "name": name }))?),
             (_, ["register" | "login" | "logout" | "me" | "users" | "roles"])
             | (_, ["me", "password" | "tokens"])
             | (_, ["me", "tokens", _])
             | (_, ["users", _])
-            | (_, ["users", _, "approve" | "password" | "tokens"]) => Err(Refusal(
+            | (_, ["users", _, "approve" | "password" | "tokens"]) => Ok((
                 405,
-                format!("{} is not allowed on {}", head.method, head.path),
+                json!({ "error": format!("{} is not allowed on {}", head.method, head.path) }),
             )),
-            _ => Err(Refusal(404, format!("no such path: {}", head.path))),
+            _ => Err(Error::not_found(format!("no such path: {}", head.path))),
         }
     }
-
-    /// Read the users, change them, and write them, while no other request
-    /// does.
-    fn change<T>(&self, f: impl FnOnce(&mut Users) -> Result<T, UsersError>) -> Result<T, Refusal> {
-        let _held = self.changing.lock().unwrap_or_else(|e| e.into_inner());
-        let mut users = self.users().map_err(|e| Refusal(500, e))?;
-        let out = f(&mut users)?;
-        users.save()?;
-        Ok(out)
-    }
-
-    fn register(&self, body: &Body) -> Answer {
-        let Registration::Approval { max_pending } = self.settings.registration else {
-            return Err(Refusal(
-                403,
-                "this hub does not take sign-ups; ask its admin to add you".into(),
-            ));
-        };
-        let (name, password) = (body.text("name")?, body.text("password")?);
-        self.change(|users| users.register(&name, &password, max_pending))?;
-        Ok((
-            201,
-            json!({ "name": name, "status": "pending", "note": "Log in once an admin approves you." }),
-        ))
-    }
-
-    /// Check a name and password, minding the lockout, and start a session.
-    fn login(&self, body: &Body) -> Answer {
-        let (name, password) = (body.text("name")?, body.text("password")?);
-        {
-            let failures = self.failures.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((_, Some(until))) = failures.get(&name)
-                && Instant::now() < *until
-            {
-                return Err(Refusal(
-                    429,
-                    "too many failed logins for this name; try again later".into(),
-                ));
-            }
-        }
-        let hours = self.settings.session_hours;
-        match self.change(|users| users.login(&name, &password, hours)) {
-            Ok((token, expires)) => {
-                self.failures
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&name);
-                Ok((
-                    200,
-                    json!({ "name": name, "token": token, "expires": expires }),
-                ))
-            }
-            Err(Refusal(401, why)) => {
-                let mut failures = self.failures.lock().unwrap_or_else(|e| e.into_inner());
-                let entry = failures.entry(name).or_insert((0, None));
-                entry.0 += 1;
-                if entry.0 >= self.settings.lockout_failures {
-                    let minutes = u64::from(self.settings.lockout_minutes);
-                    *entry = (0, Some(Instant::now() + Duration::from_secs(minutes * 60)));
-                }
-                Err(Refusal(401, why))
-            }
-            Err(other) => Err(other),
-        }
-    }
-
-    fn me(&self, head: &Head) -> Answer {
-        let users = self.users().map_err(|e| Refusal(500, e))?;
-        let token = head
-            .bearer()
-            .ok_or_else(|| Refusal(401, "a valid token is needed".into()))?;
-        if let Some(signed) = users.authenticate(token, self.roles) {
-            let mut out = view(&signed.user);
-            out["permissions"] = json!(names(&signed.permissions));
-            out["token"] = json!({ "id": signed.token_id, "kind": signed.kind.as_str() });
-            return Ok((200, out));
-        }
-        let user = users
-            .identify(token)
-            .ok_or_else(|| Refusal(401, "a valid token is needed".into()))?;
-        let mut out = view(user);
-        out["permissions"] = json!([]);
-        Ok((200, out))
-    }
-
-    fn make_token(&self, head: &Head, body: &Body) -> Answer {
-        let session = self.session(head)?;
-        let label = body.text("name")?;
-        let expires_days =
-            match body.0.get("expires_days") {
-                None | Some(Value::Null) => None,
-                Some(v) => Some(v.as_u64().and_then(|d| u32::try_from(d).ok()).ok_or_else(
-                    || Refusal(400, "`expires_days` must be a whole number of days".into()),
-                )?),
-            };
-        let scopes = match body.0.get("scopes") {
-            None | Some(Value::Null) => None,
-            Some(v) => Some(
-                serde_json::from_value::<Vec<Permission>>(v.clone()).map_err(|_| {
-                    Refusal(
-                        400,
-                        "`scopes` must be a list of share, recall, tasks, admin, compute or host"
-                            .into(),
-                    )
-                })?,
-            ),
-        };
-        let name = session.user.name.clone();
-        let (id, token, expires) = self.change(|users| {
-            users.create_token(&name, &label, expires_days, scopes.clone(), self.roles)
-        })?;
-        Ok((
-            201,
-            json!({
-                "id": id,
-                "name": label,
-                "token": token,
-                "scopes": scopes.as_deref().map(names),
-                "expires": expires,
-                "note": "Keep this token: it is shown once.",
-            }),
-        ))
-    }
-
-    /// Who the request's token signs in as, when it is valid.
-    fn signed_in(&self, head: &Head) -> Result<Signed, Refusal> {
-        let users = self.users().map_err(|e| Refusal(500, e))?;
-        head.bearer()
-            .and_then(|t| users.authenticate(t, self.roles))
-            .ok_or_else(|| Refusal(401, "a valid token of an approved user is needed".into()))
-    }
-
-    /// The request's session: refused for an access token, which may not
-    /// manage the account.
-    fn session(&self, head: &Head) -> Result<Signed, Refusal> {
-        let signed = self.signed_in(head)?;
-        if signed.kind == Kind::Session {
-            Ok(signed)
-        } else {
-            Err(Refusal(
-                403,
-                "this needs a session from logging in with your password, not an access token"
-                    .into(),
-            ))
-        }
-    }
-
-    /// Refuse unless the request's token may `admin`.
-    fn admin(&self, head: &Head) -> Result<Signed, Refusal> {
-        let signed = self.signed_in(head)?;
-        if signed.permissions.contains(&Permission::Admin) {
-            Ok(signed)
-        } else {
-            Err(Refusal(
-                403,
-                "this needs a role, and a token, with the `admin` permission".into(),
-            ))
-        }
-    }
-}
-
-fn names(permissions: &[Permission]) -> Vec<&'static str> {
-    permissions.iter().map(|p| p.as_str()).collect()
-}
-
-/// An account as the API shows it: never a password, a token or a hash.
-fn view(user: &User) -> Value {
-    json!({
-        "name": user.name,
-        "role": user.role,
-        "status": user.status.as_str(),
-        "registered": user.registered,
-        "has_password": user.password.is_some(),
-        "tracker_user": user.tracker_user,
-        "tracker_name": user.tracker_name(),
-        "tokens": user.tokens.iter().filter(|t| t.kind == Kind::Personal).count(),
-    })
-}
-
-/// An access token as the API lists it: never the token or its hash.
-fn token_view(token: &Token) -> Value {
-    json!({
-        "id": token.id,
-        "name": token.name,
-        "scopes": token.scopes.as_deref().map(names),
-        "made": token.made,
-        "expires": token.expires,
-    })
 }
 
 #[cfg(test)]
