@@ -536,7 +536,8 @@ or behind a VPN; nothing in Ensemble assumes either. (Decided 2026-11-10.)
 
 ### Private and shared nodes
 
-(Decided 2026-11-16.) The hub connects nodes; a node is there to provide
+(Decided 2026-11-16; to be replaced by `shares`, decided 2026-11-18: see
+"What a node shares" under "Operations and interfaces".) The hub connects nodes; a node is there to provide
 computing power. A **private** node works only for its owner. A **shared** node,
 typically on a powerful machine, also works for other users of the hub. Its
 config says what it offers, one or both:
@@ -829,6 +830,136 @@ first admin is made on the hub's computer with the CLI. (Decided 2026-11-11.)
 | `ensemble` CLI | `share`, `recall`, `tasks`, `nodes`, and later `ask`, `record start`. |
 | Integrations (Telegram and others) | Hub services that bring messages in and send results out. (Not built.) |
 
+## Operations and interfaces
+
+(Decided 2026-11-18; not built yet: see the build order.) People do not edit
+Ensemble's files: Ensemble writes them, and every setting has a way to be set
+without opening one. Many people will use a web UI, but none is built yet; what
+is built now is the ground any interface stands on, so that adding one, a CLI,
+a REST API, a web UI or a desktop app, is writing an adapter, never
+re-implementing a feature. Some administration may stay with the CLI.
+
+### Operations
+
+Everything a person can do to a hub or a node is an **operation**, defined
+once, in the core:
+
+- a name, such as `models.add`, `people.invite`, `computers.join-code`,
+  `settings.set`;
+- its input and output, as Rust types with JSON Schemas made from them;
+- who may run it: a permission of the hub's roles, or the node's owner;
+- its secret fields, written and never read back (keys go to `.env`);
+- errors as data, `{code, field, message, hint}`, so an interface shows each
+  next to what it is about;
+- for long work (a rebuild, testing a model), the events it goes through.
+
+There are two kinds. **Goal operations** do what a person means: add a model,
+which tests that it answers; invite someone; let a computer join; add a team
+from a template; rebuild the knowledge. **Settings operations**
+(`settings.describe`, `settings.set`) reach every setting, from the JSON
+Schemas the files already have and the checks `config set` makes: a change
+is loaded before it is written, comments stay, and what Nix declares comes
+back read-only with why.
+
+An operation runs **where the state it changes lives**: a running hub or node
+applies it in memory, at once, then writes its file, so nothing needs a
+restart and no two processes write the same file. When the hub or the node is
+not running, the same operation runs in the process that asked, on the files.
+The running process is asked over its local socket, which only its OS user may
+open: the node's exists, and the hub gets one.
+
+Agents do not run operations: no configuration through MCP tools.
+
+### Interfaces
+
+An **interface** is an adapter over the operations. It knows how to show them
+and how to reach them, and nothing about what they do; one written once serves
+every operation, those to come too.
+
+- **The CLI** is made from the operations: each is a command, its input
+  fields its options, with a short alias and positional arguments where the
+  operation gives them. It reaches a running hub or node over its socket.
+- **The REST API** is one route per operation, `POST /api/v1/ops/<name>`,
+  with an OpenAPI document made from the same schemas, signed in with the
+  hub's sessions and tokens. It is RPC-shaped rather than one resource per
+  route, so it needs no code per operation and matches the CLI one to one.
+  Signing up is part of it: without it, an admin adds people from the CLI.
+- A web UI, a desktop app, any other: a client of the REST API, or of the
+  socket on the same computer.
+
+Each is turned on in the settings, never by building another binary:
+
+```yaml
+# hub.yaml
+interfaces:
+  cli: {}                                # the socket `ensemble hub …` uses
+  rest_api: { listen: 127.0.0.1:7710 }   # its own port; left out: no REST API
+
+# node.yaml
+interfaces:
+  cli: {}
+  rest_api: { listen: 127.0.0.1:7701 }   # left out: no REST API
+```
+
+`hub init` and `node setup` write `cli: {}`. A file that turns on no
+interface is refused: a hub or node nobody can manage is a mistake. Without
+`cli`, the running process opens no socket, and `ensemble` refuses to change
+it while it runs rather than change its files behind it. The REST API has a
+port of its own on the hub too, apart from the link's, because it is
+optional; a node has none of its own to share, as it only dials out.
+
+The node's own operations reach the hub as one more adapter, over the link,
+for the node's own account only: a person manages all their computers from
+one place, and an admin never reconfigures someone else's.
+
+### The link is the only way between node and hub
+
+A node and its hub speak over the WebSocket and nothing else:
+
+- **Signing in and joining** happen on it: a connection without a token may
+  only ask `login` (a name and a password, with the lockout) or `join` (a code
+  an admin made with `computers.join-code`), and gets a token back. A node
+  makes no HTTP request to the hub, so a hub without its REST API serves
+  every node.
+- **What nodes share** goes through it both ways: the node that serves dials
+  out, so a server no one can reach may share; the node that uses it relays
+  its agents' calls over its own link. `/nodes/v1/` stays, in the REST API,
+  only for clients that are not nodes.
+
+### What a node shares
+
+(Replaces `access` and `offers`; see "Private and shared nodes".) There is no
+kind of node called shared: a node shares what its `shares` names, and a node
+that names nothing shares nothing. Each entry says who may use it, in the
+words knowledge uses:
+
+```yaml
+# node.yaml
+shares:
+  agents:
+    web/coder: hub           # everyone on the hub whose role has `compute`
+    web/reviewer: private    # only its owner's other computers
+  llm_backends:
+    web/local: hub           # <team>/<backend>: the models it serves
+```
+
+An agent that runs on an agent CLI's own login may only be `private`: no one's
+subscription works for someone else. Another node's team names what is shared
+by the node that shares it, an agent as the `node` adapter does now, and a
+backend the same way:
+
+```yaml
+# a team's config.yaml on another node
+llm_backends:
+  kims-gpu:
+    type: node
+    backend: web/local
+    nodes: [kim/gpu-box]     # tried in order
+```
+
+The node serves that backend to its agent CLIs on a local address and relays
+each call over its link; no config names a port or the hub.
+
 ## Modules
 
 Building blocks, not processes. A module is on when its config block is present;
@@ -849,6 +980,8 @@ crate holds it today.
 | capture | recorder, quick capture, privacy gate | pipeline | not built |
 | connectors | chats, mail, CRM, tracker events, each its own | pipeline or tasks | not built |
 | wiring | MCP, hooks in the user's CLIs | — | `ensemble-mcp`, `src/setup.rs`, `src/hooks.rs` |
+| operations | every action on a hub or a node, once, for every interface | identity, config | not built |
+| interfaces | the CLI, the REST API, and later a web UI or a desktop app, as adapters over the operations | operations | the CLI, by hand, in `src/cmd/` |
 | api | chat API, MCP endpoint, REST | identity | `ensemble-link` (REST only) |
 | web | the UI | api | not built |
 | link | hub-to-node connection | identity | `ensemble-link`, `ensemble-node` |
@@ -903,8 +1036,26 @@ crate holds it today.
 14. A task's work on a pushed branch, so the node that takes a task over
     carries on from where the first got to; a task whose work cannot move
     is pinned to its node. (Done.)
-What remains is the "Not yet" of steps 4 and 5, and the modules marked not
-built above.
+15. Operations (decided 2026-11-18, as "Operations and interfaces" says): an
+    `ensemble-ops` crate with the operation, its registry and errors as data;
+    the accounts, tokens, settings and signing in that the CLI and the REST
+    routes do today, as operations; the CLI made from the registry.
+16. `interfaces` in `hub.yaml` and `node.yaml`; the hub's socket; each
+    operation run by the process whose state it changes; `hub.yaml` and
+    `node.yaml` applied without a restart.
+17. Signing in and joining over the link, with join codes; no HTTP from a
+    node to the hub.
+18. The REST API as an interface: one route per operation, OpenAPI, its own
+    port, sign-up in it, `/nodes/v1/` in it for clients that are not nodes.
+19. `shares`, in place of `access` and `offers`; the `node` backend, relayed
+    over the link through a local endpoint.
+20. Goal operations: models, people, computers, teams from templates,
+    knowledge.
+21. A node's operations over the link, for the node's own account.
+
+What remains besides is the "Not yet" of steps 4 and 5, and the modules
+marked not built above. A web UI and other interfaces come after step 18, as
+adapters.
 
 ## Open questions
 
