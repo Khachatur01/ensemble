@@ -11,10 +11,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Local model servers worth looking for, with where each listens by default.
-pub const LOCAL_SERVERS: [(&str, u16, &str); 3] = [
+pub const LOCAL_SERVERS: [(&str, u16, &str); 4] = [
     ("ollama", 11434, "http://127.0.0.1:11434/v1"),
     ("llama-server", 8080, "http://127.0.0.1:8080/v1"),
     ("lm-studio", 1234, "http://127.0.0.1:1234/v1"),
+    ("unsloth", 8888, "http://127.0.0.1:8888/v1"),
 ];
 
 /// What the machine has.
