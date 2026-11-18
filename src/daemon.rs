@@ -17,7 +17,7 @@ use ensemble::board::RemoteBoard;
 use ensemble::config::{Config, Node};
 use ensemble::folders::Folders;
 use ensemble::knowledge::KnowledgeAccess;
-use ensemble::link::RemoteMemory;
+use ensemble::link::{RemoteMemory, Token};
 use ensemble::mcp;
 use ensemble::queue::Queue;
 use ensemble::router::Ensemble;
@@ -45,8 +45,8 @@ struct Folder {
 /// The node: its team, and the folders it serves.
 pub struct Daemon<'a> {
     node: Node,
-    /// The hub server it names, and its token.
-    hub: Option<(String, String)>,
+    /// The hub server it names, and its token, replaced when you sign in again.
+    hub: Option<(String, Token)>,
     /// Its teams, as one helper team: `<team>/<agent>`. Replaced when they are
     /// reloaded.
     team: RwLock<Config>,
@@ -67,7 +67,7 @@ impl<'a> Daemon<'a> {
     /// `dir`.
     pub fn new(
         node: Node,
-        hub: Option<(String, String)>,
+        hub: Option<(String, Token)>,
         team: Config,
         env_file: Option<PathBuf>,
         dir: &Path,
@@ -149,15 +149,22 @@ impl<'a> Daemon<'a> {
 
     /// Read a session's hello, `{"dir": "/abs/folder"}`, and answer it: the
     /// folder's worker, or why there is none. `{"reload": true}` reloads the
-    /// teams instead, and answers what it found; no session follows.
+    /// teams instead, and `{"relink": true}` reads the hub's token again; each
+    /// answers what it did, and no session follows.
     async fn hello(
         &self,
         mut stream: UnixStream,
         reloaded: &(dyn Fn(&Config) -> Result<(), String> + Sync),
     ) -> Result<Option<(Arc<Folder>, UnixStream)>, String> {
         let line = read_line(&mut stream).await?;
-        if serde_json::from_str::<serde_json::Value>(&line).is_ok_and(|h| h["reload"] == true) {
-            let reply = match self.reload(reloaded) {
+        let asked = serde_json::from_str::<serde_json::Value>(&line).unwrap_or_default();
+        if asked["reload"] == true || asked["relink"] == true {
+            let did = if asked["reload"] == true {
+                self.reload(reloaded)
+            } else {
+                self.relink()
+            };
+            let reply = match did {
                 Ok(said) => serde_json::json!({"ok": true, "said": said}),
                 Err(e) => serde_json::json!({"error": e}),
             };
@@ -211,6 +218,26 @@ impl<'a> Daemon<'a> {
         Ok(said)
     }
 
+    /// Read the token of the hub it names again, as `ensemble node login`
+    /// kept it: every link to the hub connects again with it, and sessions
+    /// are told their tools may have changed.
+    fn relink(&self) -> Result<String, String> {
+        let Some((url, token)) = &self.hub else {
+            return Err("the node names no hub".into());
+        };
+        let kept = ensemble::link::Tokens::load()?
+            .get(url)
+            .map(String::from)
+            .ok_or_else(|| format!("no token is kept for {url}; `ensemble node login {url}`"))?;
+        if !token.set(&kept) {
+            return Ok(format!("the node uses this token for {url} already"));
+        }
+        self.tools_changed.send_modify(|n| *n += 1);
+        let said = format!("signed in to {url} again: the node uses the new token");
+        (self.say)(&said);
+        Ok(said)
+    }
+
     /// The worker of `dir`, started the first time it is asked for.
     fn folder(&self, dir: &Path) -> Result<Arc<Folder>, String> {
         let dir = dir
@@ -226,7 +253,11 @@ impl<'a> Daemon<'a> {
         // The hub's knowledge, named for the folder in what is shared.
         let knowledge: Option<&'static RemoteMemory> = self.hub.as_ref().map(|(url, token)| {
             let project = dir.file_name().map(|n| n.to_string_lossy().into_owned());
-            &*Box::leak(Box::new(RemoteMemory::new(url, token, project)))
+            &*Box::leak(Box::new(RemoteMemory::with_token(
+                url,
+                token.clone(),
+                project,
+            )))
         });
         let memory = knowledge.map(|k| k as &dyn KnowledgeAccess);
         let state = ensemble.state_dir().map_err(|e| e.to_string())?;
@@ -240,7 +271,7 @@ impl<'a> Daemon<'a> {
         // one name, the one used last runs them.
         if let (Some((url, token)), Some(project)) = (&self.hub, dir.file_name()) {
             let project = project.to_string_lossy().into_owned();
-            let board = RemoteBoard::new(url, token, &project);
+            let board = RemoteBoard::with_token(url, token.clone(), &project);
             let (folders, here) = (self.folders.clone(), dir.clone());
             queue = queue
                 .with_board(board, &self.node.name)
@@ -378,20 +409,31 @@ pub async fn touch(socket: &Path, dir: &Path) -> Result<(), String> {
 
 /// Ask the node on `socket` to reload its teams, and what it said.
 pub async fn reload(socket: &Path) -> Result<String, String> {
+    ask(socket, "reload")
+        .await
+        .map_err(|e| format!("the node kept its teams as they were: {e}"))
+}
+
+/// Ask the node on `socket` to read its hub's token again, and what it said.
+pub async fn relink(socket: &Path) -> Result<String, String> {
+    ask(socket, "relink")
+        .await
+        .map_err(|e| format!("the node kept its token as it was: {e}"))
+}
+
+/// Send the node on `socket` `{"<what>": true}`, and what it said it did.
+async fn ask(socket: &Path, what: &str) -> Result<String, String> {
     let mut stream = UnixStream::connect(socket)
         .await
         .map_err(|e| format!("no node is running ({e})"))?;
     stream
-        .write_all(b"{\"reload\": true}\n")
+        .write_all(format!("{}\n", serde_json::json!({ what: true })).as_bytes())
         .await
         .map_err(|e| e.to_string())?;
     let reply: serde_json::Value = serde_json::from_str(&read_line(&mut stream).await?)
         .map_err(|e| format!("the node answered something else: {e}"))?;
     match reply["error"].as_str() {
-        Some(e) => Err(format!("the node kept its teams as they were: {e}")),
-        None => Ok(reply["said"]
-            .as_str()
-            .unwrap_or("teams reloaded")
-            .to_string()),
+        Some(e) => Err(e.to_string()),
+        None => Ok(reply["said"].as_str().unwrap_or("done").to_string()),
     }
 }

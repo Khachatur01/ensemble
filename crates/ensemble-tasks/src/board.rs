@@ -23,12 +23,12 @@
 use crate::tasks::{Detail, Outcome, Status, Task, Ticket, slug, utc, yaml_str};
 use async_trait::async_trait;
 use ensemble_core::runtime::blocking;
-use ensemble_link::Link;
 use ensemble_link::protocol::{
     TASK, TASK_ANSWER, TASK_ASSIGN, TASK_CANCEL, TASK_CLAIM, TASK_CREATE, TASK_FINISH,
     TASK_RELEASE, TASK_RENEW, TASKS, TaskService,
 };
 use ensemble_link::store::{self, Value as Sql};
+use ensemble_link::{Link, Token};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -808,8 +808,13 @@ pub struct RemoteBoard {
 impl RemoteBoard {
     /// The tasks of `project`, a working folder's name, on the hub at `url`.
     pub fn new(url: &str, token: &str, project: &str) -> Self {
+        Self::with_token(url, Token::new(token), project)
+    }
+
+    /// The same, following `token` when it is replaced.
+    pub fn with_token(url: &str, token: Token, project: &str) -> Self {
         RemoteBoard {
-            link: Link::new(url, token),
+            link: Link::with_token(url, token),
             project: project.to_string(),
         }
     }

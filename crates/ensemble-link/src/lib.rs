@@ -20,7 +20,7 @@ pub mod store;
 pub mod tokens;
 pub mod users;
 
-pub use client::{Link, RemoteMemory};
+pub use client::{Link, RemoteMemory, Token};
 pub use server::Server;
 pub use tokens::Tokens;
 pub use users::{User, Users};

@@ -83,13 +83,11 @@ fn init(force: bool, stdout: bool) -> Result<ExitCode, String> {
 /// `ensemble node status`: the node, whether it runs, its hub and its teams.
 fn status(ctx: &Ctx) -> Result<ExitCode, String> {
     let node = this_node()?;
-    let running =
-        std::os::unix::net::UnixStream::connect(state::node_socket(&state::node_dir()?)).is_ok();
     println!(
         "node {} ({}): {}",
         node.name,
         node.access.as_str(),
-        if running {
+        if node_running() {
             "running"
         } else {
             "not running; start it with `ensemble node serve`"
@@ -98,15 +96,22 @@ fn status(ctx: &Ctx) -> Result<ExitCode, String> {
     println!("  file: {}", node.source.display());
     match &node.hub {
         Some(url) => {
-            let signed_in = ensemble::link::Tokens::load()?.get(url).is_some();
-            println!(
-                "  hub: {url}{}",
-                if signed_in {
-                    ", signed in"
-                } else {
-                    ", not signed in: `ensemble node login`"
-                }
-            );
+            // The hub says whether the token kept for it still works.
+            let said = match ensemble::link::Tokens::load()?.get(url) {
+                None => format!("not signed in: `ensemble node login {url}`"),
+                Some(token) => match ensemble::runtime::block_on(
+                    ensemble::link::RemoteMemory::new(url, token, None).hello(),
+                ) {
+                    Ok(hello) => format!(
+                        "signed in as {} ({}: {})",
+                        hello.user,
+                        hello.role,
+                        hello.permissions.join(", ")
+                    ),
+                    Err(e) => format!("the hub cannot be used: {e}"),
+                },
+            };
+            println!("  hub: {url}, {said}");
         }
         None => println!("  hub: none, so no tasks and no knowledge"),
     }
@@ -172,8 +177,13 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
         say(line);
     }
     // With a hub: its tasks, and the link that offers what the node offers.
+    // One token for all of it, replaced when `ensemble node login` signs in
+    // again.
     let hub = match &node.hub {
-        Some(_) => Some(node_hub("node serve")?),
+        Some(_) => {
+            let (url, token) = node_hub("node serve")?;
+            Some((url, ensemble::link::Token::new(&token)))
+        }
         None => None,
     };
     let (url, token) = match &hub {
@@ -193,7 +203,7 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
             Some(
                 ensemble::node::Worker::new(
                     url,
-                    token,
+                    token.clone(),
                     node.clone(),
                     Some(team.clone()),
                     dir.join("runs"),
@@ -343,6 +353,15 @@ fn login(url: &str, user: Option<&str>, token: Option<&str>) -> Result<ExitCode,
             "hub",
         )?;
         if named.as_deref() == Some(url) {
+            // The running node takes the new token as it is.
+            if node_running() {
+                match ensemble::runtime::block_on(daemon::relink(&state::node_socket(
+                    &state::node_dir()?,
+                ))) {
+                    Ok(said) => println!("The running node: {said}."),
+                    Err(e) => println!("{e}"),
+                }
+            }
             return Ok(());
         }
         match file.set("hub", url) {
@@ -372,13 +391,8 @@ fn with_node_file<T>(
             .map_err(|e| e.to_string())
     };
     let changed = || {
-        let running = state::node_dir().is_ok_and(|dir| {
-            std::os::unix::net::UnixStream::connect(state::node_socket(&dir)).is_ok()
-        });
-        if running {
-            println!(
-                "The running node read node.yaml when it started: restart it to use the change (`systemctl --user restart ensemble-node` where a service runs it)."
-            );
+        if node_running() {
+            restart_node();
         }
     };
     work(&super::config::File {
@@ -388,6 +402,47 @@ fn with_node_file<T>(
         changed: &changed,
     })
 }
+
+/// Whether this computer's node runs: it answers on its socket.
+fn node_running() -> bool {
+    state::node_dir()
+        .is_ok_and(|dir| std::os::unix::net::UnixStream::connect(state::node_socket(&dir)).is_ok())
+}
+
+/// The running node read node.yaml when it started: start it again, so it
+/// reads the change, when its user service runs it; else say how.
+fn restart_node() {
+    let systemctl = |args: &[&str]| {
+        std::process::Command::new("systemctl")
+            .arg("--user")
+            .args(args)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    // The service's process is the node that runs here, not another one.
+    let node = state::node_dir()
+        .ok()
+        .and_then(|dir| ensemble::lock::holder(&dir));
+    let service = systemctl(&["show", "--property=MainPID", "--value", SERVICE])
+        .and_then(|pid| pid.parse::<u32>().ok());
+    if node.is_none() || service != node {
+        println!(
+            "The running node read node.yaml when it started: stop it and start it again (`ensemble node serve`) to use the change."
+        );
+    } else if systemctl(&["restart", SERVICE]).is_some() {
+        println!("The node's service was restarted, so it uses the change.");
+    } else {
+        println!(
+            "The node's service could not be restarted: `systemctl --user restart {SERVICE}` uses the change."
+        );
+    }
+}
+
+/// The user service that runs the node, as the Nix modules name it.
+const SERVICE: &str = "ensemble-node";
 
 /// Log in to the hub at `url` as `user`, with the password typed or on stdin,
 /// make an access token for this computer, and log out again.

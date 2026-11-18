@@ -179,19 +179,59 @@ pub struct Hello {
     pub instructions: String,
 }
 
+/// A hub token that may be replaced while it is used, as when `ensemble node
+/// login` signs in again: every link given it connects again with the new one.
+#[derive(Clone)]
+pub struct Token(std::sync::Arc<tokio::sync::watch::Sender<String>>);
+
+impl Token {
+    pub fn new(token: &str) -> Self {
+        Token(std::sync::Arc::new(tokio::sync::watch::Sender::new(
+            token.trim().to_string(),
+        )))
+    }
+
+    pub fn get(&self) -> String {
+        self.0.borrow().clone()
+    }
+
+    /// Use `token` from now on; whether it is another one.
+    pub fn set(&self, token: &str) -> bool {
+        self.0.send_if_modified(|t| {
+            let changed = t != token.trim();
+            if changed {
+                *t = token.trim().to_string();
+            }
+            changed
+        })
+    }
+
+    /// Something that wakes when the token is replaced.
+    pub fn watch(&self) -> tokio::sync::watch::Receiver<String> {
+        self.0.subscribe()
+    }
+}
+
 /// A hub server, asked one request at a time over one WebSocket, opened when
-/// it is first needed and once more when it broke since.
+/// it is first needed, once more when it broke since, and again when its
+/// token is replaced.
 pub struct Link {
     url: String,
-    token: String,
-    socket: tokio::sync::Mutex<Option<Connection>>,
+    token: Token,
+    /// The open connection, and the token it was opened with.
+    socket: tokio::sync::Mutex<Option<(Connection, String)>>,
 }
 
 impl Link {
     pub fn new(url: &str, token: &str) -> Self {
+        Self::with_token(url, Token::new(token))
+    }
+
+    /// A link that follows `token` when it is replaced.
+    pub fn with_token(url: &str, token: Token) -> Self {
         Link {
             url: crate::tokens::normal(url),
-            token: token.trim().to_string(),
+            token,
             socket: tokio::sync::Mutex::new(None),
         }
     }
@@ -203,11 +243,17 @@ impl Link {
     /// Ask the hub and wait for its answer.
     pub async fn ask(&self, method: &str, params: Value) -> Result<Value, String> {
         let mut socket = self.socket.lock().await;
+        let token = self.token.get();
+        if socket.as_ref().is_some_and(|(_, t)| *t != token)
+            && let Some((mut old, _)) = socket.take()
+        {
+            old.close().await;
+        }
         for attempt in 0..2 {
             if socket.is_none() {
-                *socket = Some(Connection::open(&self.url, &self.token).await?);
+                *socket = Some((Connection::open(&self.url, &token).await?, token.clone()));
             }
-            let link = socket.as_mut().expect("just opened");
+            let (link, _) = socket.as_mut().expect("just opened");
             match link.call(method, params.clone()).await {
                 Ok(v) => return Ok(v),
                 Err(Failure::Hub(e)) => return Err(e),
@@ -224,7 +270,7 @@ impl Link {
 
     /// Close the connection, if one is open; the next request opens another.
     pub async fn close(&self) {
-        if let Some(mut link) = self.socket.lock().await.take() {
+        if let Some((mut link, _)) = self.socket.lock().await.take() {
             link.close().await;
         }
     }
@@ -236,13 +282,20 @@ pub struct RemoteMemory {
     /// The working folder's name, never its path.
     project: Option<String>,
     client: Mutex<Option<String>>,
-    hello: Mutex<Option<Hello>>,
+    /// The hub's hello, and the token it was for.
+    hello: Mutex<Option<(String, Hello)>>,
 }
 
 impl RemoteMemory {
     pub fn new(url: &str, token: &str, project: Option<String>) -> Self {
+        Self::with_token(url, Token::new(token), project)
+    }
+
+    /// The knowledge of the hub at `url`, following `token` when it is
+    /// replaced.
+    pub fn with_token(url: &str, token: Token, project: Option<String>) -> Self {
         RemoteMemory {
-            link: Link::new(url, token),
+            link: Link::with_token(url, token),
             project,
             client: Mutex::new(None),
             hello: Mutex::new(None),
@@ -253,14 +306,18 @@ impl RemoteMemory {
         self.link.url()
     }
 
-    /// Who the node is on the hub; asked once, then remembered.
+    /// Who the node is on the hub; asked once per token, then remembered.
     pub async fn hello(&self) -> Result<Hello, String> {
-        if let Some(hello) = self.hello.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        let token = self.link.token.get();
+        if let Some((for_token, hello)) =
+            self.hello.lock().unwrap_or_else(|e| e.into_inner()).clone()
+            && for_token == token
+        {
             return Ok(hello);
         }
         let v = self.ask(HELLO, json!({})).await?;
         let hello = hello_from(&v);
-        *self.hello.lock().unwrap_or_else(|e| e.into_inner()) = Some(hello.clone());
+        *self.hello.lock().unwrap_or_else(|e| e.into_inner()) = Some((token, hello.clone()));
         Ok(hello)
     }
 
@@ -422,11 +479,28 @@ mod tests {
         let m = RemoteMemory::new(&hub.url, &hub.ana, None);
         m.hello().await.unwrap();
         // Break it from this side: the next request opens a new one.
-        if let Some(link) = m.link.socket.lock().await.as_mut() {
+        if let Some((link, _)) = m.link.socket.lock().await.as_mut() {
             link.close().await;
         }
         let notes = m.call("recall", &json!({"query": "deploy"})).await.unwrap();
         assert!(notes.is_ok(), "{notes:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_replaced_token_is_used_from_the_next_request_on() {
+        let hub = start();
+        let token = Token::new("ens_wrong");
+        let m = RemoteMemory::with_token(&hub.url, token.clone(), None);
+        assert!(m.hello().await.is_err());
+        assert!(token.set(&hub.rex));
+        assert!(!token.set(&hub.rex), "the same token is no change");
+        assert_eq!(m.hello().await.unwrap().user, "rex");
+        let names = |tools: Vec<Tool>| tools.iter().map(|t| t.name).collect::<Vec<_>>();
+        assert_eq!(names(m.tools().await), vec![RECALL]);
+        // Another account: who the node is, and its tools, follow it.
+        token.set(&hub.ana);
+        assert_eq!(m.hello().await.unwrap().user, "ana");
+        assert_eq!(names(m.tools().await), vec![SHARE, RECALL]);
     }
 }
 

@@ -1000,9 +1000,11 @@ A value is written as YAML when it reads as YAML (`laptop`, `8`, `true`,
 comments and order stay; the change is loaded before it is written, and one
 that would not load is refused with what is wrong, and nothing changes (`edit`
 keeps your edit beside the file to try again). A team's change reaches the
-running node at once; the node reads `node.yaml`, and the hub `hub.yaml`, when
-it starts, so they say to restart them. `ensemble node login <url>` names the
-hub in `node.yaml` by itself, and `ensemble node logout` takes it out.
+running node at once. The node reads `node.yaml` when it starts, so a change to
+it restarts the node's user service when one runs it (as the Nix modules do),
+and otherwise says to restart the node; the hub reads `hub.yaml` when it
+starts, and says to restart it. `ensemble node login <url>` names the hub in
+`node.yaml` by itself, and `ensemble node logout` takes it out.
 
 ### Editor support
 
@@ -1124,7 +1126,11 @@ hub: wss://hub.example.com
 `ensemble node login` logs in, makes an access token for this computer, logs out,
 and keeps the token in `~/.config/ensemble/node/hubs.json`, readable only by
 you; `--token T` keeps a token made elsewhere instead, and `ensemble node logout
-<url>` forgets it. From then on the node's sessions are offered the knowledge
+<url>` forgets it. Signing in again, with a new token or as someone else,
+reaches a running node at once: its links to the hub connect again with the
+new token, and open sessions are told their tools may have changed.
+`ensemble node status` asks the hub whether the token still works, and as
+whom. From then on the node's sessions are offered the knowledge
 tools the token allows (a reader gets only `recall`), and `ensemble knowledge share`,
 `ensemble knowledge recall`, the session hooks and `ensemble node peers` all go to that hub.
 For one person alone, the hub listens on `127.0.0.1` and the node names
@@ -1728,7 +1734,7 @@ $ ensemble node setup [--client C] [--name N] [--yes]   # find the CLIs, write t
 $ ensemble node init [--force|--stdout]   # ~/.config/ensemble/node/node.yaml with every setting
 $ ensemble node serve                     # run the node until stopped; a computer runs one
 $ ensemble node reload                    # the running node reads its teams again (a `node team` command does it by itself)
-$ ensemble node status                    # its name, its hub, whether it runs, its teams
+$ ensemble node status                    # its name, whether it runs, its teams, and its hub: signed in as whom
 $ ensemble node doctor                    # what is wrong, and how to fix each thing
 $ ensemble node connect <client> [--global] [--hooks]   # register with claude-code, opencode or codex
 $ ensemble node login <wss://url> --user <name>   # sign in to a hub with your account (or --token <token>), and name it in node.yaml

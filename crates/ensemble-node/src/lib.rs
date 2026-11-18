@@ -22,7 +22,7 @@ use ensemble_agents::router::Ensemble;
 use ensemble_config::{Access, Adapter, Config, Node, OpenCodeModel};
 use ensemble_core::runtime::{self, blocking};
 use ensemble_core::snapshot;
-use ensemble_link::client::{Connection, Failure};
+use ensemble_link::client::{Connection, Failure, Token};
 use ensemble_link::protocol::{
     MODEL_CALL_EVENT, MODEL_REPLY, NODE, RUN_CANCEL_EVENT, RUN_DONE, RUN_EVENT, RUN_PROGRESS,
 };
@@ -42,6 +42,8 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 const CHUNK: usize = 16 * 1024;
 /// The paths of a model server a call may ask for.
 const MODEL_PATHS: [&str; 2] = ["/chat/completions", "/completions"];
+/// Why a connection ended when the token was replaced.
+const REPLACED: &str = "signed in again with a new token";
 
 /// What a run or a model call hands the connection to send.
 type Outbox = UnboundedSender<(&'static str, Value)>;
@@ -72,7 +74,7 @@ fn check_offers(node: &Node, config: &Config) -> Result<(), String> {
 /// A node, ready to connect.
 pub struct Worker {
     url: String,
-    token: String,
+    token: Token,
     node: Node,
     /// The node's helper team, when it offers runs.
     team: Option<Ensemble>,
@@ -84,12 +86,13 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// A worker for `node`, reaching the hub at `url` with `token`. `team` is
-    /// its teams, loaded as one; each agent offered must be in it, and on a
-    /// shared node run on `llm_backends`.
+    /// A worker for `node`, reaching the hub at `url` with `token`, and again
+    /// with the new one when it is replaced. `team` is its teams, loaded as
+    /// one; each agent offered must be in it, and on a shared node run on
+    /// `llm_backends`.
     pub fn new(
         url: &str,
-        token: &str,
+        token: Token,
         node: Node,
         team: Option<Config>,
         scratch: PathBuf,
@@ -106,7 +109,7 @@ impl Worker {
         };
         Ok(Worker {
             url: url.to_string(),
-            token: token.to_string(),
+            token,
             node,
             team,
             scratch,
@@ -161,10 +164,17 @@ impl Worker {
     pub async fn work(&self, stop: &AtomicBool, say: &(dyn Fn(&str) + Sync)) -> Result<(), String> {
         let mut backoff = Duration::from_secs(1);
         let mut said_down = false;
+        let mut replaced = self.token.watch();
         while !stop.load(Ordering::Relaxed) {
+            replaced.mark_unchanged();
             match self.session(stop, say).await {
                 Ok(()) => return Ok(()),
                 Err(Failure::Hub(e)) => return Err(e),
+                Err(Failure::Broken(e)) if e == REPLACED => {
+                    say(&format!("{REPLACED}: connecting to {} with it", self.url));
+                    (backoff, said_down) = (Duration::from_secs(1), false);
+                    continue;
+                }
                 Err(Failure::Broken(e)) => {
                     if !said_down {
                         say(&format!(
@@ -178,6 +188,11 @@ impl Worker {
             tokio::select! {
                 () = tokio::time::sleep(backoff) => {}
                 () = runtime::until_set(stop) => {}
+                // Signed in again: try the new token at once.
+                _ = replaced.changed() => {
+                    backoff = Duration::from_secs(1);
+                    continue;
+                }
             }
             backoff = (backoff * 2).min(Duration::from_secs(60));
         }
@@ -185,9 +200,12 @@ impl Worker {
     }
 
     /// One connection's life. The runs and model calls it takes go on beside
-    /// it, in its task, and hand it what to send.
+    /// it, in its task, and hand it what to send. It ends when the token is
+    /// replaced, as [`REPLACED`].
     async fn session(&self, stop: &AtomicBool, say: &(dyn Fn(&str) + Sync)) -> Result<(), Failure> {
-        let mut link = Connection::open(&self.url, &self.token)
+        let mut replaced = self.token.watch();
+        replaced.mark_unchanged();
+        let mut link = Connection::open(&self.url, &self.token.get())
             .await
             .map_err(Failure::Broken)?;
         let me = link.call(NODE, self.hello()).await?;
@@ -207,6 +225,7 @@ impl Worker {
         let result = loop {
             tokio::select! {
                 () = runtime::until_set(stop) => break Ok(()),
+                Ok(()) = replaced.changed() => break Err(Failure::Broken(REPLACED.into())),
                 Some((method, params)) = sending.recv() => {
                     if let Err(e) = link.send(method, params).await {
                         break Err(Failure::Broken(e));

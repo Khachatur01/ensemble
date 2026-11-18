@@ -2816,6 +2816,42 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
         "{shares:?}"
     );
 
+    // Signed in again, as kim: the running node uses the new token at once,
+    // in the session already open.
+    let out = command(&s)
+        .args(["node", "login", &url, "--token", &kim])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("The running node: signed in to"),
+        "{}",
+        stdout_of(&out)
+    );
+    let reply = session.request(
+        "tools/call",
+        serde_json::json!({"name": "share", "arguments": {"title": "Kim", "text": "Kim owns the deploy scripts."}}),
+    );
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let shares = share_files(&hub);
+    assert!(
+        shares.iter().any(|f| f.contains("shared_by: kim")),
+        "{shares:?}"
+    );
+    // Status asks the hub whether the token works.
+    let status = stdout_of(&ensemble(&s, &["node", "status"]));
+    assert!(
+        status.contains(&format!("hub: {url}, signed in as kim (member:")),
+        "{status}"
+    );
+    let out = ensemble(&s, &["hub", "user", "revoke", "kim"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let status = stdout_of(&ensemble(&s, &["node", "status"]));
+    assert!(
+        status.contains("the hub cannot be used") && status.contains("did not accept the token"),
+        "{status}"
+    );
+
     let out = command(&s).args(["node", "logout", &url]).output().unwrap();
     assert!(stdout_of(&out).contains("signed out"));
     let _ = child.kill();
