@@ -65,7 +65,7 @@ pub fn teams_dir() -> Result<PathBuf, String> {
     Ok(runner_config_dir()?.join("teams"))
 }
 
-/// A hub this computer runs (`ensemble hub serve`): `hub.yaml`, its secrets
+/// A hub this computer runs (`ensemble-hub serve`): `hub.yaml`, its secrets
 /// in `.env`, its `database.db` of accounts and deliveries, and its knowledge
 /// vault.
 pub fn hub_config_dir() -> Result<PathBuf, String> {
@@ -110,13 +110,13 @@ pub fn hub_dir() -> Result<PathBuf, String> {
 }
 
 /// Where the hub whose state is in `hub_dir` takes the operations of
-/// `ensemble hub …`, as [`runner_socket`] says.
+/// `ensemble-hub …`, as [`runner_socket`] says.
 pub fn hub_socket(hub_dir: &Path) -> PathBuf {
     runner_socket(hub_dir)
 }
 
 /// Where the runner whose state is in `runner_dir` takes the operations of
-/// `ensemble runner …`. A socket's path must be short, so it is not in the
+/// `ensemble-runner …`. A socket's path must be short, so it is not in the
 /// state directory but in the runtime one (`$XDG_RUNTIME_DIR`, else `/tmp`),
 /// in a folder only its user may enter, named by a hash of `runner_dir`.
 pub fn runner_socket(runner_dir: &Path) -> PathBuf {

@@ -8,6 +8,12 @@
 //! errors as data ([`Error`]): a code, the field it is about, a message and a
 //! hint, so each interface shows it next to what it is about. The registry
 //! checks who asks and what is given before the operation runs.
+//!
+//! The command line both executables make from operations is `cli`; `local`
+//! runs one in the running process, over its socket, or else here.
+
+pub mod cli;
+pub mod local;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};

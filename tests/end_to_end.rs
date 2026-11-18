@@ -1,11 +1,12 @@
-//! End-to-end tests: the real binary, a real config file on disk, and a stand-in
-//! for the OpenCode CLI.
+//! End-to-end tests: the real executables, `ensemble-hub` and
+//! `ensemble-runner`, a real config file on disk, and a stand-in for the
+//! OpenCode CLI.
 //!
 //! The unit suites cover the request path with fakes injected. These cover what
-//! fakes cannot: that the binary parses its arguments, finds its config, starts
-//! the agent's CLI with the right command line and environment, runs a hub and
-//! a runner that work through tasks together, and asks a real socket which
-//! models it serves.
+//! fakes cannot: that each executable parses its arguments, finds its config,
+//! starts the agent's CLI with the right command line and environment, runs a
+//! hub and a runner that work through tasks together, and asks a real socket
+//! which models it serves.
 //!
 //! No test here needs the network, a model server or an agent CLI.
 
@@ -13,7 +14,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-const BIN: &str = env!("CARGO_BIN_EXE_ensemble");
+const HUB: &str = env!("CARGO_BIN_EXE_ensemble-hub");
+const RUNNER: &str = env!("CARGO_BIN_EXE_ensemble-runner");
 
 /// Port 1 is reserved and nothing listens there.
 const NOWHERE: &str = "http://127.0.0.1:1/v1";
@@ -48,7 +50,7 @@ impl Scratch {
     /// Where the project's tasks and runs go: its state directory, under
     /// the scratch's own XDG state directory.
     fn state(&self) -> PathBuf {
-        ensemble::state::dir_in(
+        ensemble_core::state::dir_in(
             &self.0.with_extension("xdg-state").join("ensemble"),
             &self.0,
         )
@@ -85,13 +87,13 @@ impl Scratch {
     fn repo(&self, name: &str) -> PathBuf {
         let dir = self.workspace().join(name);
         std::fs::create_dir_all(&dir).unwrap();
-        ensemble::worktree::testing::repo(&dir);
+        ensemble_agents::worktree::testing::repo(&dir);
         dir.canonicalize().unwrap()
     }
 
     /// Where the tasks and runs of the workspace's repository `name` go.
     fn state_of(&self, name: &str) -> PathBuf {
-        ensemble::state::dir_in(
+        ensemble_core::state::dir_in(
             &self.0.with_extension("xdg-state").join("ensemble"),
             &self.workspace().join(name),
         )
@@ -229,10 +231,10 @@ agents:
     )
 }
 
-/// The binary, run in `scratch` with none of the test variables inherited:
-/// a stale one would silently change what is being tested.
-fn command(scratch: &Scratch) -> Command {
-    let mut c = Command::new(BIN);
+/// The executable `program`, run in `scratch` with none of the test variables
+/// inherited: a stale one would silently change what is being tested.
+fn command(scratch: &Scratch, program: &str) -> Command {
+    let mut c = Command::new(program);
     c.current_dir(scratch.path())
         .env("XDG_STATE_HOME", scratch.0.with_extension("xdg-state"))
         .env("XDG_CACHE_HOME", scratch.0.with_extension("xdg-cache"))
@@ -243,10 +245,10 @@ fn command(scratch: &Scratch) -> Command {
     c
 }
 
-/// The binary with only the scratch's directories set, and none of the
-/// test variables: as the runner starts as a service.
+/// The runner with only the scratch's directories set, and none of the test
+/// variables: as it starts as a service.
 fn bare_command(scratch: &Scratch) -> Command {
-    let mut c = Command::new(BIN);
+    let mut c = Command::new(RUNNER);
     c.current_dir(scratch.path())
         .env("XDG_STATE_HOME", scratch.0.with_extension("xdg-state"))
         .env("XDG_CACHE_HOME", scratch.0.with_extension("xdg-cache"))
@@ -255,8 +257,26 @@ fn bare_command(scratch: &Scratch) -> Command {
     c
 }
 
-fn ensemble(scratch: &Scratch, args: &[&str]) -> std::process::Output {
-    command(scratch).args(args).output().expect("run ensemble")
+fn runner_command(scratch: &Scratch) -> Command {
+    command(scratch, RUNNER)
+}
+
+fn hub_command(scratch: &Scratch) -> Command {
+    command(scratch, HUB)
+}
+
+fn ensemble_runner(scratch: &Scratch, args: &[&str]) -> std::process::Output {
+    runner_command(scratch)
+        .args(args)
+        .output()
+        .expect("run ensemble-runner")
+}
+
+fn ensemble_hub(scratch: &Scratch, args: &[&str]) -> std::process::Output {
+    hub_command(scratch)
+        .args(args)
+        .output()
+        .expect("run ensemble-hub")
 }
 
 fn stdout_of(out: &std::process::Output) -> String {
@@ -313,7 +333,7 @@ fn check_accepts_a_valid_config_and_reports_the_team() {
     let s = Scratch::new("check-ok");
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
 
-    let out = ensemble(&s, &["runner", "team", "check"]);
+    let out = ensemble_runner(&s, &["team", "check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(text.contains("team: ok (made here)"), "{text}");
@@ -352,7 +372,7 @@ agents:
       command: opencode
 "#,
     );
-    let out = ensemble(&s, &["runner", "team", "check"]);
+    let out = ensemble_runner(&s, &["team", "check"]);
     assert!(!out.status.success());
     let err = stderr_of(&out);
     assert!(err.contains("version"), "{err}");
@@ -375,7 +395,7 @@ llm_backends:
     api_key: "sk-should-never-be-here"
 "#,
     );
-    let out = ensemble(&s, &["runner", "team", "check"]);
+    let out = ensemble_runner(&s, &["team", "check"]);
     assert!(!out.status.success(), "secrets in the config must not load");
     assert!(stderr_of(&out).contains("api_key"), "{}", stderr_of(&out));
 }
@@ -385,10 +405,10 @@ fn with_no_team_check_says_how_to_make_one() {
     let s = Scratch::new("no-org");
     // The project folder holds a config of the old kind; it is not looked at.
     s.write("config.yaml", "version: 2\n");
-    let out = ensemble(&s, &["runner", "team", "check"]);
+    let out = ensemble_runner(&s, &["team", "check"]);
     assert!(!out.status.success(), "no team means no helper team");
     assert!(
-        stderr_of(&out).contains("ensemble runner team new"),
+        stderr_of(&out).contains("ensemble-runner team new"),
         "{}",
         stderr_of(&out)
     );
@@ -398,7 +418,7 @@ fn with_no_team_check_says_how_to_make_one() {
 fn a_broken_team_is_named_rather_than_skipped() {
     let s = Scratch::new("no-config");
     s.write("@team/config.yaml", "version: 1\n");
-    let out = ensemble(&s, &["runner", "team", "check"]);
+    let out = ensemble_runner(&s, &["team", "check"]);
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("team 'team'"),
@@ -412,7 +432,7 @@ fn agents_prints_the_routing_table() {
     let s = Scratch::new("agents");
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
 
-    let out = ensemble(&s, &["runner", "agent", "list"]);
+    let out = ensemble_runner(&s, &["agent", "list"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(
@@ -430,8 +450,8 @@ fn the_base_url_is_the_one_in_the_config_and_no_variable_changes_it() {
     let s = Scratch::new("url-from-config");
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
 
-    let out = command(&s)
-        .args(["runner", "team", "check"])
+    let out = runner_command(&s)
+        .args(["team", "check"])
         .env("ENSEMBLE_TEST_LOCAL_URL", "http://10.0.0.9:9999/v1")
         .output()
         .unwrap();
@@ -450,17 +470,9 @@ fn run_starts_the_agents_cli_with_the_task_and_prints_its_answer() {
     let cli = s.opencode("the review is clean", "");
     s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
 
-    let out = ensemble(
+    let out = ensemble_runner(
         &s,
-        &[
-            "runner",
-            "agent",
-            "run",
-            "team/reviewer",
-            "review",
-            "this",
-            "code",
-        ],
+        &["agent", "run", "team/reviewer", "review", "this", "code"],
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
@@ -497,7 +509,7 @@ fn an_agent_on_an_llm_backend_gets_its_endpoint_and_the_key_from_dotenv() {
     );
     s.write("@runner/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-from-dotenv\n");
 
-    let out = ensemble(&s, &["runner", "agent", "run", "team/coder", "do it"]);
+    let out = ensemble_runner(&s, &["agent", "run", "team/coder", "do it"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         s.seen("args")
@@ -521,7 +533,7 @@ fn show_prints_how_an_agent_starts_with_the_key_hidden() {
     );
     s.write("@runner/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-secret-value\n");
 
-    let out = ensemble(&s, &["runner", "agent", "show", "team/coder"]);
+    let out = ensemble_runner(&s, &["agent", "show", "team/coder"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(
@@ -535,7 +547,7 @@ fn show_prints_how_an_agent_starts_with_the_key_hidden() {
     assert!(text.contains("<redacted>"), "{text}");
     assert!(!text.contains("sk-secret-value"), "the key leaked: {text}");
 
-    let out = ensemble(&s, &["runner", "agent", "show", "nobody"]);
+    let out = ensemble_runner(&s, &["agent", "show", "nobody"]);
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("team/coder, team/reviewer"),
@@ -551,10 +563,7 @@ fn files_the_agent_changed_are_reported() {
     s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
     s.write("a.txt", "foo\n");
 
-    let out = ensemble(
-        &s,
-        &["runner", "agent", "run", "team/coder", "rename foo to bar"],
-    );
+    let out = ensemble_runner(&s, &["agent", "run", "team/coder", "rename foo to bar"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(s.read("a.txt"), "bar\n");
 }
@@ -565,7 +574,7 @@ fn health_checks_the_cli_and_that_the_backend_serves_the_model() {
     let cli = s.opencode("", "");
     let serving = models_stub(r#"{"object":"list","data":[{"id":"qwen3-coder"}]}"#);
     s.write("@team/config.yaml", &config_yaml(&cli, &serving));
-    let out = ensemble(&s, &["runner", "agent", "health"]);
+    let out = ensemble_runner(&s, &["agent", "health"]);
     assert!(
         out.status.success(),
         "{}{}",
@@ -578,7 +587,7 @@ fn health_checks_the_cli_and_that_the_backend_serves_the_model() {
 
     let other = models_stub(r#"{"object":"list","data":[{"id":"something-else"}]}"#);
     s.write("@team/config.yaml", &config_yaml(&cli, &other));
-    let out = ensemble(&s, &["runner", "agent", "health"]);
+    let out = ensemble_runner(&s, &["agent", "health"]);
     assert!(!out.status.success());
     let text = stdout_of(&out);
     assert!(text.contains("openai-local: FAILED"), "{text}");
@@ -588,7 +597,7 @@ fn health_checks_the_cli_and_that_the_backend_serves_the_model() {
     );
 
     s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
-    let out = ensemble(&s, &["runner", "agent", "health"]);
+    let out = ensemble_runner(&s, &["agent", "health"]);
     assert!(!out.status.success());
     assert!(
         stdout_of(&out).contains("could not reach the endpoint"),
@@ -608,7 +617,7 @@ fn an_invalid_team_stops_the_runner_before_it_runs_anything() {
     let s = Scratch::new("runner-bad-config");
     s.write("@team/config.yaml", "version: 1\nbackends: {}\n");
     s.runner_yaml();
-    let out = bare_command(&s).args(["runner", "serve"]).output().unwrap();
+    let out = bare_command(&s).args(["serve"]).output().unwrap();
     assert!(!out.status.success());
     assert!(stderr_of(&out).contains("backend"), "{}", stderr_of(&out));
 }
@@ -616,7 +625,7 @@ fn an_invalid_team_stops_the_runner_before_it_runs_anything() {
 #[test]
 fn team_new_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_accident() {
     let s = Scratch::new("init");
-    let out = ensemble(&s, &["runner", "team", "new", "team"]);
+    let out = ensemble_runner(&s, &["team", "new", "team"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let written = std::fs::read_to_string(s.team_dir().join("config.yaml")).unwrap();
     assert!(written.contains("type: opencode"), "{written}");
@@ -631,13 +640,13 @@ fn team_new_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_acci
         "nothing is written in the project"
     );
 
-    let check = ensemble(&s, &["runner", "team", "check"]);
+    let check = ensemble_runner(&s, &["team", "check"]);
     assert!(check.status.success(), "{}", stderr_of(&check));
     let text = stdout_of(&check);
     assert!(text.contains("team/coder  ->"), "{text}");
 
     s.write("@team/config.yaml", "mine");
-    let again = ensemble(&s, &["runner", "team", "new", "team"]);
+    let again = ensemble_runner(&s, &["team", "new", "team"]);
     assert!(!again.status.success());
     assert!(
         stderr_of(&again).contains("already"),
@@ -649,7 +658,7 @@ fn team_new_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_acci
         "mine"
     );
 
-    let printed = ensemble(&s, &["runner", "team", "new", "--stdout"]);
+    let printed = ensemble_runner(&s, &["team", "new", "--stdout"]);
     assert_eq!(stdout_of(&printed), written);
 }
 
@@ -658,7 +667,7 @@ fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
     let s = Scratch::new("dotenv");
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
     s.write("@runner/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-from-dotenv\n");
-    let out = ensemble(&s, &["runner", "team", "check"]);
+    let out = ensemble_runner(&s, &["team", "check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(text.contains("authenticated"), "{text}");
@@ -666,26 +675,26 @@ fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
 
     // --env-file is read instead of the runner's .env.
     let other = s.write("keys.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-other\n");
-    let out = command(&s)
+    let out = runner_command(&s)
         .arg("--env-file")
         .arg(&other)
-        .args(["runner", "agent", "show", "team/coder"])
+        .args(["agent", "show", "team/coder"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
 
     s.write("@runner/.env", "not a line\n");
-    let out = ensemble(&s, &["runner", "team", "check"]);
+    let out = ensemble_runner(&s, &["team", "check"]);
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("line 1: expected NAME=value"),
         "{}",
         stderr_of(&out)
     );
-    let out = command(&s)
+    let out = runner_command(&s)
         .arg("--env-file")
         .arg(&other)
-        .args(["runner", "team", "check"])
+        .args(["team", "check"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -696,7 +705,7 @@ fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dotenv, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
-    let out = ensemble(&s, &["runner", "team", "check"]);
+    let out = ensemble_runner(&s, &["team", "check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(stderr_of(&out).contains("chmod 600"), "{}", stderr_of(&out));
 }
@@ -712,10 +721,10 @@ fn check_says_which_tasks_on_the_hub_this_runner_cannot_run() {
     );
     s.write("@team/config.yaml", &gated);
     tasks_of(&s, "shop")
-        .add(&ensemble::tasks::Ticket {
+        .add(&ensemble_tasks::tasks::Ticket {
             title: "Ok".into(),
             agent: "team/coder".into(),
-            gate: Some(ensemble::tasks::GateRef {
+            gate: Some(ensemble_tasks::tasks::GateRef {
                 name: "test".into(),
                 attempts: 1,
             }),
@@ -724,7 +733,7 @@ fn check_says_which_tasks_on_the_hub_this_runner_cannot_run() {
         })
         .unwrap();
     add_task(&s, "shop", "Look", "team/reviewer", "look");
-    let out = ensemble(&s, &["runner", "team", "check"]);
+    let out = ensemble_runner(&s, &["team", "check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).contains("tasks of shop: 2 on the hub ws://")
@@ -738,7 +747,7 @@ fn check_says_which_tasks_on_the_hub_this_runner_cannot_run() {
         "@team/config.yaml",
         &config_yaml("opencode", NOWHERE).replace("  reviewer:", "  critic:"),
     );
-    let out = ensemble(&s, &["runner", "team", "check"]);
+    let out = ensemble_runner(&s, &["team", "check"]);
     assert!(!out.status.success());
     let text = stdout_of(&out);
     assert!(
@@ -763,18 +772,7 @@ fn a_light_agent_is_one_request_to_its_backend() {
     );
     s.write("@team/config.yaml", &config);
 
-    let out = ensemble(
-        &s,
-        &[
-            "runner",
-            "agent",
-            "run",
-            "team/summariser",
-            "sum",
-            "it",
-            "up",
-        ],
-    );
+    let out = ensemble_runner(&s, &["agent", "run", "team/summariser", "sum", "it", "up"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).starts_with("three bullets"),
@@ -782,7 +780,7 @@ fn a_light_agent_is_one_request_to_its_backend() {
         stdout_of(&out)
     );
 
-    let out = ensemble(&s, &["runner", "agent", "show", "team/summariser"]);
+    let out = ensemble_runner(&s, &["agent", "show", "team/summariser"]);
     let text = stdout_of(&out);
     assert!(
         text.starts_with(&format!("POST {url}/chat/completions\n")),
@@ -793,7 +791,7 @@ fn a_light_agent_is_one_request_to_its_backend() {
         "{text}"
     );
 
-    let check = stdout_of(&ensemble(&s, &["runner", "team", "check"]));
+    let check = stdout_of(&ensemble_runner(&s, &["team", "check"]));
     assert!(
         check.contains("team/summariser  ->  direct on team/openai-local / small"),
         "{check}"
@@ -826,9 +824,9 @@ fn stub_clis(scratch: &Scratch, names: &[&str]) -> PathBuf {
     bin
 }
 
-/// The binary, with only `bin` on its PATH, so no real CLI is ever started.
+/// The runner, with only `bin` on its PATH, so no real CLI is ever started.
 fn with_path(scratch: &Scratch, bin: &Path) -> Command {
-    let mut c = Command::new(BIN);
+    let mut c = Command::new(RUNNER);
     c.current_dir(scratch.path())
         .env("PATH", bin)
         .env("XDG_STATE_HOME", scratch.0.with_extension("xdg-state"))
@@ -848,15 +846,7 @@ fn setup_writes_the_runner_and_checks_its_teams() {
     );
     let bin = stub_clis(&s, &["claude", "opencode"]);
     let out = with_path(&s, &bin)
-        .args([
-            "runner",
-            "setup",
-            "--yes",
-            "--name",
-            "desk",
-            "--workspace",
-            "~/code",
-        ])
+        .args(["setup", "--yes", "--name", "desk", "--workspace", "~/code"])
         .output()
         .unwrap();
     let said = stdout_of(&out);
@@ -868,7 +858,7 @@ fn setup_writes_the_runner_and_checks_its_teams() {
     assert!(
         said.contains("holds no git repository")
             && said.contains("Done.")
-            && said.contains("ensemble runner serve"),
+            && said.contains("ensemble-runner serve"),
         "{said}"
     );
     let runner =
@@ -888,7 +878,7 @@ fn setup_writes_the_runner_and_checks_its_teams() {
 
     // A second run keeps the runner that is there.
     let again = with_path(&s, &bin)
-        .args(["runner", "setup", "--yes"])
+        .args(["setup", "--yes"])
         .output()
         .unwrap();
     assert!(
@@ -904,7 +894,7 @@ fn setup_without_any_agent_cli_says_so_and_writes_the_runner() {
     let s = Scratch::new("setup-nothing");
     let bin = stub_clis(&s, &[]);
     let out = with_path(&s, &bin)
-        .args(["runner", "setup", "--yes", "--name", "desk"])
+        .args(["setup", "--yes", "--name", "desk"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -928,7 +918,7 @@ fn doctor_says_what_is_wrong_and_how_to_fix_it() {
         "@team/config.yaml",
         &config_yaml("/nonexistent/opencode", NOWHERE),
     );
-    let out = ensemble(&s, &["runner", "doctor"]);
+    let out = ensemble_runner(&s, &["doctor"]);
     assert!(!out.status.success());
     let text = stdout_of(&out);
     assert!(
@@ -937,7 +927,7 @@ fn doctor_says_what_is_wrong_and_how_to_fix_it() {
     );
     assert!(text.contains("fix: install `opencode`"), "{text}");
     assert!(
-        text.contains("ensemble runner agent remove team/coder"),
+        text.contains("ensemble-runner agent remove team/coder"),
         "{text}"
     );
     assert!(text.contains("problem: team/openai-local"), "{text}");
@@ -947,7 +937,7 @@ fn doctor_says_what_is_wrong_and_how_to_fix_it() {
     s.write("@team/config.yaml", &config_yaml("true", NOWHERE));
     let url = models_stub(r#"{"data":[{"id":"qwen3-coder"}]}"#);
     s.write("@team/config.yaml", &config_yaml("true", &url));
-    let out = ensemble(&s, &["runner", "doctor"]);
+    let out = ensemble_runner(&s, &["doctor"]);
     let text = stdout_of(&out);
     assert!(out.status.success(), "{text}");
     assert!(!text.contains("problem"), "{text}");
@@ -957,10 +947,9 @@ fn doctor_says_what_is_wrong_and_how_to_fix_it() {
 fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
     let s = Scratch::new("add-agent");
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
-    let out = ensemble(
+    let out = ensemble_runner(
         &s,
         &[
-            "runner",
             "agent",
             "add",
             "team/tester",
@@ -971,23 +960,16 @@ fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
         ],
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let agents = ensemble(&s, &["runner", "agent", "list"]);
+    let agents = ensemble_runner(&s, &["agent", "list"]);
     assert!(
         stdout_of(&agents).contains("team/tester\tclaude-code\tsonnet"),
         "{}",
         stdout_of(&agents)
     );
 
-    let dup = ensemble(
+    let dup = ensemble_runner(
         &s,
-        &[
-            "runner",
-            "agent",
-            "add",
-            "team/tester",
-            "--adapter",
-            "claude-code",
-        ],
+        &["agent", "add", "team/tester", "--adapter", "claude-code"],
     );
     assert!(!dup.status.success());
     assert!(
@@ -996,16 +978,13 @@ fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
         stderr_of(&dup)
     );
 
-    let bad = ensemble(
-        &s,
-        &["runner", "agent", "add", "team/x", "--adapter", "llm"],
-    );
+    let bad = ensemble_runner(&s, &["agent", "add", "team/x", "--adapter", "llm"]);
     assert!(!bad.status.success(), "`llm` is no adapter any more");
 
-    let gone = ensemble(&s, &["runner", "agent", "remove", "team/tester"]);
+    let gone = ensemble_runner(&s, &["agent", "remove", "team/tester"]);
     assert!(gone.status.success(), "{}", stderr_of(&gone));
-    assert!(!stdout_of(&ensemble(&s, &["runner", "agent", "list"])).contains("tester"));
-    let missing = ensemble(&s, &["runner", "agent", "remove", "team/tester"]);
+    assert!(!stdout_of(&ensemble_runner(&s, &["agent", "list"])).contains("tester"));
+    let missing = ensemble_runner(&s, &["agent", "remove", "team/tester"]);
     assert!(!missing.status.success());
 }
 
@@ -1063,8 +1042,8 @@ fn a_pulled_team_is_pinned_shown_trusted_and_then_used() {
 
     // Without a terminal and without --yes there is nobody to ask: a refusal,
     // and nothing is kept.
-    let refused = command(&s)
-        .args(["runner", "team", "pull", &url, "--name", "web"])
+    let refused = runner_command(&s)
+        .args(["team", "pull", &url, "--name", "web"])
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -1074,11 +1053,10 @@ fn a_pulled_team_is_pinned_shown_trusted_and_then_used() {
         "{}",
         stderr_of(&refused)
     );
-    assert!(!stdout_of(&ensemble(&s, &["runner", "team", "list"])).contains("web"));
+    assert!(!stdout_of(&ensemble_runner(&s, &["team", "list"])).contains("web"));
 
-    let pulled = command(&s)
+    let pulled = runner_command(&s)
         .args([
-            "runner",
             "team",
             "pull",
             &format!("{url}@main"),
@@ -1097,7 +1075,7 @@ fn a_pulled_team_is_pinned_shown_trusted_and_then_used() {
     );
     assert_eq!(pinned_commit(&s, "web"), sha);
 
-    let out = ensemble(&s, &["runner", "team", "check"]);
+    let out = ensemble_runner(&s, &["team", "check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(
@@ -1105,8 +1083,8 @@ fn a_pulled_team_is_pinned_shown_trusted_and_then_used() {
         "{text}"
     );
     assert!(text.contains("web/coder"), "{text}");
-    let again = command(&s)
-        .args(["runner", "team", "pull", &url, "--name", "web", "--yes"])
+    let again = runner_command(&s)
+        .args(["team", "pull", &url, "--name", "web", "--yes"])
         .output()
         .unwrap();
     assert!(!again.status.success(), "a name is taken once");
@@ -1122,11 +1100,11 @@ fn a_pulled_team_is_pinned_shown_trusted_and_then_used() {
         serde_json::json!({"url": url, "commit": other}).to_string(),
     )
     .unwrap();
-    let out = ensemble(&s, &["runner", "team", "check"]);
+    let out = ensemble_runner(&s, &["team", "check"]);
     assert!(!out.status.success(), "an untrusted commit is not used");
     assert!(
         stderr_of(&out).contains("team 'sneaky'")
-            && stderr_of(&out).contains("ensemble runner team pull"),
+            && stderr_of(&out).contains("ensemble-runner team pull"),
         "{}",
         stderr_of(&out)
     );
@@ -1136,15 +1114,15 @@ fn a_pulled_team_is_pinned_shown_trusted_and_then_used() {
 fn team_update_shows_what_changed_and_moves_only_once_trusted() {
     let s = Scratch::new("remote-update");
     let (url, old) = origin(&s, &config_yaml("true", NOWHERE));
-    let pulled = command(&s)
-        .args(["runner", "team", "pull", &url, "--name", "web", "--yes"])
+    let pulled = runner_command(&s)
+        .args(["team", "pull", &url, "--name", "web", "--yes"])
         .output()
         .unwrap();
     assert!(pulled.status.success(), "{}", stderr_of(&pulled));
     let (_, new) = origin(&s, &config_yaml("opencode", NOWHERE));
 
-    let refused = command(&s)
-        .args(["runner", "team", "update", "web", "--ref", "main"])
+    let refused = runner_command(&s)
+        .args(["team", "update", "web", "--ref", "main"])
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -1156,8 +1134,8 @@ fn team_update_shows_what_changed_and_moves_only_once_trusted() {
     );
     assert_eq!(pinned_commit(&s, "web"), old, "the pin did not move");
 
-    let moved = command(&s)
-        .args(["runner", "team", "update", "web", "--ref", "main", "--yes"])
+    let moved = runner_command(&s)
+        .args(["team", "update", "web", "--ref", "main", "--yes"])
         .output()
         .unwrap();
     assert!(moved.status.success(), "{}", stderr_of(&moved));
@@ -1167,7 +1145,7 @@ fn team_update_shows_what_changed_and_moves_only_once_trusted() {
         stdout_of(&moved)
     );
     assert_eq!(pinned_commit(&s, "web"), new);
-    let again = ensemble(&s, &["runner", "team", "update", "web", "--ref", "main"]);
+    let again = ensemble_runner(&s, &["team", "update", "web", "--ref", "main"]);
     assert!(
         stdout_of(&again).contains("already"),
         "{}",
@@ -1175,7 +1153,7 @@ fn team_update_shows_what_changed_and_moves_only_once_trusted() {
     );
 
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
-    let made = ensemble(&s, &["runner", "team", "update", "team"]);
+    let made = ensemble_runner(&s, &["team", "update", "team"]);
     assert!(!made.status.success());
     assert!(
         stderr_of(&made).contains("was not pulled"),
@@ -1263,7 +1241,7 @@ fn the_runner_works_on_the_tasks_of_each_repository_in_its_workspace_and_stops_o
     let outcome = outcome_of(&s, "shop", "0001-rename-foo").unwrap();
     assert_eq!(
         outcome.status,
-        ensemble::tasks::Status::Done,
+        ensemble_tasks::tasks::Status::Done,
         "{}",
         outcome.text
     );
@@ -1289,7 +1267,7 @@ fn the_runner_works_on_the_tasks_of_each_repository_in_its_workspace_and_stops_o
             && f.contains("Its report:\nrenamed it")),
         "{shares:?}"
     );
-    let status = ensemble(&s, &["runner", "status"]);
+    let status = ensemble_runner(&s, &["status"]);
     assert!(
         stdout_of(&status).contains("projects: shop") && stdout_of(&status).contains("running"),
         "{}",
@@ -1298,7 +1276,7 @@ fn the_runner_works_on_the_tasks_of_each_repository_in_its_workspace_and_stops_o
 
     // One runner per computer: a second one refuses.
     let second = bare_command(&s)
-        .args(["runner", "serve"])
+        .args(["serve"])
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -1369,7 +1347,7 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
     let s = Scratch::new("stats");
     let cli = s.opencode("fine", "");
     s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
-    let none = ensemble(&s, &["runner", "agent", "stats"]);
+    let none = ensemble_runner(&s, &["agent", "stats"]);
     assert!(
         stdout_of(&none).contains("No runs recorded"),
         "{}",
@@ -1377,7 +1355,7 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
     );
 
     for _ in 0..2 {
-        let out = ensemble(&s, &["runner", "agent", "run", "team/reviewer", "look"]);
+        let out = ensemble_runner(&s, &["agent", "run", "team/reviewer", "look"]);
         assert!(out.status.success(), "{}", stderr_of(&out));
     }
     // A run that cannot start is a failure on the record.
@@ -1385,10 +1363,10 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
         "@team/config.yaml",
         &config_yaml("/nonexistent/opencode", NOWHERE),
     );
-    let out = ensemble(&s, &["runner", "agent", "run", "team/reviewer", "look"]);
+    let out = ensemble_runner(&s, &["agent", "run", "team/reviewer", "look"]);
     assert!(!out.status.success());
 
-    let table = ensemble(&s, &["runner", "agent", "stats"]);
+    let table = ensemble_runner(&s, &["agent", "stats"]);
     let text = stdout_of(&table);
     let row = text
         .lines()
@@ -1397,12 +1375,12 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
     let cells: Vec<&str> = row.split_whitespace().collect();
     assert_eq!((cells[1], cells[2]), ("3", "1"), "3 runs, 1 failure: {row}");
 
-    let json = ensemble(&s, &["runner", "agent", "stats", "--json", "--since", "1h"]);
+    let json = ensemble_runner(&s, &["agent", "stats", "--json", "--since", "1h"]);
     let parsed: serde_json::Value = serde_json::from_str(&stdout_of(&json)).unwrap();
     assert_eq!(parsed[0]["agent"], "team/reviewer");
     assert_eq!(parsed[0]["runs"], 3);
 
-    let bad = ensemble(&s, &["runner", "agent", "stats", "--since", "soon"]);
+    let bad = ensemble_runner(&s, &["agent", "stats", "--since", "soon"]);
     assert!(!bad.status.success());
     assert!(stderr_of(&bad).contains("duration"), "{}", stderr_of(&bad));
 }
@@ -1415,7 +1393,7 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
 fn check_warns_about_what_agents_may_do_without_failing() {
     let s = Scratch::new("check-warn");
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
-    let out = ensemble(&s, &["runner", "team", "check"]);
+    let out = ensemble_runner(&s, &["team", "check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(text.contains("warnings:"), "{text}");
@@ -1431,10 +1409,9 @@ fn check_warns_about_what_agents_may_do_without_failing() {
 fn show_prints_how_a_codex_agent_starts() {
     let s = Scratch::new("show-codex");
     s.write("@team/config.yaml", &config_yaml("opencode", NOWHERE));
-    let out = ensemble(
+    let out = ensemble_runner(
         &s,
         &[
-            "runner",
             "agent",
             "add",
             "team/fixer",
@@ -1446,7 +1423,7 @@ fn show_prints_how_a_codex_agent_starts() {
         ],
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let shown = ensemble(&s, &["runner", "agent", "show", "team/fixer"]);
+    let shown = ensemble_runner(&s, &["agent", "show", "team/fixer"]);
     assert!(shown.status.success(), "{}", stderr_of(&shown));
     let text = stdout_of(&shown);
     assert!(
@@ -1454,7 +1431,7 @@ fn show_prints_how_a_codex_agent_starts() {
         "{text}"
     );
     assert!(text.contains("Fixes it."), "{text}");
-    let agents = stdout_of(&ensemble(&s, &["runner", "agent", "list"]));
+    let agents = stdout_of(&ensemble_runner(&s, &["agent", "list"]));
     assert!(agents.contains("fixer\tcodex\tgpt-5-codex"), "{agents}");
 }
 
@@ -1470,10 +1447,9 @@ fn a_light_agent_on_an_anthropic_backend_shows_a_messages_request() {
         )
     );
     s.write("@team/config.yaml", &v1);
-    let out = ensemble(
+    let out = ensemble_runner(
         &s,
         &[
-            "runner",
             "agent",
             "add",
             "team/helper",
@@ -1488,7 +1464,7 @@ fn a_light_agent_on_an_anthropic_backend_shows_a_messages_request() {
         ],
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let shown = ensemble(&s, &["runner", "agent", "show", "team/helper"]);
+    let shown = ensemble_runner(&s, &["agent", "show", "team/helper"]);
     assert!(shown.status.success(), "{}", stderr_of(&shown));
     let text = stdout_of(&shown);
     assert!(
@@ -1496,7 +1472,7 @@ fn a_light_agent_on_an_anthropic_backend_shows_a_messages_request() {
         "{text}"
     );
     assert!(text.contains("\"system\": \"You help.\""), "{text}");
-    let check = stdout_of(&ensemble(&s, &["runner", "team", "check"]));
+    let check = stdout_of(&ensemble_runner(&s, &["team", "check"]));
     assert!(check.contains("claude-api  [anthropic-api]"), "{check}");
 }
 
@@ -1526,7 +1502,7 @@ fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
             "version: 1\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"{central}\", timeout_seconds: 5 }}\nlimits: {{}}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ backend: home, model: small }}\n        - {{ backend: central, model: big }}\n      when_none: wait\n      max_tokens: 10\n"
         ),
     );
-    let out = ensemble(&s, &["runner", "agent", "show", "team/summariser"]);
+    let out = ensemble_runner(&s, &["agent", "show", "team/summariser"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
     assert!(
@@ -1539,10 +1515,7 @@ fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
     );
     assert!(!text.contains("a run now"), "{text}");
 
-    let probed = ensemble(
-        &s,
-        &["runner", "agent", "show", "team/summariser", "--probe"],
-    );
+    let probed = ensemble_runner(&s, &["agent", "show", "team/summariser", "--probe"]);
     assert!(probed.status.success(), "{}", stderr_of(&probed));
     assert!(
         stdout_of(&probed).contains("a run now would use 2."),
@@ -1550,7 +1523,7 @@ fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
         stdout_of(&probed)
     );
 
-    let health = ensemble(&s, &["runner", "agent", "health"]);
+    let health = ensemble_runner(&s, &["agent", "health"]);
     assert!(!health.status.success(), "home is down");
     let said = stdout_of(&health);
     assert!(
@@ -1567,22 +1540,22 @@ fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
 fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
     let scratch = Scratch::new("hub-init");
     let hub = hub_dir(&scratch);
-    let out = ensemble(&scratch, &["hub", "check"]);
+    let out = ensemble_hub(&scratch, &["check"]);
     assert!(!out.status.success());
     assert!(
-        stderr_of(&out).contains("ensemble hub init"),
+        stderr_of(&out).contains("ensemble-hub init"),
         "{}",
         stderr_of(&out)
     );
 
-    let out = ensemble(&scratch, &["hub", "init"]);
+    let out = ensemble_hub(&scratch, &["init"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(hub.join("hub.yaml").exists());
     assert!(
         hub.join("vault/.git").exists(),
         "the vault is a git repository"
     );
-    let again = ensemble(&scratch, &["hub", "init"]);
+    let again = ensemble_hub(&scratch, &["init"]);
     assert!(
         !again.status.success(),
         "it does not overwrite without --force"
@@ -1606,7 +1579,7 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
         ),
     )
     .unwrap();
-    let out = ensemble(&scratch, &["hub", "check"]);
+    let out = ensemble_hub(&scratch, &["check"]);
     assert!(
         out.status.success(),
         "{}{}",
@@ -1687,13 +1660,13 @@ fn shares_become_notes_by_hand_on_the_hub_and_in_the_background_while_it_runs() 
         r#"{"items":[{"kind":"decision","title":"Deploy day","body":"Deploys go out on Tuesdays.","tags":["ops"]}]}"#,
     );
     distill_on(&hub, &url);
-    let out = ensemble(&s, &["hub", "knowledge", "status"]);
+    let out = ensemble_hub(&s, &["knowledge", "status"]);
     assert!(
         stdout_of(&out).contains("pending: 1"),
         "{}",
         stdout_of(&out)
     );
-    let out = ensemble(&s, &["hub", "knowledge", "distill"]);
+    let out = ensemble_hub(&s, &["knowledge", "distill"]);
     assert!(
         out.status.success(),
         "{}{}",
@@ -1710,9 +1683,9 @@ fn shares_become_notes_by_hand_on_the_hub_and_in_the_background_while_it_runs() 
         note.contains("kind: decision") && note.contains("Tuesdays"),
         "{note}"
     );
-    let out = ensemble(&s, &["hub", "knowledge", "status"]);
+    let out = ensemble_hub(&s, &["knowledge", "status"]);
     assert!(stdout_of(&out).contains("pending: 0") && stdout_of(&out).contains("notes: 1"));
-    let out = ensemble(&s, &["hub", "knowledge", "rebuild"]);
+    let out = ensemble_hub(&s, &["knowledge", "rebuild"]);
     assert!(
         !out.status.success(),
         "a rebuild asks first: {}",
@@ -1740,8 +1713,8 @@ fn shares_become_notes_by_hand_on_the_hub_and_in_the_background_while_it_runs() 
     );
     assert!(said.starts_with("Shared as "), "{said}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    let vault = ensemble::knowledge::Vault::new(hub.join("vault"));
-    while !ensemble::knowledge::pipeline::pending(&vault).is_empty() {
+    let vault = ensemble_knowledge::Vault::new(hub.join("vault"));
+    while !ensemble_knowledge::pipeline::pending(&vault).is_empty() {
         assert!(
             std::time::Instant::now() < deadline,
             "the share was not distilled"
@@ -1754,8 +1727,8 @@ fn shares_become_notes_by_hand_on_the_hub_and_in_the_background_while_it_runs() 
 fn a_hub_servers_admin_adds_users_whose_tokens_are_shown_once() {
     let s = Scratch::new("hub-users");
     hub_server_of(&s);
-    let run = |args: &[&str]| command(&s).args(args).output().unwrap();
-    let out = run(&["hub", "user", "add", "ana", "--role", "member"]);
+    let run = |args: &[&str]| hub_command(&s).args(args).output().unwrap();
+    let out = run(&["user", "add", "ana", "--role", "member"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let token = stdout_of(&out).trim().to_string();
     assert!(token.starts_with("ens_"), "{token}");
@@ -1768,12 +1741,12 @@ fn a_hub_servers_admin_adds_users_whose_tokens_are_shown_once() {
         "{}",
         stderr_of(&out)
     );
-    let out = run(&["hub", "user", "add", "bob", "--role", "owner"]);
+    let out = run(&["user", "add", "bob", "--role", "owner"]);
     assert!(!out.status.success() && stderr_of(&out).contains("no role 'owner'"));
-    let out = run(&["hub", "user", "list"]);
+    let out = run(&["user", "list"]);
     assert!(stdout_of(&out).contains("ana") && stdout_of(&out).contains("1 token(s)"));
     assert!(!stdout_of(&out).contains(&token));
-    let out = run(&["hub", "user", "revoke", "ana"]);
+    let out = run(&["user", "revoke", "ana"]);
     assert!(
         stdout_of(&out).contains("revoked 1 token(s)"),
         "{}",
@@ -1781,17 +1754,17 @@ fn a_hub_servers_admin_adds_users_whose_tokens_are_shown_once() {
     );
 }
 
-/// A hub server made by `hub init`, listening on a free loopback port, with
+/// A hub server made by `ensemble-hub init`, listening on a free loopback port, with
 /// `ana` a member. Returns the hub, its address and ana's token.
-/// A hub server made by `hub init --server`, beside the project.
+/// A hub server made by `ensemble-hub init --server`, beside the project.
 /// The scratch computer's hub folder, `~/.config/ensemble/hub/`.
 fn hub_dir(scratch: &Scratch) -> PathBuf {
     scratch.0.with_extension("xdg-config").join("ensemble/hub")
 }
 
-/// A hub made by `ensemble hub init` on the scratch computer.
+/// A hub made by `ensemble-hub init` on the scratch computer.
 fn hub_server_of(scratch: &Scratch) -> PathBuf {
-    let out = command(scratch).args(["hub", "init"]).output().unwrap();
+    let out = hub_command(scratch).args(["init"]).output().unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     // No test reaches a hosted model: the sample's Anthropic backend goes.
     let hub = hub_dir(scratch);
@@ -1827,8 +1800,8 @@ fn runner_names_hub(scratch: &Scratch, url: &str) {
 /// it with `token`.
 fn runner_with_hub(scratch: &Scratch, url: &str, token: &str) {
     runner_names_hub(scratch, url);
-    let out = command(scratch)
-        .args(["runner", "login", url, "--token", token])
+    let out = runner_command(scratch)
+        .args(["login", url, "--token", token])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -1860,8 +1833,8 @@ fn hub_server(scratch: &Scratch) -> (PathBuf, String, String) {
         text.replace("127.0.0.1:7700", &address),
     )
     .unwrap();
-    let out = command(scratch)
-        .args(["hub", "user", "add", "ana", "--role", "member"])
+    let out = hub_command(scratch)
+        .args(["user", "add", "ana", "--role", "member"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -1879,15 +1852,15 @@ fn with_hub(scratch: &Scratch) -> (Served, String, String) {
 }
 
 /// The tasks of ana's `project` on the scratch computer's hub.
-fn tasks_of(scratch: &Scratch, project: &str) -> ensemble::board::DbBoard {
-    ensemble::board::DbBoard::new(&hub_dir(scratch), "ana", project)
+fn tasks_of(scratch: &Scratch, project: &str) -> ensemble_hub::board::DbBoard {
+    ensemble_hub::board::DbBoard::new(&hub_dir(scratch), "ana", project)
 }
 
 /// Keep a task of ana's `project` on the hub, for `agent`, as a client
 /// agent's `submit` does: its id.
 fn add_task(scratch: &Scratch, project: &str, title: &str, agent: &str, text: &str) -> String {
     tasks_of(scratch, project)
-        .add(&ensemble::tasks::Ticket {
+        .add(&ensemble_tasks::tasks::Ticket {
             title: title.into(),
             agent: agent.into(),
             text: text.into(),
@@ -1897,7 +1870,7 @@ fn add_task(scratch: &Scratch, project: &str, title: &str, agent: &str, text: &s
 }
 
 /// Task `id` of ana's `project`, as the hub has it now.
-fn task_of(scratch: &Scratch, project: &str, id: &str) -> ensemble::tasks::Task {
+fn task_of(scratch: &Scratch, project: &str, id: &str) -> ensemble_tasks::tasks::Task {
     tasks_of(scratch, project)
         .detail(id)
         .unwrap()
@@ -1906,11 +1879,15 @@ fn task_of(scratch: &Scratch, project: &str, id: &str) -> ensemble::tasks::Task 
 }
 
 /// The result of task `id` of ana's `project`, once it has one.
-fn outcome_of(scratch: &Scratch, project: &str, id: &str) -> Option<ensemble::tasks::Outcome> {
+fn outcome_of(
+    scratch: &Scratch,
+    project: &str,
+    id: &str,
+) -> Option<ensemble_tasks::tasks::Outcome> {
     tasks_of(scratch, project).detail(id).unwrap()?.outcome
 }
 
-/// A running `ensemble hub serve`, stopped when the test ends, passed or
+/// A running `ensemble-hub serve`, stopped when the test ends, passed or
 /// failed: left running, it would keep the test runner's output open.
 struct Served(Child);
 
@@ -1938,7 +1915,7 @@ impl Drop for Served {
 fn start_runner(s: &Scratch) -> Served {
     s.runner_yaml();
     let mut runner = bare_command(s)
-        .args(["runner", "serve"])
+        .args(["serve"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -1961,8 +1938,8 @@ fn start_runner(s: &Scratch) -> Served {
 }
 
 fn serve_hub(scratch: &Scratch, _hub: &Path) -> Served {
-    let mut child = command(scratch)
-        .args(["hub", "serve"])
+    let mut child = hub_command(scratch)
+        .args(["serve"])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -2018,8 +1995,8 @@ fn a_runner_signs_in_to_a_hub_server_and_takes_a_new_token_as_it_runs() {
     let url = format!("ws://{address}");
     runner_names_hub(&s, &url);
 
-    let out = command(&s)
-        .args(["runner", "login", &url, "--token", "ens_wrong"])
+    let out = runner_command(&s)
+        .args(["login", &url, "--token", "ens_wrong"])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -2028,14 +2005,14 @@ fn a_runner_signs_in_to_a_hub_server_and_takes_a_new_token_as_it_runs() {
         "{}",
         stderr_of(&out)
     );
-    let status = stdout_of(&ensemble(&s, &["runner", "status"]));
+    let status = stdout_of(&ensemble_runner(&s, &["status"]));
     assert!(
-        status.contains("not signed in: `ensemble runner login"),
+        status.contains("not signed in: `ensemble-runner login"),
         "nothing was saved: {status}"
     );
 
-    let out = command(&s)
-        .args(["runner", "login", &url, "--token", &token])
+    let out = runner_command(&s)
+        .args(["login", &url, "--token", &token])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2046,15 +2023,15 @@ fn a_runner_signs_in_to_a_hub_server_and_takes_a_new_token_as_it_runs() {
     );
     // An admin adds an account on the server while the hub runs: the database
     // is shared between the two processes, and the new token works at once.
-    let added = command(&s)
-        .args(["hub", "user", "add", "kim", "--role", "member"])
+    let added = hub_command(&s)
+        .args(["user", "add", "kim", "--role", "member"])
         .output()
         .unwrap();
     assert!(added.status.success(), "{}", stderr_of(&added));
     let kim = stdout_of(&added).trim().to_string();
     let other = Scratch::new("hub-remote-kim");
-    let out = command(&other)
-        .args(["runner", "login", &url, "--token", &kim])
+    let out = runner_command(&other)
+        .args(["login", &url, "--token", &kim])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2073,8 +2050,8 @@ fn a_runner_signs_in_to_a_hub_server_and_takes_a_new_token_as_it_runs() {
 
     // Signed in again, as kim: the running runner uses the new token at once.
     let _runner = start_runner(&s);
-    let out = command(&s)
-        .args(["runner", "login", &url, "--token", &kim])
+    let out = runner_command(&s)
+        .args(["login", &url, "--token", &kim])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2084,23 +2061,20 @@ fn a_runner_signs_in_to_a_hub_server_and_takes_a_new_token_as_it_runs() {
         stdout_of(&out)
     );
     // Status asks the hub whether the token works.
-    let status = stdout_of(&ensemble(&s, &["runner", "status"]));
+    let status = stdout_of(&ensemble_runner(&s, &["status"]));
     assert!(
         status.contains(&format!("hub: {url}, signed in as kim (member:")),
         "{status}"
     );
-    let out = ensemble(&s, &["hub", "user", "revoke", "kim"]);
+    let out = ensemble_hub(&s, &["user", "revoke", "kim"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let status = stdout_of(&ensemble(&s, &["runner", "status"]));
+    let status = stdout_of(&ensemble_runner(&s, &["status"]));
     assert!(
         status.contains("the hub cannot be used") && status.contains("did not accept the token"),
         "{status}"
     );
 
-    let out = command(&s)
-        .args(["runner", "logout", &url])
-        .output()
-        .unwrap();
+    let out = runner_command(&s).args(["logout", &url]).output().unwrap();
     assert!(stdout_of(&out).contains("signed out"));
     let _ = child.kill();
     let _ = child.wait();
@@ -2140,8 +2114,8 @@ fn someone_signs_up_is_let_in_and_logs_in_from_a_runner_with_a_password() {
     assert_eq!(status, 201, "{body}");
     let url = format!("ws://{address}");
     let login = |user: &str| {
-        let mut child = command(&s)
-            .args(["runner", "login", &url, "--user", user])
+        let mut child = runner_command(&s)
+            .args(["login", &url, "--user", user])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2154,10 +2128,10 @@ fn someone_signs_up_is_let_in_and_logs_in_from_a_runner_with_a_password() {
     assert!(!out.status.success());
     assert!(stderr_of(&out).contains("approval"), "{}", stderr_of(&out));
 
-    let run = |args: &[&str]| command(&s).args(args).output().unwrap();
-    let out = run(&["hub", "user", "list"]);
+    let run = |args: &[&str]| hub_command(&s).args(args).output().unwrap();
+    let out = run(&["user", "list"]);
     assert!(stdout_of(&out).contains("dana") && stdout_of(&out).contains("pending"));
-    let out = run(&["hub", "user", "approve", "dana", "--role", "member"]);
+    let out = run(&["user", "approve", "dana", "--role", "member"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let out = login("dana");
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2188,7 +2162,7 @@ fn someone_signs_up_is_let_in_and_logs_in_from_a_runner_with_a_password() {
 #[test]
 fn a_runner_file_is_written_once_and_an_account_names_itself_in_the_tracker() {
     let s = Scratch::new("runner-init");
-    let out = command(&s).args(["runner", "init"]).output().unwrap();
+    let out = runner_command(&s).args(["init"]).output().unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     let runner =
         s.0.with_extension("xdg-config")
@@ -2198,26 +2172,26 @@ fn a_runner_file_is_written_once_and_an_account_names_itself_in_the_tracker() {
         written.contains("offers:") && written.contains("workspace: ~/ensemble"),
         "{written}"
     );
-    let again = command(&s).args(["runner", "init"]).output().unwrap();
+    let again = runner_command(&s).args(["init"]).output().unwrap();
     assert!(
         !again.status.success(),
         "it does not overwrite without --force"
     );
 
     hub_server_of(&s);
-    let run = |args: &[&str]| command(&s).args(args).output().unwrap();
+    let run = |args: &[&str]| hub_command(&s).args(args).output().unwrap();
     assert!(
-        run(&["hub", "user", "add", "ana", "--role", "member"])
+        run(&["user", "add", "ana", "--role", "member"])
             .status
             .success()
     );
-    let out = run(&["hub", "user", "tracker", "ana", "ana.petrosyan"]);
+    let out = run(&["user", "tracker", "ana", "ana.petrosyan"]);
     assert!(
         stdout_of(&out).contains("ana is ana.petrosyan in the tracker"),
         "{}",
         stdout_of(&out)
     );
-    let out = run(&["hub", "user", "tracker", "ana"]);
+    let out = run(&["user", "tracker", "ana"]);
     assert!(
         stdout_of(&out).contains("the account's own name"),
         "{}",
@@ -2239,8 +2213,8 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_runner_and_reported_back() 
         text.replace("  poll_seconds: 30\n", "  poll_seconds: 1\n"),
     )
     .unwrap();
-    let out = command(&s)
-        .args(["hub", "user", "tracker", "ana", "ana.p"])
+    let out = hub_command(&s)
+        .args(["user", "tracker", "ana", "ana.p"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2278,7 +2252,7 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_runner_and_reported_back() 
     }
 }
 
-/// The binary on another computer of the scratch, `machine`: its own config
+/// The runner on another computer of the scratch, `machine`: its own config
 /// and state directories, with `runner_yaml` as its runner, working in the
 /// machine's `workspace` folder unless it says otherwise, and signed in to the
 /// hubs the scratch signed in to.
@@ -2306,7 +2280,7 @@ fn on_machine(scratch: &Scratch, machine: &str, runner_yaml: &str) -> Command {
     if tokens.exists() {
         std::fs::copy(&tokens, config.join("hubs.json")).unwrap();
     }
-    let mut c = Command::new(BIN);
+    let mut c = Command::new(RUNNER);
     c.current_dir(scratch.path())
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_STATE_HOME", home.join("state"))
@@ -2328,7 +2302,7 @@ fn machine_team(scratch: &Scratch, machine: &str, team: &str, config: &str) {
     std::fs::write(dir.join("config.yaml"), config).unwrap();
 }
 
-/// `ensemble runner serve` on the computer `machine`, whose runner is
+/// `ensemble-runner serve` on the computer `machine`, whose runner is
 /// `runner_yaml`, started and waited for until it is connected.
 fn serve_runner(scratch: &Scratch, url: &str, machine: &str, runner_yaml: &str) -> Served {
     // The runner names the hub it connects to.
@@ -2338,7 +2312,7 @@ fn serve_runner(scratch: &Scratch, url: &str, machine: &str, runner_yaml: &str) 
         runner_yaml.replacen("\noffers:", &format!("\nhub: \"{url}\"\noffers:"), 1)
     };
     let mut child = on_machine(scratch, machine, &runner_yaml)
-        .args(["runner", "serve"])
+        .args(["serve"])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -2366,8 +2340,8 @@ fn an_agent_runs_on_another_runner_and_what_it_changed_comes_back() {
     let (hub, address, token) = hub_server(&s);
     let _hub = serve_hub(&s, &hub);
     let url = format!("ws://{address}");
-    let out = command(&s)
-        .args(["runner", "login", &url, "--token", &token])
+    let out = runner_command(&s)
+        .args(["login", &url, "--token", &token])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2383,7 +2357,7 @@ fn an_agent_runs_on_another_runner_and_what_it_changed_comes_back() {
         "version: 1\nname: laptop\naccess: private\noffers:\n  runs: { agents: [work/reviewer] }\n";
     let _runner = serve_runner(&s, &url, "laptop", runner_yaml);
     runner_names_hub(&s, &url);
-    let out = command(&s).args(["runner", "peers"]).output().unwrap();
+    let out = runner_command(&s).args(["peers"]).output().unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).contains("ana/laptop  (private, 0 running)\n  agents: work/reviewer"),
@@ -2402,10 +2376,7 @@ fn an_agent_runs_on_another_runner_and_what_it_changed_comes_back() {
             "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: work/reviewer, nodes: [ana/laptop] }}\n"
         ),
     );
-    let out = ensemble(
-        &s,
-        &["runner", "agent", "run", "team/heavy", "change", "a.txt"],
-    );
+    let out = ensemble_runner(&s, &["agent", "run", "team/heavy", "change", "a.txt"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).starts_with("changed it there"),
@@ -2437,10 +2408,7 @@ fn an_agent_runs_on_another_runner_and_what_it_changed_comes_back() {
             "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: work/reviewer, nodes: [kim/gpu-box] }}\n"
         ),
     );
-    let out = ensemble(
-        &s,
-        &["runner", "agent", "run", "team/heavy", "change", "a.txt"],
-    );
+    let out = ensemble_runner(&s, &["agent", "run", "team/heavy", "change", "a.txt"]);
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("kim/gpu-box is not connected"),
@@ -2455,8 +2423,8 @@ fn a_runner_serves_its_models_through_the_hub_and_a_shared_runner_lends_no_login
     let (hub, address, token) = hub_server(&s);
     let _hub = serve_hub(&s, &hub);
     let url = format!("ws://{address}");
-    let out = command(&s)
-        .args(["runner", "login", &url, "--token", &token])
+    let out = runner_command(&s)
+        .args(["login", &url, "--token", &token])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2477,7 +2445,7 @@ fn a_runner_serves_its_models_through_the_hub_and_a_shared_runner_lends_no_login
 
     // A member may not host a shared runner.
     let out = on_machine(&s, "shared-box", &runner_yaml("shared", &models))
-        .args(["runner", "serve"])
+        .args(["serve"])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -2493,7 +2461,7 @@ fn a_runner_serves_its_models_through_the_hub_and_a_shared_runner_lends_no_login
         "shared-box",
         &runner_yaml("shared", "offers:\n  runs: { agents: [work/reviewer] }\n"),
     )
-    .args(["runner", "serve"])
+    .args(["serve"])
     .output()
     .unwrap();
     assert!(!out.status.success());
@@ -2514,8 +2482,8 @@ fn a_running_runner_reloads_its_teams() {
     let elsewhere = s.0.with_extension("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
     std::fs::write(elsewhere.join("config.yaml"), config_yaml("true", NOWHERE)).unwrap();
-    let added = command(&s)
-        .args(["runner", "team", "link", "pcb"])
+    let added = runner_command(&s)
+        .args(["team", "link", "pcb"])
         .arg(&elsewhere)
         .output()
         .unwrap();
@@ -2528,7 +2496,7 @@ fn a_running_runner_reloads_its_teams() {
 
     // A team that cannot be loaded leaves the runner's teams as they were.
     std::fs::write(elsewhere.join("config.yaml"), "version: 1\n").unwrap();
-    let out = ensemble(&s, &["runner", "reload"]);
+    let out = ensemble_runner(&s, &["reload"]);
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("kept its teams as they were")
@@ -2545,7 +2513,7 @@ fn machine_runner(scratch: &Scratch, machine: &str, url: &str) -> Served {
     let yaml =
         format!("version: 1\nname: {machine}\naccess: private\nhub: \"{url}\"\noffers: {{}}\n");
     let mut runner = on_machine(scratch, machine, &yaml)
-        .args(["runner", "serve"])
+        .args(["serve"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -2644,7 +2612,8 @@ fn a_task_stopped_on_one_computer_is_carried_on_by_another_from_its_pushed_branc
     );
     let outcome = outcome_of(&s, "proj", "0001-two-parts").unwrap();
     assert!(
-        outcome.status == ensemble::tasks::Status::Done && outcome.text.contains("both parts done"),
+        outcome.status == ensemble_tasks::tasks::Status::Done
+            && outcome.text.contains("both parts done"),
         "{}",
         outcome.text
     );
@@ -2663,17 +2632,17 @@ fn settings_are_changed_from_the_command_line_and_those_nix_declares_are_kept() 
     let s = Scratch::new("config");
     let runner = s.runner_yaml();
     let get = |key: &str| {
-        stdout_of(&ensemble(&s, &["runner", "config", "get", key]))
+        stdout_of(&ensemble_runner(&s, &["config", "get", key]))
             .trim()
             .to_string()
     };
     assert_eq!(get("name"), "desk");
 
-    let out = ensemble(&s, &["runner", "config", "set", "access", "shared"]);
+    let out = ensemble_runner(&s, &["config", "set", "access", "shared"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(get("access"), "shared");
     // One that would not load is refused, and nothing changes.
-    let out = ensemble(&s, &["runner", "config", "set", "name", "a b/c"]);
+    let out = ensemble_runner(&s, &["config", "set", "name", "a b/c"]);
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("nothing was changed"),
@@ -2681,29 +2650,26 @@ fn settings_are_changed_from_the_command_line_and_those_nix_declares_are_kept() 
         stderr_of(&out)
     );
     assert_eq!(get("name"), "desk");
-    let out = ensemble(&s, &["runner", "config", "unset", "name"]);
+    let out = ensemble_runner(&s, &["config", "unset", "name"]);
     assert!(!out.status.success(), "a runner needs a name");
     assert_eq!(
-        stdout_of(&ensemble(&s, &["runner", "config", "path"])).trim(),
+        stdout_of(&ensemble_runner(&s, &["config", "path"])).trim(),
         runner.display().to_string()
     );
 
     // What Nix declares is merged in, kept, and refused here.
     let declared = s.write("declared.yaml", "access: private\noffers: {}\n");
-    let out = ensemble(
-        &s,
-        &["runner", "config", "merge", declared.to_str().unwrap()],
-    );
+    let out = ensemble_runner(&s, &["config", "merge", declared.to_str().unwrap()]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(get("access"), "private");
-    let out = ensemble(&s, &["runner", "config", "set", "access", "shared"]);
+    let out = ensemble_runner(&s, &["config", "set", "access", "shared"]);
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("`access` is set in your Nix configuration"),
         "{}",
         stderr_of(&out)
     );
-    let out = ensemble(&s, &["runner", "config", "set", "name", "rogstrix"]);
+    let out = ensemble_runner(&s, &["config", "set", "name", "rogstrix"]);
     assert!(
         out.status.success(),
         "the rest stays the CLI's: {}",
@@ -2711,12 +2677,11 @@ fn settings_are_changed_from_the_command_line_and_those_nix_declares_are_kept() 
     );
 
     // A team made here, too; the running runner would reload it.
-    let out = ensemble(&s, &["runner", "team", "new", "web"]);
+    let out = ensemble_runner(&s, &["team", "new", "web"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let out = ensemble(
+    let out = ensemble_runner(
         &s,
         &[
-            "runner",
             "team",
             "config",
             "web",
@@ -2730,7 +2695,7 @@ fn settings_are_changed_from_the_command_line_and_those_nix_declares_are_kept() 
         "a gate needs its command: {}",
         stdout_of(&out)
     );
-    let out = ensemble(&s, &["runner", "team", "config", "web", "get", "version"]);
+    let out = ensemble_runner(&s, &["team", "config", "web", "get", "version"]);
     assert_eq!(stdout_of(&out).trim(), "1");
 }
 
@@ -2741,22 +2706,22 @@ fn signing_in_to_a_hub_names_it_in_the_runner_and_signing_out_takes_it_out() {
     let _hub = serve_hub(&s, &hub);
     s.runner_yaml();
     let url = format!("ws://{address}");
-    let out = ensemble(&s, &["runner", "login", &url, "--token", &token]);
+    let out = ensemble_runner(&s, &["login", &url, "--token", &token]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).contains("The runner names this hub now"),
         "{}",
         stdout_of(&out)
     );
-    let hub_now = stdout_of(&ensemble(&s, &["runner", "config", "get", "hub"]));
+    let hub_now = stdout_of(&ensemble_runner(&s, &["config", "get", "hub"]));
     assert_eq!(hub_now.trim(), url);
-    let status = stdout_of(&ensemble(&s, &["runner", "status"]));
+    let status = stdout_of(&ensemble_runner(&s, &["status"]));
     assert!(
         status.contains(&format!("hub: {url}, signed in")),
         "{status}"
     );
 
-    let out = ensemble(&s, &["runner", "logout", &url]);
+    let out = ensemble_runner(&s, &["logout", &url]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).contains("The runner names no hub now"),
@@ -2764,7 +2729,7 @@ fn signing_in_to_a_hub_names_it_in_the_runner_and_signing_out_takes_it_out() {
         stdout_of(&out)
     );
     assert!(
-        !ensemble(&s, &["runner", "config", "get", "hub"])
+        !ensemble_runner(&s, &["config", "get", "hub"])
             .status
             .success()
     );
@@ -2775,11 +2740,11 @@ fn a_running_runner_makes_a_change_to_its_settings_itself() {
     let s = Scratch::new("config-running");
     s.runner_yaml();
     // Not running: the command makes it, and nothing needs saying.
-    let out = ensemble(&s, &["runner", "config", "set", "access", "shared"]);
+    let out = ensemble_runner(&s, &["config", "set", "access", "shared"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(stderr_of(&out).is_empty(), "{}", stderr_of(&out));
     let mut runner = start_runner(&s);
-    let out = ensemble(&s, &["runner", "config", "set", "access", "private"]);
+    let out = ensemble_runner(&s, &["config", "set", "access", "private"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stderr_of(&out).contains("The running runner"),
@@ -2787,7 +2752,7 @@ fn a_running_runner_makes_a_change_to_its_settings_itself() {
         stderr_of(&out)
     );
     // Its errors come back as they are.
-    let out = ensemble(&s, &["runner", "config", "set", "name", "a b/c"]);
+    let out = ensemble_runner(&s, &["config", "set", "name", "a b/c"]);
     assert!(
         stderr_of(&out).contains("nothing was changed"),
         "{}",
@@ -2803,22 +2768,19 @@ fn a_running_hub_uses_a_changed_hub_yaml_at_once_or_starts_again() {
     let (hub, _address, _token) = hub_server(&s);
     let _served = serve_hub(&s, &hub);
     // Roles: used at once.
-    let out = ensemble(
-        &s,
-        &["hub", "config", "set", "roles.reader", "[recall, share]"],
-    );
+    let out = ensemble_hub(&s, &["config", "set", "roles.reader", "[recall, share]"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stderr_of(&out).contains("uses it now"),
         "{}",
         stderr_of(&out)
     );
-    let roles = stdout_of(&ensemble(&s, &["hub", "role", "list"]));
+    let roles = stdout_of(&ensemble_hub(&s, &["role", "list"]));
     assert!(roles.contains("reader:\n  - recall\n  - share"), "{roles}");
     // Where it listens: it starts again, there.
     let port = free_port();
     let listen = format!("127.0.0.1:{port}");
-    let out = ensemble(&s, &["hub", "config", "set", "server.listen", &listen]);
+    let out = ensemble_hub(&s, &["config", "set", "server.listen", &listen]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stderr_of(&out).contains("starts again"),
@@ -2829,7 +2791,7 @@ fn a_running_hub_uses_a_changed_hub_yaml_at_once_or_starts_again() {
         wait_for(15, || std::net::TcpStream::connect(&listen).is_ok()),
         "the hub listens on {listen}"
     );
-    assert!(wait_for(5, || ensemble(&s, &["hub", "user", "list"])
+    assert!(wait_for(5, || ensemble_hub(&s, &["user", "list"])
         .status
         .success()));
 }

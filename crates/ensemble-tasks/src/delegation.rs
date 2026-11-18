@@ -59,7 +59,7 @@ pub(crate) async fn run_delegation(
             let hint = if timed_out {
                 " This may be transient; the same task is worth one retry."
             } else if e.is_retryable() {
-                " `ensemble runner agent health` says what is wrong; retry once it is fixed."
+                " `ensemble-runner agent health` says what is wrong; retry once it is fixed."
             } else {
                 " Retrying this unchanged will fail the same way."
             };

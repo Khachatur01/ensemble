@@ -5,9 +5,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Ensemble's operations: everything a person can do to a hub or a runner, defined once, with the input, access and errors every interface adapts."
+description = "Ensemble's operations: everything a person can do to a hub or a runner, defined once, with the input, access and errors every interface adapts, and the command line and local socket made from them."
 
 [dependencies]
+ensemble-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_norway.workspace = true
+clap.workspace = true
+tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

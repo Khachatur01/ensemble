@@ -7,6 +7,9 @@
 //! how the run ended. A task the worker's end interrupts is put back, and a
 //! runner that dies stops renewing, so either way another run takes it up.
 //! What each run does as it goes is kept in its activity log ([`Runs`]).
+//!
+//! Its tests run it against the tasks the hub keeps, in `ensemble-hub`
+//! (`tests/queue.rs`).
 
 use super::delegation::{RunResult, run_delegation};
 use crate::board::{Board, Claim, End, LEASE, Progress, Renewal};
@@ -848,6 +851,3 @@ fn over_budget_message(agent: &str, wait: u64) -> String {
         minutes(wait)
     )
 }
-
-#[cfg(test)]
-mod tests;

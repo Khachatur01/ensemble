@@ -26,7 +26,7 @@
       "minLength": 1
     },
     "hub": {
-      "description": "The hub server it connects to, ws:// or wss://, signed in to with `ensemble runner login`: the tasks the hub has for you, and what it offers. Leave it out for no hub.",
+      "description": "The hub server it connects to, ws:// or wss://, signed in to with `ensemble-runner login`: the tasks the hub has for you, and what it offers. Leave it out for no hub.",
       "type": "string",
       "pattern": "^wss?://"
     },
@@ -49,7 +49,7 @@
       "additionalProperties": false,
       "properties": {
         "cli": {
-          "description": "`ensemble hub …` or `ensemble runner …` on its computer, run by the running process over its socket when it runs.",
+          "description": "`ensemble-hub …` or `ensemble-runner …` on its computer, run by the running process over its socket when it runs.",
           "type": "object",
           "additionalProperties": false
         }

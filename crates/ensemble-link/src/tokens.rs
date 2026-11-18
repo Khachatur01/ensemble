@@ -1,5 +1,5 @@
 //! Where a runner keeps its hub tokens: `~/.config/ensemble/runner/hubs.json`
-//! (under `$XDG_CONFIG_HOME` when that is set), one token per hub URL. Only its user can read it, like an SSH key; `ensemble runner login` writes it.
+//! (under `$XDG_CONFIG_HOME` when that is set), one token per hub URL. Only its user can read it, like an SSH key; `ensemble-runner login` writes it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -61,10 +61,23 @@ impl Tokens {
         }
         let json = serde_json::to_string_pretty(&self.tokens).map_err(|e| e.to_string())?;
         let tmp = self.path.with_extension("tmp");
-        crate::users::write_private(&tmp, &json)
+        write_private(&tmp, &json)
             .and_then(|()| std::fs::rename(&tmp, &self.path))
             .map_err(|e| format!("cannot write {}: {e}", self.path.display()))
     }
+}
+
+/// Write `text` to a new file only its owner can read.
+fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(text.as_bytes())
 }
 
 #[cfg(test)]

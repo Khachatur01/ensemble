@@ -185,7 +185,7 @@ impl Vault {
         &self.root
     }
 
-    /// Is it a git repository? `ensemble hub init` makes it one.
+    /// Is it a git repository? `ensemble-hub init` makes it one.
     pub fn exists(&self) -> bool {
         self.root.join(".git").exists()
     }

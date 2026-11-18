@@ -150,8 +150,8 @@ impl SettingsFile {
 
     /// Merge the settings of the YAML file `from` into the file, and note them
     /// as declared in Nix. The file is written even when the merge leaves it
-    /// incomplete: the settings not in Nix are made with `ensemble`. What is
-    /// missing is said.
+    /// incomplete: the settings not in Nix are made with `ensemble-hub` or
+    /// `ensemble-runner`. What is missing is said.
     pub fn merge(&self, from: &Path) -> Result<Option<String>, Error> {
         let doc = std::fs::read_to_string(from)
             .map_err(|e| Error::failed(format!("{}: {e}", from.display())))?;
@@ -363,7 +363,7 @@ mod tests {
         let dir = scratch("ops");
         let path = dir.join("runner.yaml");
         std::fs::write(&path, "# mine\nname: laptop\nhub: wss://a\n").unwrap();
-        let file = SettingsFile::new(path.clone(), "`ensemble runner setup`", |t| {
+        let file = SettingsFile::new(path.clone(), "`ensemble-runner setup`", |t| {
             if t.contains("name: \"\"") || t.contains("name: ''") {
                 Err("name: is empty".into())
             } else {
@@ -426,7 +426,7 @@ mod tests {
         let err = run("config.get", json!({})).unwrap_err();
         assert_eq!(
             err.hint.as_deref(),
-            Some("`ensemble runner setup` writes it")
+            Some("`ensemble-runner setup` writes it")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

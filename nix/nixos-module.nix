@@ -1,12 +1,12 @@
-# The NixOS module: a hub, `ensemble hub serve`, as a system service, and this
-# computer's runner, `ensemble runner serve`, as a user service. Each runs as the
+# The NixOS module: a hub, `ensemble-hub serve`, as a system service, and this
+# computer's runner, `ensemble-runner serve`, as a user service. Each runs as the
 # person it is for, from their `~/.config/ensemble/`, so they manage it with
-# `ensemble` as on any platform. What should always hold is written in Nix:
-# the settings declared here are merged into `hub.yaml` and `runner.yaml` when
-# each starts, and teams are linked in. The rest is made and changed with
-# `ensemble` (`ensemble hub init`, `ensemble runner setup`, `… config set`,
-# `ensemble runner team …`), which refuses to change what Nix declares. Each
-# process starts once its file is there.
+# `ensemble-hub` and `ensemble-runner` as on any platform. What should always
+# hold is written in Nix: the settings declared here are merged into
+# `hub.yaml` and `runner.yaml` when each starts, and teams are linked in. The
+# rest is made and changed with `ensemble-hub init`, `ensemble-runner setup`,
+# `… config set` and `ensemble-runner team …`, which refuse to change what Nix
+# declares. Each process starts once its file is there.
 { self }:
 {
   config,
@@ -24,8 +24,7 @@ let
     ;
   cfg = config.services.ensemble;
   yaml = pkgs.formats.yaml { };
-  runner = import ./runner.nix { inherit lib; };
-  package = cfg.package;
+  runner = import ./runner.nix { inherit self lib; };
 
   hub = cfg.hub;
   hubDir = "${config.users.users.${hub.user}.home}/.config/ensemble/hub";
@@ -39,27 +38,27 @@ let
 in
 {
   options.services.ensemble = {
-    package = mkOption {
-      type = types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-      defaultText = lib.literalExpression "ensemble.packages.\${system}.default";
-      description = "The Ensemble package.";
-    };
-
     hub = {
       enable = mkEnableOption ''
-        an Ensemble hub, `ensemble hub serve`: knowledge, tasks, accounts, and
+        an Ensemble hub, `ensemble-hub serve`: knowledge, tasks, accounts, and
         the link runners connect to. It runs as `services.ensemble.hub.user`,
         from their `~/.config/ensemble/hub/`, and they manage it with
-        `ensemble hub …` as themselves
+        `ensemble-hub …` as themselves
       '';
+
+      package = mkOption {
+        type = types.package;
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.ensemble-hub;
+        defaultText = lib.literalExpression "ensemble.packages.\${system}.ensemble-hub";
+        description = "The package of `ensemble-hub`.";
+      };
 
       user = mkOption {
         type = types.str;
         description = ''
           Whose hub it is: it runs as them, and its files are in their
           `~/.config/ensemble/hub/`. For a hub of an account of its own, make
-          that user, and run `ensemble hub …` as it.
+          that user, and run `ensemble-hub …` as it.
         '';
         example = "ana";
       };
@@ -72,10 +71,10 @@ in
           `llm_backends`, `knowledge`, `server`, `roles` and `tasks`, down to
           one setting such as `server.listen`. They are merged into the hub's
           `hub.yaml` whenever it starts; the rest is made and changed with
-          `ensemble` (`ensemble hub init`, `ensemble hub config set`), which
-          refuses to change those declared here. `ensemble hub init --stdout`
-          prints every setting. Null leaves the whole file to `ensemble`, and
-          the hub starts once `ensemble hub init` has written it.
+          `ensemble-hub init` and `ensemble-hub config set`, which refuse to
+          change those declared here. `ensemble-hub init --stdout` prints every
+          setting. Null leaves the whole file to `ensemble-hub`, and the hub
+          starts once `ensemble-hub init` has written it.
         '';
         example = lib.literalExpression ''
           {
@@ -114,7 +113,7 @@ in
         default = null;
         description = ''
           A file of NAME=value lines, the API keys the hub's backends name in
-          `api_key_env`, given to `ensemble hub serve` as `--env-file`, such
+          `api_key_env`, given to `ensemble-hub serve` as `--env-file`, such
           as a secret sops-nix or agenix puts in /run. A path as a string, so
           the keys never enter the Nix store. Null reads the hub's own
           `~/.config/ensemble/hub/.env`, when there is one.
@@ -133,7 +132,7 @@ in
 
     runner = {
       enable = mkEnableOption ''
-        this computer's Ensemble runner, `ensemble runner serve`, as a user
+        this computer's Ensemble runner, `ensemble-runner serve`, as a user
         service of `services.ensemble.runner.user`: it works on the tasks of
         its hub in the git repositories of its workspace
       '';
@@ -148,9 +147,10 @@ in
   };
 
   config = mkMerge [
-    (mkIf (hub.enable || runnerCfg.enable) {
-      environment.systemPackages = [ package ];
-    })
+    {
+      environment.systemPackages =
+        lib.optional hub.enable hub.package ++ lib.optional runnerCfg.enable runnerCfg.package;
+    }
 
     (mkIf hub.enable {
       assertions = [
@@ -170,7 +170,7 @@ in
         after = [ "network-online.target" ];
         wants = [ "network-online.target" ];
         restartTriggers = lib.optional (hubYaml != null) hubYaml;
-        # Without settings, it waits for `ensemble hub init`.
+        # Without settings, it waits for `ensemble-hub init`.
         unitConfig = lib.optionalAttrs (hubYaml == null) {
           ConditionPathExists = "${hubDir}/hub.yaml";
         };
@@ -180,8 +180,8 @@ in
           if hubYaml != null then
             ''
               # A hub to merge into: the sample, with its vault.
-              [ -e ${hubDir}/hub.yaml ] || ${lib.getExe package} hub init
-              ${lib.getExe package} hub config merge ${hubYaml}
+              [ -e ${hubDir}/hub.yaml ] || ${lib.getExe hub.package} init
+              ${lib.getExe hub.package} config merge ${hubYaml}
             ''
           else
             ''
@@ -190,8 +190,7 @@ in
         serviceConfig = {
           ExecStart = lib.escapeShellArgs (
             [
-              (lib.getExe package)
-              "hub"
+              (lib.getExe hub.package)
               "serve"
             ]
             ++ lib.optionals (hub.environmentFile != null) [
@@ -214,7 +213,7 @@ in
         unitConfig = {
           ConditionUser = runnerCfg.user;
         }
-        # Without settings, it waits for `ensemble runner setup`.
+        # Without settings, it waits for `ensemble-runner setup`.
         // lib.optionalAttrs (runnerFiles.runnerYaml == null) {
           ConditionPathExists = "%h/.config/ensemble/runner/runner.yaml";
         };
@@ -222,19 +221,19 @@ in
           lib.optional (runnerFiles.runnerYaml != null) runnerFiles.runnerYaml
           ++ lib.attrValues runnerFiles.teams;
         path = [
-          package
+          runnerCfg.package
           pkgs.git
         ]
         ++ runnerCfg.extraPackages;
         serviceConfig = {
           ExecStartPre = runner.linkScript {
-            inherit pkgs package;
+            inherit pkgs;
+            inherit (runnerCfg) package;
             files = runnerFiles;
           };
           ExecStart = lib.escapeShellArgs (
             [
-              (lib.getExe package)
-              "runner"
+              (lib.getExe runnerCfg.package)
               "serve"
             ]
             ++ lib.optionals (runnerCfg.environmentFile != null) [

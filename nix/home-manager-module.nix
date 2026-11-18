@@ -1,8 +1,8 @@
-# The Home Manager module: this computer's runner, `ensemble runner serve`,
+# The Home Manager module: this computer's runner, `ensemble-runner serve`,
 # for the person whose home it is, on Linux (a systemd user service) and on
 # macOS (a launchd agent). What its settings and teams should always be may be
 # written in Nix, like the NixOS module's runner; the rest is made with
-# `ensemble`, as on any platform. It runs once there is a runner.
+# `ensemble-runner`, as on any platform. It runs once there is a runner.
 { self }:
 {
   config,
@@ -11,21 +11,20 @@
   ...
 }:
 let
-  inherit (lib) mkEnableOption mkIf mkOption types;
+  inherit (lib) mkEnableOption mkIf;
   cfg = config.services.ensemble.runner;
   yaml = pkgs.formats.yaml { };
-  runner = import ./runner.nix { inherit lib; };
+  runner = import ./runner.nix { inherit self lib; };
   files = runner.files { inherit pkgs yaml cfg; };
   links = runner.linkScript {
     inherit pkgs files;
     inherit (cfg) package;
   };
   path = lib.makeBinPath ([ cfg.package pkgs.git ] ++ cfg.extraPackages);
-  # Written by `ensemble runner setup`, with what `settings` declares merged in.
+  # Written by `ensemble-runner setup`, with what `settings` declares merged in.
   runnerYaml = "${config.xdg.configHome}/ensemble/runner/runner.yaml";
   command = [
     (lib.getExe cfg.package)
-    "runner"
     "serve"
   ]
   ++ lib.optionals (cfg.environmentFile != null) [
@@ -36,15 +35,9 @@ in
 {
   options.services.ensemble.runner = {
     enable = mkEnableOption ''
-      this computer's Ensemble runner, `ensemble runner serve`: it works on the
+      this computer's Ensemble runner, `ensemble-runner serve`: it works on the
       tasks of its hub in the git repositories of its workspace
     '';
-    package = mkOption {
-      type = types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-      defaultText = lib.literalExpression "ensemble.packages.\${system}.default";
-      description = "The Ensemble package.";
-    };
   }
   // runner.options { inherit pkgs yaml; };
 

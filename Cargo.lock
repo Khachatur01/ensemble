@@ -648,23 +648,14 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 name = "ensemble"
 version = "0.1.0"
 dependencies = [
- "clap",
- "clap_complete",
  "ensemble-agents",
- "ensemble-backends",
- "ensemble-config",
  "ensemble-core",
- "ensemble-inbox",
+ "ensemble-hub",
  "ensemble-knowledge",
- "ensemble-link",
- "ensemble-node",
- "ensemble-ops",
+ "ensemble-runner",
  "ensemble-tasks",
  "libc",
- "serde",
  "serde_json",
- "serde_norway",
- "tokio",
  "ureq",
 ]
 
@@ -719,17 +710,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "ensemble-inbox"
+name = "ensemble-hub"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "clap",
+ "clap_complete",
+ "ensemble-agents",
+ "ensemble-backends",
  "ensemble-config",
  "ensemble-core",
+ "ensemble-knowledge",
  "ensemble-link",
+ "ensemble-ops",
+ "ensemble-store",
  "ensemble-tasks",
+ "futures-util",
+ "ring",
  "serde",
  "serde_json",
  "serde_norway",
  "tokio",
+ "tokio-tungstenite",
+ "ureq",
 ]
 
 [[package]]
@@ -750,42 +753,46 @@ dependencies = [
 name = "ensemble-link"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "ensemble-config",
  "ensemble-core",
- "ensemble-knowledge",
- "ensemble-ops",
- "ensemble-store",
  "futures-util",
- "ring",
  "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
- "ureq",
-]
-
-[[package]]
-name = "ensemble-node"
-version = "0.1.0"
-dependencies = [
- "ensemble-agents",
- "ensemble-config",
- "ensemble-core",
- "ensemble-link",
- "futures-util",
- "reqwest",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
 name = "ensemble-ops"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "ensemble-core",
+ "libc",
  "serde",
  "serde_json",
  "serde_norway",
+ "tokio",
+]
+
+[[package]]
+name = "ensemble-runner"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "clap_complete",
+ "ensemble-agents",
+ "ensemble-backends",
+ "ensemble-config",
+ "ensemble-core",
+ "ensemble-link",
+ "ensemble-ops",
+ "ensemble-tasks",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ureq",
 ]
 
 [[package]]

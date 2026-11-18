@@ -7,7 +7,7 @@ use serde::Deserialize;
 /// The interfaces a hub or a runner turns on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Interfaces {
-    /// `ensemble hub …` or `ensemble runner …` on its computer: run by the
+    /// `ensemble-hub …` or `ensemble-runner …` on its computer: run by the
     /// running process, over its socket, when it runs.
     pub cli: bool,
     /// The hub's MCP over HTTP, for client agents. A hub's alone.

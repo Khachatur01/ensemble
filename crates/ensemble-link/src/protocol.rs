@@ -110,13 +110,6 @@ pub struct Event {
     pub data: Value,
 }
 
-/// The hub's tasks, as the link passes requests to them, so the link knows
-/// nothing of how they are kept.
-pub trait TaskService: Sync {
-    /// One of [`TASK_METHODS`], for `user`'s own tasks.
-    fn handle(&self, user: &str, method: &str, params: &Value) -> Result<Value, String>;
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub id: u64,

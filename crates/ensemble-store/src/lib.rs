@@ -1,6 +1,6 @@
 //! The hub server's state that changes while it runs: its accounts and their
-//! tokens (`ensemble_link::users`), the tasks it keeps for them
-//! (`ensemble_tasks::board`), which issue of the tracker became which task (the
+//! tokens (`ensemble_hub::users`), the tasks it keeps for them
+//! (`ensemble_hub::board`), which issue of the tracker became which task (the
 //! inbox). One Turso database, `database.db`, in the hub's folder
 //! (`~/.config/ensemble/hub/`), which only whoever runs the hub may enter.
 //! [`open`] opens another Turso file, such as the knowledge vault's cache of
@@ -9,7 +9,7 @@
 //! Turso locks the file while it is open, and another process cannot open it
 //! then. So each read or change opens it, does its work (a change in one
 //! transaction), and closes it; an open that finds the file locked tries again
-//! for a few seconds. That is what lets `ensemble hub user` change accounts on
+//! for a few seconds. That is what lets `ensemble-hub user` change accounts on
 //! the server while the hub runs.
 
 use ensemble_core::runtime;

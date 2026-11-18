@@ -1,14 +1,14 @@
 # What the NixOS and Home Manager modules share about a runner: its options,
 # and the files they become. The settings declared in Nix are merged into the
 # runner's own `runner.yaml`, each time, setting by setting, so the rest of it
-# stays the person's to change with `ensemble runner config`; `ensemble`
-# refuses to change one Nix declares. Each team declared in Nix is a folder
+# stays the person's to change with `ensemble-runner config`, which refuses to
+# change one Nix declares. Each team declared in Nix is a folder
 # with a `config.yaml`, written from Nix or taken from a path (such as a flake
 # input that pins a company's team repository), linked into the runner's teams
 # directory, `~/.config/ensemble/runner/teams/`, and read-only there. Nothing
 # here adds a setting: Ensemble refuses a file with one missing, and says
 # which.
-{ lib }:
+{ self, lib }:
 let
   inherit (lib) mkOption types;
 in
@@ -16,6 +16,13 @@ in
   options =
     { pkgs, yaml }:
     {
+      package = mkOption {
+        type = types.package;
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.ensemble-runner;
+        defaultText = lib.literalExpression "ensemble.packages.\${system}.ensemble-runner";
+        description = "The package of `ensemble-runner`.";
+      };
+
       settings = mkOption {
         type = types.nullOr yaml.type;
         default = null;
@@ -24,11 +31,11 @@ in
           `name`, `access`, `workspace`, `hub` and `offers`, down to one
           setting such as `offers.models.base_url`. They are merged into
           `~/.config/ensemble/runner/runner.yaml` whenever the runner starts;
-          the settings not declared here are made and changed with `ensemble`
-          (`ensemble runner setup`, `ensemble runner config set`, `ensemble
-          runner login`), which refuses to change those declared here.
-          `ensemble runner init --stdout` prints every setting. Null leaves the
-          whole file to `ensemble`.
+          the settings not declared here are made and changed with
+          `ensemble-runner` (`ensemble-runner setup`, `ensemble-runner config
+          set`, `ensemble-runner login`), which refuses to change those declared
+          here. `ensemble-runner init --stdout` prints every setting. Null
+          leaves the whole file to `ensemble-runner`.
         '';
         example = lib.literalExpression ''
           {
@@ -50,7 +57,7 @@ in
           runner runs, and one added later is found within half a minute.
           `~/` is the person's home directory. Merged into `runner.yaml` like
           `settings`, in place of a `workspace` there. Null leaves it to
-          `settings`, or to `ensemble runner setup`.
+          `settings`, or to `ensemble-runner setup`.
         '';
         example = "~/ensemble";
       };
@@ -63,7 +70,7 @@ in
                 type = types.nullOr yaml.type;
                 default = null;
                 description = ''
-                  The team's `config.yaml`, as Nix. `ensemble runner team new --stdout`
+                  The team's `config.yaml`, as Nix. `ensemble-runner team new --stdout`
                   prints every setting.
                 '';
               };
@@ -82,8 +89,9 @@ in
         description = ''
           The runner's helper teams, by name; their agents are `<name>/<agent>`.
           Each is linked into `~/.config/ensemble/runner/teams/`, beside the
-          teams made there by hand (`ensemble runner team new`, `pull`, `link`),
-          which are left alone. A team declared here is read-only to `ensemble`.
+          teams made there by hand (`ensemble-runner team new`, `pull`, `link`),
+          which are left alone. A team declared here is read-only to
+          `ensemble-runner`.
         '';
         example = lib.literalExpression ''
           {
@@ -104,7 +112,7 @@ in
         default = null;
         description = ''
           A file of NAME=value lines, the API keys the teams' backends name in
-          `api_key_env`, given to `ensemble runner serve` as `--env-file`, such
+          `api_key_env`, given to `ensemble-runner serve` as `--env-file`, such
           as a secret sops-nix or agenix puts in /run. A path as a string, so
           the keys never enter the Nix store. Null reads the runner's own
           `~/.config/ensemble/runner/.env`, when there is one.
@@ -170,12 +178,12 @@ in
       ${
         if files.runnerYaml != null then
           ''
-            # A runner to merge into: as `ensemble runner setup` makes one.
+            # A runner to merge into: as `ensemble-runner setup` makes one.
             if [ ! -e "$dir/runner.yaml" ]; then
               printf 'version: 1\nname: %s\naccess: private\nworkspace: ~/ensemble\noffers: {}\ninterfaces:\n  cli: {}\n' \
                 "$(${pkgs.hostname}/bin/hostname -s)" > "$dir/runner.yaml"
             fi
-            ${lib.getExe package} runner config merge ${files.runnerYaml}
+            ${lib.getExe package} config merge ${files.runnerYaml}
           ''
         else
           ''rm -f "$dir/.nix-managed"''

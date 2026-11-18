@@ -63,7 +63,7 @@ impl Connection {
         .map_err(|_| format!("cannot reach the hub {url}: it did not answer in time"))?;
         let (socket, _) = opened.map_err(|e| match e {
             tungstenite::Error::Http(resp) if resp.status() == 401 => format!(
-                "the hub {url} did not accept the token; `ensemble runner login {url}` with a new one"
+                "the hub {url} did not accept the token; `ensemble-runner login {url}` with a new one"
             ),
             e => format!("cannot reach the hub {url}: {e}"),
         })?;
@@ -174,7 +174,7 @@ pub struct Hello {
     pub permissions: Vec<String>,
 }
 
-/// A hub token that may be replaced while it is used, as when `ensemble runner
+/// A hub token that may be replaced while it is used, as when `ensemble-runner
 /// login` signs in again: every link given it connects again with the new one.
 #[derive(Clone)]
 pub struct Token(std::sync::Arc<tokio::sync::watch::Sender<String>>);
@@ -297,110 +297,33 @@ fn hello_from(v: &Value) -> Hello {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::testing::start;
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn hello_says_who_the_token_is_and_a_bad_token_is_named() {
-        let hub = start();
-        let hello = Link::new(&hub.url, &hub.ana).hello().await.unwrap();
-        assert_eq!(
-            (hello.user.as_str(), hello.role.as_str()),
-            ("ana", "member")
-        );
-        assert!(
-            hello.permissions.contains(&"share".to_string()),
-            "{hello:?}"
-        );
-        let rex = Link::new(&hub.url, &hub.rex).hello().await.unwrap();
-        assert_eq!(rex.permissions, vec!["recall"]);
-
-        let err = Link::new(&hub.url, "ens_wrong").hello().await.unwrap_err();
-        assert!(err.contains("did not accept the token"), "{err}");
+    /// A stand-in hub on loopback that answers the first request of each
+    /// connection as `ana`, and then hangs up.
+    async fn hub_that_hangs_up() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    if let Some(Ok(Message::Text(text))) = socket.next().await {
+                        let asked: Request = serde_json::from_str(&text).unwrap();
+                        let hello = json!({"user": "ana", "role": "member", "permissions": []});
+                        let reply = serde_json::to_string(&Reply::ok(asked.id, hello)).unwrap();
+                        let _ = socket.send(Message::text(reply)).await;
+                    }
+                });
+            }
+        });
+        url
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn the_link_is_opened_again_when_it_breaks() {
-        let hub = start();
-        let link = Link::new(&hub.url, &hub.ana);
-        link.hello().await.unwrap();
-        // Break it from this side: the next request opens a new one.
-        if let Some((open, _)) = link.socket.lock().await.as_mut() {
-            open.close().await;
-        }
+        let link = Link::new(&hub_that_hangs_up().await, "ens_any");
         assert_eq!(link.hello().await.unwrap().user, "ana");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_replaced_token_is_used_from_the_next_request_on() {
-        let hub = start();
-        let token = Token::new("ens_wrong");
-        let link = Link::with_token(&hub.url, token.clone());
-        assert!(link.hello().await.is_err());
-        assert!(token.set(&hub.rex));
-        assert!(!token.set(&hub.rex), "the same token is no change");
-        assert_eq!(link.hello().await.unwrap().user, "rex");
-        token.set(&hub.ana);
+        // The hub hung up after it answered: the next request opens a new one.
         assert_eq!(link.hello().await.unwrap().user, "ana");
-    }
-}
-
-#[cfg(test)]
-mod task_tests {
-    use super::*;
-    use crate::protocol::{TASK_METHODS, TASKS, TaskService};
-    use crate::server::testing::start_with;
-    use std::sync::Mutex;
-
-    /// What runners asked of the tasks.
-    #[derive(Default)]
-    struct FakeTasks {
-        heard: Mutex<Vec<(String, String, Value)>>,
-    }
-
-    impl TaskService for FakeTasks {
-        fn handle(&self, user: &str, method: &str, params: &Value) -> Result<Value, String> {
-            self.heard
-                .lock()
-                .unwrap()
-                .push((user.into(), method.into(), params.clone()));
-            Ok(json!({ "tasks": [] }))
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn task_requests_reach_the_service_as_the_signed_in_account() {
-        let tasks: &'static FakeTasks = Box::leak(Box::default());
-        let hub = start_with(Some(tasks));
-        let link = Link::new(&hub.url, &hub.ana);
-        let v = link
-            .ask(TASKS, json!({"project": "shop", "owner": "mallory"}))
-            .await
-            .unwrap();
-        assert_eq!(v, json!({ "tasks": [] }));
-        let heard = tasks.heard.lock().unwrap().clone();
-        assert_eq!(
-            heard,
-            vec![(
-                "ana".to_string(),
-                TASKS.to_string(),
-                json!({"project": "shop", "owner": "mallory"})
-            )],
-            "the account is the token's, never one the runner sends"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_token_without_the_tasks_permission_reaches_no_task() {
-        let tasks: &'static FakeTasks = Box::leak(Box::default());
-        let hub = start_with(Some(tasks));
-        let link = Link::new(&hub.url, &hub.rex);
-        for method in TASK_METHODS {
-            let err = link
-                .ask(method, json!({"project": "shop"}))
-                .await
-                .unwrap_err();
-            assert!(err.contains("do not allow `tasks`"), "{method}: {err}");
-        }
-        assert!(tasks.heard.lock().unwrap().is_empty());
     }
 }

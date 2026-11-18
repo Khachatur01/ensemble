@@ -3,12 +3,12 @@
 //! in one of three ways:
 //!
 //! - **made here**: a folder with its `config.yaml`, written by a person
-//!   (`ensemble runner team new`) or by an agent at the person's request, which waits
+//!   (`ensemble-runner team new`) or by an agent at the person's request, which waits
 //!   for approval (a `pending` file beside it) until the person approves it;
 //! - **linked**: a symbolic link to a folder elsewhere, such as a checkout of
-//!   the team's repository (`ensemble runner team link`);
+//!   the team's repository (`ensemble-runner team link`);
 //! - **pulled**: a folder with `pulled.json`, naming a git repository and the
-//!   commit it is pinned to (`ensemble runner team pull`); the team itself is the
+//!   commit it is pinned to (`ensemble-runner team pull`); the team itself is the
 //!   clone in the cache, checked and trusted per commit.
 //!
 //! The runner runs every team that is ready at once, as one [`Config`]: each
@@ -64,7 +64,7 @@ impl TeamEntry {
         };
         if self.pending {
             format!(
-                "{origin}, waiting for approval: ensemble runner team approve {}",
+                "{origin}, waiting for approval: ensemble-runner team approve {}",
                 self.name
             )
         } else {
@@ -163,7 +163,7 @@ pub fn create_pending(dir: &Path, name: &str, text: &str, by: &str) -> Result<Pa
         std::fs::write(
             path.join(PENDING_FILE),
             format!(
-                "Written by {by}. It runs once you approve it: ensemble runner team approve {name}\n"
+                "Written by {by}. It runs once you approve it: ensemble-runner team approve {name}\n"
             ),
         )
     });

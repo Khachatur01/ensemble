@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-const BIN: &str = env!("CARGO_BIN_EXE_ensemble");
+const BIN: &str = env!("CARGO_BIN_EXE_ensemble-runner");
 
 fn enabled() -> bool {
     std::env::var("ENSEMBLE_REAL_CLI").is_ok_and(|v| v == "1")
@@ -38,7 +38,7 @@ impl Project {
         Project(dir)
     }
 
-    fn ensemble(&self, args: &[&str]) -> std::process::Output {
+    fn runner(&self, args: &[&str]) -> std::process::Output {
         Command::new(BIN)
             .args(args)
             .env("XDG_CONFIG_HOME", self.0.join("config"))
@@ -47,7 +47,7 @@ impl Project {
             .env("XDG_DATA_HOME", self.0.join("data"))
             .current_dir(self.0.join("work"))
             .output()
-            .expect("run ensemble")
+            .expect("run ensemble-runner")
     }
 }
 
@@ -65,15 +65,14 @@ fn config(agent: &str, adapter: &str) -> String {
 
 fn check(agent: &str, adapter: &str) {
     let project = Project::new(&config(agent, adapter));
-    let health = project.ensemble(&["runner", "agent", "health"]);
+    let health = project.runner(&["agent", "health"]);
     assert!(
         health.status.success(),
         "health failed: {}{}",
         String::from_utf8_lossy(&health.stdout),
         String::from_utf8_lossy(&health.stderr)
     );
-    let run = project.ensemble(&[
-        "runner",
+    let run = project.runner(&[
         "agent",
         "run",
         &format!("probe/{agent}"),

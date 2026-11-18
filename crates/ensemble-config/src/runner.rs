@@ -22,7 +22,7 @@ pub const RUNNER_SCHEMA: &str = include_str!("../../../runner.schema.json");
 /// The first line of a runner file, which points an editor at its schema.
 pub const RUNNER_SCHEMA_URL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/runner.schema.json";
 
-/// The file `ensemble runner init` writes.
+/// The file `ensemble-runner init` writes.
 pub const RUNNER_SAMPLE: &str = include_str!("runner_sample.yaml");
 
 /// One runner.
@@ -36,7 +36,7 @@ pub struct Runner {
     /// project, named for its folder, whose tasks the runner runs.
     pub workspace: PathBuf,
     /// The hub server it connects to, `ws://` or `wss://`, signed in to with
-    /// `ensemble runner login`. None: it uses no hub.
+    /// `ensemble-runner login`. None: it uses no hub.
     pub hub: Option<String>,
     pub offers: Offers,
     /// How it may be managed.

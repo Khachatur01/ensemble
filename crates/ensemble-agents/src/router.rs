@@ -82,7 +82,7 @@ impl std::fmt::Display for RouteError {
             } => write!(
                 f,
                 "agent '{agent}' has no model it can run on now: {}.{} \
-                 `ensemble runner agent health` shows what each backend answers.",
+                 `ensemble-runner agent health` shows what each backend answers.",
                 refusals
                     .iter()
                     .map(|r| format!("{} ({}): {}", r.backend, r.model, r.why))
@@ -214,7 +214,7 @@ impl Ensemble {
     }
 
     /// The index of the model a run of `name` would use now, asking its
-    /// backends, or why there is none. For `ensemble runner agent show --probe`.
+    /// backends, or why there is none. For `ensemble-runner agent show --probe`.
     pub fn probe(&self, name: &str) -> Result<usize, RouteError> {
         let config = self.config();
         let agent = Self::resolve(&config, name)?;
@@ -302,7 +302,7 @@ impl Ensemble {
         })
     }
 
-    /// Where an agent runs, and on which model. Used by `ensemble runner agent list`;
+    /// Where an agent runs, and on which model. Used by `ensemble-runner agent list`;
     /// starts nothing.
     pub fn route_of(&self, name: &str) -> Result<(String, String), RouteError> {
         let config = self.config();

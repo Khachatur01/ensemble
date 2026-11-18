@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/hub.schema.json
 
-# hub.yaml — a hub, written by `ensemble hub init` in ~/.config/ensemble/hub/.
-# Run it with `ensemble hub serve`. A hub provides services and connects
+# hub.yaml — a hub, written by `ensemble-hub init` in ~/.config/ensemble/hub/.
+# Run it with `ensemble-hub serve`. A hub provides services and connects
 # runners: it has no helper team and runs no agents. Client agents reach it
 # over MCP (`interfaces.mcp`) to share to and recall from the knowledge vault
 # here and to make tasks; runners connect to it (each names it as `hub:` in its
@@ -9,13 +9,13 @@
 # helper teams; shared runners lend their power through it. It may serve
 # a team, or one person on their own computer. API keys never go here: they come
 # from the environment, or from a file passed with --env-file. Accounts are not
-# here either: they are kept in database.db beside it (`ensemble hub user`, or
+# here either: they are kept in database.db beside it (`ensemble-hub user`, or
 # the REST API under /api/v1/).
 #
 # Nothing has a default value: every setting is written here, and one that is
 # missing is refused by name. Only these may be left out, because leaving them
 # out means "not used": `tasks`, and a backend's `api_key_env`.
-# Check the file with `ensemble hub check`.
+# Check the file with `ensemble-hub check`.
 
 version: 1
 
@@ -64,7 +64,7 @@ knowledge:
 # ---------------------------------------------------------------------------
 # Tasks: issues in the tracker with the label reach the helper team of the
 # member they are assigned to. An account names itself in the tracker with
-# `tracker_user` (PUT /api/v1/me, or `ensemble hub user tracker`); each member's
+# `tracker_user` (PUT /api/v1/me, or `ensemble-hub user tracker`); each member's
 # runner works on them in the repository of the project's name in its workspace.
 # Leave this block out for no inbox.
 # ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ server:
   lockout:
     failures: 5                  # failed logins before a name is refused
     minutes: 15                  # and for how long
-roles:                           # names are yours; the first admin: `ensemble hub user add`
+roles:                           # names are yours; the first admin: `ensemble-hub user add`
   # Permissions: share, recall, tasks, admin; compute (use shared runners) and
   # host (connect a shared runner that works for those with compute).
   admin: [admin, share, recall, tasks, compute, host]
@@ -100,6 +100,6 @@ roles:                           # names are yours; the first admin: `ensemble h
 # Interfaces: how the hub is reached. Left out, the command line alone is on.
 # ---------------------------------------------------------------------------
 interfaces:
-  cli: {}                        # `ensemble hub …` on this computer, run by the running hub
+  cli: {}                        # `ensemble-hub …` on this computer, run by the running hub
   mcp:                           # MCP for client agents at <url>/mcp, an account's token as the API key
     url: http://127.0.0.1:7700   # the address clients reach the hub at; left out: no MCP

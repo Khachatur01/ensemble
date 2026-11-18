@@ -26,11 +26,11 @@ use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILENAME: &str = "config.yaml";
 
-/// The JSON Schema for `config.yaml`, for editors. `ensemble runner team schema`
+/// The JSON Schema for `config.yaml`, for editors. `ensemble-runner team schema`
 /// prints it; the tests keep it in step with the structs below.
 pub const SCHEMA: &str = include_str!("../../../ensemble.schema.json");
 
-/// The config `ensemble runner team new` writes: every setting at least once, with what
+/// The config `ensemble-runner team new` writes: every setting at least once, with what
 /// it does. The tests keep it loading and complete.
 pub const SAMPLE: &str = include_str!("sample.yaml");
 
@@ -181,7 +181,7 @@ pub enum Adapter {
 /// definition sent from here, so the node's owner decides what runs there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeAdapter {
-    /// The hub server, `ws://` or `wss://`, signed in to with `ensemble runner login`.
+    /// The hub server, `ws://` or `wss://`, signed in to with `ensemble-runner login`.
     pub hub: String,
     /// The agent the nodes offer.
     pub agent: String,
@@ -608,12 +608,12 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::NotFound { path } => write!(
                 f,
-                "no {CONFIG_FILENAME} at {}. `ensemble runner team list` lists the teams; `ensemble runner team new <name>` makes one.",
+                "no {CONFIG_FILENAME} at {}. `ensemble-runner team list` lists the teams; `ensemble-runner team new <name>` makes one.",
                 path.display()
             ),
             ConfigError::HubNotFound { path } => write!(
                 f,
-                "no {HUB_FILENAME} at {}. Make one with `ensemble hub init`, or run the hub on the computer that has it.",
+                "no {HUB_FILENAME} at {}. Make one with `ensemble-hub init`, or run the hub on the computer that has it.",
                 path.display()
             ),
             ConfigError::Unreadable { path, detail } => {

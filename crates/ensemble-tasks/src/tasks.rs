@@ -275,35 +275,14 @@ fn front_matter(text: &str) -> Option<(&str, &str)> {
     Some((&rest[..end.0 + 1], &rest[end.1..]))
 }
 
-/// A YAML scalar that reads back as exactly `s`.
-pub(crate) fn yaml_str(s: &str) -> String {
-    serde_json::to_string(s).expect("a string serializes")
-}
-
-/// Lowercase words of the title, joined by dashes, at most 40 characters.
-pub(crate) fn slug(title: &str) -> String {
-    let mut out = String::new();
-    for c in title.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-        } else if !out.is_empty() && !out.ends_with('-') {
-            out.push('-');
-        }
-        if out.len() >= 40 {
-            break;
-        }
-    }
-    out.trim_end_matches('-').to_string()
-}
-
 pub use ensemble_core::time::utc;
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
 
     /// A ticket with only what every ticket has.
-    pub(crate) fn draft(title: &str, agent: &str, text: &str) -> Ticket {
+    fn draft(title: &str, agent: &str, text: &str) -> Ticket {
         Ticket {
             title: title.into(),
             agent: agent.into(),
@@ -409,10 +388,6 @@ pub(crate) mod tests {
         for bad in ["", "..", "../x", "a/b", "a b"] {
             assert!(!valid_id(bad), "{bad}");
         }
-        assert_eq!(
-            slug("Add retry: to the fetcher!"),
-            "add-retry-to-the-fetcher"
-        );
     }
 
     #[test]

@@ -239,7 +239,7 @@ impl Memory {
         let vault = self.vault();
         if !vault.exists() {
             return Err(format!(
-                "the knowledge vault {} is not a git repository yet; `ensemble hub init` makes it",
+                "the knowledge vault {} is not a git repository yet; `ensemble-hub init` makes it",
                 vault.root().display()
             ));
         }
@@ -495,7 +495,7 @@ impl Memory {
         let vault = self.vault();
         if !vault.exists() {
             return Err(format!(
-                "{SHARE}: the knowledge vault {} is not a git repository yet; `ensemble hub init` makes it",
+                "{SHARE}: the knowledge vault {} is not a git repository yet; `ensemble-hub init` makes it",
                 vault.root().display()
             ));
         }

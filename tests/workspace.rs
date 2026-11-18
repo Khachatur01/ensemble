@@ -1,7 +1,8 @@
 //! The crates of the workspace depend on each other in one direction only, so a
 //! later module (memory, the hub, the link) is added as a crate on top, never
-//! woven back into one below. This reads each crate's `Cargo.toml` rather than
-//! asking cargo, so it needs nothing but the files.
+//! woven back into one below; and the runner is built of none of the hub's.
+//! This reads each crate's `Cargo.toml` rather than asking cargo, so it needs
+//! nothing but the files.
 
 use std::path::Path;
 
@@ -16,9 +17,13 @@ const ORDER: [&str; 11] = [
     "ensemble-link",
     "ensemble-agents",
     "ensemble-tasks",
-    "ensemble-inbox",
-    "ensemble-node",
+    "ensemble-runner",
+    "ensemble-hub",
 ];
+
+/// The crates only the hub has, which the runner never builds, by itself or
+/// through another crate: the hub, its knowledge and its database.
+const HUB_ONLY: [&str; 3] = ["ensemble-hub", "ensemble-knowledge", "ensemble-store"];
 
 /// The workspace crates a manifest names, in any dependency table.
 fn ensemble_dependencies(manifest: &str) -> Vec<String> {
@@ -68,6 +73,37 @@ fn every_crate_depends_only_on_crates_below_it() {
                 "{name} depends on {dependency}, which is not below it in {ORDER:?}"
             );
         }
+    }
+}
+
+#[test]
+fn the_runner_depends_on_nothing_of_the_hub() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = |name: &str| {
+        std::fs::read_to_string(root.join("crates").join(name).join("Cargo.toml")).unwrap()
+    };
+    // Every workspace crate the runner depends on, through any other.
+    let mut reached = vec!["ensemble-runner".to_string()];
+    let mut at = 0;
+    while at < reached.len() {
+        for dependency in ensemble_dependencies(&manifest(&reached[at])) {
+            if !reached.contains(&dependency) {
+                reached.push(dependency);
+            }
+        }
+        at += 1;
+    }
+    for name in &reached {
+        assert!(
+            !HUB_ONLY.contains(&name.as_str()),
+            "the runner depends on {name}, which only the hub has: {reached:?}"
+        );
+        assert!(
+            !manifest(name)
+                .lines()
+                .any(|line| line.trim_start().starts_with("turso")),
+            "{name}, which the runner depends on, depends on Turso, the hub's database"
+        );
     }
 }
 

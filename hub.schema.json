@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/hub.schema.json",
   "title": "Ensemble hub: hub.yaml",
-  "description": "A hub, in ~/.config/ensemble/hub/hub.yaml: it provides services and connects runners, and has no helper team. Always a server (`ensemble hub serve`): accounts with roles, a knowledge vault and the models that distill it, and the issues of a tracker handed to the runners of the people they are assigned to. Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (`tasks`, and a backend's `api_key_env`).",
+  "description": "A hub, in ~/.config/ensemble/hub/hub.yaml: it provides services and connects runners, and has no helper team. Always a server (`ensemble-hub serve`): accounts with roles, a knowledge vault and the models that distill it, and the issues of a tracker handed to the runners of the people they are assigned to. Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (`tasks`, and a backend's `api_key_env`).",
   "type": "object",
   "required": ["version", "owner", "llm_backends", "knowledge", "server", "roles"],
   "additionalProperties": false,
@@ -32,12 +32,12 @@
       "$ref": "#/definitions/tasks"
     },
     "server": {
-      "description": "Where `ensemble hub serve` listens for runners and the REST API, and how people join.",
+      "description": "Where `ensemble-hub serve` listens for runners and the REST API, and how people join.",
       "$ref": "#/definitions/server"
     },
     "interfaces": { "$ref": "#/definitions/interfaces" },
     "roles": {
-      "description": "The hub's roles, named as you like, each a list of what its users may do. Users and their tokens are kept in database.db beside this file, not here: `ensemble hub user add NAME --role R`.",
+      "description": "The hub's roles, named as you like, each a list of what its users may do. Users and their tokens are kept in database.db beside this file, not here: `ensemble-hub user add NAME --role R`.",
       "type": "object",
       "minProperties": 1,
       "additionalProperties": {
@@ -54,7 +54,7 @@
       "additionalProperties": false,
       "properties": {
         "cli": {
-          "description": "`ensemble hub …` on its computer, run by the running process over its socket when it runs.",
+          "description": "`ensemble-hub …` on its computer, run by the running process over its socket when it runs.",
           "type": "object",
           "additionalProperties": false
         },
@@ -199,7 +199,7 @@
       "additionalProperties": false,
       "properties": {
         "vault": {
-          "description": "The vault's directory, a git repository, relative to the hub's directory or absolute. `ensemble hub init` makes it.",
+          "description": "The vault's directory, a git repository, relative to the hub's directory or absolute. `ensemble-hub init` makes it.",
           "type": "string",
           "minLength": 1
         },

@@ -1556,7 +1556,7 @@ fn a_missing_hub_file_says_how_to_make_one() {
     let err = load_hub(Path::new("/nonexistent/hub.yaml"), None, &env(&[]))
         .unwrap_err()
         .to_string();
-    assert!(err.contains("ensemble hub init"), "{err}");
+    assert!(err.contains("ensemble-hub init"), "{err}");
 }
 
 #[test]

@@ -25,7 +25,7 @@ provide computing power, with work spread across them.
    your agent CLI (Claude Code, OpenCode, Codex, ...)
            │ MCP over HTTP, your token as its key
            ▼
-                        hub  (ensemble hub serve)
+                        hub  (ensemble-hub serve)
        task tracking · knowledge · accounts · integrations
           routes runs and model calls between runners
            ║                     ║                      ║
@@ -76,11 +76,11 @@ notes in a git vault, and later work recalls them. See [The hub](#the-hub) and
   your agent (Claude Code, OpenCode, Codex, ...)
         |  MCP over HTTP: share, recall, make and follow tasks
         v
-  ensemble hub serve   (accounts, knowledge, the tasks of each project)
+  ensemble-hub serve   (accounts, knowledge, the tasks of each project)
         ^
         |  a link over WebSocket: tasks leased, how each run ended
         |
-  ensemble runner serve   (this computer's runner, long-running)
+  ensemble-runner serve   (this computer's runner, long-running)
         |  a worker for each git repository of its workspace
         v
   its helper teams (a config.yaml each): an agent -> its adapter -> a model
@@ -96,7 +96,7 @@ notes in a git vault, and later work recalls them. See [The hub](#the-hub) and
   `submit`, `tasks`, `task`, `answer`, `assign`, `cancel` and `agents` for
   tasks. It never names a model: the team's config decides what runs each
   agent.
-- **Your runner does the work.** A computer runs one runner, `ensemble runner
+- **Your runner does the work.** A computer runs one runner, `ensemble-runner
   serve`, a process you keep running. It works in its workspace, a folder of
   git repositories: each is a project, and the runner runs the tasks the hub
   keeps for that project, in that repository, with its helper teams. It goes
@@ -105,7 +105,7 @@ notes in a git vault, and later work recalls them. See [The hub](#the-hub) and
 - **Load spreads across runners.** An agent of `type: node` runs on another
   runner through the hub, and a runner's model servers can serve the whole
   team through the hub as an OpenAI-compatible endpoint.
-- **The hub provides the services.** `ensemble hub serve`, on a server for a
+- **The hub provides the services.** `ensemble-hub serve`, on a server for a
   team or on your own computer, keeps the accounts, the knowledge and the
   tasks, turns tracker issues into tasks for the right person, and connects
   the runners. Each runner names its hub in its `runner.yaml`.
@@ -122,24 +122,24 @@ on another runner.
 ## Quick start
 
 ```console
-$ ensemble runner setup
+$ ensemble-runner setup
 ```
 
-`runner setup` finds the agent CLIs you have (`claude`, `opencode`, `codex`;
-with none it says so and goes on, as `builtin` and `direct` agents need none)
-and any local model server. When there is no runner file
-(`~/.config/ensemble/runner/runner.yaml`), it asks what to call this
-computer's runner (this computer's name, unless you say otherwise) and which
-folder it works in (`~/ensemble`, unless you say otherwise), and writes one.
-Then it checks the runner's helper teams and says what is next. Give the
-runner a team, a repository and a hub, and run it:
+`ensemble-runner setup` finds the agent CLIs you have (`claude`, `opencode`,
+`codex`; with none it says so and goes on, as `builtin` and `direct` agents need
+none) and any local model server. When there is no runner file
+(`~/.config/ensemble/runner/runner.yaml`), it asks what to call this computer's
+runner (this computer's name, unless you say otherwise) and which folder it
+works in (`~/ensemble`, unless you say otherwise), and writes one. Then it
+checks the runner's helper teams and says what is next. Give the runner a team,
+a repository and a hub, and run it:
 
 ```console
-$ ensemble runner team new web                               # a sample to edit, or:
-$ ensemble runner team pull github.com/acme/web-team@v1.2    # a team your company keeps
+$ ensemble-runner team new web                               # a sample to edit, or:
+$ ensemble-runner team pull github.com/acme/web-team@v1.2    # a team your company keeps
 $ git clone git@github.com:acme/shop.git ~/ensemble/shop      # a project: a repository in the workspace
-$ ensemble runner login wss://hub.example.com --user ana     # your account on the hub
-$ ensemble runner serve
+$ ensemble-runner login wss://hub.example.com --user ana     # your account on the hub
+$ ensemble-runner serve
 ```
 
 Keep the runner running (see [Running the runner](#running-the-runner)). Then
@@ -149,14 +149,15 @@ the tools from the hub when it connects, so there is nothing to add to its
 `CLAUDE.md` or `AGENTS.md`. Without a hub the runner has no tasks; working
 alone, you run the hub on the same computer ([The hub](#the-hub)).
 
-Without a terminal, or to script it: `ensemble runner setup --yes --name desk
+Without a terminal, or to script it: `ensemble-runner setup --yes --name desk
 --workspace ~/code`. [Install](#installation) Ensemble first, so that
-`ensemble` is on your `PATH`.
+`ensemble-runner` is on your `PATH`.
 
-Afterwards, `ensemble runner doctor` says what is wrong and how to fix each thing, and
-`ensemble runner agent add web/tester --adapter claude-code` and
-`ensemble runner agent remove web/tester` change a team without editing the file (the file stays
-yours: comments and order are kept, and every setting is written out).
+Afterwards, `ensemble-runner doctor` says what is wrong and how to fix each
+thing, and `ensemble-runner agent add web/tester --adapter claude-code` and
+`ensemble-runner agent remove web/tester` change a team without editing the file
+(the file stays yours: comments and order are kept, and every setting is written
+out).
 
 The workspace is where the teams work. Each git repository directly inside it
 is a project, named for its folder: `~/ensemble/shop` is the project `shop`.
@@ -191,7 +192,7 @@ on the hub's computer, or you make one for yourself (`POST /api/v1/me/tokens`,
 with a session):
 
 ```console
-$ ensemble hub user token ana
+$ ensemble-hub user token ana
 ens_…
 note: This is ana's token, shown once. … For their agent, as its API key for the hub's MCP:
   claude mcp add --transport http ensemble https://hub.example.com/mcp --header "Authorization: Bearer ens_…"
@@ -232,7 +233,7 @@ team in its teams directory (`~/.config/ensemble/runner/teams/`, see
 servers, limits and gates, is `<team>/<name>`, so two teams may both have a
 `coder`. Commands that change one agent name it so, `web/coder`; every other
 one reads all the teams. Nothing else is searched for, and there is no
-user-level config. `ensemble runner team new <name>` writes a sample with every
+user-level config. `ensemble-runner team new <name>` writes a sample with every
 setting.
 
 What Ensemble learns while it runs is state, not configuration, and is kept per
@@ -340,7 +341,7 @@ own settings. It has a `type`:
 
 Either requires `base_url` (the URL itself; no variable overrides it) and
 `timeout_seconds` (per request), and takes `api_key_env`, the name of the
-variable holding the key, when the server wants one. `ensemble runner agent
+variable holding the key, when the server wants one. `ensemble-runner agent
 health` asks each for the models it serves.
 
 An agent on backends lists its models in **`try`**, in order, and says in
@@ -363,7 +364,7 @@ serves (`GET /models`), at most once a minute per backend. When none works,
 `fail` makes the task fail, saying what each backend answered; `wait` keeps
 the task in the queue, noted in its log (`waiting for a backend`), and tries
 again later. A run on a later model says so in what it reports (`opencode on
-central (fallback 2 of 2)`), and `ensemble runner agent show <agent> --probe`
+central (fallback 2 of 2)`), and `ensemble-runner agent show <agent> --probe`
 says which model a run would use now.
 Claude Code and Codex use your own login and have no `try` list.
 
@@ -466,10 +467,10 @@ With a model of type `llm_backend`, the same inline config also defines that
 backend as an OpenCode provider (`@ai-sdk/openai-compatible`, its base URL, its
 key, its `timeout_seconds`) serving the agent's model with `context_window` as
 its limit, so OpenCode knows when to compact. Nothing is written to disk. See it
-with `ensemble runner agent show <agent>`:
+with `ensemble-runner agent show <agent>`:
 
 ```console
-$ ensemble runner agent show coder
+$ ensemble-runner agent show coder
 opencode run --standalone --format json --agent ensemble-coder -m ensemble-local/qwen3.5-9b -- '<task>'
 
 OPENCODE_CONFIG_CONTENT:
@@ -515,8 +516,8 @@ agents:
 ```
 
 The request waits up to the backend's `timeout_seconds`, and the agent's
-`max_seconds` or a cancel ends the wait sooner. `ensemble runner agent show <agent>` prints
-the request; `health` checks the backend serves the model.
+`max_seconds` or a cancel ends the wait sooner. `ensemble-runner agent show
+<agent>` prints the request; `health` checks the backend serves the model.
 
 ### The `builtin` adapter
 
@@ -577,9 +578,10 @@ adapter:
 Codex has no tool list and no turn limit to set. What limits it is its own
 sandbox: `read-only` can only read, `workspace-write` can change files in the
 project (Ensemble then lists what changed), `danger-full-access` limits nothing,
-which `runner team check` and `runner doctor` warn about. It has no flag for a system prompt, so the
-agent's `prompt` goes in front of the task. Progress, the commands it ran, its
-tokens and its answer are read from its JSON events as it works.
+which `ensemble-runner team check` and `ensemble-runner doctor` warn about. It
+has no flag for a system prompt, so the agent's `prompt` goes in front of the
+task. Progress, the commands it ran, its tokens and its answer are read from its
+JSON events as it works.
 
 **Not yet checked against a real Codex release.** The event shapes follow Codex's
 documented `exec --json` output and are covered by stand-ins and a saved stream;
@@ -656,10 +658,10 @@ Every run, whether a task or a gate retry, leaves
 one line in `records.jsonl` beside the usage counters (shared by every repository
 that uses the helper team): the agent, the model that answered, when it started
 and how long it took, the tokens, the steps and tool calls, and whether it
-worked. `ensemble runner agent stats` sums them per agent:
+worked. `ensemble-runner agent stats` sums them per agent:
 
 ```console
-$ ensemble runner agent stats --since 7d
+$ ensemble-runner agent stats --since 7d
 agent              runs  failures    total s    mean s   tokens in  tokens out
 web/coder            12         1     1843.2     153.6      418220       30114
 web/reviewer          9         0      402.7      44.7           -           -
@@ -703,7 +705,7 @@ task outlive the runner that runs it:
   workspace takes a task that may start. So a task you make at your desk runs
   on your laptop if the desk is off and the laptop has the repository. Give
   your runners the teams your tasks name: a runner without a task's agent
-  fails the task, and `ensemble runner team check` lists the tasks on the hub
+  fails the task, and `ensemble-runner team check` lists the tasks on the hub
   a runner cannot run.
 - A runner whose claim ran out, and whose task another runner took meanwhile,
   cannot say how it ended: the task is never done twice. What that run did
@@ -753,17 +755,16 @@ runs once the agent is done:
 3. This repeats until it passes or the agent has had `attempts` runs in all.
    Then the task is `failed`.
 
-Each retry takes a run from the agent's `budget`; over it, no retry is made.
-The result records `gate`, `gate_result` (`passed`, `failed`, or `not run`
-when the agent itself failed) and `attempts`. A gate that is not defined in
-`config.yaml` fails the task at once, and `ensemble runner team check` reports it before
-that.
+Each retry takes a run from the agent's `budget`; over it, no retry is made. The
+result records `gate`, `gate_result` (`passed`, `failed`, or `not run` when the
+agent itself failed) and `attempts`. A gate that is not defined in `config.yaml`
+fails the task at once, and `ensemble-runner team check` reports it before that.
 
 A result starts with `status` (`done`, `failed` or `cancelled`), `agent`,
 `started` and `ended`, then the agent's reply. A task with a result is over;
 submit it again to run it again. What a run does as it goes, its activity
 log, is in `runs/<id>/` in the repository's state directory on the computer
-that ran it. `ensemble runner team check` reports, for each project of the
+that ran it. `ensemble-runner team check` reports, for each project of the
 workspace, the tasks on the hub this runner cannot run as they are: a gate it
 has not got, or an agent that is another runner's.
 
@@ -813,17 +814,16 @@ your agent's `answer`, or a comment on the issue a task came from.
 
 ### Running the runner
 
-`ensemble runner serve` runs this computer's runner until it gets Ctrl-C or
-SIGTERM. It makes its workspace when the folder is not there, and gives each
-git repository directly inside it a worker, which runs the tasks the hub keeps
-for that repository's project. It looks again every 30 seconds: a repository
-cloned in since gets a worker, and one that went away has its worker stopped.
-Without a hub it has no tasks, and says so. On a stop, running tasks are
-stopped and put back on the hub, for this runner or another to run again, and
-the rest stay queued. A computer runs one runner, so a second `runner serve`
-refuses. One worker runs a repository's tasks: its lock is a file in the
-repository's state directory, and one left by a process that died is taken
-over.
+`ensemble-runner serve` runs this computer's runner until it gets Ctrl-C or
+SIGTERM. It makes its workspace when the folder is not there, and gives each git
+repository directly inside it a worker, which runs the tasks the hub keeps for
+that repository's project. It looks again every 30 seconds: a repository cloned
+in since gets a worker, and one that went away has its worker stopped. Without a
+hub it has no tasks, and says so. On a stop, running tasks are stopped and put
+back on the hub, for this runner or another to run again, and the rest stay
+queued. A computer runs one runner, so a second `ensemble-runner serve` refuses.
+One worker runs a repository's tasks: its lock is a file in the repository's
+state directory, and one left by a process that died is taken over.
 
 On NixOS, and with Home Manager on Linux or macOS, the Nix modules run it for
 you ([Installation](#installation)). Otherwise, to keep it running, as a
@@ -831,7 +831,7 @@ systemd user unit (`~/.config/systemd/user/ensemble-runner.service`):
 
 ```ini
 [Service]
-ExecStart=ensemble runner serve
+ExecStart=ensemble-runner serve
 Restart=on-failure
 
 [Install]
@@ -845,7 +845,7 @@ and `systemctl --user enable --now ensemble-runner`. On macOS, a launchd agent
 <plist version="1.0"><dict>
   <key>Label</key><string>dev.ensemble.runner</string>
   <key>ProgramArguments</key><array>
-    <string>ensemble</string><string>runner</string><string>serve</string>
+    <string>ensemble-runner</string><string>serve</string>
   </array>
   <key>KeepAlive</key><true/>
 </dict></plist>
@@ -874,13 +874,14 @@ agents:
 Every agent that names `local-server` uses one count of slots and one budget, so
 their runs together stay within it. An agent writes either `limit`, or both
 `max_concurrent` and `budget`; a mix, or neither, is refused by name. A token
-budget is counted from the record of runs (`ensemble runner agent stats`), from what each run
-reported: an agent whose runs report none counts none, so its budget never fills.
+budget is counted from the record of runs (`ensemble-runner agent stats`), from
+what each run reported: an agent whose runs report none counts none, so its
+budget never fills.
 
-There is no sandbox: the agents' tools are their CLIs' own. `ensemble runner team check` and
-`ensemble runner doctor` warn, without failing, about agents that can change files
-directly in the repository (`isolation: shared`), about Claude Code
-permission modes that skip the checks, and about token budgets.
+There is no sandbox: the agents' tools are their CLIs' own. `ensemble-runner
+team check` and `ensemble-runner doctor` warn, without failing, about agents
+that can change files directly in the repository (`isolation: shared`), about
+Claude Code permission modes that skip the checks, and about token budgets.
 
 ### Teams
 
@@ -890,21 +891,20 @@ a folder per team named for it, and runs every team that is ready. A team gets
 there in one of four ways:
 
 ```console
-$ ensemble runner team new web                                # made here: a sample to edit
-$ ensemble runner team link pcb ~/work/pcb-team                # linked: a folder of yours elsewhere
-$ ensemble runner team pull github.com/acme/docs-team@v1.2    # pulled: a git repository, pinned
-$ ensemble runner team list                                    # each team, where it comes from, its agents
+$ ensemble-runner team new web                                # made here: a sample to edit
+$ ensemble-runner team link pcb ~/work/pcb-team                # linked: a folder of yours elsewhere
+$ ensemble-runner team pull github.com/acme/docs-team@v1.2    # pulled: a git repository, pinned
+$ ensemble-runner team list                                    # each team, where it comes from, its agents
 ```
 
 and the fourth: a team someone else wrote, marked pending (a `pending` file in
-its folder), waits for you. `ensemble runner team approve <name>` shows every agent
-command, gate command, tool list and permission mode it would run on your
+its folder), waits for you. `ensemble-runner team approve <name>` shows every
+agent command, gate command, tool list and permission mode it would run on your
 machine, with a warning for each risk, and lets it run only once you say yes.
-`ensemble runner team remove <name>`
-takes a team out; a linked folder and a pulled clone are left where they are.
-A running runner uses a change at once: each `runner team` command tells it to reload
-its teams, and so does `ensemble runner reload` after you edit a team by hand.
-A team that cannot be
+`ensemble-runner team remove <name>` takes a team out; a linked folder and a
+pulled clone are left where they are. A running runner uses a change at once:
+each `ensemble-runner team` command tells it to reload its teams, and so does
+`ensemble-runner reload` after you edit a team by hand. A team that cannot be
 loaded leaves the runner's teams as they were, and the command says why.
 
 **Pulled teams** work like images pinned to a digest. `team pull` resolves
@@ -922,9 +922,9 @@ so:
   command that trusts it. There is no trusting a whole publisher.
 - **The cache is checked.** A cached copy that is not at the commit, or has been
   changed by hand, is refused.
-- **Updating is explicit.** `ensemble runner team update <name> --ref main` shows what
-  changed in `config.yaml` and asks you to trust the new commit; the pin moves
-  only then.
+- **Updating is explicit.** `ensemble-runner team update <name> --ref main`
+  shows what changed in `config.yaml` and asks you to trust the new commit; the
+  pin moves only then.
 
 A pulled team is read-only: clone it, change your copy, and `team add` that.
 Its keys are not in it; they come from the runner's `.env` or your environment,
@@ -953,35 +953,35 @@ keys its backends name: the hub and the runner are separate services, a team's
 hub often on another computer or of another user, so each reads only its own
 secrets. `--env-file <path>` reads another file instead of
 either, such as a secret that sops-nix or agenix puts in `/run`. Neither file
-holds the runner's hub tokens: `ensemble runner login` keeps those in `hubs.json`,
+holds the runner's hub tokens: `ensemble-runner login` keeps those in `hubs.json`,
 also readable by you alone, because Ensemble writes them, not you.
 
 A variable set in the environment wins over the file. A `.env` that other users
 can read is still read, with a note saying to `chmod 600` it. The helper team
 holds no secrets, so nothing is read from beside it, and a pulled or shared
-helper team cannot carry keys by accident. The file feeds only
-Ensemble's own settings: a backend's key reaches an agent's CLI only as that
-backend's provider key in `OPENCODE_CONFIG_CONTENT`, in the CLI's environment
-for that run. Nothing else from it is passed on, so it cannot change how the
-CLIs log in. `ensemble runner agent show` and `ensemble runner team check` never print a key.
+helper team cannot carry keys by accident. The file feeds only Ensemble's own
+settings: a backend's key reaches an agent's CLI only as that backend's provider
+key in `OPENCODE_CONFIG_CONTENT`, in the CLI's environment for that run. Nothing
+else from it is passed on, so it cannot change how the CLIs log in.
+`ensemble-runner agent show` and `ensemble-runner team check` never print a key.
 Keep the file readable by you alone, and out of any repository.
 
 ### Changing settings from the command line
 
 Every settings file can be changed without opening it: runner.yaml with
-`ensemble runner config`, hub.yaml with `ensemble hub config`, and a team's
-config.yaml (one made here or linked) with `ensemble runner team config <team>`.
+`ensemble-runner config`, hub.yaml with `ensemble-hub config`, and a team's
+config.yaml (one made here or linked) with `ensemble-runner team config <team>`.
 A setting is named by its keys joined by dots:
 
 ```console
-$ ensemble runner config get hub
-$ ensemble runner config set access shared
-$ ensemble runner config set workspace ~/code
-$ ensemble hub config set server.listen 0.0.0.0:7700
-$ ensemble runner team config web set agents.coder.max_concurrent 2
-$ ensemble runner config unset offers.models
-$ ensemble hub config edit            # in $VISUAL or $EDITOR
-$ ensemble runner config path
+$ ensemble-runner config get hub
+$ ensemble-runner config set access shared
+$ ensemble-runner config set workspace ~/code
+$ ensemble-hub config set server.listen 0.0.0.0:7700
+$ ensemble-runner team config web set agents.coder.max_concurrent 2
+$ ensemble-runner config unset offers.models
+$ ensemble-hub config edit            # in $VISUAL or $EDITOR
+$ ensemble-runner config path
 ```
 
 A value is written as YAML when it reads as YAML (`laptop`, `8`, `true`,
@@ -989,7 +989,7 @@ A value is written as YAML when it reads as YAML (`laptop`, `8`, `true`,
 comments and order stay; the change is loaded before it is written, and one
 that would not load is refused with what is wrong, and nothing changes (`edit`
 keeps your edit beside the file to try again). While the hub or the runner
-runs, `ensemble hub …` and `ensemble runner …` ask it, over its socket, and it
+runs, `ensemble-hub …` and `ensemble-runner …` ask it, over its socket, and it
 makes the change itself and uses it at once: a team, the hub's roles, how
 people sign up and how long a login lasts, its models and knowledge settings,
 its owner. A change the hub cannot use as it runs (where it listens, its
@@ -997,12 +997,12 @@ vault, its inbox, its interfaces) has it start again, in the same process;
 runners connect again by themselves. A change to `runner.yaml` has the runner
 start again, in the same process: running tasks start again from where their
 work was last pushed. When neither runs, the command makes the change in the
-file, and the hub or the runner reads it when it starts. `ensemble runner
-login <url>` names the hub in `runner.yaml` by itself, and `ensemble runner
+file, and the hub or the runner reads it when it starts. `ensemble-runner
+login <url>` names the hub in `runner.yaml` by itself, and `ensemble-runner
 logout` takes it out.
 
 The command line reaches a hub or a runner because its file turns it on:
-`interfaces: { cli: {} }`, which `ensemble hub init` and `ensemble runner
+`interfaces: { cli: {} }`, which `ensemble-hub init` and `ensemble-runner
 setup` write. Left out, the command line is on; a file that turns it off is
 refused, since nothing could manage it. A hub may also turn on `mcp`, for
 client agents (see [Connect your agent](#connect-your-agent)).
@@ -1011,25 +1011,26 @@ client agents (see [Connect your agent](#connect-your-agent)).
 
 `config.yaml` has a JSON Schema, [`ensemble.schema.json`](ensemble.schema.json):
 completion for every key and value, hover descriptions, and errors for the
-mistakes `ensemble runner team check` would also report (a missing key, a setting the
-adapter type does not take). The first line of the file
-`ensemble runner team new` writes points an editor with the YAML language server at it:
+mistakes `ensemble-runner team check` would also report (a missing key, a
+setting the adapter type does not take). The first line of the file
+`ensemble-runner team new` writes points an editor with the YAML language server
+at it:
 
 ```yaml
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json
 ```
 
 That works in VS Code (the YAML extension), Neovim, Zed and JetBrains IDEs.
-Offline or pinned to your installed version: `ensemble runner team schema > ensemble.schema.json`
-and put that path after `$schema=`. The schema is checked against the code by
-the tests, so it cannot list a key the config rejects.
+Offline or pinned to your installed version: `ensemble-runner team schema >
+ensemble.schema.json` and put that path after `$schema=`. The schema is checked
+against the code by the tests, so it cannot list a key the config rejects.
 
 ### Validation
 
 Every independent problem is reported in one pass:
 
 ```console
-$ ensemble runner team check
+$ ensemble-runner team check
 ensemble: team 'web': ~/.config/ensemble/runner/teams/web/config.yaml is invalid:
   - version: 2 is not supported; this build understands version 1
   - llm_backends.x: type 'ollama' is unknown. Known types: openai-compatible-api.
@@ -1046,7 +1047,7 @@ A **hub** provides services and connects runners: a knowledge vault, the
 tasks, a task inbox fed by a tracker, accounts and tokens, MCP for client
 agents, and the routing that lets runners lend their agents and models to each
 other. It has no helper team and runs no agents. It is always its own process,
-`ensemble hub serve`: a team runs one on a server, and one person runs one on
+`ensemble-hub serve`: a team runs one on a server, and one person runs one on
 their own computer beside their runner. Its files are in `~/.config/ensemble/hub/`:
 
 ```text
@@ -1060,13 +1061,13 @@ their own computer beside their runner. Its files are in `~/.config/ensemble/hub
 On the hub's computer:
 
 ```console
-$ ensemble hub init                       # hub.yaml with every setting, and the vault
+$ ensemble-hub init                       # hub.yaml with every setting, and the vault
 $ $EDITOR ~/.config/ensemble/hub/hub.yaml # its name, models, roles, tracker
 $ $EDITOR ~/.config/ensemble/hub/.env     # the keys its backends name, if any; chmod 600
-$ ensemble hub check                      # validates it; says which model would distill shares now
-$ ensemble hub user add root --role admin # the first admin; prints their token once
-$ ensemble hub user password root         # typed without echo
-$ ensemble hub serve                      # until Ctrl-C or SIGTERM
+$ ensemble-hub check                      # validates it; says which model would distill shares now
+$ ensemble-hub user add root --role admin # the first admin; prints their token once
+$ ensemble-hub user password root         # typed without echo
+$ ensemble-hub serve                      # until Ctrl-C or SIGTERM
 ```
 
 ```yaml
@@ -1120,7 +1121,7 @@ under the name of the account that signed in, never a name a client sends.
 hub, sign in once and put the hub in the runner's file:
 
 ```console
-$ ensemble runner login wss://hub.example.com --user ana    # asks the password; makes a token "ensemble on <host>"
+$ ensemble-runner login wss://hub.example.com --user ana    # asks the password; makes a token "ensemble on <host>"
 ```
 
 ```yaml
@@ -1128,14 +1129,14 @@ $ ensemble runner login wss://hub.example.com --user ana    # asks the password;
 hub: wss://hub.example.com
 ```
 
-`ensemble runner login` logs in, makes an access token for this computer, logs out,
-and keeps the token in `~/.config/ensemble/runner/hubs.json`, readable only by
-you; `--token T` keeps a token made elsewhere instead, and `ensemble runner logout
-<url>` forgets it. Signing in again, with a new token or as someone else,
-reaches a running runner at once: its links to the hub connect again with the
-new token. `ensemble runner status` asks the hub whether the token still
+`ensemble-runner login` logs in, makes an access token for this computer, logs
+out, and keeps the token in `~/.config/ensemble/runner/hubs.json`, readable only
+by you; `--token T` keeps a token made elsewhere instead, and `ensemble-runner
+logout <url>` forgets it. Signing in again, with a new token or as someone
+else, reaches a running runner at once: its links to the hub connect again with
+the new token. `ensemble-runner status` asks the hub whether the token still
 works, and as whom. From then on the runner runs the tasks the hub keeps for
-that account, and `ensemble runner peers` asks that hub.
+that account, and `ensemble-runner peers` asks that hub.
 For one person alone, the hub listens on `127.0.0.1` and the runner names
 `ws://127.0.0.1:7700`.
 
@@ -1162,7 +1163,7 @@ up with a name and password; they can log in once an admin approves them:
 
 ```console
 $ curl -X POST https://hub.example.com/api/v1/register -d '{"name":"ana","password":"..."}'
-$ ensemble hub user approve ana --role member     # on the hub's computer, or the API, below
+$ ensemble-hub user approve ana --role member     # on the hub's computer, or the API, below
 ```
 
 **Client agents.** With `interfaces.mcp` in `hub.yaml`, the hub serves MCP
@@ -1223,7 +1224,7 @@ key is not shared, and the hub's log says so.
 
 **Only Ensemble writes notes.** Each share is kept as it arrived, and the
 running hub turns it into notes in the background, or now with
-`ensemble hub knowledge distill` on the hub's computer:
+`ensemble-hub knowledge distill` on the hub's computer:
 
 1. One chat request extracts typed items (decision, fact, how-to, lesson,
    commitment, preference, ownership); chatter gives none and is skipped.
@@ -1250,13 +1251,13 @@ vault/
 ```
 
 Because the notes are made from the shares, a better model or a new note format
-needs no migration: `ensemble hub knowledge rebuild` deletes the notes and makes
+needs no migration: `ensemble-hub knowledge rebuild` deletes the notes and makes
 them again from every share, in one commit. While the hub runs, it asks the hub
 instead, which clears the notes and makes them again one share at a time, as
 it distills, and goes on from there if it is stopped meanwhile; until it is
 done, `recall` finds only the notes made so far. A new version of Ensemble
 whose notes differ does the same by itself: notes another version made are
-made again from every share. `ensemble hub knowledge status`
+made again from every share. `ensemble-hub knowledge status`
 counts shares, pending shares, notes and what waits in `review/`.
 
 **Shared text is data, not instructions.** It may carry instructions meant for
@@ -1313,7 +1314,7 @@ After logging in, it redirects to /home instead of back to where you were.
 
 - **Who is who.** An issue goes to the account whose tracker name is its
   assignee: the account's `tracker_user` when set (`PUT /api/v1/me`, an admin's
-  `PUT /api/v1/users/{name}`, or `ensemble hub user tracker ana ana.petrosyan`),
+  `PUT /api/v1/users/{name}`, or `ensemble-hub user tracker ana ana.petrosyan`),
   else the account's own name. Its role needs the `tasks` permission.
 - **Which repository.** The issue's `project` is a repository's name: the task
   runs on one of that person's [runners](#runners) with a repository of that
@@ -1370,7 +1371,7 @@ everyone whose role has `compute`; connecting a shared one needs `host`. The
 hub connects them, and keeps no runner once it is gone.
 
 ```yaml
-# ~/.config/ensemble/runner/runner.yaml — `ensemble runner setup` or `ensemble runner init` writes it
+# ~/.config/ensemble/runner/runner.yaml — `ensemble-runner setup` or `ensemble-runner init` writes it
 version: 1
 name: gpu-box                    # a hub knows it as <you>/gpu-box
 access: shared                   # private: you alone
@@ -1384,17 +1385,17 @@ offers:                          # through a hub; each block may be left out
     timeout_seconds: 600
     names: [qwen3.5:72b]
 interfaces:
-  cli: {}                        # `ensemble runner …` on this computer
+  cli: {}                        # `ensemble-runner …` on this computer
 ```
 
 ```console
-$ ensemble runner login wss://hub.example.com --user kim     # once, for the hub runner.yaml names
+$ ensemble-runner login wss://hub.example.com --user kim     # once, for the hub runner.yaml names
 $ git clone git@github.com:acme/shop.git ~/ensemble/shop      # a project of its workspace
-$ ensemble runner serve                                       # until Ctrl-C or SIGTERM
-$ ensemble runner peers                                       # the other runners of the hub you may use now
+$ ensemble-runner serve                                       # until Ctrl-C or SIGTERM
+$ ensemble-runner peers                                       # the other runners of the hub you may use now
 ```
 
-`ensemble runner …` reaches the running runner on a socket only you may open
+`ensemble-runner …` reaches the running runner on a socket only you may open
 (in `$XDG_RUNTIME_DIR/ensemble`, else a folder of yours under `/tmp`). A
 project's tasks run only on a runner with a repository of its name in its
 workspace: the runner clones nothing itself, so clone each repository you
@@ -1421,20 +1422,20 @@ A task for it sends the files git tracks or would track in the folder it works
 in (never what `.gitignore` leaves out, such as `.env`; at most 24 MiB) to the
 hub, which hands them to that runner. The runner's own agent works on them in a
 folder of its own, and what it changed (files written, added, deleted) comes
-back and is written here. So gates, worktrees, branches and commits all stay
-on your computer, and to the rest of Ensemble it is an agent that changed some
+back and is written here. So gates, worktrees, branches and commits all stay on
+your computer, and to the rest of Ensemble it is an agent that changed some
 files. Its progress lines come through as it works; a cancel or its
-`max_seconds` stops it there too. `ensemble runner agent health` says whether one of its
-runners is connected and offers the agent.
+`max_seconds` stops it there too. `ensemble-runner agent health` says whether
+one of its runners is connected and offers the agent.
 
 What runs is the runner owner's agent, from their helper team: nothing of your
 agent's definition but the name goes there, so the owner decides what runs on
 their machine. They also see your files. A shared runner offers only agents that
-run on models from `llm_backends` (`opencode` on `llm_backend`, `builtin`, or `direct`):
-an agent CLI's own login, such as a Claude Code subscription, belongs to its
-owner and is never lent; `runner serve` refuses to start otherwise. A private
-runner may offer any of its owner's agents, for the owner's own use from another
-computer.
+run on models from `llm_backends` (`opencode` on `llm_backend`, `builtin`, or
+`direct`): an agent CLI's own login, such as a Claude Code subscription, belongs
+to its owner and is never lent; `ensemble-runner serve` refuses to start
+otherwise. A private runner may offer any of its owner's agents, for the owner's
+own use from another computer.
 
 **Using a runner's models.** A runner that offers `models` serves them through the
 hub as an OpenAI-compatible endpoint at `https://<hub>/nodes/v1`, with an
@@ -1454,9 +1455,11 @@ llm_backends:
 
 ## Installation
 
-Ensemble is one program, `ensemble`. It is built and tested on Linux, and it is
-Unix-only: it runs agent CLIs as process groups, gates with `sh -c`, and
-reaches a running runner or hub on a Unix socket.
+Ensemble is two programs: `ensemble-runner`, this computer's runner, and
+`ensemble-hub`, a hub. A computer has the one it runs, or both. They are built
+and tested on Linux, and they are Unix-only: the runner runs agent CLIs as
+process groups and gates with `sh -c`, and each reaches its running process on
+a Unix socket.
 
 | platform | how | keeps the runner running |
 | --- | --- | --- |
@@ -1467,17 +1470,18 @@ reaches a running runner or hub on a Unix socket.
 | Windows | [WSL 2](#windows-through-wsl-2), then as on Linux | a systemd user service inside WSL |
 
 The macOS build is made by the same flake and the same cargo, but the tests run
-on Linux; tell us what breaks. Native Windows is not supported: `ensemble`
-says so and exits.
+on Linux; tell us what breaks. Native Windows is not supported: each
+executable says so and exits.
 
 On every platform Ensemble keeps its files in the same places
 (`~/.config/ensemble/`) and is managed with the same commands. The Nix modules
-also let you write those files in Nix, or leave them to `ensemble`.
+also let you write those files in Nix, or leave them to `ensemble-runner` and
+`ensemble-hub`.
 
 Besides Ensemble, install the CLIs of the adapters your teams use: `claude` for
 `claude-code`, `opencode` for `opencode`, `codex` for `codex`. The `builtin`,
 `direct` and `node` adapters need none. git is needed for the workspace,
-worktrees and pulled teams. Then run `ensemble runner setup`
+worktrees and pulled teams. Then run `ensemble-runner setup`
 ([Quick start](#quick-start)). The computer of your agent CLI needs nothing of
 Ensemble: the agent reaches the hub over MCP.
 
@@ -1503,23 +1507,24 @@ system flake, and import the module:
 }
 ```
 
-The module has two parts, each enabled on its own. Each runs as the person it
-is for, from their `~/.config/ensemble/`, so they manage it with `ensemble` as
-on any platform: `ensemble hub user add`, `ensemble runner team pull`,
-`ensemble runner config set` and the rest, as themselves, with no `sudo`.
+The module has two parts, each enabled on its own. Each runs as the person it is
+for, from their `~/.config/ensemble/`, so they manage it with `ensemble-hub` and
+`ensemble-runner` as on any platform: `ensemble-hub user add`, `ensemble-runner
+team pull`, `ensemble-runner config set` and the rest, as themselves, with no
+`sudo`.
 
 Configuration comes from both. **What should always hold is written in Nix**:
-the settings under `settings` (and the runner's `workspace`) are merged into
-the real `runner.yaml` and `hub.yaml` whenever the service starts, setting by
+the settings under `settings` (and the runner's `workspace`) are merged into the
+real `runner.yaml` and `hub.yaml` whenever the service starts, setting by
 setting, and may be as few as one (`settings.server.listen`); teams under
-`teams` are linked in whole and are read-only. **What belongs to this
-deployment is made with `ensemble`**: every other setting, other teams, the
-hub's accounts and the keys. `ensemble` refuses to change a setting Nix
-declares, and says to change it in Nix, so a change is never silently undone
-at the next start. Without `settings`, the files are `ensemble`'s alone, and
-each service starts once its file is there. The module adds no setting of its
-own; `ensemble runner init --stdout`, `ensemble runner team new --stdout` and
-`ensemble hub init --stdout` print them all.
+`teams` are linked in whole and are read-only. **What belongs to this deployment
+is made with `ensemble-hub` and `ensemble-runner`**: every other setting, other
+teams, the hub's accounts and the keys. They refuse to change a setting Nix
+declares, and say to change it in Nix, so a change is never silently undone at
+the next start. Without `settings`, the files are theirs alone, and each service
+starts once its file is there. The module adds no setting of its own;
+`ensemble-runner init --stdout`, `ensemble-runner team new --stdout` and
+`ensemble-hub init --stdout` print them all.
 
 **This computer's runner**, a systemd user service of one person, with its teams:
 
@@ -1533,7 +1538,7 @@ own; `ensemble runner init --stdout`, `ensemble runner team new --stdout` and
     workspace = "~/ensemble";              # its git repositories, each a project
     extraPackages = [ pkgs.claude-code ];  # the agent CLIs on its PATH; git is always there
     environmentFile = "/run/secrets/ensemble-runner.env";  # API keys, kept out of the store; null: ~/.config/ensemble/runner/.env
-    settings = {                           # merged into runner.yaml; the rest is `ensemble`'s
+    settings = {                           # merged into runner.yaml; the rest is `ensemble-runner`'s
       version = 1;
       name = "laptop";
       access = "private";
@@ -1572,16 +1577,17 @@ own; `ensemble runner init --stdout`, `ensemble runner team new --stdout` and
 ```
 
 When the service starts, the declared settings and `workspace` are merged into
-`~/.config/ensemble/runner/runner.yaml` (made first, as `ensemble runner setup`
+`~/.config/ensemble/runner/runner.yaml` (made first, as `ensemble-runner setup`
 makes one, when there is none), and each team is linked into
-`~/.config/ensemble/runner/teams/`, beside what is not declared: `hubs.json` from
-`ensemble runner login`, and teams made by hand (`ensemble runner team new`,
-`pull`, `link`), which are left alone. A team declared in Nix is a link into
-the store, so it is read-only to `ensemble`; its trust is your review of the
-Nix configuration. With neither `settings` nor `workspace`, the runner waits
-until `ensemble runner setup` has written `runner.yaml`; start it then with
-`systemctl --user start ensemble-runner`. `ensemble` is put on the system's
-`PATH`, for managing it.
+`~/.config/ensemble/runner/teams/`, beside what is not declared: `hubs.json`
+from `ensemble-runner login`, and teams made by hand (`ensemble-runner team
+new`, `pull`, `link`), which are left alone. A team declared in Nix is a link
+into the store, so it is read-only to `ensemble-runner`; its trust is your
+review of the Nix configuration. With neither `settings` nor `workspace`, the
+runner waits until `ensemble-runner setup` has written `runner.yaml`; start it
+then with `systemctl --user start ensemble-runner`. `ensemble-runner` is put on
+the system's `PATH`, for managing it; `services.ensemble.runner.package` is the
+package it comes from.
 
 **A hub**, a system service that runs as `user`, from their
 `~/.config/ensemble/hub/`:
@@ -1590,10 +1596,10 @@ until `ensemble runner setup` has written `runner.yaml`; start it then with
 {
   services.ensemble.hub = {
     enable = true;
-    user = "ana";                          # her hub: she runs `ensemble hub …` as herself
+    user = "ana";                          # her hub: she runs `ensemble-hub …` as herself
     openFirewall = false;                  # the port of server.listen
     environmentFile = "/run/secrets/ensemble-hub.env";  # keys its backends name; null: her hub/.env
-    settings = {                           # merged into hub.yaml; the rest is `ensemble`'s
+    settings = {                           # merged into hub.yaml; the rest is `ensemble-hub`'s
       version = 1;
       owner = "acme";
       llm_backends.central = {
@@ -1627,11 +1633,13 @@ until `ensemble runner setup` has written `runner.yaml`; start it then with
 
 The declared settings are merged into `hub.yaml` on every start (made first
 from the sample, with its vault, when there is none). Accounts live in the
-hub's `database.db`, not in Nix: `ensemble hub user add root --role admin`,
-`ensemble hub config set …`, `ensemble hub knowledge status` and the rest, run
-as `user`. Without `settings`, the hub waits until `ensemble hub init` has
-written `hub.yaml`; start it then with `sudo systemctl start ensemble-hub`. For a hub
-of an account of its own, make that user and run `ensemble hub …` as it.
+hub's `database.db`, not in Nix: `ensemble-hub user add root --role admin`,
+`ensemble-hub config set …`, `ensemble-hub knowledge status` and the rest, run
+as `user`. Without `settings`, the hub waits until `ensemble-hub init` has
+written `hub.yaml`; start it then with `sudo systemctl start ensemble-hub`.
+`ensemble-hub` is put on the system's `PATH`, from
+`services.ensemble.hub.package`. For a hub of an account of its own, make that
+user and run `ensemble-hub …` as it.
 
 For the internet, put a TLS proxy in front (`services.caddy`, see
 [The hub](#the-hub)) and leave `openFirewall` off. A whole configuration that
@@ -1656,7 +1664,7 @@ Home Manager module runs this computer's runner: a systemd user service,
     enable = true;
     extraPackages = [ pkgs.opencode ];
     workspace = "~/code";
-    settings = {                         # or leave it out and run `ensemble runner setup`
+    settings = {                         # or leave it out and run `ensemble-runner setup`
       version = 1;
       name = "macbook";
       access = "private";
@@ -1669,18 +1677,19 @@ Home Manager module runs this computer's runner: a systemd user service,
 
 On every `home-manager switch`, the declared settings and `workspace` are
 merged into `~/.config/ensemble/runner/runner.yaml` and the teams are linked
-into `~/.config/ensemble/runner/teams/`, and `ensemble` is put in
+into `~/.config/ensemble/runner/teams/`, and `ensemble-runner` is put in
 `home.packages`. The runner runs once there is a `runner.yaml`. A hub runs on
-NixOS through the NixOS module, or anywhere with `ensemble hub serve`.
+NixOS through the NixOS module, or anywhere with `ensemble-hub serve`.
 
 ### Linux with Nix
 
 Without NixOS or Home Manager:
 
 ```console
-$ nix profile install github:Khachatur01/ensemble  # installed, on PATH
+$ nix profile install github:Khachatur01/ensemble  # both executables, on PATH
+$ nix profile install github:Khachatur01/ensemble#ensemble-runner   # the runner alone
 $ nix shell github:Khachatur01/ensemble            # on PATH for this shell only
-$ nix run github:Khachatur01/ensemble -- runner doctor   # one command
+$ nix run github:Khachatur01/ensemble -- doctor    # one command of ensemble-runner
 ```
 
 `nix profile upgrade ensemble` updates it. Keep the runner running as in
@@ -1696,7 +1705,8 @@ Arch, the Xcode command line tools on macOS (`xcode-select --install`).
 $ cargo install --git https://github.com/Khachatur01/ensemble
 ```
 
-This puts `ensemble` in `~/.cargo/bin`, which must be on `PATH`. Run the same
+This puts `ensemble-runner` and `ensemble-hub` in `~/.cargo/bin`, which must be
+on `PATH`; `--bin ensemble-runner` installs the runner alone. Run the same
 command again to update. Ensemble is not published on crates.io. Keep the runner
 running with a systemd user unit on Linux, or a launchd agent on macOS, both in
 [Running the runner](#running-the-runner).
@@ -1720,9 +1730,9 @@ Claude Code, OpenCode and Codex all run in WSL.
 3. In Ubuntu, install Ensemble with [cargo](#linux-and-macos-with-cargo) (after
    `sudo apt install build-essential git` and rustup) or
    [Nix](#linux-with-nix), and the agent CLIs you use, inside WSL too.
-4. Run `ensemble runner setup`, and keep the runner running with the systemd user unit
-   in [Running the runner](#running-the-runner) (`loginctl enable-linger $USER`
-   keeps it running while no Ubuntu window is open).
+4. Run `ensemble-runner setup`, and keep the runner running with the systemd
+   user unit in [Running the runner](#running-the-runner) (`loginctl
+   enable-linger $USER` keeps it running while no Ubuntu window is open).
 
 Keep the workspace inside WSL (`~/ensemble`), not under `/mnt/c`: the agents,
 git and Ensemble are much faster there, and file changes are seen at once.
@@ -1739,74 +1749,81 @@ has its own `--help`:
 
 ```console
 # This computer's runner
-$ ensemble runner setup [--name N] [--workspace PATH] [--yes]   # find the CLIs, write the runner, check the teams
-$ ensemble runner init [--force|--stdout]   # ~/.config/ensemble/runner/runner.yaml with every setting
-$ ensemble runner serve                     # run the runner until stopped; a computer runs one
-$ ensemble runner reload                    # the running runner reads its teams again (a `runner team` command does it by itself)
-$ ensemble runner status                    # its name, whether it runs, its workspace and projects, its hub: signed in as whom, its teams
-$ ensemble runner doctor                    # what is wrong, and how to fix each thing
-$ ensemble runner login <wss://url> --user <name>   # sign in to a hub with your account (or --token <token>), and name it in runner.yaml
-$ ensemble runner logout <wss://url>
-$ ensemble runner peers                     # the other runners of your hub you may use now
-$ ensemble runner config get|set|unset|edit|path   # runner.yaml, setting by setting
+$ ensemble-runner setup [--name N] [--workspace PATH] [--yes]   # find the CLIs, write the runner, check the teams
+$ ensemble-runner init [--force|--stdout]   # ~/.config/ensemble/runner/runner.yaml with every setting
+$ ensemble-runner serve                     # run the runner until stopped; a computer runs one
+$ ensemble-runner reload                    # the running runner reads its teams again (an `ensemble-runner team` command does it by itself)
+$ ensemble-runner status                    # its name, whether it runs, its workspace and projects, its hub: signed in as whom, its teams
+$ ensemble-runner doctor                    # what is wrong, and how to fix each thing
+$ ensemble-runner login <wss://url> --user <name>   # sign in to a hub with your account (or --token <token>), and name it in runner.yaml
+$ ensemble-runner logout <wss://url>
+$ ensemble-runner peers                     # the other runners of your hub you may use now
+$ ensemble-runner config get|set|unset|edit|path   # runner.yaml, setting by setting
 
 # Its helper teams
-$ ensemble runner team list                 # each team, where it comes from, its agents
-$ ensemble runner team new <name> [--stdout]          # a sample config.yaml to edit
-$ ensemble runner team link <name> <dir>              # a folder with a config.yaml, as a team
-$ ensemble runner team pull <url>[@ref] [--name N]    # a team from git, pinned to a commit you trust
-$ ensemble runner team update <name> [--ref R]        # a pulled team moved to a new commit, once you trust it
-$ ensemble runner team approve <name>                 # read a team someone else wrote, and let it run
-$ ensemble runner team remove <name>
-$ ensemble runner team check                # validate every team, print the gates and agents, and the tasks on the hub it cannot run
-$ ensemble runner team schema               # the JSON Schema of config.yaml
-$ ensemble runner team config <name> get|set|unset|edit|path   # a team's config.yaml
+$ ensemble-runner team list                 # each team, where it comes from, its agents
+$ ensemble-runner team new <name> [--stdout]          # a sample config.yaml to edit
+$ ensemble-runner team link <name> <dir>              # a folder with a config.yaml, as a team
+$ ensemble-runner team pull <url>[@ref] [--name N]    # a team from git, pinned to a commit you trust
+$ ensemble-runner team update <name> [--ref R]        # a pulled team moved to a new commit, once you trust it
+$ ensemble-runner team approve <name>                 # read a team someone else wrote, and let it run
+$ ensemble-runner team remove <name>
+$ ensemble-runner team check                # validate every team, print the gates and agents, and the tasks on the hub it cannot run
+$ ensemble-runner team schema               # the JSON Schema of config.yaml
+$ ensemble-runner team config <name> get|set|unset|edit|path   # a team's config.yaml
 
 # Their agents, named <team>/<agent>
-$ ensemble runner agent list                # the routing table
-$ ensemble runner agent show <team>/<agent> [--probe]   # how it starts, keys hidden; --probe: which model a run would use now
-$ ensemble runner agent run <team>/<agent> <task> [--context C]   # one task to one agent, in --dir
-$ ensemble runner agent health              # every CLI starts, every backend serves its models? non-zero if not
-$ ensemble runner agent stats [--since 7d] [--json]   # runs, failures, time, tokens
-$ ensemble runner agent add <team>/<name> --adapter A [--model M] [--backend B] [--prompt P] [--writes]
-$ ensemble runner agent remove <team>/<name>
+$ ensemble-runner agent list                # the routing table
+$ ensemble-runner agent show <team>/<agent> [--probe]   # how it starts, keys hidden; --probe: which model a run would use now
+$ ensemble-runner agent run <team>/<agent> <task> [--context C]   # one task to one agent, in --dir
+$ ensemble-runner agent health              # every CLI starts, every backend serves its models? non-zero if not
+$ ensemble-runner agent stats [--since 7d] [--json]   # runs, failures, time, tokens
+$ ensemble-runner agent add <team>/<name> --adapter A [--model M] [--backend B] [--prompt P] [--writes]
+$ ensemble-runner agent remove <team>/<name>
 
 # A hub this computer runs
-$ ensemble hub init [--force|--stdout]    # hub.yaml in ~/.config/ensemble/hub/, and its vault
-$ ensemble hub check                      # validate hub.yaml; which model would distill now
-$ ensemble hub serve                      # run the hub until stopped
-$ ensemble hub user list
-$ ensemble hub user show <name>
-$ ensemble hub role list                  # the roles, and what each may do
-$ ensemble hub user add <name> --role <role>        # prints their token once
-$ ensemble hub user approve|role <name> --role <role>
-$ ensemble hub user password|token|revoke|remove <name>   # a password is asked, or read from stdin; a token comes with the line for an agent
-$ ensemble hub user tracker <name> [<tracker name>]
-$ ensemble hub knowledge status|distill|rebuild
-$ ensemble hub config get|set|unset|edit|path    # hub.yaml, setting by setting
+$ ensemble-hub init [--force|--stdout]    # hub.yaml in ~/.config/ensemble/hub/, and its vault
+$ ensemble-hub check                      # validate hub.yaml; which model would distill now
+$ ensemble-hub serve                      # run the hub until stopped
+$ ensemble-hub user list
+$ ensemble-hub user show <name>
+$ ensemble-hub role list                  # the roles, and what each may do
+$ ensemble-hub user add <name> --role <role>        # prints their token once
+$ ensemble-hub user approve|role <name> --role <role>
+$ ensemble-hub user password|token|revoke|remove <name>   # a password is asked, or read from stdin; a token comes with the line for an agent
+$ ensemble-hub user tracker <name> [<tracker name>]
+$ ensemble-hub knowledge status|distill|rebuild
+$ ensemble-hub config get|set|unset|edit|path    # hub.yaml, setting by setting
 
-$ ensemble completions zsh|bash|fish|elvish|powershell   # a completion script for your shell
+$ ensemble-runner completions zsh|bash|fish|elvish|powershell   # a completion script for your shell
+$ ensemble-hub completions zsh|bash|fish|elvish|powershell
 ```
 
-Every command takes `--dir <path>` (the folder `runner agent run` works in, and
-where `runner agent health` and `runner doctor` start agent CLIs; by default
-the current directory) and `--env-file <path>` (read in place of the runner's
-or the hub's `.env`). `runner agent run` prints the answer on stdout and the
+Every command takes `--env-file <path>` (read in place of the runner's or the
+hub's `.env`), and every command of `ensemble-runner` `--dir <path>` (the folder
+`ensemble-runner agent run` works in, and where `ensemble-runner agent health`
+and `ensemble-runner doctor` start agent CLIs; by default the current
+directory). `ensemble-runner agent run` prints the answer on stdout and the
 provenance on stderr, so it pipes cleanly.
 
 ## How it fits together
 
 A Cargo workspace of eleven crates under `crates/`, each depending only on
-the ones before it (`tests/workspace.rs` checks it), and the root crate, the
-binary: `ensemble-core` (shared types, state, runtime), `ensemble-ops` (the
-operations of a hub and a runner, defined once, that the command line and the
-REST API are made from), `ensemble-config` (`config.yaml`, `hub.yaml`,
-`runner.yaml`), `ensemble-backends` (model servers), `ensemble-store` (the
-hub's database), `ensemble-knowledge` (the vault and its pipeline),
-`ensemble-link` (the hub server, its MCP and REST API, and the link to it),
-`ensemble-agents` (the adapters and the router), `ensemble-tasks` (tasks, and
-the worker that runs a repository's tasks), `ensemble-inbox` (issues into
-tasks) and `ensemble-node` (a runner's runs and models for others).
+the ones before it, and the root crate, which builds the two executables and
+holds the end-to-end tests: `ensemble-core` (shared types, state, runtime),
+`ensemble-ops` (the operations of a hub and a runner, defined once, that the
+command lines and the REST API are made from), `ensemble-config`
+(`config.yaml`, `hub.yaml`, `runner.yaml`), `ensemble-backends` (model
+servers), `ensemble-store` (the hub's database), `ensemble-knowledge` (the
+vault and its pipeline), `ensemble-link` (the link between a runner and a hub:
+its messages, and the runner's side), `ensemble-agents` (the adapters and the
+router), `ensemble-tasks` (tasks as a runner leases them, and the worker that
+runs a repository's tasks), `ensemble-runner` (the runner: its commands, its
+workers, its teams, and its runs and models for others) and `ensemble-hub`
+(the hub: accounts, the tasks it keeps, the tracker inbox, MCP, the REST API
+and the server runners connect to). The runner is built of none of the hub's
+crates (`ensemble-hub`, `ensemble-knowledge`, `ensemble-store`);
+`tests/workspace.rs` checks that, and the order.
 [ARCHITECTURE.md](ARCHITECTURE.md) says what each file does and how the pieces
 work together at run time.
 
@@ -1847,13 +1864,13 @@ scripts stand in for the CLIs.
 | `crates/ensemble-agents/src/external/` | each CLI's command line, generated config and event stream, denials, limits, failures, the time limit killing the process tree |
 | `crates/ensemble-agents/src/router.rs`, `crates/ensemble-backends/` | routing, `health` and its model check, the chat request in both formats |
 | `crates/ensemble-knowledge/` | shares kept as they arrived, notes and the log, commits by the lock holder, the secret check; the pipeline against a stub model: new notes, merges, chatter skipped, unusable answers to review, waiting for a model, rebuild |
-| `crates/ensemble-link/` | sign-up, approval and the REST API's codes, tokens kept as hashes and revoked at once, roles checked per request, shares under the signed-in name; the hub's MCP: a token needed, the tools a token allows, share and recall as its account, tasks made and followed; the token file 0600, the link opened again when it breaks; runs sent to a runner that may be used and offers the agent, each side told when the other goes away, model calls streamed from a runner |
-| `crates/ensemble-inbox/` | markdown issues read and written with only the status line changed; issues to tasks of the account matched by tracker name, questions and answers through comments, results posted once, a closed issue cancelling its task |
+| `crates/ensemble-hub/` | sign-up, approval and the REST API's codes, tokens kept as hashes and revoked at once, roles checked per request, shares under the signed-in name; the hub's MCP: a token needed, the tools a token allows, share and recall as its account, tasks made and followed; runs sent to a runner that may be used and offers the agent, each side told when the other goes away, model calls streamed from a runner; tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the runner holding the lease, questions, hand-offs, cancelling, over the link as the signed-in account; the inbox: markdown issues read and written with only the status line changed, issues to tasks of the account matched by tracker name, questions and answers through comments, results posted once, a closed issue cancelling its task |
+| `crates/ensemble-link/` | the token file 0600, the link opened again when it breaks |
 | `crates/ensemble-core/` | the state directories and their hashes, the worker lock, run records, a snapshot of a folder and its changes written back |
-| `crates/ensemble-tasks/` | tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the runner holding the lease, questions, hand-offs, cancelling; over the link as the signed-in account; run logs |
-| `crates/ensemble-tasks/src/queue/tests.rs` | the worker of a repository: tasks run within `max_concurrent` and shared limits, closing the worker interrupting running tasks, cancel, `after`, gates, worktrees, `repo`, questions and answers, the backlog and `assign`, hand-offs, budgets, waiting for a backend |
-| `tests/workspace.rs` | the crates depend on each other in one direction only |
-| `tests/end_to_end.rs` | the real binary: CLI, `show`, `health` against a stub server, an agent changing a file; setup and doctor; the runner working on the tasks of a repository in its workspace, a task made through the hub's MCP; a task resumed when the runner starts again; a task stopped on one computer and carried on by another from its pushed branch; an issue from the tracker worked on a member's runner; an agent run on another runner and its changes back; a runner's models through the hub; signing in, settings changed from the command line, reloads of teams and settings |
+| `crates/ensemble-tasks/` | tickets, questions and hand-offs in a reply, run logs |
+| `crates/ensemble-hub/tests/queue.rs` | the worker of a repository: tasks run within `max_concurrent` and shared limits, closing the worker interrupting running tasks, cancel, `after`, gates, worktrees, `repo`, questions and answers, the backlog and `assign`, hand-offs, budgets, waiting for a backend |
+| `tests/workspace.rs` | the crates depend on each other in one direction only, and the runner on none of the hub's |
+| `tests/end_to_end.rs` | the real executables, `ensemble-hub` and `ensemble-runner`: their commands, `show`, `health` against a stub server, an agent changing a file; setup and doctor; the runner working on the tasks of a repository in its workspace, a task made through the hub's MCP; a task resumed when the runner starts again; a task stopped on one computer and carried on by another from its pushed branch; an issue from the tracker worked on a member's runner; an agent run on another runner and its changes back; a runner's models through the hub; signing in, settings changed from the command line, reloads of teams and settings |
 | `crates/ensemble-agents/tests/fixtures/` | saved event streams per CLI version, replayed through each adapter's parser (see its README) |
 | `tests/real_cli.rs` | the real `claude`, `opencode` and `codex` CLIs: `health` and one trivial run. Ignored; run with `ENSEMBLE_REAL_CLI=1 cargo test --test real_cli -- --ignored`. |
 | `nix/example.nix` | `nix flake check` evaluates the NixOS module with it, and builds the hub's and the runner's units |

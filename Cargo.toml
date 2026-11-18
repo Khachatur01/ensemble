@@ -63,14 +63,14 @@ ensemble-knowledge = { path = "crates/ensemble-knowledge" }
 ensemble-link = { path = "crates/ensemble-link" }
 ensemble-agents = { path = "crates/ensemble-agents" }
 ensemble-tasks = { path = "crates/ensemble-tasks" }
-ensemble-inbox = { path = "crates/ensemble-inbox" }
-ensemble-node = { path = "crates/ensemble-node" }
+ensemble-hub = { path = "crates/ensemble-hub" }
+ensemble-runner = { path = "crates/ensemble-runner" }
 
 [package]
 name = "ensemble"
 version.workspace = true
 edition.workspace = true
-description = "An agentic development system: a hub of services (task tracking, knowledge, integrations) that client agents reach over MCP, and runners of computing power (agents, model servers)."
+description = "An agentic development system: a hub of services (task tracking, knowledge, integrations) that client agents reach over MCP, and runners of computing power (agents, model servers). Two executables: ensemble-hub and ensemble-runner."
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
@@ -79,40 +79,34 @@ categories = ["command-line-utilities", "development-tools"]
 rust-version.workspace = true
 
 [[bin]]
-name = "ensemble"
-path = "src/main.rs"
+name = "ensemble-hub"
+path = "src/bin/ensemble-hub.rs"
+
+[[bin]]
+name = "ensemble-runner"
+path = "src/bin/ensemble-runner.rs"
 
 [dependencies]
-ensemble-agents.workspace = true
-ensemble-backends.workspace = true
-ensemble-config.workspace = true
-ensemble-core.workspace = true
-ensemble-inbox.workspace = true
-ensemble-knowledge.workspace = true
-ensemble-link.workspace = true
-ensemble-node.workspace = true
-ensemble-ops.workspace = true
-ensemble-tasks.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-serde_norway.workspace = true
-ureq.workspace = true
-tokio.workspace = true
-clap.workspace = true
-clap_complete.workspace = true
+ensemble-hub.workspace = true
+ensemble-runner.workspace = true
 
 [dev-dependencies]
-# Only the test helpers of the workspace's own crates. The suites use the std
-# harness and shell scripts standing in for the agent CLIs, so `cargo test`
+# Only the test helpers of the workspace's own crates, and what the
+# end-to-end tests read of the state the executables leave. The suites use the
+# std harness and shell scripts standing in for the agent CLIs, so `cargo test`
 # needs no network, model server or agent CLI.
 ensemble-agents = { workspace = true, features = ["test-support"] }
 ensemble-core = { workspace = true, features = ["test-support"] }
+ensemble-knowledge.workspace = true
+ensemble-tasks.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
 
 [profile.release]
 strip = true
-
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
 
 # Password hashing runs 600 000 PBKDF2 rounds; unoptimized, the tests would
 # spend minutes in it.

@@ -1,6 +1,6 @@
 //! One setting of a YAML file, read or changed as text, so that its comments,
-//! its order and everything else in it stay as they were: what `ensemble runner
-//! config`, `ensemble hub config` and `ensemble runner team config` do. A
+//! its order and everything else in it stay as they were: what `ensemble-runner
+//! config`, `ensemble-hub config` and `ensemble-runner team config` do. A
 //! setting is named by its path, its keys joined by dots, such as
 //! `server.listen`. The caller checks the result by loading it before it is
 //! written anywhere.

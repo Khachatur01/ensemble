@@ -1,0 +1,29 @@
+[package]
+name = "ensemble-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Ensemble's runner and its executable, ensemble-runner: a worker that gives a computer's power to the people of a hub, by running its tasks with the helper teams and the agents and models it offers."
+
+[dependencies]
+ensemble-agents.workspace = true
+ensemble-backends.workspace = true
+ensemble-config.workspace = true
+ensemble-core.workspace = true
+ensemble-link.workspace = true
+ensemble-ops.workspace = true
+ensemble-tasks.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+
+[dev-dependencies]
+ensemble-agents = { workspace = true, features = ["test-support"] }
+ensemble-core = { workspace = true, features = ["test-support"] }

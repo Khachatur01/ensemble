@@ -1,0 +1,33 @@
+[package]
+name = "ensemble-hub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Ensemble's hub and its executable, ensemble-hub: accounts and tokens, the tasks, the tracker inbox, MCP for client agents, the REST API, and the server runners connect to."
+
+[dependencies]
+async-trait.workspace = true
+ensemble-backends.workspace = true
+ensemble-config.workspace = true
+ensemble-core.workspace = true
+ensemble-knowledge.workspace = true
+ensemble-link.workspace = true
+ensemble-ops.workspace = true
+ensemble-store.workspace = true
+ensemble-tasks.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_norway.workspace = true
+tokio-tungstenite.workspace = true
+tokio.workspace = true
+futures-util = { workspace = true, features = ["sink"] }
+clap.workspace = true
+clap_complete.workspace = true
+
+[dev-dependencies]
+ureq.workspace = true
+ensemble-agents = { workspace = true, features = ["test-support"] }
+ensemble-core = { workspace = true, features = ["test-support"] }

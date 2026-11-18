@@ -5,26 +5,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Ensemble's hub server and the link to it: users and tokens, the WebSocket protocol, MCP for client agents, the server, and the runner's client."
+description = "Ensemble's link between a runner and a hub: the WebSocket protocol, the runner's client and its tokens."
 
 [dependencies]
-ensemble-store.workspace = true
-async-trait.workspace = true
-ensemble-config.workspace = true
 ensemble-core.workspace = true
-ensemble-knowledge.workspace = true
-ensemble-ops.workspace = true
-ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio-tungstenite.workspace = true
 tokio.workspace = true
 futures-util = { workspace = true, features = ["sink"] }
 
-[features]
-# The hub server for tests in the crates above (`server::testing`).
-test-support = ["ensemble-core/test-support"]
-
 [dev-dependencies]
-ureq.workspace = true
 ensemble-core = { workspace = true, features = ["test-support"] }

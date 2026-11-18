@@ -1,6 +1,6 @@
 # An example NixOS configuration: one person's computer that runs a hub for
 # themselves and a runner that names it, both written in Nix, with one helper
-# team. She manages both with `ensemble` as herself.
+# team. She manages them with `ensemble-hub` and `ensemble-runner` as herself.
 # The flake's `checks` evaluate it, so it stays a configuration that works.
 { pkgs, ... }:
 {

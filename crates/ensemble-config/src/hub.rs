@@ -1,6 +1,6 @@
 //! `hub.yaml`: a hub's settings, in `~/.config/ensemble/hub/`. A hub provides
 //! services and connects runners: it has no helper team and runs no agents. It is
-//! always a server (`ensemble hub serve`), for a team or for one person on
+//! always a server (`ensemble-hub serve`), for a team or for one person on
 //! their own computer: its `server`, the `roles` of its accounts, its
 //! `knowledge`, and, optionally, the `tasks` it hands out from a tracker.
 //!
@@ -19,7 +19,7 @@ pub const HUB_SUPPORTED_VERSION: u32 = 1;
 /// the structs below.
 pub const HUB_SCHEMA: &str = include_str!("../../../hub.schema.json");
 
-/// The hub file `ensemble hub init` writes, with what each setting does.
+/// The hub file `ensemble-hub init` writes, with what each setting does.
 pub const HUB_SAMPLE: &str = include_str!("hub_sample.yaml");
 
 /// The hub's settings, resolved.
@@ -302,7 +302,7 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
         return Err(ConfigError::Invalid {
             path: path.to_path_buf(),
             problems: vec![
-                "server: a hub is always a server now, never part of a runner: add `server` and `roles` (`ensemble hub init --stdout` prints them), and remove `tasks.user` and `tasks.projects`. One person runs it on their own computer, and their runner names it as `hub:` in runner.yaml"
+                "server: a hub is always a server now, never part of a runner: add `server` and `roles` (`ensemble-hub init --stdout` prints them), and remove `tasks.user` and `tasks.projects`. One person runs it on their own computer, and their runner names it as `hub:` in runner.yaml"
                     .into(),
             ],
         });

@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json
 
-# config.yaml — a helper team of agents, written by `ensemble runner team new`.
+# config.yaml — a helper team of agents, written by `ensemble-runner team new`.
 # It lives in a folder of its own (often its own git repo), apart from any
 # project; the repository a task names is where the team works. It can be yours
 # alone, or one your company shares and you pull. API keys never go here: they
@@ -11,11 +11,11 @@
 # out means "not used": an agent's `prompt`, and a backend's `api_key_env`.
 # This file is a map of what can be set rather than a team to keep as it is:
 # delete the agents you do not want and change the rest. Check it with
-# `ensemble runner team check`, see how an agent is started with
-# `ensemble runner agent show <team>/<agent>`, and check that everything it
-# needs is there with `ensemble runner agent health`.
+# `ensemble-runner team check`, see how an agent is started with
+# `ensemble-runner agent show <team>/<agent>`, and check that everything it
+# needs is there with `ensemble-runner agent health`.
 #
-# Your runner runs every team in its teams directory, where `ensemble runner
+# Your runner runs every team in its teams directory, where `ensemble-runner
 # team new` writes this; the tasks of your hub go to `<team>/<agent>`.
 
 version: 1
@@ -225,7 +225,7 @@ agents:
   # An agent a runner of a hub server offers, such as a colleague's shared runner
   # on a machine with big GPUs. The task and a copy of the files git tracks go
   # there; what the agent changed comes back and is written here, where gates,
-  # branches and commits stay. Needs `ensemble runner login <hub>`.
+  # branches and commits stay. Needs `ensemble-runner login <hub>`.
   heavy-coder:
     prompt: |
       Implements large changes on a big model.
@@ -240,7 +240,7 @@ agents:
       # The agent the runners offer, by its name in their helper team.
       agent: coder
       # The runners that may run it, as <owner>/<name>, tried in order;
-      # `ensemble runner peers` lists them.
+      # `ensemble-runner peers` lists them.
       nodes: [kim/gpu-box]
 
   # The Codex CLI, on your own login.
