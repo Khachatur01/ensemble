@@ -2,7 +2,7 @@
 //! hub with your helper teams, in the git repositories of its workspace.
 
 use crate::cli::Command;
-use crate::{Ctx, daemon, host_name, hostname, runner_file, runner_hub, this_runner};
+use crate::{Ctx, daemon, host_name, runner_file, runner_hub, this_runner};
 use crate::{setup, teams};
 use ensemble_agents::router::Ensemble;
 use ensemble_config::settings_file::{self, SettingsFile, WithSettings};
@@ -349,6 +349,12 @@ struct Login {
 }
 
 #[derive(serde::Deserialize)]
+struct Join {
+    url: String,
+    code: String,
+}
+
+#[derive(serde::Deserialize)]
 struct Logout {
     url: String,
 }
@@ -364,6 +370,15 @@ const LOGIN: &[Field] = &[
     ),
     Field::text("token", "A token made elsewhere, in place of your account."),
     Field::secret("password", "Your password on the hub"),
+];
+const JOIN: &[Field] = &[
+    URL,
+    Field::text(
+        "code",
+        "A join code from `ensemble-hub user join-code` or your account.",
+    )
+    .required()
+    .positional(),
 ];
 const LOGOUT: &[Field] = &[URL];
 
@@ -381,6 +396,20 @@ pub fn operations() -> Registry<RunnerContext> {
     ));
     all.push(operation(
         Spec {
+            name: "join",
+            summary: "Join a hub with a code made for your account, and keep its token for the runner.",
+            access: Access::Local,
+            input: JOIN,
+        },
+        |c: &RunnerContext, _: &Caller, input: Join| {
+            let url = hub_url(&input.url)?;
+            let params = serde_json::json!({ "code": input.code.trim(), "runner": runner_name() });
+            let token = sign_in(url, ensemble_link::protocol::JOIN, params)?;
+            keep(c, url, &token)
+        },
+    ));
+    all.push(operation(
+        Spec {
             name: "logout",
             summary: "Forget a hub's token.",
             access: Access::Local,
@@ -391,22 +420,19 @@ pub fn operations() -> Registry<RunnerContext> {
     Registry::new(all)
 }
 
-/// `login`: check a hub's token, made here from your account or elsewhere,
-/// keep it, and have the runner name the hub.
+/// `login`: sign in to a hub over the link with your account, or take a token
+/// made elsewhere, and keep it.
 fn login(c: &RunnerContext, input: Login) -> Result<serde_json::Value, Error> {
-    let url = input.url.as_str();
-    if !url.starts_with("ws://") && !url.starts_with("wss://") {
-        return Err(Error::invalid(format!(
-            "'{url}' is not a hub's URL, such as wss://hub.example.com"
-        ))
-        .on("url"));
-    }
+    let url = hub_url(&input.url)?;
     let token = match (&input.user, &input.token) {
         (Some(user), None) => {
             let password = input.password.as_deref().ok_or_else(|| {
                 Error::invalid(format!("a password is needed to sign in as {user}")).on("password")
             })?;
-            token_from_account(url, user, password)?
+            let params = serde_json::json!({
+                "name": user, "password": password, "runner": runner_name(),
+            });
+            sign_in(url, ensemble_link::protocol::LOGIN, params)?
         }
         (None, Some(t)) => t.clone(),
         _ => {
@@ -415,10 +441,49 @@ fn login(c: &RunnerContext, input: Login) -> Result<serde_json::Value, Error> {
             );
         }
     };
-    let hello = ensemble_core::runtime::block_on(ensemble_link::Link::new(url, &token).hello())
+    keep(c, url, &token)
+}
+
+/// `url`, when it is a hub's: a WebSocket's.
+fn hub_url(url: &str) -> Result<&str, Error> {
+    if url.starts_with("ws://") || url.starts_with("wss://") {
+        Ok(url)
+    } else {
+        Err(Error::invalid(format!(
+            "'{url}' is not a hub's URL, such as wss://hub.example.com"
+        ))
+        .on("url"))
+    }
+}
+
+/// Sign in to the hub at `url` over a link without a token, asking `method`
+/// with `params`: the access token it makes for this computer.
+fn sign_in(url: &str, method: &str, params: serde_json::Value) -> Result<String, Error> {
+    ensemble_core::runtime::block_on(ensemble_link::client::sign_in(url, method, params)).map_err(
+        |failure| match failure {
+            ensemble_link::client::Failure::Hub(e) => Error::new(Code::Unauthorized, e),
+            ensemble_link::client::Failure::Broken(e) => Error::new(Code::Unavailable, e).on("url"),
+        },
+    )
+}
+
+/// The name the hub gives this computer's token: the runner's, or else the
+/// computer's.
+fn runner_name() -> String {
+    this_runner()
+        .map(|r| r.name)
+        .ok()
+        .or_else(host_name)
+        .unwrap_or_else(|| "this computer".into())
+}
+
+/// Check the token of the hub at `url`, keep it, and have the runner name
+/// the hub.
+fn keep(c: &RunnerContext, url: &str, token: &str) -> Result<serde_json::Value, Error> {
+    let hello = ensemble_core::runtime::block_on(ensemble_link::Link::new(url, token).hello())
         .map_err(|e| Error::new(Code::Unauthorized, e).on("token"))?;
     let mut tokens = ensemble_link::Tokens::load()?;
-    tokens.set(url, &token);
+    tokens.set(url, token);
     tokens.save()?;
     let mut said = vec![format!(
         "signed in to {url} as {} ({}: {})",
@@ -500,69 +565,6 @@ fn runner_running() -> bool {
     state::runner_dir().is_ok_and(|dir| {
         std::os::unix::net::UnixStream::connect(state::runner_socket(&dir)).is_ok()
     })
-}
-
-/// Log in to the hub at `url` as `user` with `password`, make an access token
-/// for this computer, and log out again.
-fn token_from_account(url: &str, user: &str, password: &str) -> Result<String, Error> {
-    let base = url
-        .replacen("wss://", "https://", 1)
-        .replacen("ws://", "http://", 1);
-    let base = base.trim_end_matches('/');
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(std::time::Duration::from_secs(30)))
-        .build()
-        .into();
-    let call = |path: &str, bearer: Option<&str>, body: serde_json::Value| {
-        let mut req = agent
-            .post(format!("{base}{path}"))
-            .header("content-type", "application/json");
-        if let Some(b) = bearer {
-            req = req.header("authorization", &format!("Bearer {b}"));
-        }
-        let mut resp = req.send(body.to_string()).map_err(|e| {
-            Error::new(Code::Unavailable, format!("cannot reach {base}: {e}")).on("url")
-        })?;
-        let status = resp.status().as_u16();
-        let text = resp.body_mut().read_to_string().unwrap_or_default();
-        let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
-        if (200..300).contains(&status) {
-            Ok(value)
-        } else {
-            let code = if status == 401 {
-                Code::Unauthorized
-            } else {
-                Code::Failed
-            };
-            Err(Error::new(
-                code,
-                format!(
-                    "the hub said {status}: {}",
-                    value["error"].as_str().unwrap_or(&text)
-                ),
-            ))
-        }
-    };
-    let session = call(
-        "/api/v1/login",
-        None,
-        serde_json::json!({ "name": user, "password": password }),
-    )?;
-    let session = session["token"]
-        .as_str()
-        .ok_or_else(|| Error::failed("the hub sent no session"))?
-        .to_string();
-    let made = call(
-        "/api/v1/me/tokens",
-        Some(&session),
-        serde_json::json!({ "name": format!("ensemble on {}", hostname()) }),
-    );
-    let _ = call("/api/v1/logout", Some(&session), serde_json::json!({}));
-    made?["token"]
-        .as_str()
-        .map(String::from)
-        .ok_or_else(|| Error::failed("the hub sent no token"))
 }
 
 /// `ensemble-runner peers`: the runners of your runner's hub you may use now.
@@ -699,7 +701,7 @@ fn setup(
     println!();
     if healthy {
         println!(
-            "Done. Clone the repositories its tasks are for into {}, sign in to your hub with `ensemble-runner login <url> --user <name>`, and start the runner with `ensemble-runner serve`; keep it running.",
+            "Done. Clone the repositories its tasks are for into {}, sign in to your hub with `ensemble-runner login <url> --user <name>` or `ensemble-runner join <url> <code>`, and start the runner with `ensemble-runner serve`; keep it running.",
             runner.workspace.display()
         );
         Ok(ExitCode::SUCCESS)

@@ -1,5 +1,5 @@
 //! Where a runner keeps its hub tokens: `~/.config/ensemble/runner/hubs.json`
-//! (under `$XDG_CONFIG_HOME` when that is set), one token per hub URL. Only its user can read it, like an SSH key; `ensemble-runner login` writes it.
+//! (under `$XDG_CONFIG_HOME` when that is set), one token per hub URL. Only its user can read it, like an SSH key; `ensemble-runner login` and `ensemble-runner join` write it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

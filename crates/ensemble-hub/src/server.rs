@@ -1,8 +1,9 @@
 //! `ensemble-hub serve`: the hub as a server for a team. Each member's runner
-//! opens a WebSocket, signed in with its token, and asks for what its role
-//! allows; the hub's MCP asks the same way for a client agent. Shares go into
-//! the organization vault under the signed-in user's name, never a name the
-//! client sends.
+//! opens a WebSocket, saying the link protocol it speaks and signed in with
+//! its token, and asks for what its role allows; a runner without a token
+//! may only sign in, with a password or a join code, for one. The hub's MCP
+//! asks the same way for a client agent. Shares go into the organization
+//! vault under the signed-in user's name, never a name the client sends.
 //!
 //! The same port serves the REST API under `/api/v1/` (`api`): a request that
 //! asks for a WebSocket upgrade is the link, anything else is REST.
@@ -20,9 +21,10 @@ use ensemble_config::Permission;
 use ensemble_core::runtime::{self, blocking};
 use ensemble_knowledge::Memory;
 use ensemble_link::protocol::{
-    Event, HELLO, MODEL_REPLY, NODE, NODES, RECALL, RUN, RUN_CANCEL, RUN_DONE, RUN_PROGRESS, Reply,
-    Request, SHARE, TASK_METHODS,
+    Event, HELLO, JOIN, LOGIN, MODEL_REPLY, NODE, NODES, RECALL, RUN, RUN_CANCEL, RUN_DONE,
+    RUN_PROGRESS, Reply, Request, SHARE, TASK_METHODS, VERSION, VERSION_HEADER,
 };
+use ensemble_ops::Caller;
 use futures_util::SinkExt;
 use futures_util::stream::{SplitSink, StreamExt};
 use serde_json::{Value, json};
@@ -171,12 +173,22 @@ impl<'a> Server<'a> {
         let mut session = None;
         // The handshake callback's error type is tungstenite's own response.
         #[allow(clippy::result_large_err)]
-        let signed_in = |req: &Upgrade, resp: Response| match blocking(|| self.sign_in(req)) {
-            Some(s) => {
-                session = Some(s);
-                Ok(resp)
+        let signed_in = |req: &Upgrade, resp: Response| {
+            // A runner of another version would be misread: refused first.
+            let version = req
+                .headers()
+                .get(VERSION_HEADER)
+                .and_then(|v| v.to_str().ok()?.trim().parse::<u32>().ok());
+            if version != Some(VERSION) {
+                return Err(outdated(version));
             }
-            None => Err(refused()),
+            match blocking(|| self.sign_in(req)) {
+                Ok(s) => {
+                    session = s;
+                    Ok(resp)
+                }
+                Err(()) => Err(refused()),
+            }
         };
         let ws = tokio_tungstenite::accept_hdr_async_with_config(
             Replay::new(read, stream),
@@ -185,26 +197,38 @@ impl<'a> Server<'a> {
         )
         .await
         .map_err(|e| format!("refused or broken handshake: {e}"))?;
-        let session = session.ok_or("no session after the handshake")?;
-        say(&format!("{} connected", session.user));
+        let who = session
+            .as_ref()
+            .map_or("a runner signing in", |s| s.user.as_str())
+            .to_string();
+        say(&format!("{who} connected"));
         let (conn, outbox) = self.routes.connect();
         let (mut sender, receiver) = ws.split();
         let ended = self
-            .link(&mut sender, receiver, &session, conn, outbox, stop, say)
+            .link(
+                &mut sender,
+                receiver,
+                session.as_ref(),
+                conn,
+                outbox,
+                stop,
+                say,
+            )
             .await;
         self.routes.disconnect(conn);
-        say(&format!("{} disconnected", session.user));
+        say(&format!("{who} disconnected"));
         let _ = sender.close().await;
         ended
     }
 
-    /// Serve one runner's link until it closes or `stop` is set.
+    /// Serve one runner's link until it closes or `stop` is set: as the
+    /// account it signed in as, or, without a token, for signing in alone.
     #[allow(clippy::too_many_arguments)]
     async fn link(
         &self,
         sender: &mut Sender,
         mut receiver: futures_util::stream::SplitStream<WebSocketStream<Replay<TcpStream>>>,
-        session: &Session,
+        session: Option<&Session>,
         conn: u64,
         mut outbox: tokio::sync::mpsc::UnboundedReceiver<Event>,
         stop: &AtomicBool,
@@ -243,9 +267,13 @@ impl<'a> Server<'a> {
                     if !matches!(req.method.as_str(), RUN_PROGRESS | MODEL_REPLY)
                         && !TASK_METHODS.contains(&req.method.as_str())
                     {
-                        say(&format!("{}: {}", session.user, req.method));
+                        let who = session.map_or("a runner signing in", |s| s.user.as_str());
+                        say(&format!("{who}: {}", req.method));
                     }
-                    blocking(|| self.answer(session, conn, req))
+                    blocking(|| match session {
+                        Some(session) => self.answer(session, conn, req),
+                        None => self.unsigned(req),
+                    })
                 }
                 Err(e) => Reply::err(0, format!("not a request: {e}")),
             };
@@ -253,17 +281,42 @@ impl<'a> Server<'a> {
         }
     }
 
-    /// The user an upgrade request's bearer token signs in as.
-    fn sign_in(&self, req: &Upgrade) -> Option<Session> {
-        let token = req
-            .headers()
-            .get("authorization")?
+    /// The user an upgrade request's bearer token signs in as; none without
+    /// a token, and refused with one that is not valid.
+    fn sign_in(&self, req: &Upgrade) -> Result<Option<Session>, ()> {
+        let Some(header) = req.headers().get("authorization") else {
+            return Ok(None);
+        };
+        let token = header
             .to_str()
-            .ok()?
-            .strip_prefix("Bearer ")?
-            .trim()
-            .to_string();
-        self.session(token)
+            .ok()
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .ok_or(())?;
+        self.session(token.trim().to_string()).map(Some).ok_or(())
+    }
+
+    /// What a connection without a token may ask: to sign in, with a password
+    /// or a join code, for an access token of the runner's own. Nothing else.
+    fn unsigned(&self, req: Request) -> Reply {
+        let operation = match req.method.as_str() {
+            LOGIN => "runner.login",
+            JOIN => "runner.join",
+            other => {
+                return Reply::err(
+                    req.id,
+                    format!(
+                        "this link is not signed in, so it may ask only `{LOGIN}` or `{JOIN}`, not `{other}`; connect with a token"
+                    ),
+                );
+            }
+        };
+        match self
+            .operations
+            .run(&self.hub, &Caller::Anyone, operation, req.params)
+        {
+            Ok(value) => Reply::ok(req.id, value),
+            Err(e) => Reply::err(req.id, e.to_string()),
+        }
     }
 
     /// The user `token` signs in as, when it is valid.
@@ -385,9 +438,20 @@ impl<'a> Server<'a> {
 
 fn refused() -> ErrorResponse {
     let mut resp = ErrorResponse::new(Some(
-        "a valid token is needed: Authorization: Bearer <token>".into(),
+        "the token is not valid: Authorization: Bearer <token>, or none to sign in".into(),
     ));
     *resp.status_mut() = tungstenite::http::StatusCode::UNAUTHORIZED;
+    resp
+}
+
+/// The refusal of a runner that speaks `version` of the link, or named none:
+/// both versions, and what to update.
+fn outdated(version: Option<u32>) -> ErrorResponse {
+    let mut resp = ErrorResponse::new(Some(ensemble_link::protocol::mismatch(VERSION, version)));
+    *resp.status_mut() = tungstenite::http::StatusCode::UPGRADE_REQUIRED;
+    let headers = resp.headers_mut();
+    headers.insert(VERSION_HEADER, VERSION.into());
+    headers.insert("upgrade", "websocket".parse().expect("a header"));
     resp
 }
 
@@ -427,6 +491,7 @@ pub mod testing {
         pub ana: String,
         pub rex: String,
         pub root: String,
+        pub server: &'static Server<'static>,
         stop: &'static AtomicBool,
     }
 
@@ -499,6 +564,7 @@ pub mod testing {
             ana,
             rex,
             root,
+            server,
             stop,
         }
     }
@@ -513,10 +579,23 @@ pub(crate) mod tests {
     type Client = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
 
     fn connect(url: &str, token: Option<&str>) -> Result<Client, tungstenite::Error> {
+        connect_as(url, token, Some(&VERSION.to_string()))
+    }
+
+    /// A link that says it speaks `version`, or says nothing of it.
+    fn connect_as(
+        url: &str,
+        token: Option<&str>,
+        version: Option<&str>,
+    ) -> Result<Client, tungstenite::Error> {
         let mut req = url.into_client_request().unwrap();
         if let Some(token) = token {
             req.headers_mut()
                 .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        }
+        if let Some(version) = version {
+            req.headers_mut()
+                .insert(VERSION_HEADER, version.parse().unwrap());
         }
         tungstenite::connect(req).map(|(ws, _)| ws)
     }
@@ -537,12 +616,59 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_node_without_a_valid_token_is_refused() {
+    fn a_runner_with_a_token_that_is_not_valid_is_refused() {
         let hub = start();
-        for token in [None, Some("ens_wrong")] {
-            match connect(&hub.url, token) {
+        for token in ["ens_wrong", ""] {
+            match connect(&hub.url, Some(token)) {
                 Err(tungstenite::Error::Http(resp)) => assert_eq!(resp.status(), 401),
                 other => panic!("{token:?}: {:?}", other.map(|_| ())),
+            }
+        }
+    }
+
+    #[test]
+    fn a_link_without_a_token_may_only_sign_in() {
+        let hub = start();
+        let mut ws = connect(&hub.url, None).unwrap();
+        for (id, method) in [(1, HELLO), (2, RECALL), (3, NODES)] {
+            let err = ask(&mut ws, id, method, json!({"query": "deploy"}))
+                .error
+                .unwrap();
+            assert!(
+                err.contains("not signed in") && err.contains("`login` or `join`"),
+                "{method}: {err}"
+            );
+        }
+        let err = ask(&mut ws, 4, JOIN, json!({"code": "join_nope"}))
+            .error
+            .unwrap();
+        assert!(err.contains("`runner` is required"), "{err}");
+    }
+
+    #[test]
+    fn a_runner_of_another_protocol_version_is_told_what_to_update() {
+        let hub = start();
+        let newer = (VERSION + 1).to_string();
+        let older = (VERSION - 1).to_string();
+        for (version, update) in [
+            (Some(newer.as_str()), "update ensemble-hub"),
+            (Some(older.as_str()), "update ensemble-runner"),
+            (None, "named none: update ensemble-runner"),
+            (Some("one"), "named none: update ensemble-runner"),
+        ] {
+            // Refused before the token is looked at.
+            match connect_as(&hub.url, Some(&hub.ana), version) {
+                Err(tungstenite::Error::Http(resp)) => {
+                    assert_eq!(resp.status(), 426);
+                    assert_eq!(resp.headers()[VERSION_HEADER], VERSION.to_string());
+                    let said = String::from_utf8(resp.body().clone().unwrap()).unwrap();
+                    assert!(
+                        said.contains(&format!("this hub speaks link protocol {VERSION}"))
+                            && said.contains(update),
+                        "{version:?}: {said}"
+                    );
+                }
+                other => panic!("{version:?}: {:?}", other.map(|_| ())),
             }
         }
     }

@@ -14,12 +14,14 @@
 //! | `GET /api/v1/me/tokens` | `me.tokens` |
 //! | `POST /api/v1/me/tokens` `{name, expires_days?, scopes?}` | `me.token` |
 //! | `DELETE /api/v1/me/tokens/{id}` | `me.revoke` |
+//! | `POST /api/v1/me/join-codes` | `me.join-code` |
 //! | `GET /api/v1/users` | `user.list` |
 //! | `POST /api/v1/users` `{name, role, password}` | `user.add` |
 //! | `GET /api/v1/roles` | `role.list` |
 //! | `POST /api/v1/users/{name}/approve` `{role}` | `user.approve` |
 //! | `PUT /api/v1/users/{name}` `{role?, tracker_user?}` | `user.role`, `user.tracker` |
 //! | `PUT /api/v1/users/{name}/password` `{password}` | `user.password` |
+//! | `POST /api/v1/users/{name}/join-codes` | `user.join-code` |
 //! | `DELETE /api/v1/users/{name}/tokens` | `user.revoke` |
 //! | `DELETE /api/v1/users/{name}` | `user.remove` |
 
@@ -147,6 +149,7 @@ impl Server<'_> {
             ("GET", ["me", "tokens"]) => ok(run("me.tokens", json!({}))?),
             ("POST", ["me", "tokens"]) => made(run("me.token", Value::Object(body()?))?),
             ("DELETE", ["me", "tokens", id]) => ok(run("me.revoke", json!({ "id": id }))?),
+            ("POST", ["me", "join-codes"]) => made(run("me.join-code", json!({}))?),
             ("GET", ["users"]) => ok(run("user.list", json!({}))?),
             ("POST", ["users"]) => {
                 let fields = body()?;
@@ -175,15 +178,18 @@ impl Server<'_> {
                 ok(run("user.show", json!({ "name": name }))?)
             }
             ("PUT", ["users", name, "password"]) => ok(run("user.password", with("name", name)?)?),
+            ("POST", ["users", name, "join-codes"]) => {
+                made(run("user.join-code", json!({ "name": name }))?)
+            }
             ("DELETE", ["users", name, "tokens"]) => {
                 ok(run("user.revoke", json!({ "name": name }))?)
             }
             ("DELETE", ["users", name]) => ok(run("user.remove", json!({ "name": name }))?),
             (_, ["register" | "login" | "logout" | "me" | "users" | "roles"])
-            | (_, ["me", "password" | "tokens"])
+            | (_, ["me", "password" | "tokens" | "join-codes"])
             | (_, ["me", "tokens", _])
             | (_, ["users", _])
-            | (_, ["users", _, "approve" | "password" | "tokens"]) => Ok((
+            | (_, ["users", _, "approve" | "password" | "tokens" | "join-codes"]) => Ok((
                 405,
                 json!({ "error": format!("{} is not allowed on {}", head.method, head.path) }),
             )),
@@ -443,6 +449,83 @@ mod tests {
         assert_eq!(status, 200);
         let (_, me) = call(&hub.url, "GET", "/api/v1/me", Some(&ana), None);
         assert_eq!(me["tracker_name"], "ana.p");
+    }
+
+    #[test]
+    fn join_codes_are_made_by_an_admin_or_by_a_session_and_sign_a_runner_in_once() {
+        let hub = start();
+        let (_, root) = login(&hub.url, "root", PASSWORD);
+        let root = root["token"].as_str().unwrap().to_string();
+        let (status, made) = call(
+            &hub.url,
+            "POST",
+            "/api/v1/users/rex/join-codes",
+            Some(&root),
+            None,
+        );
+        assert_eq!(status, 201, "{made}");
+        assert!(made["expires"].is_string());
+        assert!(
+            made["note"]
+                .as_str()
+                .unwrap()
+                .contains("ensemble-runner join"),
+            "{made}"
+        );
+        let code = made["code"].as_str().unwrap().to_string();
+        assert!(
+            call(&hub.url, "GET", "/api/v1/me", Some(&code), None).0 == 401,
+            "a code signs in as no one"
+        );
+        let join = |code: &str| {
+            block_on(ensemble_link::client::sign_in(
+                &hub.url,
+                ensemble_link::protocol::JOIN,
+                json!({"code": code, "runner": "lab"}),
+            ))
+        };
+        let token = join(&code).unwrap();
+        let hello = block_on(ensemble_link::Link::new(&hub.url, &token).hello()).unwrap();
+        assert_eq!(hello.user, "rex");
+        assert!(join(&code).is_err(), "spent");
+
+        let (status, _) = call(
+            &hub.url,
+            "POST",
+            "/api/v1/users/rex/join-codes",
+            Some(&hub.ana),
+            None,
+        );
+        assert_eq!(status, 403, "a member is no admin");
+        let (status, _) = call(
+            &hub.url,
+            "POST",
+            "/api/v1/me/join-codes",
+            Some(&hub.ana),
+            None,
+        );
+        assert_eq!(status, 403, "an access token makes no codes");
+        let (_, session) = login(&hub.url, "ana", PASSWORD);
+        let session = session["token"].as_str().unwrap().to_string();
+        let (status, made) = call(
+            &hub.url,
+            "POST",
+            "/api/v1/me/join-codes",
+            Some(&session),
+            None,
+        );
+        assert_eq!(status, 201, "{made}");
+        let token = join(made["code"].as_str().unwrap()).unwrap();
+        let hello = block_on(ensemble_link::Link::new(&hub.url, &token).hello()).unwrap();
+        assert_eq!(hello.user, "ana");
+        let (status, _) = call(
+            &hub.url,
+            "GET",
+            "/api/v1/me/join-codes",
+            Some(&session),
+            None,
+        );
+        assert_eq!(status, 405);
     }
 
     #[test]

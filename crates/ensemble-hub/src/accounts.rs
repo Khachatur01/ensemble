@@ -4,18 +4,21 @@
 //!
 //! | Operation | Who |
 //! |---|---|
-//! | `user.list`, `user.show`, `user.add`, `user.approve`, `user.role`, `user.password`, `user.tracker`, `user.token`, `user.revoke`, `user.remove`, `role.list` | admin |
+//! | `user.list`, `user.show`, `user.add`, `user.approve`, `user.role`, `user.password`, `user.tracker`, `user.token`, `user.join-code`, `user.revoke`, `user.remove`, `role.list` | admin |
 //! | `config.get`, `config.set`, `config.unset`, `config.path` | admin |
 //! | `me.show` | any signed-in account |
-//! | `me.tracker`, `me.password`, `me.tokens`, `me.token`, `me.revoke`, `account.logout` | a session |
-//! | `account.register`, `account.login` | anyone |
+//! | `me.tracker`, `me.password`, `me.tokens`, `me.token`, `me.join-code`, `me.revoke`, `account.logout` | a session |
+//! | `account.register`, `account.login`, `runner.login`, `runner.join` | anyone |
 //!
 //! A **session** comes from logging in with the password, and only a session
 //! may change the password or make and revoke access tokens, so a stolen access
 //! token cannot make more. An **access token** may be narrowed by scopes, and
-//! is what runners, client agents and scripts use.
+//! is what runners, client agents and scripts use. A runner gets its own over
+//! the link, which runs `runner.login` and `runner.join` for a connection
+//! without a token: with a password, or with a **join code**, made by an admin
+//! or by the account's session and spent once.
 
-use crate::users::{Kind, Roles, Token, User, Users, UsersError};
+use crate::users::{JOIN_HOURS, Kind, Roles, Token, User, Users, UsersError};
 use ensemble_config::settings_file::{self, SettingsFile, WithSettings};
 use ensemble_config::{Permission, Registration};
 use ensemble_ops::{
@@ -194,6 +197,7 @@ pub fn operations() -> Registry<HubContext> {
     let mut all = settings_file::operations::<HubContext>(Access::Permission("admin"));
     all.extend(user_operations());
     all.extend(own_operations());
+    all.extend(runner_operations());
     Registry::new(all)
 }
 
@@ -261,7 +265,8 @@ const TRACKER: &[Field] = &[
 /// What a new token's owner is told.
 fn token_note(c: &HubContext, name: &str, token: &str) -> String {
     let mut note = format!(
-        "This is {name}'s token, shown once. On their computer: ensemble-runner login <hub-url> --token <token>"
+        "This is {name}'s token, shown once. On their computer: ensemble-runner login {} --token <token>",
+        hub_url(c)
     );
     if let Some(add) = mcp_line(c, token) {
         note.push_str(&format!(
@@ -271,17 +276,48 @@ fn token_note(c: &HubContext, name: &str, token: &str) -> String {
     note
 }
 
-/// The line that adds the hub's MCP to an agent with `token`, when the hub
-/// serves MCP: what a person pastes, or asks their agent to run.
-fn mcp_line(c: &HubContext, token: &str) -> Option<String> {
+/// What a new join code's owner is told.
+fn join_note(c: &HubContext, name: &str, code: &str) -> String {
+    format!(
+        "This is {name}'s join code, shown once and good for one runner within {JOIN_HOURS} hours. On the runner's computer: ensemble-runner join {} {code}",
+        hub_url(c)
+    )
+}
+
+/// hub.yaml as it is now, when it loads.
+fn hub_file(c: &HubContext) -> Option<ensemble_config::Hub> {
     let text = c.settings.read().ok()?;
-    let hub = ensemble_config::parse_hub(
+    ensemble_config::parse_hub(
         &text,
         &ensemble_config::hub_path(&c.dir),
         &ensemble_config::SystemEnv,
     )
-    .ok()?;
-    let mcp = hub.interfaces.mcp?;
+    .ok()
+}
+
+/// The address a runner reaches the hub's link at: the one clients reach its
+/// MCP at, as a WebSocket's, or where it listens when that is one address;
+/// else a stand-in for the person to fill.
+fn hub_url(c: &HubContext) -> String {
+    let Some(hub) = hub_file(c) else {
+        return "<hub-url>".into();
+    };
+    match hub.interfaces.mcp {
+        Some(mcp) => mcp
+            .url
+            .replacen("https://", "wss://", 1)
+            .replacen("http://", "ws://", 1),
+        None if !hub.server.listen.ip().is_unspecified() => {
+            format!("ws://{}", hub.server.listen)
+        }
+        None => "<hub-url>".into(),
+    }
+}
+
+/// The line that adds the hub's MCP to an agent with `token`, when the hub
+/// serves MCP: what a person pastes, or asks their agent to run.
+fn mcp_line(c: &HubContext, token: &str) -> Option<String> {
+    let mcp = hub_file(c)?.interfaces.mcp?;
     Some(format!(
         "claude mcp add --transport http ensemble {} --header \"Authorization: Bearer {token}\"",
         mcp.endpoint()
@@ -449,6 +485,15 @@ fn user_operations() -> Vec<Operation<HubContext>> {
                     json!({ "name": input.name, "token": token, "said": token, "note": token_note(c, &input.name, &token) }),
                 )
             },
+        ),
+        operation(
+            Spec {
+                name: "user.join-code",
+                summary: "Make an account a join code, shown once, that signs one runner in.",
+                access: ADMIN,
+                input: NAMED,
+            },
+            |c: &HubContext, _: &Caller, input: Named| join_code(c, &input.name),
         ),
         operation(
             Spec {
@@ -674,7 +719,7 @@ fn own_operations() -> Vec<Operation<HubContext>> {
             |c: &HubContext, caller: &Caller, input: OwnPassword| {
                 let name = own(caller)?;
                 c.accounts()?.change(|users| {
-                    users.login(name, &input.current, 1).map_err(|_| {
+                    users.verify(name, &input.current).map_err(|_| {
                         UsersError::Unauthorized("the current password is wrong".into())
                     })?;
                     users.set_password(name, &input.new)
@@ -740,6 +785,15 @@ fn own_operations() -> Vec<Operation<HubContext>> {
         ),
         operation(
             Spec {
+                name: "me.join-code",
+                summary: "Make yourself a join code, shown once, that signs one runner in.",
+                access: Access::Session,
+                input: &[],
+            },
+            |c: &HubContext, caller: &Caller, _: Nothing| join_code(c, own(caller)?),
+        ),
+        operation(
+            Spec {
                 name: "me.revoke",
                 summary: "Revoke one of your access tokens.",
                 access: Access::Session,
@@ -754,9 +808,113 @@ fn own_operations() -> Vec<Operation<HubContext>> {
     ]
 }
 
+#[derive(Deserialize)]
+struct RunnerLogin {
+    name: String,
+    password: String,
+    runner: String,
+}
+
+#[derive(Deserialize)]
+struct Join {
+    code: String,
+    runner: String,
+}
+
+const RUNNER: Field = Field::text(
+    "runner",
+    "The runner's name, which its new access token is named after.",
+)
+.required();
+const RUNNER_LOGIN: &[Field] = &[
+    Field::text("name", "Your account's name.").required(),
+    Field::secret("password", "Your password.").required(),
+    RUNNER,
+];
+const JOIN: &[Field] = &[
+    Field::text("code", "A join code made for your account.").required(),
+    RUNNER,
+];
+
+/// How a runner signs in: over the link, on a connection without a token.
+fn runner_operations() -> Vec<Operation<HubContext>> {
+    vec![
+        operation(
+            Spec {
+                name: "runner.login",
+                summary: "Sign a runner in with a password, for an access token of its own.",
+                access: Access::Anyone,
+                input: RUNNER_LOGIN,
+            },
+            |c: &HubContext, _: &Caller, input: RunnerLogin| {
+                let accounts = c.accounts()?;
+                let token = guarded(accounts, &input.name, |users| {
+                    users.verify(&input.name, &input.password)?;
+                    runner_token(users, &input.name, &input.runner, &accounts.roles())
+                })?;
+                Ok(json!({ "name": input.name, "token": token }))
+            },
+        ),
+        operation(
+            Spec {
+                name: "runner.join",
+                summary: "Sign a runner in with a join code, for an access token of its own.",
+                access: Access::Anyone,
+                input: JOIN,
+            },
+            |c: &HubContext, _: &Caller, input: Join| {
+                let accounts = c.accounts()?;
+                let (name, token) = accounts.change(|users| {
+                    let name = users.spend(&input.code)?;
+                    let token = runner_token(users, &name, &input.runner, &accounts.roles())?;
+                    Ok((name, token))
+                })?;
+                Ok(json!({ "name": name, "token": token }))
+            },
+        ),
+    ]
+}
+
+/// A new access token of `name` for the runner `runner`, named after it,
+/// with the account's whole role and no expiry.
+fn runner_token(
+    users: &mut Users,
+    name: &str,
+    runner: &str,
+    roles: &Roles,
+) -> Result<String, UsersError> {
+    let label = format!("runner {}", runner.trim());
+    users
+        .create_token(name, &label, None, None, roles)
+        .map(|(_, token, _)| token)
+}
+
+/// A new join code for `name`, and what to do with it.
+fn join_code(c: &HubContext, name: &str) -> Result<Value, Error> {
+    let (code, expires) = c.accounts()?.change(|u| u.join_code(name))?;
+    Ok(json!({
+        "name": name, "code": code, "expires": expires,
+        "said": code, "note": join_note(c, name, &code),
+    }))
+}
+
 /// Check a name and password, minding the lockout, and start a session.
 fn login(accounts: &Accounts, input: &Login) -> Result<Value, Error> {
-    let name = &input.name;
+    let hours = accounts.server().session_hours;
+    let (token, expires) = guarded(accounts, &input.name, |users| {
+        users.login(&input.name, &input.password, hours)
+    })?;
+    Ok(json!({ "name": input.name, "token": token, "expires": expires }))
+}
+
+/// Change the accounts with `check`, which checks the password of `name`,
+/// minding the lockout: refused while the name is locked, and a wrong
+/// password counted against it.
+fn guarded<T>(
+    accounts: &Accounts,
+    name: &str,
+    check: impl FnOnce(&mut Users) -> Result<T, UsersError>,
+) -> Result<T, Error> {
     {
         let failures = accounts.failures.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((_, Some(until))) = failures.get(name)
@@ -768,19 +926,18 @@ fn login(accounts: &Accounts, input: &Login) -> Result<Value, Error> {
             ));
         }
     }
-    let hours = accounts.server().session_hours;
-    match accounts.change(|users| users.login(name, &input.password, hours)) {
-        Ok((token, expires)) => {
+    match accounts.change(check) {
+        Ok(out) => {
             accounts
                 .failures
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(name);
-            Ok(json!({ "name": name, "token": token, "expires": expires }))
+            Ok(out)
         }
         Err(e) if e.code == Code::Unauthorized => {
             let mut failures = accounts.failures.lock().unwrap_or_else(|e| e.into_inner());
-            let entry = failures.entry(name.clone()).or_insert((0, None));
+            let entry = failures.entry(name.to_string()).or_insert((0, None));
             entry.0 += 1;
             if entry.0 >= accounts.server().lockout_failures {
                 let minutes = u64::from(accounts.server().lockout_minutes);

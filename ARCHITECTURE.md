@@ -7,9 +7,10 @@ direction"**, records what was decided with the owner and where Ensemble is
 going; its build order says what is done and what is not. The questions at the
 end are open; everything else is decided unless marked otherwise. Part two's
 "Hub, adapters and runners" (decided 2026-11-19) is being built: the runner
-is a pure worker, clients reach the hub alone, and each is an executable of
-its own, while signing in over the link, the runner's workspace as a place it
-clones into, and shared LLM backends are still to come.
+is a pure worker, clients reach the hub alone, each is an executable of its
+own, and a runner signs in and joins over its link alone, while the runner's
+workspace as a place it clones into, and shared LLM backends are still to
+come.
 
 `README.md` is the user's guide: every setting, command and tool. This document
 is the map behind it.
@@ -115,11 +116,11 @@ and the runner on none of the hub's alone: `ensemble-store`,
 | `ensemble-backends` | talking to model servers | one chat request in the server's own format (`chat.rs`); which models a server serves (`models.rs`); the first usable model of a `try` list (`resolve.rs`); texts as vectors (`embed.rs`); a stand-in server for tests (`testing.rs`) |
 | `ensemble-store` | Turso files, the hub's alone | the hub's `database.db`, opened for each read or change, and any other Turso file, such as the vault's cache of vectors (`lib.rs`) |
 | `ensemble-knowledge` | the hub's knowledge, the hub's alone | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); notes by meaning, with their vectors in `.ensemble/embeddings.db` (`meaning.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait (`lib.rs`) |
-| `ensemble-link` | what the runner and the hub share of the link | the frames of the link (`protocol.rs`); the runner's side, `Connection` and `Link`, one reconnecting, which says who its token is (`client.rs`); the token file (`tokens.rs`) |
+| `ensemble-link` | what the runner and the hub share of the link | the frames of the link (`protocol.rs`); the runner's side, `Connection` and `Link`, one reconnecting, which says who its token is, and signing in without a token, for one (`client.rs`); the token file (`tokens.rs`) |
 | `ensemble-agents` | running one agent once | the adapters (`external/`): `claude_code.rs`, `opencode.rs`, `codex.rs`, `builtin.rs`, `direct.rs`, `node.rs`, the subprocess runner (`process.rs`) and gates (`gate.rs`); a git worktree per task (`worktree.rs`); the router: agents to adapters, models, records, `health` (`router.rs`) |
 | `ensemble-tasks` | the work of the helper teams, as a runner does it | tickets and tasks as the hub has them (`tasks.rs`); how they are leased: the `Board` trait, and a runner's `RemoteBoard`, over the link (`board.rs`); what a runner keeps of its runs (`runs.rs`); the worker that runs a repository's tasks within slots and budgets (`queue.rs`); one run of an agent and what it came to (`delegation.rs`) |
 | `ensemble-runner` | the runner, and its executable | `main` and the global options (`lib.rs`); the command line, parsed with clap (`cli.rs`), and what each group of commands does (`cmd/`: `runner`, `team`, `agent`, a team's `config`); the runner's workers, socket and reload (`daemon.rs`); `Worker`: runs and model calls for others (`worker.rs`); what `setup` and `doctor` find and check (`setup.rs`); the runner's teams, loaded, made, linked, pulled and approved (`teams.rs`), over git repositories pinned and trusted per commit (`remote.rs`) |
-| `ensemble-hub` | the hub, and its executable | `main` and the global options (`lib.rs`); the command line (`cli.rs`) and what its commands do (`cmd.rs`); MCP over HTTP for client agents (`mcp.rs`); the hub's operations, its accounts, tokens, sessions and settings (`accounts.rs`); accounts and hashed tokens (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API, each route one of the operations (`api.rs`), over a small HTTP reader (`http.rs`); the hub's side of the link, a task per connection (`server.rs`); connected runners, runs and model calls, `/nodes/v1/` (`nodes.rs`); the tasks it keeps and leases, `DbBoard`, and the `Service` that answers the link (`board.rs`), and a runner's worker run against them (`tests/queue.rs`); the tracker inbox (`inbox/`): the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`), an issue made a task and what the task reports (`work.rs`), the hub's inbox (`relay.rs`) |
+| `ensemble-hub` | the hub, and its executable | `main` and the global options (`lib.rs`); the command line (`cli.rs`) and what its commands do (`cmd.rs`); MCP over HTTP for client agents (`mcp.rs`); the hub's operations, its accounts, tokens, join codes, sessions and settings (`accounts.rs`); accounts, and hashed tokens and join codes (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API, each route one of the operations (`api.rs`), over a small HTTP reader (`http.rs`); the hub's side of the link, a task per connection (`server.rs`); connected runners, runs and model calls, `/nodes/v1/` (`nodes.rs`); the tasks it keeps and leases, `DbBoard`, and the `Service` that answers the link (`board.rs`), and a runner's worker run against them (`tests/queue.rs`); the tracker inbox (`inbox/`): the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`), an issue made a task and what the task reports (`work.rs`), the hub's inbox (`relay.rs`) |
 | `ensemble` (the root) | the two executables, and the tests of the whole | `src/bin/ensemble-hub.rs` and `src/bin/ensemble-runner.rs`, each its crate's `main`; the end-to-end suite, which runs both (`tests/end_to_end.rs`); the checks against the real agent CLIs (`tests/real_cli.rs`); the layering of the crates (`tests/workspace.rs`) |
 | `nix/` | not a crate: the NixOS module (`nixos-module.nix`: a hub as a system service, the runner as a user service, each run as the person it is for), the Home Manager module (`home-manager-module.nix`: the runner on Linux or macOS), what they share about a runner (`runner.nix`), and an example configuration the flake's checks build (`example.nix`). The flake packages each executable on its own (`ensemble-hub`, `ensemble-runner`) and both together. Settings declared in Nix are merged into the person's own files at each start, and `ensemble-hub` and `ensemble-runner` refuse to change them (`.nix-managed` names them); the rest is made and changed with them, as on any platform |
 
@@ -400,20 +401,36 @@ a CLI's own login is never lent.
 
 ## The link
 
-The runner opens WebSockets and signs in with `Authorization: Bearer <token>`
-during the upgrade (401 without a valid one). Frames are JSON text: requests
+The runner opens WebSockets, says the version of the link's protocol it
+speaks as the `ensemble-protocol` header of the upgrade, and signs in with
+`Authorization: Bearer <token>`. The hub refuses a link of another version,
+or of none, before anything else, with 426 and words that name both versions
+and which of the two to update ("this hub speaks link protocol 1, the runner
+2: update ensemble-hub"), which the runner shows as they are; then a token
+that is not valid, with 401. A link without a token is signed in to nothing,
+and may only ask to be, for a token of its own. Frames are JSON text: requests
 `{id, method, params}`, replies `{id, result}` or `{id, error}`, and events
 `{event, data}` the hub sends unasked. A runner opens one link for the tasks of
 each repository it works in, one for what it offers, one per run it sends
-elsewhere, and a short one for `hello` when it signs in or says its status.
+elsewhere, a short one without a token to sign in, and a short one for
+`hello` when it signs in or says its status. It makes no HTTP request to the
+hub.
 
 | for | the runner asks | the hub sends |
 | --- | --- | --- |
+| a token, on a link without one | `login` (a name, a password and the runner's name) or `join` (a join code and the runner's name), each answered with a new access token for the runner's computer, named after the runner | |
 | who it is | `hello` (who am I, which permissions) | |
 | tasks | each with its `project`: `tasks`, `task`, `task_claim`, `task_renew`, `task_release`, `task_finish` | |
 | runs and models | `node` (I am a runner that offers: name, access, agents, models), `nodes` (which may I use), `run`, `run_cancel`, and as one that offers `run_progress`, `run_done`, `model_reply` | `run`, `run_cancel` and `model_call` events to a runner; `run_progress` and `run_done` events to whoever asked for a run (a `run_done` that failed when the runner went away) |
 
-The hub's MCP runs its tools as the same requests (`share`, `recall`, and
+`login` and `join` are the hub's operations `runner.login` and `runner.join`,
+run for anyone: `login` checks the password as logging in anywhere does,
+failures locking the name; `join` spends a join code, which an admin makes
+for an account with `user.join-code` (`ensemble-hub user join-code NAME`, or
+`POST /api/v1/users/{name}/join-codes`) or the account for itself with a
+session, `me.join-code` (`POST /api/v1/me/join-codes`). A code is shown once,
+kept as a hash with the tokens, signs in as no one, and is good once within 24
+hours. The hub's MCP runs its tools as the same requests (`share`, `recall`, and
 `task_create`, `task_answer`, `task_assign`, `task_cancel` with the reading
 ones), so the link and MCP cannot differ. Every request is checked against the
 token's permissions (its role, narrowed by its scopes), read again from the
@@ -447,7 +464,8 @@ work, and is written to be read by the person or the model that will see it.
   official CLI on its owner's login; a shared runner never lends one.
 - **Shared text is data.** The distilling model has no tools; recalled notes
   are marked as reference data.
-- **The hub keeps hashes.** Passwords as PBKDF2, tokens as SHA-256. A runner's
+- **The hub keeps hashes.** Passwords as PBKDF2, tokens and join codes as
+  SHA-256. A runner's
   token file and socket folder are its user's alone.
 
 # Part two: decisions and direction
@@ -918,10 +936,12 @@ optional expiry and optional scopes that narrow the account's role. Only a
 session may manage tokens or the password; failed logins lock a name for a
 while. (Decided 2026-11-11.) A client agent uses a token as the API key of the
 hub's MCP. A runner signs in over its link, with a name and a password or a
-join code, which makes an access token for that computer (the OAuth device
-flow and OIDC later), and keeps it in a file only its user can read, under
-`~/.config/ensemble`, like an SSH key; the OS keyring may come later as an
-option. The hub stores tokens hashed. Runners, sources and agents are
+join code, which makes an access token for that computer, named after the
+runner (the OAuth device flow and OIDC later), and keeps it in a file only its
+user can read, under `~/.config/ensemble`, like an SSH key; the OS keyring may
+come later as an option. An admin makes a join code for an account, or the
+account for itself with a session; it is shown once and spent by one runner
+within 24 hours. The hub stores tokens and join codes hashed. Runners, sources and agents are
 identities too, and an agent acts on behalf of a person.
 
 There are no teams of people in the hub, only roles. Ensemble defines a fixed
@@ -962,7 +982,7 @@ re-implementing a feature. Some administration may stay with the CLI.
 Everything a person can do to a hub or a runner is an **operation**, defined
 once, in the core:
 
-- a name, such as `models.add`, `people.invite`, `computers.join-code`,
+- a name, such as `models.add`, `people.invite`, `user.join-code`,
   `settings.set`;
 - its input and output, as Rust types with JSON Schemas made from them;
 - who may run it: a permission of the hub's roles, or the runner's owner;
@@ -1035,9 +1055,12 @@ A runner and its hub speak over the WebSocket and nothing else:
 
 - **Signing in and joining** happen on it: a connection without a token may
   only ask `login` (a name and a password, with the lockout) or `join` (a code
-  an admin made with `computers.join-code`), and gets a token back. A runner
-  makes no HTTP request to the hub, so a hub without its REST API serves
-  every runner.
+  an admin made with `user.join-code`, or the account with `me.join-code`),
+  and gets a token back. A runner makes no HTTP request to the hub, so a hub
+  without its REST API serves every runner.
+- **The protocol's version** is said on every link, and a hub refuses a
+  runner of another version before anything else, naming both and which to
+  update.
 - **Tasks** are pulled over it, and questions and reports go back on it.
 - **Shared backends** go over a second WebSocket of the same runner, as
   "Sharing LLM backends" says: the runner that serves dials out, so a machine
@@ -1145,15 +1168,20 @@ crate holds it today.
     Nix package, with one crate for the link's messages; the node becomes the
     runner, a pure worker: no MCP for clients, no hooks, no delegations;
     signing in and joining over the link, with join codes, and no HTTP from a
-    runner to the hub; the protocol version checked on connecting. (In
-    progress: the node is the runner, `runner.yaml`; the stdio MCP, session
-    hooks, delegations, the `task` and `knowledge` commands and the agents'
-    `recall` are gone, so clients use the hub's MCP alone; the runner runs a
-    worker for each git repository of its `workspace`, looked at again every
-    30 seconds; the hub and the runner are two crates, two executables and two
-    Nix packages, `ensemble-hub` and `ensemble-runner`, and the runner is
-    built of none of the hub's crates. Not yet: signing in and joining over
-    the link, the protocol version.)
+    runner to the hub; the protocol version checked on connecting. (Done: the
+    node is the runner, `runner.yaml`; the stdio MCP, session hooks,
+    delegations, the `task` and `knowledge` commands and the agents' `recall`
+    are gone, so clients use the hub's MCP alone; the runner runs a worker for
+    each git repository of its `workspace`, looked at again every 30 seconds;
+    the hub and the runner are two crates, two executables and two Nix
+    packages, `ensemble-hub` and `ensemble-runner`, and the runner is built of
+    none of the hub's crates; a link without a token may only ask `login`, with
+    a password and the lockout, or `join`, with a join code made by
+    `user.join-code` or `me.join-code`, single-use and good for 24 hours, each
+    making an access token named after the runner, so `ensemble-runner login`
+    and `ensemble-runner join` make no HTTP request and the runner has no HTTP
+    client for the hub; every link says the protocol version it speaks, and
+    the hub refuses another, or none, with 426 and both versions named.)
 19. The runner's workspace: a task's repository found or cloned, worked on a
     branch and pushed; a question when it is not found; a task given back,
     and blocked when no runner can reach its repository; the related notes in

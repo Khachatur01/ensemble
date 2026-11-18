@@ -1,8 +1,9 @@
 //! The runner's side of the link: one WebSocket to a hub server
-//! ([`Connection`]); and a link that opens one when it is first needed, and
-//! again once when it breaks ([`Link`]).
+//! ([`Connection`]); a link that opens one when it is first needed, and again
+//! once when it breaks ([`Link`]); and signing in without a token, for one
+//! ([`sign_in`]). Every link says the protocol version it speaks.
 
-use crate::protocol::{Event, HELLO, Reply, Request};
+use crate::protocol::{Event, HELLO, Reply, Request, VERSION, VERSION_HEADER};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -44,16 +45,26 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// A link signed in with `token`.
     pub async fn open(url: &str, token: &str) -> Result<Connection, String> {
+        Connection::connect(url, Some(token)).await
+    }
+
+    /// A link with a token, or without one, which may only sign in.
+    async fn connect(url: &str, token: Option<&str>) -> Result<Connection, String> {
         let url = crate::tokens::normal(url);
         let mut req = url
             .as_str()
             .into_client_request()
             .map_err(|e| format!("{url}: {e}"))?;
-        let bearer = format!("Bearer {}", token.trim())
-            .parse()
-            .map_err(|_| "the token has characters a header cannot carry")?;
-        req.headers_mut().insert("authorization", bearer);
+        req.headers_mut()
+            .insert(VERSION_HEADER, VERSION.to_string().parse().expect("digits"));
+        if let Some(token) = token {
+            let bearer = format!("Bearer {}", token.trim())
+                .parse()
+                .map_err(|_| "the token has characters a header cannot carry")?;
+            req.headers_mut().insert("authorization", bearer);
+        }
         let config = Some(crate::protocol::socket_config());
         let opened = tokio::time::timeout(
             TIMEOUT,
@@ -65,6 +76,9 @@ impl Connection {
             tungstenite::Error::Http(resp) if resp.status() == 401 => format!(
                 "the hub {url} did not accept the token; `ensemble-runner login {url}` with a new one"
             ),
+            tungstenite::Error::Http(resp) if resp.status() == 426 => {
+                format!("the hub {url} refused the link: {}", outdated(&resp))
+            }
             e => format!("cannot reach the hub {url}: {e}"),
         })?;
         Ok(Connection {
@@ -164,6 +178,45 @@ impl Connection {
     pub async fn close(&mut self) {
         let _ = self.socket.close(None).await;
     }
+}
+
+/// Why a hub refused a runner of another version: what it said, or, when its
+/// words did not come with the refusal, what the version it names means.
+fn outdated(resp: &tungstenite::http::Response<Option<Vec<u8>>>) -> String {
+    let said = resp
+        .body()
+        .as_deref()
+        .map(String::from_utf8_lossy)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    said.unwrap_or_else(|| {
+        let hub = resp
+            .headers()
+            .get(VERSION_HEADER)
+            .and_then(|v| v.to_str().ok()?.trim().parse().ok());
+        match hub {
+            Some(hub) => crate::protocol::mismatch(hub, Some(VERSION)),
+            None => format!("it does not speak link protocol {VERSION}"),
+        }
+    })
+}
+
+/// Sign in to the hub at `url` without a token: ask `method`, [`LOGIN`] or
+/// [`JOIN`], with `params`, and return the access token the hub made for
+/// this computer.
+///
+/// [`LOGIN`]: crate::protocol::LOGIN
+/// [`JOIN`]: crate::protocol::JOIN
+pub async fn sign_in(url: &str, method: &str, params: Value) -> Result<String, Failure> {
+    let mut link = Connection::connect(url, None)
+        .await
+        .map_err(Failure::Broken)?;
+    let answer = link.call(method, params).await;
+    link.close().await;
+    answer?["token"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| Failure::Hub(format!("the hub answered `{method}` with no token")))
 }
 
 /// Who the runner is on the hub, and what it may do there.
@@ -317,6 +370,57 @@ mod tests {
             }
         });
         url
+    }
+
+    /// A stand-in hub that refuses every link as one of version `hub` does,
+    /// with its words when `say` is set, and says what version the runner
+    /// sent.
+    async fn hub_of_version(hub: u32, say: bool) -> (String, tokio::sync::mpsc::Receiver<String>) {
+        use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (heard, hear) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let heard = heard.clone();
+                // The handshake callback's error type is tungstenite's own response.
+                #[allow(clippy::result_large_err)]
+                let refuse = move |req: &Request, _: Response| -> Result<Response, ErrorResponse> {
+                    let sent = req.headers()[VERSION_HEADER].to_str().unwrap().to_string();
+                    let runner = sent.parse().ok();
+                    heard.try_send(sent).unwrap();
+                    let words = say.then(|| crate::protocol::mismatch(hub, runner));
+                    let mut resp = ErrorResponse::new(words);
+                    *resp.status_mut() = tungstenite::http::StatusCode::UPGRADE_REQUIRED;
+                    resp.headers_mut()
+                        .insert(VERSION_HEADER, hub.to_string().parse().unwrap());
+                    Err(resp)
+                };
+                let _ = tokio_tungstenite::accept_hdr_async(stream, refuse).await;
+            }
+        });
+        (url, hear)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hub_of_another_version_is_named_with_what_to_update() {
+        let (url, mut heard) = hub_of_version(VERSION + 1, true).await;
+        let err = Connection::open(&url, "ens_any").await.err().unwrap();
+        assert_eq!(heard.recv().await.unwrap(), VERSION.to_string());
+        assert!(
+            err.contains(&format!(
+                "this hub speaks link protocol {}, the runner {VERSION}: update ensemble-runner",
+                VERSION + 1
+            )),
+            "{err}"
+        );
+        // A refusal without words: the runner says it from the version named.
+        let (url, _heard) = hub_of_version(VERSION - 1, false).await;
+        let err = sign_in(&url, crate::protocol::JOIN, json!({}))
+            .await
+            .unwrap_err()
+            .message();
+        assert!(err.contains("update ensemble-hub"), "{err}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

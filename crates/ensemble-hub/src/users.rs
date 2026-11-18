@@ -9,6 +9,10 @@
 //! and optional scopes that narrow what the account's role allows. A token is
 //! shown once, when it is made; only its SHA-256 is kept.
 //!
+//! A **join code** is kept the same way, but signs in as no one: it is spent
+//! once, within a day, to make a runner's computer an access token, so that
+//! a person signs a runner in without typing their password on it.
+//!
 //! Someone who signs up is `pending`, and cannot log in until an admin
 //! approves them with a role.
 
@@ -28,6 +32,8 @@ use std::time::{Duration, SystemTime};
 pub const MIN_PASSWORD: usize = 12;
 /// PBKDF2 rounds for a new password hash: OWASP's figure for HMAC-SHA256.
 const ROUNDS: u32 = 600_000;
+/// How long a join code may be spent.
+pub const JOIN_HOURS: u32 = 24;
 
 /// Where an account stands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +64,9 @@ pub enum Kind {
     /// Made from a session, for a runner, an agent or a script.
     #[default]
     Personal,
+    /// A join code: signs in as nothing, and is spent once to make a runner
+    /// an access token.
+    Join,
 }
 
 impl Kind {
@@ -65,6 +74,7 @@ impl Kind {
         match self {
             Kind::Session => "session",
             Kind::Personal => "personal",
+            Kind::Join => "join",
         }
     }
 }
@@ -270,6 +280,15 @@ impl Users {
         password: &str,
         hours: u32,
     ) -> Result<(String, String), UsersError> {
+        self.verify(name, password)?;
+        let expires = later(Duration::from_secs(u64::from(hours) * 3600));
+        let (_, token) = self.mint(name, "login", Kind::Session, None, Some(expires.clone()))?;
+        Ok((token, expires))
+    }
+
+    /// Whether `password` is the password of `name`, an account that may
+    /// sign in.
+    pub fn verify(&self, name: &str, password: &str) -> Result<(), UsersError> {
         let wrong = || UsersError::Unauthorized("wrong name or password".into());
         let user = self.users.get(name).ok_or_else(wrong)?;
         let kept = user.password.as_ref().ok_or_else(wrong)?;
@@ -281,9 +300,48 @@ impl Users {
                 "your sign-up waits for an admin's approval".into(),
             ));
         }
-        let expires = later(Duration::from_secs(u64::from(hours) * 3600));
-        let (_, token) = self.mint(name, "login", Kind::Session, None, Some(expires.clone()))?;
-        Ok((token, expires))
+        Ok(())
+    }
+
+    /// A new join code for `name`, an active account, good once within
+    /// [`JOIN_HOURS`]: the code and when it expires.
+    pub fn join_code(&mut self, name: &str) -> Result<(String, String), UsersError> {
+        if self.user_mut(name)?.status != Status::Active {
+            return Err(UsersError::Conflict(format!(
+                "{name} waits for approval; approve them with a role first"
+            )));
+        }
+        let expires = later(Duration::from_secs(u64::from(JOIN_HOURS) * 3600));
+        let (_, code) = self.mint(name, "join", Kind::Join, None, Some(expires.clone()))?;
+        Ok((code, expires))
+    }
+
+    /// Spend the join `code`: the account it was made for, which no longer
+    /// has it.
+    pub fn spend(&mut self, code: &str) -> Result<String, UsersError> {
+        let hash = sha256(code.trim());
+        let now = now();
+        // Every hash is compared, all the way, as `find` does.
+        let mut found = None;
+        for user in self.users.values() {
+            for t in user.tokens.iter().filter(|t| t.kind == Kind::Join) {
+                if same(t.sha256.as_bytes(), hash.as_bytes()) {
+                    found = Some((user.name.clone(), t.id.clone(), t.expires.clone()));
+                }
+            }
+        }
+        let invalid = || {
+            UsersError::Unauthorized(
+                "the join code is not valid: it was used, it expired, or it was never made; ask for a new one".into(),
+            )
+        };
+        let (name, id, expires) = found.ok_or_else(invalid)?;
+        let user = self.user_mut(&name)?;
+        user.tokens.retain(|t| t.id != id);
+        if expires.is_some_and(|e| e <= now) || user.status != Status::Active {
+            return Err(invalid());
+        }
+        Ok(name)
     }
 
     /// Approve a pending account with `role`.
@@ -476,7 +534,10 @@ impl Users {
                 }
             }
         }
-        found.filter(|(_, t)| t.expires.as_ref().is_none_or(|e| *e > now))
+        // A join code signs in as no one: it is only spent.
+        found
+            .filter(|(_, t)| t.kind != Kind::Join)
+            .filter(|(_, t)| t.expires.as_ref().is_none_or(|e| *e > now))
     }
 
     fn mint(
@@ -487,7 +548,11 @@ impl Users {
         scopes: Option<Vec<Permission>>,
         expires: Option<String>,
     ) -> Result<(String, String), UsersError> {
-        let token = format!("ens_{}", hex(&random::<32>()?));
+        // A join code is typed on another computer: shorter, and named so.
+        let token = match kind {
+            Kind::Join => format!("join_{}", hex(&random::<16>()?)),
+            Kind::Session | Kind::Personal => format!("ens_{}", hex(&random::<32>()?)),
+        };
         let id = hex(&random::<4>()?);
         self.user_mut(name)?.tokens.push(Token {
             sha256: sha256(&token),
@@ -499,6 +564,15 @@ impl Users {
             expires,
         });
         Ok((id, token))
+    }
+
+    /// Have every join code of `name` expired, as a day later.
+    #[cfg(test)]
+    pub(crate) fn expire_join_codes(&mut self, name: &str) {
+        let user = self.users.get_mut(name).expect("the account");
+        for t in user.tokens.iter_mut().filter(|t| t.kind == Kind::Join) {
+            t.expires = Some("2000-01-01T00:00:00Z".into());
+        }
     }
 
     fn insert(&mut self, name: &str, role: &str, status: Status, password: Option<Password>) {
@@ -661,6 +735,7 @@ async fn read(c: &store::Connection) -> Result<BTreeMap<String, User>, String> {
                 name: text(&r[3]),
                 kind: match text(&r[4]).as_str() {
                     "session" => Kind::Session,
+                    "join" => Kind::Join,
                     _ => Kind::Personal,
                 },
                 scopes,
@@ -917,6 +992,45 @@ mod tests {
         assert!(users.authenticate(&token, &roles()).is_none());
         users.save().unwrap();
         assert!(users.get("ana").unwrap().tokens.is_empty());
+    }
+
+    #[test]
+    fn a_join_code_signs_in_as_no_one_and_is_spent_once_before_it_expires() {
+        let tmp = TempDir::new();
+        let mut users = Users::load(&tmp.0).unwrap();
+        users.add("ana", "member", &roles()).unwrap();
+        let (code, expires) = users.join_code("ana").unwrap();
+        assert!(code.starts_with("join_") && expires > now(), "{code}");
+        assert!(users.authenticate(&code, &roles()).is_none());
+        assert!(users.identify(&code).is_none());
+        assert_eq!(
+            users.tokens("ana").unwrap().len(),
+            1,
+            "codes are not listed"
+        );
+        users.save().unwrap();
+        let kept = String::from_utf8_lossy(&std::fs::read(tmp.0.join(store::DB_FILE)).unwrap())
+            .into_owned();
+        assert!(!kept.contains(&code[5..]), "only its hash is kept");
+
+        let mut users = Users::load(&tmp.0).unwrap();
+        assert_eq!(users.spend(&code).unwrap(), "ana");
+        let spent = users.spend(&code).unwrap_err().to_string();
+        assert!(spent.contains("not valid"), "{spent}");
+
+        let (code, _) = users.join_code("ana").unwrap();
+        let ana = users.users.get_mut("ana").unwrap();
+        let kept = ana.tokens.iter_mut().find(|t| t.kind == Kind::Join);
+        kept.unwrap().expires = Some("2000-01-01T00:00:00Z".into());
+        assert!(matches!(
+            users.spend(&code),
+            Err(UsersError::Unauthorized(_))
+        ));
+        users.register("dan", PASSWORD, 5).unwrap();
+        assert!(matches!(
+            users.join_code("dan"),
+            Err(UsersError::Conflict(_))
+        ));
     }
 
     #[test]

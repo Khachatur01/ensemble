@@ -138,7 +138,7 @@ a repository and a hub, and run it:
 $ ensemble-runner team new web                               # a sample to edit, or:
 $ ensemble-runner team pull github.com/acme/web-team@v1.2    # a team your company keeps
 $ git clone git@github.com:acme/shop.git ~/ensemble/shop      # a project: a repository in the workspace
-$ ensemble-runner login wss://hub.example.com --user ana     # your account on the hub
+$ ensemble-runner login wss://hub.example.com --user ana     # your account on the hub, or: join <url> <code>
 $ ensemble-runner serve
 ```
 
@@ -953,7 +953,7 @@ keys its backends name: the hub and the runner are separate services, a team's
 hub often on another computer or of another user, so each reads only its own
 secrets. `--env-file <path>` reads another file instead of
 either, such as a secret that sops-nix or agenix puts in `/run`. Neither file
-holds the runner's hub tokens: `ensemble-runner login` keeps those in `hubs.json`,
+holds the runner's hub tokens: `ensemble-runner login` and `join` keep those in `hubs.json`,
 also readable by you alone, because Ensemble writes them, not you.
 
 A variable set in the environment wins over the file. A `.env` that other users
@@ -1118,10 +1118,12 @@ runner; see [Runners](#runners)). Accounts are not in `hub.yaml`: they are kept 
 under the name of the account that signed in, never a name a client sends.
 
 **Each runner names its hub.** On each computer that runs a runner for the
-hub, sign in once and put the hub in the runner's file:
+hub, sign in once, with your password or with a join code; either puts the hub
+in the runner's file:
 
 ```console
-$ ensemble-runner login wss://hub.example.com --user ana    # asks the password; makes a token "ensemble on <host>"
+$ ensemble-runner login wss://hub.example.com --user ana    # asks the password; makes a token "runner <name>"
+$ ensemble-runner join wss://hub.example.com join_…         # or a join code, in place of the password
 ```
 
 ```yaml
@@ -1129,16 +1131,37 @@ $ ensemble-runner login wss://hub.example.com --user ana    # asks the password;
 hub: wss://hub.example.com
 ```
 
-`ensemble-runner login` logs in, makes an access token for this computer, logs
-out, and keeps the token in `~/.config/ensemble/runner/hubs.json`, readable only
-by you; `--token T` keeps a token made elsewhere instead, and `ensemble-runner
-logout <url>` forgets it. Signing in again, with a new token or as someone
-else, reaches a running runner at once: its links to the hub connect again with
-the new token. `ensemble-runner status` asks the hub whether the token still
+The runner signs in over its link, the WebSocket it works on, and makes no
+other request to the hub: a link opened without a token may only sign in.
+`ensemble-runner login` checks the password, minding the lockout below, and
+the hub makes an access token for this computer, named after the runner (or
+the computer, before there is a runner). `ensemble-runner join` does the same
+with a **join code** in place of the password: an admin makes one for an
+account on the hub's computer, or you make one for yourself with a session
+(`POST /api/v1/me/join-codes`), and it is shown once, signs in as no one, and
+is spent by the first runner that joins with it, within 24 hours:
+
+```console
+$ ensemble-hub user join-code ana
+join_…
+note: This is ana's join code, shown once and good for one runner within 24 hours. On the runner's computer: ensemble-runner join wss://hub.example.com join_…
+```
+
+The runner keeps the token in `~/.config/ensemble/runner/hubs.json`, readable
+only by you; `--token T` keeps a token made elsewhere instead, and
+`ensemble-runner logout <url>` forgets it. Signing in again, with a new token
+or as someone else, reaches a running runner at once: its links to the hub
+connect again with the new token. `ensemble-runner status` asks the hub whether the token still
 works, and as whom. From then on the runner runs the tasks the hub keeps for
 that account, and `ensemble-runner peers` asks that hub.
 For one person alone, the hub listens on `127.0.0.1` and the runner names
 `ws://127.0.0.1:7700`.
+
+Every link a runner opens says the version of the link's protocol it speaks
+(the `ensemble-protocol` header). A hub refuses a runner of another version
+before anything else, with both versions and which of the two to update, such
+as "this hub speaks link protocol 1, the runner 2: update ensemble-hub", and
+the runner says it in `login`, `join`, `status` and as `serve` connects.
 
 **Accounts.** An account has a name, a role and a password of at least 12
 characters, kept as a PBKDF2-HMAC-SHA256 hash. There are two kinds of token,
@@ -1184,12 +1207,14 @@ come and for scripts. JSON in and out.
 | `GET /api/v1/me/tokens` | a session | your access tokens: id, name, scopes, made, expires |
 | `POST /api/v1/me/tokens` `{name, expires_days?, scopes?}` | a session | a new access token, shown once |
 | `DELETE /api/v1/me/tokens/{id}` | a session | revokes one |
+| `POST /api/v1/me/join-codes` | a session | a join code for one of your runners, shown once: `{code, expires}` |
 | `GET /api/v1/users` | admin | every account; never a password, token or hash |
 | `POST /api/v1/users` `{name, role, password}` | admin | an account, active |
 | `GET /api/v1/roles` | admin | the roles and their permissions |
 | `POST /api/v1/users/{name}/approve` `{role}` | admin | lets a pending account in |
 | `PUT /api/v1/users/{name}` `{role?, tracker_user?}` | admin | another role, or who they are in the tracker |
 | `PUT /api/v1/users/{name}/password` `{password}` | admin | resets it; the account's sessions end |
+| `POST /api/v1/users/{name}/join-codes` | admin | a join code for one of their runners, shown once |
 | `DELETE /api/v1/users/{name}/tokens` | admin | revokes every token |
 | `DELETE /api/v1/users/{name}` | admin | removes an account, or turns a sign-up down |
 
@@ -1756,6 +1781,7 @@ $ ensemble-runner reload                    # the running runner reads its teams
 $ ensemble-runner status                    # its name, whether it runs, its workspace and projects, its hub: signed in as whom, its teams
 $ ensemble-runner doctor                    # what is wrong, and how to fix each thing
 $ ensemble-runner login <wss://url> --user <name>   # sign in to a hub with your account (or --token <token>), and name it in runner.yaml
+$ ensemble-runner join <wss://url> <code>   # the same with a join code
 $ ensemble-runner logout <wss://url>
 $ ensemble-runner peers                     # the other runners of your hub you may use now
 $ ensemble-runner config get|set|unset|edit|path   # runner.yaml, setting by setting
@@ -1791,6 +1817,7 @@ $ ensemble-hub role list                  # the roles, and what each may do
 $ ensemble-hub user add <name> --role <role>        # prints their token once
 $ ensemble-hub user approve|role <name> --role <role>
 $ ensemble-hub user password|token|revoke|remove <name>   # a password is asked, or read from stdin; a token comes with the line for an agent
+$ ensemble-hub user join-code <name>      # a code, shown once, that signs one runner in within 24 hours
 $ ensemble-hub user tracker <name> [<tracker name>]
 $ ensemble-hub knowledge status|distill|rebuild
 $ ensemble-hub config get|set|unset|edit|path    # hub.yaml, setting by setting
@@ -1864,13 +1891,13 @@ scripts stand in for the CLIs.
 | `crates/ensemble-agents/src/external/` | each CLI's command line, generated config and event stream, denials, limits, failures, the time limit killing the process tree |
 | `crates/ensemble-agents/src/router.rs`, `crates/ensemble-backends/` | routing, `health` and its model check, the chat request in both formats |
 | `crates/ensemble-knowledge/` | shares kept as they arrived, notes and the log, commits by the lock holder, the secret check; the pipeline against a stub model: new notes, merges, chatter skipped, unusable answers to review, waiting for a model, rebuild |
-| `crates/ensemble-hub/` | sign-up, approval and the REST API's codes, tokens kept as hashes and revoked at once, roles checked per request, shares under the signed-in name; the hub's MCP: a token needed, the tools a token allows, share and recall as its account, tasks made and followed; runs sent to a runner that may be used and offers the agent, each side told when the other goes away, model calls streamed from a runner; tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the runner holding the lease, questions, hand-offs, cancelling, over the link as the signed-in account; the inbox: markdown issues read and written with only the status line changed, issues to tasks of the account matched by tracker name, questions and answers through comments, results posted once, a closed issue cancelling its task |
-| `crates/ensemble-link/` | the token file 0600, the link opened again when it breaks |
+| `crates/ensemble-hub/` | sign-up, approval and the REST API's codes, tokens kept as hashes and revoked at once, join codes spent once and before they expire, a runner signing in over the link with a password (and the lockout) or a code, a link without a token refused all else, a runner of another protocol version refused with what to update, roles checked per request, shares under the signed-in name; the hub's MCP: a token needed, the tools a token allows, share and recall as its account, tasks made and followed; runs sent to a runner that may be used and offers the agent, each side told when the other goes away, model calls streamed from a runner; tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the runner holding the lease, questions, hand-offs, cancelling, over the link as the signed-in account; the inbox: markdown issues read and written with only the status line changed, issues to tasks of the account matched by tracker name, questions and answers through comments, results posted once, a closed issue cancelling its task |
+| `crates/ensemble-link/` | the token file 0600, the link opened again when it breaks, a hub of another protocol version named with what to update |
 | `crates/ensemble-core/` | the state directories and their hashes, the worker lock, run records, a snapshot of a folder and its changes written back |
 | `crates/ensemble-tasks/` | tickets, questions and hand-offs in a reply, run logs |
 | `crates/ensemble-hub/tests/queue.rs` | the worker of a repository: tasks run within `max_concurrent` and shared limits, closing the worker interrupting running tasks, cancel, `after`, gates, worktrees, `repo`, questions and answers, the backlog and `assign`, hand-offs, budgets, waiting for a backend |
 | `tests/workspace.rs` | the crates depend on each other in one direction only, and the runner on none of the hub's |
-| `tests/end_to_end.rs` | the real executables, `ensemble-hub` and `ensemble-runner`: their commands, `show`, `health` against a stub server, an agent changing a file; setup and doctor; the runner working on the tasks of a repository in its workspace, a task made through the hub's MCP; a task resumed when the runner starts again; a task stopped on one computer and carried on by another from its pushed branch; an issue from the tracker worked on a member's runner; an agent run on another runner and its changes back; a runner's models through the hub; signing in, settings changed from the command line, reloads of teams and settings |
+| `tests/end_to_end.rs` | the real executables, `ensemble-hub` and `ensemble-runner`: their commands, `show`, `health` against a stub server, an agent changing a file; setup and doctor; the runner working on the tasks of a repository in its workspace, a task made through the hub's MCP; a task resumed when the runner starts again; a task stopped on one computer and carried on by another from its pushed branch; an issue from the tracker worked on a member's runner; an agent run on another runner and its changes back; a runner's models through the hub; signing in and joining with a code, a hub refusing another protocol or a bad token, settings changed from the command line, reloads of teams and settings |
 | `crates/ensemble-agents/tests/fixtures/` | saved event streams per CLI version, replayed through each adapter's parser (see its README) |
 | `tests/real_cli.rs` | the real `claude`, `opencode` and `codex` CLIs: `health` and one trivial run. Ignored; run with `ENSEMBLE_REAL_CLI=1 cargo test --test real_cli -- --ignored`. |
 | `nix/example.nix` | `nix flake check` evaluates the NixOS module with it, and builds the hub's and the runner's units |

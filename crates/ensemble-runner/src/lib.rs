@@ -171,7 +171,7 @@ fn runner_hub(command: &str) -> Result<(String, String), String> {
     let token = ensemble_link::Tokens::load()?
         .get(&url)
         .ok_or_else(|| {
-            format!("{command}: no token for the hub {url}. Sign in first: ensemble-runner login {url} --user <name>")
+            format!("{command}: no token for the hub {url}. Sign in first: ensemble-runner login {url} --user <name>, or ensemble-runner join {url} <code>")
         })?
         .to_string();
     Ok((url, token))
@@ -229,23 +229,14 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-/// This computer's name, offered as the runner's name when setup asks.
+/// This computer's name, offered as the runner's name when setup asks, and
+/// the name of its token when it signs in to a hub before it has a runner.
 fn host_name() -> Option<String> {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .or_else(|_| std::fs::read_to_string("/etc/hostname"))
         .ok()
         .map(|n| n.trim().to_string())
         .filter(|n| !n.is_empty())
-}
-
-/// This computer's name, for naming the tokens it holds.
-fn hostname() -> String {
-    std::fs::read_to_string("/etc/hostname")
-        .ok()
-        .map(|h| h.trim().to_string())
-        .filter(|h| !h.is_empty())
-        .or_else(|| std::env::var("HOSTNAME").ok())
-        .unwrap_or_else(|| "this computer".into())
 }
 
 /// After a team is added, changed or removed: have the running runner use it

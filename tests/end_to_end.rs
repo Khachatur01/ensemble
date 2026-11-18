@@ -1962,19 +1962,30 @@ fn serve_hub(scratch: &Scratch, _hub: &Path) -> Served {
 }
 
 #[test]
-fn a_hub_server_refuses_a_node_without_a_token_and_stops_on_sigterm() {
+fn a_hub_server_refuses_another_protocol_or_a_bad_token_and_stops_on_sigterm() {
     let s = Scratch::new("hub-serve");
     let (hub, address, _) = hub_server(&s);
     let mut child = serve_hub(&s, &hub);
-    let mut stream = std::net::TcpStream::connect(&address).unwrap();
-    write!(
-        stream,
-        "GET / HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
-    )
-    .unwrap();
-    let mut status = String::new();
-    BufReader::new(&stream).read_line(&mut status).unwrap();
+    let upgrade = |headers: &str| {
+        let mut stream = std::net::TcpStream::connect(&address).unwrap();
+        write!(
+            stream,
+            "GET / HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{headers}\r\n"
+        )
+        .unwrap();
+        let mut status = String::new();
+        BufReader::new(&stream).read_line(&mut status).unwrap();
+        status
+    };
+    let status = upgrade("Authorization: Bearer ens_wrong\r\n");
+    assert!(status.contains("426"), "no protocol named: {status}");
+    let status = upgrade("Ensemble-Protocol: 1\r\nAuthorization: Bearer ens_wrong\r\n");
     assert!(status.contains("401"), "{status}");
+    let status = upgrade("Ensemble-Protocol: 1\r\n");
+    assert!(
+        status.contains("101"),
+        "no token: signing in only: {status}"
+    );
 
     #[cfg(unix)]
     unsafe {
@@ -2157,6 +2168,53 @@ fn someone_signs_up_is_let_in_and_logs_in_from_a_runner_with_a_password() {
         serde_json::json!({"name": "eve", "password": password}),
     );
     assert_eq!(status, 403);
+}
+
+#[test]
+fn a_runner_joins_a_hub_with_a_code_an_admin_made_and_spends_it() {
+    let s = Scratch::new("hub-join");
+    let (hub, address, _) = hub_server(&s);
+    let _child = serve_hub(&s, &hub);
+    s.runner_yaml();
+    let url = format!("ws://{address}");
+    let out = ensemble_hub(&s, &["user", "join-code", "ana"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let code = stdout_of(&out).trim().to_string();
+    assert!(
+        stderr_of(&out).contains(&format!("ensemble-runner join {url} {code}"))
+            && stderr_of(&out).contains("24 hours"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    let out = ensemble_runner(&s, &["join", &url, &code]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("as ana (member")
+            && stdout_of(&out).contains("The runner names this hub now"),
+        "{}",
+        stdout_of(&out)
+    );
+    let status = stdout_of(&ensemble_runner(&s, &["status"]));
+    assert!(
+        status.contains(&format!("hub: {url}, signed in as ana")),
+        "{status}"
+    );
+    // The token is the runner's, named after it.
+    let out = ensemble_hub(&s, &["user", "show", "ana"]);
+    assert!(stdout_of(&out).contains("tokens: 2"), "{}", stdout_of(&out));
+
+    let other = Scratch::new("hub-join-again");
+    let out = runner_command(&other)
+        .args(["join", &url, &code])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("join code is not valid"),
+        "{}",
+        stderr_of(&out)
+    );
 }
 
 #[test]

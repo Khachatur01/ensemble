@@ -37,6 +37,116 @@ mod link {
     }
 }
 
+mod signing_in {
+    use crate::server::testing::{PASSWORD, start};
+    use crate::users::Users;
+    use ensemble_link::Link;
+    use ensemble_link::client::{Failure, sign_in};
+    use ensemble_link::protocol::{JOIN, LOGIN};
+    use ensemble_ops::Caller;
+    use serde_json::json;
+
+    fn login(
+        url: &str,
+        name: &str,
+        password: &str,
+    ) -> impl Future<Output = Result<String, Failure>> {
+        sign_in(
+            url,
+            LOGIN,
+            json!({"name": name, "password": password, "runner": "desk"}),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_runner_logs_in_with_a_password_for_a_token_named_after_it() {
+        let hub = start();
+        let token = login(&hub.url, "ana", PASSWORD).await.unwrap();
+        let hello = Link::new(&hub.url, &token).hello().await.unwrap();
+        assert_eq!(hello.user, "ana");
+        let users = Users::load(&hub.tmp.0.join("state")).unwrap();
+        let tokens = users.tokens("ana").unwrap();
+        assert!(tokens.iter().any(|t| t.name == "runner desk"), "{tokens:?}");
+        assert!(
+            users
+                .get("ana")
+                .unwrap()
+                .tokens
+                .iter()
+                .all(|t| t.kind != crate::users::Kind::Session),
+            "no session is left behind"
+        );
+
+        let err = login(&hub.url, "ana", "not the password")
+            .await
+            .unwrap_err();
+        assert_eq!(err, Failure::Hub("wrong name or password".into()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_logins_over_the_link_lock_the_name_as_anywhere() {
+        let hub = start();
+        // The test hub locks a name after 3 failures.
+        for _ in 0..3 {
+            assert!(login(&hub.url, "rex", "wrong password!!").await.is_err());
+        }
+        let err = login(&hub.url, "rex", PASSWORD)
+            .await
+            .unwrap_err()
+            .message();
+        assert!(err.contains("too many failed logins"), "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_runner_joins_with_a_code_once_before_it_expires() {
+        let hub = start();
+        let (operations, context) = hub.server.operations();
+        let made = operations
+            .run(
+                context,
+                &Caller::Local,
+                "user.join-code",
+                json!({"name": "rex"}),
+            )
+            .unwrap();
+        let code = made["code"].as_str().unwrap().to_string();
+        assert!(
+            made["note"]
+                .as_str()
+                .unwrap()
+                .contains("ensemble-runner join <hub-url> join_"),
+            "{made}"
+        );
+        let join = |code: &str| sign_in(&hub.url, JOIN, json!({"code": code, "runner": "lab"}));
+        let token = join(&code).await.unwrap();
+        assert_eq!(
+            Link::new(&hub.url, &token).hello().await.unwrap().user,
+            "rex"
+        );
+        let spent = join(&code).await.unwrap_err().message();
+        assert!(spent.contains("join code is not valid"), "{spent}");
+        let unknown = join("join_0000").await.unwrap_err().message();
+        assert!(unknown.contains("join code is not valid"), "{unknown}");
+
+        // A code a day old is refused, and gone once the accounts are written.
+        let made = operations
+            .run(
+                context,
+                &Caller::Local,
+                "user.join-code",
+                json!({"name": "rex"}),
+            )
+            .unwrap();
+        let code = made["code"].as_str().unwrap();
+        let state = hub.tmp.0.join("state");
+        let mut users = Users::load(&state).unwrap();
+        users.expire_join_codes("rex");
+        users.save().unwrap();
+        let expired = join(code).await.unwrap_err().message();
+        assert!(expired.contains("join code is not valid"), "{expired}");
+    }
+}
+
 mod tasks {
     use crate::board::TaskService;
     use crate::server::testing::start_with;
