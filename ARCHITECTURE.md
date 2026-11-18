@@ -676,7 +676,8 @@ An issue carries an explicit signal that agents may take it: a label, such as
    my answer comes back the same way.
 4. It works, checks gates, and may hand parts on to other agents of my team.
 5. The result is reported in the tracker; I remain the assignee.
-6. The outcome goes to the knowledge pipeline. (Not built yet.)
+6. What the agent reported goes to the knowledge pipeline, as a share of the
+   account the task is for.
 
 Planning is a conversation, not an object (decided 2026-11-18). The person
 talks the work through with their own agent, with an issue of theirs or
@@ -722,7 +723,9 @@ personal knowledge lives in the person's own hub, which is a different hub.
   2026-11-10; the session harvester was dropped.)
 - Sources the organization owns are captured automatically: task outcomes,
   connectors to team chats, mail and CRM, and conversations with clients of the
-  hub's own chat API. (Not built.)
+  hub's own chat API. (Built: task outcomes. When a task ends done, the hub
+  shares what was asked, the questions answered on the way and the agent's
+  report, as the task's account, with the client `task`.)
 - Recordings, started by a person, transcribed on the node. (Not built.)
 
 ### The pipeline

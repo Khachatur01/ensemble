@@ -166,8 +166,22 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
         ))),
         None => None,
     };
-    let tasks: &'static ensemble::board::Service =
-        Box::leak(Box::new(ensemble::board::Service::new(&users)));
+    // What a task's agent reported when it was done is shared, so the vault
+    // learns from the work as from what people share.
+    let tasks = ensemble::board::Service::new(&users).on_done(|user, project, task| {
+        let Some((title, text)) = ensemble::board::learned(project, task) else {
+            return;
+        };
+        let id = &task.task.ticket.id;
+        match memory.share_as(user, Some("task"), Some(project), &title, &text) {
+            Ok(share) => eprintln!(
+                "ensemble: knowledge: task {id} of {user} is share {}",
+                share.id
+            ),
+            Err(e) => eprintln!("ensemble: knowledge: task {id} of {user} was not shared: {e}"),
+        }
+    });
+    let tasks: &'static ensemble::board::Service = Box::leak(Box::new(tasks));
     let server = ensemble::link::Server::new(memory, &hub.roles, server, users).with_tasks(tasks);
     let server: &'static ensemble::link::Server<'static> = Box::leak(Box::new(server));
     std::thread::scope(|scope| {

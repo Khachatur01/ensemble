@@ -1201,6 +1201,12 @@ same by hand. A share that looks like it holds a key or a private key is
 refused, so the agent shares again without it: the vault keeps everything it is
 given.
 
+**Tasks teach it too.** When a task on the hub ends done, the hub shares what
+was asked, what was asked and answered on the way, and what the agent
+reported, as yours, with the client `task`, so what your helper agents learn
+is kept like what you share. A report that looks like it holds a key is not
+shared, and the hub's log says so.
+
 **Only Ensemble writes notes.** Each share is kept as it arrived, and the
 running hub turns it into notes in the background, or now with
 `ensemble hub knowledge distill` on the hub's computer:

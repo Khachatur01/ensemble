@@ -702,18 +702,73 @@ impl Board for DbBoard {
     }
 }
 
+/// What is done with a task that ended done: given its account, its project
+/// and the task.
+pub type OnDone = dyn Fn(&str, &str, &Detail) + Send + Sync;
+
 /// The hub's side of the link's task methods: each for the signed-in
 /// account's own tasks, in the hub's database in `dir`.
 pub struct Service {
     dir: PathBuf,
+    done: Option<Box<OnDone>>,
 }
 
 impl Service {
     pub fn new(dir: &Path) -> Self {
         Service {
             dir: dir.to_path_buf(),
+            done: None,
         }
     }
+
+    /// Give each task that ends done to `done`, as the hub gives it to its
+    /// knowledge.
+    pub fn on_done(mut self, done: impl Fn(&str, &str, &Detail) + Send + Sync + 'static) -> Self {
+        self.done = Some(Box::new(done));
+        self
+    }
+}
+
+/// The most of a task's report shared, in characters.
+const MAX_LEARNED: usize = 20_000;
+
+/// A task that ended done, as knowledge to share: a title and a text saying
+/// what was asked, what was asked and answered on the way, and what its agent
+/// reported. None for a task not done.
+pub fn learned(project: &str, task: &Detail) -> Option<(String, String)> {
+    let outcome = task.outcome.as_ref()?;
+    if outcome.status != Status::Done {
+        return None;
+    }
+    let t = &task.task.ticket;
+    let mut text = format!(
+        "What the helper agent {} reported when it had done task {} in the project {project}.\n\nAsked: {}\n",
+        t.agent, t.id, t.title
+    );
+    if let Some(goal) = &t.goal {
+        text.push_str(&format!("Goal: {goal}\n"));
+    }
+    if let Some(context) = &t.context {
+        text.push_str(&format!("Context: {context}\n"));
+    }
+    for check in &t.done_when {
+        text.push_str(&format!("Done when: {check}\n"));
+    }
+    if let Some((asked, _)) = &task.conversation {
+        text.push_str(&format!(
+            "\nAsked and answered on the way:\n{}\n",
+            asked.trim()
+        ));
+    }
+    let report = outcome.reply().trim();
+    let cut: String = report.chars().take(MAX_LEARNED).collect();
+    let more = if cut.len() < report.len() {
+        "\n[...]"
+    } else {
+        ""
+    };
+    text.push_str(&format!("\nIts report:\n{cut}{more}\n"));
+    Some((t.title.clone(), text))
 }
 
 impl TaskService for Service {
@@ -778,7 +833,19 @@ impl TaskService for Service {
             TASK_FINISH => {
                 let end: End = serde_json::from_value(parsed("end")?)
                     .map_err(|e| format!("{method}: `end` is not how a run ends: {e}"))?;
-                board.end(text("id")?, text("node")?, end, progress()?)?;
+                let over = matches!(end, End::Result { .. });
+                let id = text("id")?;
+                board.end(id, text("node")?, end, progress()?)?;
+                if over
+                    && let Some(done) = &self.done
+                    && let Some(task) = board.detail(id)?
+                    && task
+                        .outcome
+                        .as_ref()
+                        .is_some_and(|o| o.status == Status::Done)
+                {
+                    done(user, project, &task);
+                }
                 Ok(json!({ "finished": true }))
             }
             TASK_ANSWER => {
@@ -1267,5 +1334,73 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("not a project name"), "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_task_done_is_given_to_the_hub_once_with_what_it_asked_and_reported() {
+        let tmp = TempDir::new();
+        let given: &'static std::sync::Mutex<Vec<(String, String, String)>> =
+            Box::leak(Box::default());
+        let service = Service::new(&tmp.0).on_done(|user, project, task| {
+            let (title, text) = learned(project, task).unwrap();
+            given
+                .lock()
+                .unwrap()
+                .push((format!("{user}/{project}"), title, text));
+        });
+        let hub = ensemble_link::server::testing::start_with_tasks(Box::leak(Box::new(service)));
+        let laptop = RemoteBoard::new(&hub.url, &hub.ana, "shop");
+        let mut ticket = draft("Retry fetches", "web/coder", "t");
+        ticket.goal = Some("Requests survive a flaky network.".into());
+        let id = laptop.create(&ticket).await.unwrap();
+        // Asking is no end: nothing is given.
+        laptop.claim(&id, "laptop", LEASE, true).await.unwrap();
+        let ask = End::Ask {
+            question: "Which status codes?".into(),
+            reply: "r".into(),
+        };
+        laptop.finish(&id, "laptop", ask, None).await.unwrap();
+        assert!(given.lock().unwrap().is_empty());
+        laptop.answer(&id, "502 and 503").await.unwrap();
+        laptop.claim(&id, "laptop", LEASE, true).await.unwrap();
+        laptop
+            .finish(
+                &id,
+                "laptop",
+                result("Retries 502 and 503 three times."),
+                None,
+            )
+            .await
+            .unwrap();
+        let given = given.lock().unwrap();
+        assert_eq!(given.len(), 1);
+        let (whose, title, text) = &given[0];
+        assert_eq!(
+            (whose.as_str(), title.as_str()),
+            ("ana/shop", "Retry fetches")
+        );
+        for part in [
+            "helper agent web/coder",
+            "task 0001-retry-fetches in the project shop",
+            "Goal: Requests survive a flaky network.",
+            "Which status codes?",
+            "502 and 503",
+            "Its report:\nRetries 502 and 503 three times.",
+        ] {
+            assert!(text.contains(part), "{part}: {text}");
+        }
+
+        // A task that failed teaches nothing here.
+        let failed = Detail {
+            outcome: Some(Outcome {
+                status: Status::Failed,
+                text: "x".into(),
+            }),
+            ..DbBoard::new(&tmp.0, "ana", "shop")
+                .detail(&id)
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(learned("shop", &failed), None);
     }
 }

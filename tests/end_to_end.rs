@@ -1815,6 +1815,14 @@ fn the_node_runs_a_submitted_task_without_a_session_and_stops_on_sigterm() {
         "{}",
         stdout_of(&listed)
     );
+    // What it reported is shared, for the vault to learn from.
+    let shares = share_files(&hub_dir(&s));
+    assert!(
+        shares.iter().any(|f| f.contains("client: task")
+            && f.contains("title: Rename foo")
+            && f.contains("Its report:\nrenamed it")),
+        "{shares:?}"
+    );
 
     // One node per computer: a second one refuses.
     let second = bare_command(&s)
