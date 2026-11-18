@@ -4,7 +4,7 @@
 //!    fact, how-to, lesson, commitment, preference, ownership), or none when it
 //!    is chatter.
 //! 2. **Integrate**: each item is compared with the notes most like it, found
-//!    by [`search`](crate::search). With none, it is a new note; otherwise one
+//!    by their words and meaning. With none, it is a new note; otherwise one
 //!    more request says whether it is new, adds to a note, says what a note
 //!    already says, or contradicts one, and which of the notes offered it
 //!    relates to.
@@ -22,7 +22,6 @@
 //! found and removed.
 
 use crate::Memory;
-use crate::search;
 use crate::vault::{Note, Processed, Share, Vault, random_hex};
 use ensemble_backends::chat;
 use ensemble_config::WhenNone;
@@ -180,7 +179,7 @@ impl Memory {
         for item in &items {
             let notes = vault.notes();
             let similar: Vec<&Note> =
-                search::rank(&notes, &format!("{} {}", item.title, item.body), SIMILAR);
+                self.find(&notes, &format!("{} {}", item.title, item.body), SIMILAR);
             let action = if similar.is_empty() {
                 Action::New {
                     related: Vec::new(),

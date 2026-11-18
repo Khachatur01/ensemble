@@ -2280,7 +2280,12 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
     let (head, tail) = text.split_once("llm_backends:").unwrap();
     let (_, rest) = tail.split_once("# ---").unwrap();
     let rest = rest.split_once("knowledge:").unwrap().1;
-    let rest = rest.split_once("  recall:").unwrap().1;
+    // The sample's embedding model is on a backend this test takes out.
+    let rest = rest
+        .split_once("  recall:")
+        .unwrap()
+        .1
+        .replace("backend: central", "backend: up");
     std::fs::write(
         hub.join("hub.yaml"),
         format!(
@@ -2297,6 +2302,14 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
     );
     assert!(
         stdout_of(&out).contains("distilled by small on up"),
+        "{}",
+        stdout_of(&out)
+    );
+    // The stub serves no embeddings: recall goes on by words, and that is no
+    // failure.
+    assert!(
+        stdout_of(&out)
+            .contains("recall: by words alone for now: nomic-embed-text on up cannot embed"),
         "{}",
         stdout_of(&out)
     );

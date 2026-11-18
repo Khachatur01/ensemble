@@ -68,6 +68,17 @@ pub fn anthropic_body(ask: &Ask<'_>) -> Value {
 /// Send `body` to `path` of `backend` and read the answer. It waits at most the
 /// backend's `timeout_seconds`.
 pub fn send(backend: &LlmBackend, path: &str, body: &Value) -> Result<Answer, Error> {
+    let (status, text) = post(backend, path, body)?;
+    let model = body["model"].as_str().unwrap_or("");
+    match backend.settings {
+        BackendSettings::OpenAiCompatible { .. } => parse(&backend.name, model, status, &text),
+        BackendSettings::Anthropic { .. } => parse_anthropic(&backend.name, model, status, &text),
+    }
+}
+
+/// POST `body` to `path` after the backend's `base_url`, with its key: the
+/// status and the answer's text.
+pub(crate) fn post(backend: &LlmBackend, path: &str, body: &Value) -> Result<(u16, String), Error> {
     let (base_url, api_key) = (backend.settings.base_url(), backend.settings.api_key());
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(backend.timeout_seconds)))
@@ -106,11 +117,7 @@ pub fn send(backend: &LlmBackend, path: &str, body: &Value) -> Result<Answer, Er
     })?;
     let status = resp.status().as_u16();
     let text = resp.body_mut().read_to_string().unwrap_or_default();
-    let model = body["model"].as_str().unwrap_or("");
-    match backend.settings {
-        BackendSettings::OpenAiCompatible { .. } => parse(&backend.name, model, status, &text),
-        BackendSettings::Anthropic { .. } => parse_anthropic(&backend.name, model, status, &text),
-    }
+    Ok((status, text))
 }
 
 /// An answer from Anthropic's Messages API: the text blocks of `content`.

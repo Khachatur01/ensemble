@@ -1424,6 +1424,55 @@ fn hub_refusal(doc: &str) -> String {
 }
 
 #[test]
+fn an_embedding_model_is_an_openai_compatible_backend_and_a_similarity_from_0_to_1() {
+    let with = |embed: &str| {
+        HUB.replace(
+            "  recall: { max_notes: 3, max_chars: 1000 }\n",
+            &format!("  recall: {{ max_notes: 3, max_chars: 1000, embed: {embed} }}\n"),
+        )
+    };
+    let hub = parse_hub(
+        &with("{ backend: local, model: nomic-embed-text, min_similarity: 0.45 }"),
+        Path::new("/hubs/ana/hub.yaml"),
+        &env(&[]),
+    )
+    .unwrap();
+    let embed = hub.knowledge.recall.embed.unwrap();
+    assert_eq!(
+        (embed.backend.as_str(), embed.model.as_str()),
+        ("local", "nomic-embed-text")
+    );
+    assert!((embed.min_similarity() - 0.45).abs() < 1e-6);
+    assert!(
+        parse_hub(HUB, Path::new("hub.yaml"), &env(&[]))
+            .unwrap()
+            .knowledge
+            .recall
+            .embed
+            .is_none(),
+        "no block, words alone"
+    );
+    let err = hub_refusal(&with(
+        "{ backend: elsewhere, model: e, min_similarity: 0.5 }",
+    ));
+    assert!(
+        err.contains("'elsewhere' is not one of llm_backends"),
+        "{err}"
+    );
+    let err = hub_refusal(&with("{ backend: local, model: e, min_similarity: 2 }"));
+    assert!(err.contains("must be from 0 to 1"), "{err}");
+    let anthropic = with("{ backend: claude, model: e, min_similarity: 0.5 }").replace(
+        "llm_backends:\n",
+        "llm_backends:\n  claude: { type: anthropic-api, base_url: \"https://api.anthropic.com\", timeout_seconds: 5 }\n",
+    );
+    let err = hub_refusal(&anthropic);
+    assert!(
+        err.contains("not an openai-compatible-api backend"),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_hub_names_its_owner_its_backends_and_its_knowledge() {
     let hub = parse_hub(HUB, Path::new("/hubs/ana/hub.yaml"), &env(&[])).unwrap();
     assert_eq!(hub.owner, "Ana");
@@ -1593,7 +1642,8 @@ fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
         ),
         ("knowledge", accepted_keys::<hub::RawKnowledge>(), vec![]),
         ("distill", accepted_keys::<hub::RawDistill>(), vec![]),
-        ("recall", accepted_keys::<hub::RawRecall>(), vec![]),
+        ("recall", accepted_keys::<hub::RawRecall>(), vec!["embed"]),
+        ("embed", accepted_keys::<hub::RawEmbed>(), vec![]),
         (
             "direct_candidate",
             accepted_keys::<RawDirectCandidate>(),
@@ -1661,6 +1711,7 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
         ("knowledge", vec![knowledge]),
         ("distill", vec![&knowledge["distill"]]),
         ("recall", vec![&knowledge["recall"]]),
+        ("embed", vec![&knowledge["recall"]["embed"]]),
         (
             "direct_candidate",
             knowledge["distill"]["try"]

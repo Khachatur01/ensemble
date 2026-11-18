@@ -86,7 +86,7 @@ pub fn rank<'n>(notes: &'n [Note], query: &str, limit: usize) -> Vec<&'n Note> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn note(slug: &str, title: &str, body: &str) -> Note {

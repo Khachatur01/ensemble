@@ -125,12 +125,32 @@ impl Permission {
 /// The issue tracker types that ship.
 pub const LOCAL_MARKDOWN_TRACKER: &str = "local_markdown";
 
-/// How much one recall returns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How much one recall returns, and how notes are found.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recall {
     pub max_notes: u32,
     /// All the notes together.
     pub max_chars: u32,
+    /// Absent: notes are found by their words alone.
+    pub embed: Option<Embed>,
+}
+
+/// An embedding model, which finds notes by what they mean as well as by
+/// their words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Embed {
+    /// One of `llm_backends`, OpenAI-compatible: it serves `/embeddings`.
+    pub backend: String,
+    pub model: String,
+    /// How alike a note must be to the query to be found by its meaning, in
+    /// thousandths of cosine similarity.
+    pub min_similarity_permille: u32,
+}
+
+impl Embed {
+    pub fn min_similarity(&self) -> f32 {
+        self.min_similarity_permille as f32 / 1000.0
+    }
 }
 
 /// The hub file in directory `hub`. Like the helper team, the hub is named,
@@ -237,6 +257,15 @@ pub(crate) struct RawDistill {
 pub(crate) struct RawRecall {
     pub(crate) max_notes: u32,
     pub(crate) max_chars: u32,
+    pub(crate) embed: Option<RawEmbed>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawEmbed {
+    pub(crate) backend: String,
+    pub(crate) model: String,
+    pub(crate) min_similarity: f64,
 }
 
 /// Load the hub file at `path`, with variables the environment does not set
@@ -320,12 +349,41 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
         if k.recall.max_chars == 0 {
             problems.push("knowledge.recall: `max_chars` must be greater than 0".into());
         }
+        let embed = k.recall.embed.as_ref().map(|e| {
+            match raw.llm_backends.get(&e.backend) {
+                None => problems.push(format!(
+                    "knowledge.recall.embed.backend: '{}' is not one of llm_backends",
+                    e.backend
+                )),
+                Some(raw::RawLlmBackend::OpenAiCompatibleApi(_)) => {}
+                Some(_) => problems.push(format!(
+                    "knowledge.recall.embed.backend: '{}' is not an openai-compatible-api backend, which is what serves /embeddings",
+                    e.backend
+                )),
+            }
+            if e.model.trim().is_empty() {
+                problems.push("knowledge.recall.embed.model: is empty".into());
+            }
+            if !(0.0..=1.0).contains(&e.min_similarity) {
+                problems.push(
+                    "knowledge.recall.embed.min_similarity: must be from 0 to 1, such as 0.5"
+                        .into(),
+                );
+            }
+            Embed {
+                backend: e.backend.clone(),
+                model: e.model.trim().to_string(),
+                min_similarity_permille: (e.min_similarity.clamp(0.0, 1.0) * 1000.0).round()
+                    as u32,
+            }
+        });
         Knowledge {
             vault: base.join(k.vault.trim()),
             distill,
             recall: Recall {
                 max_notes: k.recall.max_notes,
                 max_chars: k.recall.max_chars,
+                embed,
             },
         }
     };

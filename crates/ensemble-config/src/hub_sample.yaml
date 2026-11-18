@@ -52,6 +52,13 @@ knowledge:
   recall:
     max_notes: 8
     max_chars: 6000
+    # Find notes by what they mean as well as by their words, with an embedding
+    # model an openai-compatible backend serves at /embeddings. Left out: by
+    # their words alone, as when the model cannot be asked.
+    embed:
+      backend: central
+      model: nomic-embed-text
+      min_similarity: 0.5        # how alike a note must be, by cosine; depends on the model
 
 # ---------------------------------------------------------------------------
 # Tasks: issues in the tracker with the label reach the helper team of the

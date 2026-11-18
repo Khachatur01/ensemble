@@ -327,7 +327,7 @@ that runs it, which is how `status` shows what an agent is doing there.
   share ─► secret check ─► vault/shares/  ─► distiller (every 5 s) ─► vault/notes/
                             kept as it came    extract → integrate      one commit per share
                                                └► review/ when unsure
-  recall ◄─ BM25 over vault/notes/ ◄──────────────────────────────────────┘
+  recall ◄─ BM25 + embeddings, fused, over vault/notes/ ◄─────────────────┘
 ```
 
 - **The vault** is a git repository: `shares/` as they arrived, never changed;

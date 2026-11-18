@@ -1252,7 +1252,15 @@ offered, or it goes to `review/`; and every note names the shares it came from.
 earlier decisions or setup may matter, and gets the matching notes, best first,
 within `max_notes` and `max_chars`, marked as reference data.
 `ensemble knowledge recall <topic>` prints the same. The search is by words (BM25, a
-title's words counting more), with no index to keep.
+title's words counting more), with no index to keep, and, with an embedding
+model, by what the notes mean: `knowledge.recall.embed` in `hub.yaml` names one
+an `openai-compatible-api` backend serves at `/embeddings` (Ollama's
+`nomic-embed-text`, say), and notes at least `min_similarity` alike to the
+query are found too, in other words than yours. A note found both ways comes
+first. The hub embeds each note once, after it writes it, and keeps the vectors
+in the vault's `.git` folder, out of its history; when the model cannot be
+asked, notes are found by their words alone, and the hub's log says why, once.
+The distiller finds the notes an item may belong to the same way.
 
 **Notes in your own sessions.** Your agent recalls when it decides to. With
 session hooks, Claude Code and Codex get the notes without asking: before each
@@ -1904,8 +1912,12 @@ scripts stand in for the CLIs.
   and wait for an admin; there is no password reset by mail, and no second
   factor. The API sends no CORS headers, so a UI is served from the hub's own
   origin. Connectors to chats and mail are not built either.
-- **Recall is a word search.** It finds notes that use your words, not ones
-  that only mean the same. Your agent recalls when it decides to; a helper
+- **Recall needs an embedding model to find by meaning.** Without
+  `knowledge.recall.embed`, or while its model cannot be asked, it finds notes
+  that use your words, not ones that only mean the same; how alike is alike
+  enough (`min_similarity`) depends on the model, and is yours to tune. The
+  notes are compared one by one, which suits a vault of thousands of notes, not
+  millions. Your agent recalls when it decides to; a helper
   agent with `recall` gets the notes its task's words find, once, when the task
   starts. Session hooks recall on your prompt's words in Claude Code and
   Codex; OpenCode has none.

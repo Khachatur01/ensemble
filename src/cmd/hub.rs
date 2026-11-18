@@ -106,23 +106,53 @@ fn check(ctx: &Ctx) -> Result<ExitCode, String> {
                 .map(|b| (b, c.model.as_str()))
         })
         .collect();
-    match ensemble::backends::resolve::Resolver::default().choose(&candidates) {
+    let distills = match ensemble::backends::resolve::Resolver::default().choose(&candidates) {
         Ok(i) => {
             let c = &knowledge.distill.fallback.candidates[i];
             println!(
                 "distill: shares would be distilled by {} on {}",
                 c.model, c.backend
             );
-            Ok(ExitCode::SUCCESS)
+            true
         }
         Err(refusals) => {
             println!("distill: no model can be used now:");
             for r in refusals {
                 println!("  {} / {}: {}", r.backend, r.model, r.why);
             }
-            Ok(ExitCode::FAILURE)
+            false
+        }
+    };
+    // Recall works without its embedding model, by words alone: said, but
+    // no failure.
+    match &knowledge.recall.embed {
+        None => println!("recall: by words"),
+        Some(e) => {
+            let answered = match hub.llm_backends.get(&e.backend) {
+                Some(backend) => {
+                    ensemble::backends::embed::embed(backend, &e.model, &["check".to_string()])
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                }
+                None => Err(format!("no backend '{}'", e.backend)),
+            };
+            match answered {
+                Ok(()) => println!(
+                    "recall: by words and by meaning, with {} on {}",
+                    e.model, e.backend
+                ),
+                Err(why) => println!(
+                    "recall: by words alone for now: {} on {} cannot embed: {why}",
+                    e.model, e.backend
+                ),
+            }
         }
     }
+    Ok(if distills {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 /// `ensemble hub serve`: the hub as a server for a team, until stopped.

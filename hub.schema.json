@@ -216,6 +216,31 @@
           "description": "Most characters one recall returns, all notes together.",
           "type": "integer",
           "minimum": 1
+        },
+        "embed": { "$ref": "#/definitions/embed" }
+      }
+    },
+    "embed": {
+      "description": "An embedding model, so notes are found by what they mean as well as by their words. Left out: by their words alone.",
+      "type": "object",
+      "required": ["backend", "model", "min_similarity"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "description": "One of llm_backends, of type openai-compatible-api: it serves /embeddings.",
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "description": "The embedding model, as the backend names it, such as nomic-embed-text.",
+          "type": "string",
+          "minLength": 1
+        },
+        "min_similarity": {
+          "description": "How alike, by cosine similarity, a note must be to the query to be found by its meaning alone. Depends on the model; 0.5 is a start.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
         }
       }
     },

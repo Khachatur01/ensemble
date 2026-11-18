@@ -9,7 +9,8 @@
 //! The vault (`vault`) keeps each share as it arrived. A share is checked for
 //! secrets first (`secrets`), because the vault is a git repository and a key
 //! in it would stay in the history. The pipeline (`pipeline`) turns shares into
-//! notes, in the background, finding related notes by their words (`search`).
+//! notes, in the background. Recall and the pipeline find notes by their words
+//! (`search`) and, with an embedding model, by what they mean (`meaning`).
 
 use async_trait::async_trait;
 use ensemble_backends::resolve::Resolver;
@@ -21,6 +22,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+mod meaning;
 pub mod pipeline;
 pub mod search;
 pub mod secrets;
@@ -112,6 +114,8 @@ pub struct Memory {
     /// The hub's own model endpoints.
     backends: BTreeMap<String, LlmBackend>,
     resolver: Resolver,
+    /// The notes' vectors, to find them by their meaning.
+    meaning: meaning::Meaning,
 }
 
 /// What a run of the pipeline over the pending shares did.
@@ -133,11 +137,16 @@ impl Memory {
             client: Mutex::new(None),
             backends: hub.llm_backends.clone(),
             resolver: Resolver::default(),
+            meaning: meaning::Meaning::default(),
         }
     }
 
     pub(crate) fn backends(&self) -> &BTreeMap<String, LlmBackend> {
         &self.backends
+    }
+
+    pub(crate) fn meaning(&self) -> &meaning::Meaning {
+        &self.meaning
     }
 
     pub(crate) fn resolver(&self) -> &Resolver {
@@ -261,6 +270,10 @@ impl Memory {
                                 format!(" ({})", line.notes.join(", "))
                             }
                         ));
+                        // So that a recall need not; a failure is said once.
+                        if !line.notes.is_empty() {
+                            let _ = self.embed_notes();
+                        }
                     }
                     Ok(Step::Waiting(why)) => {
                         if !said_waiting {
@@ -314,8 +327,8 @@ impl Memory {
     /// for an agent to read.
     pub fn recall(&self, query: &str) -> String {
         let notes = self.vault().notes();
-        let limits = self.knowledge.recall;
-        let found = search::rank(&notes, query, limits.max_notes as usize);
+        let limits = &self.knowledge.recall;
+        let found = self.find(&notes, query, limits.max_notes as usize);
         if found.is_empty() {
             return format!(
                 "No note in the user's knowledge vault is about '{}'.",
