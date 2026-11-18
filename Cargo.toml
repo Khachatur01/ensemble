@@ -57,6 +57,7 @@ harness-rs-context = "=0.0.72"
 ensemble-core = { path = "crates/ensemble-core" }
 ensemble-config = { path = "crates/ensemble-config" }
 ensemble-backends = { path = "crates/ensemble-backends" }
+ensemble-store = { path = "crates/ensemble-store" }
 ensemble-knowledge = { path = "crates/ensemble-knowledge" }
 ensemble-link = { path = "crates/ensemble-link" }
 ensemble-agents = { path = "crates/ensemble-agents" }

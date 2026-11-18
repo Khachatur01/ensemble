@@ -6,10 +6,11 @@
 use std::path::Path;
 
 /// Bottom to top: a crate may depend only on crates before it.
-const ORDER: [&str; 10] = [
+const ORDER: [&str; 11] = [
     "ensemble-core",
     "ensemble-config",
     "ensemble-backends",
+    "ensemble-store",
     "ensemble-knowledge",
     "ensemble-link",
     "ensemble-agents",

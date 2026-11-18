@@ -1,0 +1,16 @@
+[package]
+name = "ensemble-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Ensemble's hub database: one Turso file for accounts, tokens, tasks, task deliveries and the notes' embeddings."
+
+[dependencies]
+turso.workspace = true
+ensemble-core.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+ensemble-core = { workspace = true, features = ["test-support"] }

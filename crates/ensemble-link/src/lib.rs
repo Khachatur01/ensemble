@@ -16,11 +16,11 @@ mod http;
 mod nodes;
 pub mod protocol;
 pub mod server;
-pub mod store;
 pub mod tokens;
 pub mod users;
 
 pub use client::{Link, RemoteMemory, Token};
+pub use ensemble_store as store;
 pub use server::Server;
 pub use tokens::Tokens;
 pub use users::{User, Users};

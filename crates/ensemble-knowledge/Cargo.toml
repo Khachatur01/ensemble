@@ -12,6 +12,7 @@ async-trait.workspace = true
 ensemble-backends.workspace = true
 ensemble-config.workspace = true
 ensemble-core.workspace = true
+ensemble-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_norway.workspace = true

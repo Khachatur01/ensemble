@@ -1,49 +1,43 @@
 //! Finding notes by what they mean, with `knowledge.recall.embed`. Each note's
-//! title and body is a vector from the embedding model, kept in a cache in the
-//! vault's `.git` folder, out of its history: it is made again from the notes
-//! whenever they or the model change. A query's vector finds the notes that
-//! point its way, at least `min_similarity` alike, and those are merged with
-//! the notes its words find ([`search`](crate::search)), so a note found both
-//! ways comes first. Without a model, or when it cannot be asked, notes are
-//! found by their words alone.
+//! title and body is a vector from the embedding model, kept in a Turso file in
+//! the vault, `.ensemble/embeddings.db`, out of its history: a cache, made
+//! again whenever a note or the model changes, as the notes are of the shares.
+//! The file compares a query's vector with them (`vector_distance_cos`),
+//! and the notes at least `min_similarity` alike are merged with the notes the
+//! query's words find ([`search`](crate::search)), so a note found both ways
+//! comes first. Without a model, or when it cannot be asked, notes are found by
+//! their words alone.
 
 use crate::Memory;
 use crate::search;
 use crate::vault::Note;
-use ensemble_backends::embed::{cosine, embed};
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use ensemble_backends::embed::embed;
+use ensemble_store::{self as store, Value};
+use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// The cache's file, in the vault's `.git` folder.
-const CACHE_FILE: &str = "ensemble-meaning.json";
 /// The most notes embedded in one request.
 const BATCH: usize = 32;
 /// The most of a note's text embedded, in characters: embedding models read
 /// little.
 const MAX_TEXT: usize = 4000;
+/// The cache, in the vault's [`cache_dir`](crate::Vault::cache_dir).
+const CACHE_FILE: &str = "embeddings.db";
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS embeddings (
+    slug TEXT PRIMARY KEY,
+    model TEXT NOT NULL,
+    hash INTEGER NOT NULL,
+    dims INTEGER NOT NULL,
+    vector BLOB NOT NULL
+);
+";
 /// Reciprocal rank fusion's usual constant: how little a lower rank counts.
 const FUSION_K: f32 = 60.0;
-
-/// The vectors of the notes, by slug, for one model.
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct Cache {
-    model: String,
-    notes: BTreeMap<String, Kept>,
-}
-
-/// One note's vector, and a hash of the text it is of.
-#[derive(Debug, Serialize, Deserialize)]
-struct Kept {
-    hash: u64,
-    vector: Vec<f32>,
-}
 
 /// What a [`Memory`] keeps to find notes by their meaning.
 #[derive(Debug, Default)]
 pub(crate) struct Meaning {
-    /// Read from the file when first needed.
-    cache: Mutex<Option<Cache>>,
     /// The last failure said, so it is said once, not on every recall.
     said: Mutex<Option<String>>,
 }
@@ -72,114 +66,127 @@ impl Memory {
         if self.knowledge().recall.embed.is_none() {
             return Ok(0);
         }
-        let notes = self.vault().notes();
-        let mut cache = self
-            .meaning()
-            .cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        self.fill(&mut cache, &notes)
+        self.fill(&self.vault().notes())
             .inspect_err(|e| self.say_once(e))
     }
 
-    /// The notes at least `min_similarity` alike to `query`, most alike first.
+    /// Those of `notes` at least `min_similarity` alike to `query`, most
+    /// alike first.
     fn by_meaning<'n>(&self, notes: &'n [Note], query: &str) -> Result<Vec<&'n Note>, String> {
-        let embed_with = self
+        let e = self
             .knowledge()
             .recall
             .embed
             .as_ref()
             .ok_or("no embedding model")?;
-        let mut cache = self
-            .meaning()
-            .cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        self.fill(&mut cache, notes)?;
-        let cache = cache.as_ref().ok_or("no vectors")?;
+        self.fill(notes)?;
         let asked = self
             .vectors(&[query.trim().to_string()])?
             .pop()
             .ok_or("the model gave no vector for the query")?;
-        let mut alike: Vec<(f32, &Note)> = notes
+        // A vector of zeros points nowhere: alike to nothing.
+        if asked.iter().all(|x| *x == 0.0) {
+            return Ok(Vec::new());
+        }
+        let rows = self.cache(async |c| {
+            store::rows(
+                c,
+                "SELECT slug, 1 - vector_distance_cos(vector, vector32(?1)) FROM embeddings \
+                 WHERE model = ?2 AND dims = ?3",
+                vec![
+                    Value::Text(vector_text(&asked)),
+                    Value::Text(e.model.clone()),
+                    Value::Integer(asked.len() as i64),
+                ],
+            )
+            .await
+        })?;
+        let by_slug: HashMap<&str, &Note> = notes.iter().map(|n| (n.slug.as_str(), n)).collect();
+        let mut alike: Vec<(f64, &Note)> = rows
             .iter()
-            .filter_map(|n| {
-                let kept = cache.notes.get(&n.slug)?;
-                let similarity = cosine(&asked, &kept.vector);
-                (similarity >= embed_with.min_similarity()).then_some((similarity, n))
+            .filter_map(|row| {
+                let note = by_slug.get(store::text(&row[0])?.as_str())?;
+                let similarity = match row[1] {
+                    Value::Real(s) => s,
+                    _ => return None,
+                };
+                (similarity >= f64::from(e.min_similarity())).then_some((similarity, *note))
             })
             .collect();
         alike.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.slug.cmp(&b.1.slug)));
         Ok(alike.into_iter().map(|(_, n)| n).collect())
     }
 
-    /// Give every note in `notes` a vector of its text, and forget the notes
-    /// gone: read from the file first, written back when changed. How many it
+    /// Give every note in `notes` a vector of its text, by the hub's model,
+    /// and forget the vectors of notes gone and of other models. How many it
     /// embedded.
-    fn fill(&self, cache: &mut Option<Cache>, notes: &[Note]) -> Result<usize, String> {
+    fn fill(&self, notes: &[Note]) -> Result<usize, String> {
         let model = match &self.knowledge().recall.embed {
             Some(e) => e.model.clone(),
             None => return Ok(0),
         };
-        let path = self.vault().lock_dir().join(CACHE_FILE);
-        let cache = cache.get_or_insert_with(|| {
-            std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|t| serde_json::from_str(&t).ok())
-                .unwrap_or_default()
-        });
-        let mut changed = false;
-        if cache.model != model {
-            *cache = Cache {
-                model,
-                notes: BTreeMap::new(),
+        let kept = self.cache(async |c| {
+            store::rows(c, "SELECT slug, model, hash FROM embeddings", vec![]).await
+        })?;
+        let mut have: HashMap<String, i64> = HashMap::new();
+        let mut stale: Vec<String> = Vec::new();
+        for row in &kept {
+            let (Some(slug), Some(of)) = (store::text(&row[0]), store::text(&row[1])) else {
+                continue;
             };
-            changed = true;
-        }
-        let before = cache.notes.len();
-        cache
-            .notes
-            .retain(|slug, _| notes.iter().any(|n| &n.slug == slug));
-        changed |= cache.notes.len() != before;
-        let missing: Vec<(&Note, u64)> = notes
-            .iter()
-            .map(|n| (n, hash(&text_of(n))))
-            .filter(|(n, h)| cache.notes.get(&n.slug).is_none_or(|k| k.hash != *h))
-            .collect();
-        let mut made = 0;
-        let mut failed = None;
-        for batch in missing.chunks(BATCH) {
-            let texts: Vec<String> = batch.iter().map(|(n, _)| text_of(n)).collect();
-            match self.vectors(&texts) {
-                Ok(vectors) => {
-                    for ((note, hash), vector) in batch.iter().zip(vectors) {
-                        cache.notes.insert(
-                            note.slug.clone(),
-                            Kept {
-                                hash: *hash,
-                                vector,
-                            },
-                        );
-                        made += 1;
-                    }
+            match row[2] {
+                Value::Integer(hash) if of == model && notes.iter().any(|n| n.slug == slug) => {
+                    have.insert(slug, hash);
                 }
-                Err(e) => {
-                    failed = Some(e);
-                    break;
-                }
+                _ => stale.push(slug),
             }
         }
-        if changed || made > 0 {
-            let text = serde_json::to_string(cache).map_err(|e| e.to_string())?;
-            let tmp = path.with_extension("tmp");
-            std::fs::write(&tmp, text)
-                .and_then(|()| std::fs::rename(&tmp, &path))
-                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        if !stale.is_empty() {
+            self.cache(async |c| {
+                let deletes = stale
+                    .iter()
+                    .map(|slug| {
+                        (
+                            "DELETE FROM embeddings WHERE slug = ?1",
+                            vec![Value::Text(slug.clone())],
+                        )
+                    })
+                    .collect();
+                store::transaction(c, deletes).await
+            })?;
         }
-        match failed {
-            Some(e) => Err(e),
-            None => Ok(made),
+        let missing: Vec<(&Note, i64)> = notes
+            .iter()
+            .map(|n| (n, hash(&text_of(n)) as i64))
+            .filter(|(n, h)| have.get(&n.slug) != Some(h))
+            .collect();
+        let mut made = 0;
+        for batch in missing.chunks(BATCH) {
+            let texts: Vec<String> = batch.iter().map(|(n, _)| text_of(n)).collect();
+            let vectors = self.vectors(&texts)?;
+            self.cache(async |c| {
+                let inserts = batch
+                    .iter()
+                    .zip(&vectors)
+                    .map(|((note, hash), vector)| {
+                        (
+                            "INSERT OR REPLACE INTO embeddings (slug, model, hash, dims, vector) \
+                             VALUES (?1, ?2, ?3, ?4, vector32(?5))",
+                            vec![
+                                Value::Text(note.slug.clone()),
+                                Value::Text(model.clone()),
+                                Value::Integer(*hash),
+                                Value::Integer(vector.len() as i64),
+                                Value::Text(vector_text(vector)),
+                            ],
+                        )
+                    })
+                    .collect();
+                store::transaction(c, inserts).await
+            })?;
+            made += batch.len();
         }
+        Ok(made)
     }
 
     /// The vectors of `texts`, from the hub's embedding model.
@@ -197,6 +204,15 @@ impl Memory {
         embed(backend, &e.model, texts).map_err(|e| e.to_string())
     }
 
+    /// Run `work` on the vault's cache of vectors.
+    fn cache<T>(
+        &self,
+        work: impl AsyncFnOnce(&store::Connection) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let path = self.vault().cache_dir()?.join(CACHE_FILE);
+        store::open(&path, SCHEMA, work)
+    }
+
     /// Say why notes are found by their words alone, unless it was the last
     /// thing said.
     fn say_once(&self, why: &str) {
@@ -210,6 +226,12 @@ impl Memory {
             *said = Some(why.to_string());
         }
     }
+}
+
+/// A vector as `vector32` reads it: `[0.1,0.2]`.
+fn vector_text(vector: &[f32]) -> String {
+    let numbers: Vec<String> = vector.iter().map(f32::to_string).collect();
+    format!("[{}]", numbers.join(","))
 }
 
 /// What of a note is embedded: its title and body, cut at [`MAX_TEXT`].
@@ -252,17 +274,20 @@ mod tests {
     use ensemble_backends::testing::{embedding_server, nowhere};
     use ensemble_core::workspace::testing::TempDir;
 
-    /// The knowledge of a hub whose embedding model is at `url`. A new vault
-    /// gets three notes: two about releases, in other words, and one about
-    /// lunch.
+    /// The knowledge of a hub in `tmp`/hub whose embedding model is at `url`.
+    /// A new vault gets three notes: two about releases, in other words, and
+    /// one about lunch.
     fn memory_with(tmp: &TempDir, url: &str) -> Memory {
         let yaml = format!(
             "version: 1\nowner: Ana\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall:\n    max_notes: 3\n    max_chars: 1000\n    embed: {{ backend: local, model: e, min_similarity: 0.5 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: closed }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles: {{ member: [share, recall] }}\n",
             tmp.0.join("vault").display()
         );
-        let hub =
-            ensemble_config::parse_hub(&yaml, std::path::Path::new("hub.yaml"), &BTreeMap::new())
-                .unwrap();
+        let hub = ensemble_config::parse_hub(
+            &yaml,
+            &tmp.0.join("hub/hub.yaml"),
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
         let m = Memory::new(&hub, None);
         let vault = m.vault();
         if vault.exists() {
@@ -315,16 +340,49 @@ mod tests {
         // The notes were embedded once, in one request; each of the two
         // queries is one more.
         assert_eq!(server.requests.lock().unwrap().len(), 3);
-        assert!(m.vault().lock_dir().join(CACHE_FILE).exists());
+        let kept = |m: &Memory| -> Vec<String> {
+            m.cache(async |c| {
+                store::rows(c, "SELECT slug FROM embeddings ORDER BY slug", vec![]).await
+            })
+            .unwrap()
+            .iter()
+            .filter_map(|r| store::text(&r[0]))
+            .collect()
+        };
+        assert_eq!(kept(&m), vec!["deploy-day", "lunch", "release-train"]);
+        // In the vault, and out of its history.
+        let vault = m.vault();
+        assert!(vault.root().join(".ensemble/embeddings.db").exists());
+        vault.commit("notes").unwrap();
+        let tracked = std::process::Command::new("git")
+            .args(["ls-files"])
+            .current_dir(vault.root())
+            .output()
+            .unwrap();
+        let tracked = String::from_utf8_lossy(&tracked.stdout);
+        assert!(
+            tracked.contains(".gitignore") && !tracked.contains(".ensemble"),
+            "{tracked}"
+        );
+        vault.cache_dir().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(vault.root().join(".gitignore")).unwrap(),
+            "/.ensemble/\n",
+            "named once"
+        );
         // A changed note is embedded again; the others are not.
         let mut lunch = m.vault().note("lunch").unwrap();
         lunch.body = "Pizza on Fridays, and the ship's cook decides.".into();
         m.vault().write_note(&lunch).unwrap();
         assert_eq!(m.embed_notes().unwrap(), 1);
         assert_eq!(m.embed_notes().unwrap(), 0);
-        // Another process reads the vectors from the cache.
+        // Another process finds them in the database.
         let again = memory_with(&tmp, &server.url);
         assert_eq!(again.embed_notes().unwrap(), 0);
+        // A note gone takes its vector with it.
+        std::fs::remove_file(m.vault().root().join("notes/lunch.md")).unwrap();
+        assert_eq!(m.embed_notes().unwrap(), 0);
+        assert_eq!(kept(&m), vec!["deploy-day", "release-train"]);
     }
 
     #[test]

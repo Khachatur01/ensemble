@@ -1,8 +1,10 @@
 //! The hub server's state that changes while it runs: its accounts and their
-//! tokens (`users`), the tasks it keeps for them (`ensemble_tasks::board`),
-//! and which issue of the tracker became which task (the inbox). One Turso database,
-//! `database.db`, in the hub's folder (`~/.config/ensemble/hub/`), which only
-//! whoever runs the hub may enter.
+//! tokens (`ensemble_link::users`), the tasks it keeps for them
+//! (`ensemble_tasks::board`), which issue of the tracker became which task (the
+//! inbox). One Turso database, `database.db`, in the hub's folder
+//! (`~/.config/ensemble/hub/`), which only whoever runs the hub may enter.
+//! [`open`] opens another Turso file, such as the knowledge vault's cache of
+//! its notes' vectors.
 //!
 //! Turso locks the file while it is open, and another process cannot open it
 //! then. So each read or change opens it, does its work (a change in one
@@ -13,7 +15,7 @@
 use ensemble_core::runtime;
 use std::path::Path;
 use std::time::{Duration, Instant};
-pub use turso::Value;
+pub use turso::{Connection, Value};
 
 /// The database file in the hub's state directory.
 pub const DB_FILE: &str = "database.db";
@@ -63,7 +65,16 @@ pub fn with<T>(
     work: impl AsyncFnOnce(&turso::Connection) -> Result<T, String>,
 ) -> Result<T, String> {
     private_dir(dir)?;
-    let path = dir.join(DB_FILE);
+    open(&dir.join(DB_FILE), SCHEMA, work)
+}
+
+/// Open the Turso file at `path`, made with the tables of `schema` when they
+/// are not there, and run `work` on it, as [`with`] does the hub's database.
+pub fn open<T>(
+    path: &Path,
+    schema: &str,
+    work: impl AsyncFnOnce(&turso::Connection) -> Result<T, String>,
+) -> Result<T, String> {
     let path = path
         .to_str()
         .ok_or_else(|| format!("{} is not a path Turso can open", path.display()))?;
@@ -84,7 +95,7 @@ pub fn with<T>(
         // Another process, or another request of this one, may be writing.
         conn.busy_timeout(WAIT)
             .map_err(|e| format!("cannot open {path}: {e}"))?;
-        conn.execute_batch(SCHEMA)
+        conn.execute_batch(schema)
             .await
             .map_err(|e| format!("{path}: {e}"))?;
         work(&conn).await.map_err(|e| format!("{path}: {e}"))

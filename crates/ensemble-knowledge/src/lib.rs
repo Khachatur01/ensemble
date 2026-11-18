@@ -114,7 +114,7 @@ pub struct Memory {
     /// The hub's own model endpoints.
     backends: BTreeMap<String, LlmBackend>,
     resolver: Resolver,
-    /// The notes' vectors, to find them by their meaning.
+    /// The last failure to find notes by their meaning, said once.
     meaning: meaning::Meaning,
 }
 

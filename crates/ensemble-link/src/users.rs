@@ -608,7 +608,7 @@ fn random<const N: usize>() -> Result<[u8; N], UsersError> {
 }
 
 /// Every account in the database, with its tokens in the order they were made.
-async fn read(c: &turso::Connection) -> Result<BTreeMap<String, User>, String> {
+async fn read(c: &store::Connection) -> Result<BTreeMap<String, User>, String> {
     let text = |v: &Value| store::text(v).unwrap_or_default();
     let mut users = BTreeMap::new();
     let rows = store::rows(

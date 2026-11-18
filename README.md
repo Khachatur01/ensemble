@@ -1241,6 +1241,7 @@ vault/
                                sources (share ids), shared_by, pipeline, updated
   review/<share-id>.md         what the pipeline would not write, and why
   log.jsonl                    what the pipeline did with each share
+  .ensemble/embeddings.db      the notes' vectors, with an embedding model: a cache, not in git
 ```
 
 Because the notes are made from the shares, a better model or a new note format
@@ -1269,8 +1270,11 @@ an `openai-compatible-api` backend serves at `/embeddings` (Ollama's
 `nomic-embed-text`, say), and notes at least `min_similarity` alike to the
 query are found too, in other words than yours. A note found both ways comes
 first. The hub embeds each note once, after it writes it, and keeps the vectors
-in the vault's `.git` folder, out of its history; when the model cannot be
-asked, notes are found by their words alone, and the hub's log says why, once.
+in the vault, in `.ensemble/embeddings.db`: a Turso file that compares them,
+out of the history (the vault's `.gitignore` names it), and a cache like the
+notes, made again when a note or the model changes, and safe to delete. When
+the model cannot be asked, notes are found by their words alone, and the hub's
+log says why, once.
 The distiller finds the notes an item may belong to the same way.
 
 **Notes in your own sessions.** Your agent recalls when it decides to. With

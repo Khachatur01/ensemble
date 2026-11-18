@@ -739,6 +739,7 @@ dependencies = [
  "ensemble-backends",
  "ensemble-config",
  "ensemble-core",
+ "ensemble-store",
  "serde",
  "serde_json",
  "serde_norway",
@@ -752,13 +753,13 @@ dependencies = [
  "ensemble-config",
  "ensemble-core",
  "ensemble-knowledge",
+ "ensemble-store",
  "futures-util",
  "ring",
  "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
- "turso",
  "ureq",
 ]
 
@@ -789,6 +790,15 @@ dependencies = [
  "reqwest",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "ensemble-store"
+version = "0.1.0"
+dependencies = [
+ "ensemble-core",
+ "tokio",
+ "turso",
 ]
 
 [[package]]
