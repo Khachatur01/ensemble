@@ -651,6 +651,7 @@ impl std::error::Error for ConfigError {}
 pub mod edit;
 mod env;
 pub mod hub;
+mod interfaces;
 pub mod node;
 mod raw;
 pub mod settings;
@@ -663,6 +664,8 @@ pub use hub::{
     Embed, HUB_FILENAME, Hub, IssueTracker, Knowledge, Permission, Recall, Registration, Server,
     Tasks, hub_path, load_hub, parse_hub,
 };
+pub use interfaces::Interfaces;
+pub(crate) use interfaces::{RawInterfaces, interfaces};
 pub use node::{
     Access, NODE_FILENAME, Node, OfferedModels, OfferedRuns, Offers, load_node, node_path,
     parse_node,

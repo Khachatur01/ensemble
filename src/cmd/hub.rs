@@ -154,6 +154,10 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
         &SystemEnv,
     )
     .map_err(|e| e.to_string())?;
+    // One hub per computer; the lock also tells `ensemble hub …` it runs.
+    let hub_dir = state::hub_dir()?;
+    let _lock = ensemble::lock::acquire(&hub_dir)
+        .map_err(|pid| format!("hub serve: process {pid} already runs the hub"))?;
     let server = hub.server;
     let memory = ensemble::knowledge::Memory::new(&hub, None);
     // A hub written by hand, or by a NixOS module, gets its vault here.
@@ -206,16 +210,60 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
     let tasks: &'static ensemble::board::Service = Box::leak(Box::new(tasks));
     let server = ensemble::link::Server::new(memory, &hub.roles, server, users).with_tasks(tasks);
     let server: &'static ensemble::link::Server<'static> = Box::leak(Box::new(server));
+    // `ensemble hub …` reaches it on its socket, while it runs.
+    let socket = hub.interfaces.cli.then(|| state::hub_socket(&hub_dir));
     std::thread::scope(|scope| {
         scope.spawn(|| memory.work(&STOP, &say));
         if let Some(inbox) = inbox {
             scope.spawn(|| inbox.work(&STOP, &say));
         }
-        ensemble::runtime::shared()
-            .block_on(server.run(listener, &STOP, &|line| eprintln!("ensemble: {line}")));
+        ensemble::runtime::shared().block_on(async {
+            let commands = async {
+                if let Some(socket) = &socket {
+                    commands(socket, server, &say).await;
+                }
+            };
+            tokio::join!(
+                server.run(listener, &STOP, &|line| eprintln!("ensemble: {line}")),
+                commands
+            );
+        });
     });
     say("stopped");
     Ok(ExitCode::SUCCESS)
+}
+
+/// Run the operations `ensemble hub …` asks for on `socket`, until [`STOP`]
+/// is set: the one who runs the hub asks, on its computer.
+async fn commands(
+    socket: &std::path::Path,
+    server: &'static ensemble::link::Server<'static>,
+    say: &(dyn Fn(&str) + Sync),
+) {
+    let listener = match crate::daemon::listen(socket) {
+        Ok(listener) => listener,
+        Err(e) => {
+            say(&format!("no commands: {e}"));
+            return;
+        }
+    };
+    while !STOP.load(std::sync::atomic::Ordering::Relaxed) {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            () = tokio::time::sleep(std::time::Duration::from_millis(200)) => continue,
+        };
+        let Ok((stream, _)) = accepted else { continue };
+        tokio::spawn(async move {
+            let (registry, context) = server.operations();
+            let _ = crate::local::reply(stream, |asked| {
+                crate::local::answer(registry, context, asked).unwrap_or_else(|| {
+                    serde_json::json!({ "error": ensemble::ops::Error::invalid("`op` must name an operation") })
+                })
+            })
+            .await;
+        });
+    }
+    let _ = std::fs::remove_file(socket);
 }
 
 /// `ensemble hub knowledge …`: the vault of the hub this computer runs.

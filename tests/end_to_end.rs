@@ -3930,3 +3930,30 @@ fn signing_in_to_a_hub_names_it_in_the_node_and_signing_out_takes_it_out() {
             .success()
     );
 }
+
+#[test]
+fn a_running_node_makes_a_change_to_its_settings_itself() {
+    let s = Scratch::new("config-running");
+    s.node_yaml();
+    // Not running: the command makes it, and nothing needs saying.
+    let out = ensemble(&s, &["node", "config", "set", "access", "shared"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).is_empty(), "{}", stderr_of(&out));
+    let mut node = start_node(&s, &[]);
+    let out = ensemble(&s, &["node", "config", "set", "access", "private"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("The running node"),
+        "the running node made it: {}",
+        stderr_of(&out)
+    );
+    // Its errors come back as they are.
+    let out = ensemble(&s, &["node", "config", "set", "name", "a b/c"]);
+    assert!(
+        stderr_of(&out).contains("nothing was changed"),
+        "{}",
+        stderr_of(&out)
+    );
+    sigterm(&node);
+    let _ = node.wait();
+}

@@ -33,9 +33,23 @@
         "runs": { "$ref": "#/definitions/runs" },
         "models": { "$ref": "#/definitions/models" }
       }
-    }
+    },
+    "interfaces": { "$ref": "#/definitions/interfaces" }
   },
   "definitions": {
+    "interfaces": {
+      "description": "How it is managed: each interface it turns on. Left out, the command line is on; at least one must be.",
+      "type": "object",
+      "required": [],
+      "additionalProperties": false,
+      "properties": {
+        "cli": {
+          "description": "`ensemble hub …` or `ensemble node …` on its computer, run by the running process over its socket when it runs.",
+          "type": "object",
+          "additionalProperties": false
+        }
+      }
+    },
     "runs": {
       "description": "Agents of the node's teams, which others name with an agent of `type: node`. A task gets a copy of the files git tracks, works in a folder of its own, and sends back what it changed.",
       "type": "object",

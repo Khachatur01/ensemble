@@ -36,6 +36,8 @@ pub struct Hub {
     pub server: Server,
     /// What each role may do, by the role's name.
     pub roles: BTreeMap<String, Vec<Permission>>,
+    /// How it may be managed.
+    pub interfaces: Interfaces,
     /// Where it was loaded from, for error messages.
     pub source: PathBuf,
 }
@@ -169,6 +171,7 @@ pub(crate) struct RawHub {
     pub(crate) tasks: Option<RawTasks>,
     pub(crate) server: RawServer,
     pub(crate) roles: BTreeMap<String, Vec<Permission>>,
+    pub(crate) interfaces: Option<RawInterfaces>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -473,6 +476,7 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             );
         }
     }
+    let interfaces = interfaces(raw.interfaces.as_ref(), &mut problems);
     match (problems.is_empty(), server) {
         (true, Some(server)) => Ok(Hub {
             version: raw.version,
@@ -482,6 +486,7 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             tasks,
             server,
             roles,
+            interfaces,
             source: path.to_path_buf(),
         }),
         _ => Err(ConfigError::Invalid {

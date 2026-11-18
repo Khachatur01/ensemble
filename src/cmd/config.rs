@@ -1,13 +1,19 @@
-//! `ensemble … config`: a settings file (`SettingsFile`) as the command line
-//! reaches it. For the hub and the node, `get`, `set`, `unset` and `path` are
-//! their `config.*` operations; this adds what only a command line does:
-//! `edit`, in $VISUAL or $EDITOR, and `merge`, what the Nix modules run. A
-//! team's settings file is reached here whole.
+//! `ensemble … config`: a settings file as the command line reaches it. For
+//! the hub and the node, `get`, `set`, `unset`, `replace` and `path` are their
+//! `config.*` operations; this adds what only a command line does: `edit`, in
+//! $VISUAL or $EDITOR, which reads and writes through the operations, and
+//! `merge`, what the Nix modules run before the service starts. A team's
+//! settings file is reached through the same operations, here.
 
 use crate::cli::ConfigCommand;
-use ensemble::config::SettingsFile;
+use ensemble::config::settings_file::{self, SettingsFile, WithSettings};
+use ensemble::ops::{Access, Caller, Error, Registry};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+/// How an operation is run, where it runs.
+pub type Call<'a> = &'a dyn Fn(&str, Value) -> Result<Value, Error>;
 
 /// `command`'s `config` group with `edit` and `merge`, which only a command
 /// line has.
@@ -33,16 +39,18 @@ pub fn extras(command: clap::Command) -> clap::Command {
 }
 
 /// `config edit` or `config merge`, when `matches` (a hub's or a node's
-/// group of commands) names one, on `file`.
+/// group of commands) names one: `edit` through `call`, `merge` on `file`,
+/// before the service starts.
 pub fn run_extra(
     matches: &clap::ArgMatches,
+    call: Call<'_>,
     file: impl FnOnce() -> Result<SettingsFile, String>,
 ) -> Option<Result<ExitCode, String>> {
     let ("config", config) = matches.subcommand()? else {
         return None;
     };
     match config.subcommand()? {
-        ("edit", _) => Some(file().and_then(|f| edit(&f).map(|()| ExitCode::SUCCESS))),
+        ("edit", _) => Some(edit(call).map(|()| ExitCode::SUCCESS)),
         ("merge", m) => {
             let from = m.get_one::<PathBuf>("file")?.clone();
             Some(file().and_then(|f| merge(&f, &from)))
@@ -51,50 +59,56 @@ pub fn run_extra(
     }
 }
 
+/// A team's settings file, as its context.
+struct Team(SettingsFile);
+
+impl WithSettings for Team {
+    fn settings_file(&self) -> Result<&SettingsFile, Error> {
+        Ok(&self.0)
+    }
+}
+
 /// A team's settings file, by the command given.
-pub fn run(file: &SettingsFile, command: ConfigCommand) -> Result<ExitCode, String> {
-    let say = |note: Option<String>| {
-        if let Some(note) = note {
-            eprintln!("{note}");
-        }
+pub fn run(file: SettingsFile, command: ConfigCommand) -> Result<ExitCode, String> {
+    let registry = Registry::new(settings_file::operations::<Team>(Access::Local));
+    let team = Team(file);
+    let call = |name: &str, input: Value| registry.run(&team, &Caller::Local, name, input);
+    let (name, input) = match command {
+        ConfigCommand::Get { key } => ("config.get", json!({ "key": key })),
+        ConfigCommand::Set { key, value } => ("config.set", json!({ "key": key, "value": value })),
+        ConfigCommand::Unset { key } => ("config.unset", json!({ "key": key })),
+        ConfigCommand::Path => ("config.path", json!({})),
+        ConfigCommand::Edit => return edit(&call).map(|()| ExitCode::SUCCESS),
+        ConfigCommand::Merge { file: from } => return merge(&team.0, &from),
     };
-    match command {
-        ConfigCommand::Path => println!("{}", file.path.display()),
-        ConfigCommand::Get { key: None } => print!("{}", file.read().map_err(|e| e.to_string())?),
-        ConfigCommand::Get { key: Some(key) } => {
-            let text = file.read().map_err(|e| e.to_string())?;
-            match ensemble::config::settings::get(&text, &key)? {
-                Some(value) => println!("{value}"),
-                None => return Err(format!("{} sets no `{key}`", file.path.display())),
-            }
-        }
-        ConfigCommand::Set { key, value } => {
-            let note = file.set(&key, &value).map_err(|e| e.to_string())?;
-            println!("{key}: set in {}", file.path.display());
-            say(note);
-        }
-        ConfigCommand::Unset { key } => {
-            let note = file.unset(&key).map_err(|e| e.to_string())?;
-            println!("{key}: taken out of {}", file.path.display());
-            say(note);
-        }
-        ConfigCommand::Edit => edit(file)?,
-        ConfigCommand::Merge { file: from } => return merge(file, &from),
+    let output = call(name, input).map_err(|e| e.to_string())?;
+    let said = registry.get(name).ok_or("no such operation")?.show(&output);
+    println!("{}", said.out);
+    if let Some(note) = said.note {
+        eprintln!("{note}");
     }
     Ok(ExitCode::SUCCESS)
 }
 
-/// Edit a copy in $VISUAL or $EDITOR, and keep it when it loads and leaves
-/// the settings declared in Nix as they are.
-fn edit(file: &SettingsFile) -> Result<(), String> {
-    let before = file.read().map_err(|e| e.to_string())?;
-    let name = file
-        .path
+/// Edit a copy of the file in $VISUAL or $EDITOR, and keep it through
+/// `config.replace`, which refuses it when it would not load, changes what
+/// Nix declares, or the file changed meanwhile; then the copy stays.
+fn edit(call: Call<'_>) -> Result<(), String> {
+    let text = |out: &Value, key: &str| out[key].as_str().unwrap_or_default().to_string();
+    let path = PathBuf::from(text(
+        &call("config.path", json!({})).map_err(|e| e.to_string())?,
+        "path",
+    ));
+    let before = text(
+        &call("config.get", json!({})).map_err(|e| e.to_string())?,
+        "text",
+    );
+    let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let copy = file.path.with_file_name(format!(".{name}.edit"));
-    ensemble::config::settings_file::write_atomically(&copy, &before)?;
+    let copy = path.with_file_name(format!(".{name}.edit"));
+    settings_file::write_atomically(&copy, &before)?;
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".into());
@@ -108,27 +122,22 @@ fn edit(file: &SettingsFile) -> Result<(), String> {
     if !status.success() {
         return Err(format!(
             "{editor} failed ({status}); {} is unchanged",
-            file.path.display()
+            path.display()
         ));
     }
     let after = std::fs::read_to_string(&copy).map_err(|e| e.to_string())?;
-    if after == before {
-        let _ = std::fs::remove_file(&copy);
-        println!("{} is unchanged", file.path.display());
-        return Ok(());
-    }
-    match file.replace(&before, &after) {
-        Ok(note) => {
+    match call("config.replace", json!({ "text": after, "before": before })) {
+        Ok(out) => {
             let _ = std::fs::remove_file(&copy);
-            println!("{} is changed", file.path.display());
-            if let Some(note) = note {
+            println!("{}", text(&out, "said"));
+            if let Some(note) = out["note"].as_str() {
                 eprintln!("{note}");
             }
             Ok(())
         }
         Err(e) => Err(format!(
             "{} is unchanged: {e}\nYour edit is kept in {}",
-            file.path.display(),
+            path.display(),
             copy.display()
         )),
     }

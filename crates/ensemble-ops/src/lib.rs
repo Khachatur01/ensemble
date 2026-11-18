@@ -9,14 +9,14 @@
 //! hint, so each interface shows it next to what it is about. The registry
 //! checks who asks and what is given before the operation runs.
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::fmt;
 
 /// What kind of failure an [`Error`] is, for an interface to answer with:
 /// a REST status, a CLI exit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Code {
     /// What was given is not what the operation takes.
@@ -38,7 +38,7 @@ pub enum Code {
 }
 
 /// Why an operation did not do what it was asked.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Error {
     pub code: Code,
     /// The input field it is about, when it is about one.

@@ -1609,8 +1609,12 @@ fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
         "top level"
     );
     let mut top = accepted_keys::<hub::RawHub>();
-    top.retain(|k| k != "tasks");
-    assert_eq!(schema_required(&schema), top, "only tasks may be left out");
+    top.retain(|k| k != "tasks" && k != "interfaces");
+    assert_eq!(
+        schema_required(&schema),
+        top,
+        "only tasks and interfaces may be left out"
+    );
     let permissions: Vec<String> = defs["permission"]["enum"]
         .as_array()
         .unwrap()
@@ -1643,6 +1647,11 @@ fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
         ("knowledge", accepted_keys::<hub::RawKnowledge>(), vec![]),
         ("distill", accepted_keys::<hub::RawDistill>(), vec![]),
         ("recall", accepted_keys::<hub::RawRecall>(), vec!["embed"]),
+        (
+            "interfaces",
+            accepted_keys::<interfaces::RawInterfaces>(),
+            vec!["cli"],
+        ),
         ("embed", accepted_keys::<hub::RawEmbed>(), vec![]),
         (
             "direct_candidate",
@@ -1712,6 +1721,7 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
         ("distill", vec![&knowledge["distill"]]),
         ("recall", vec![&knowledge["recall"]]),
         ("embed", vec![&knowledge["recall"]["embed"]]),
+        ("interfaces", vec![&doc["interfaces"]]),
         (
             "direct_candidate",
             knowledge["distill"]["try"]
@@ -1802,9 +1812,13 @@ fn a_node_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
     let schema: serde_json::Value = serde_json::from_str(node::NODE_SCHEMA).unwrap();
     assert_eq!(schema_keys(&schema), accepted_keys::<node::RawNode>());
     let mut required = accepted_keys::<node::RawNode>();
-    required.retain(|k| k != "hub");
+    required.retain(|k| k != "hub" && k != "interfaces");
     assert_eq!(schema_required(&schema), required);
     let defs = &schema["definitions"];
+    assert_eq!(
+        schema_keys(&defs["interfaces"]),
+        accepted_keys::<interfaces::RawInterfaces>()
+    );
     assert_eq!(
         schema_keys(&schema["properties"]["offers"]),
         accepted_keys::<node::RawOffers>()
@@ -1896,4 +1910,30 @@ fn a_builtin_agent_runs_on_llm_backends_with_tools_it_has() {
     ] {
         assert!(joined.contains(expected), "{expected}: {joined}");
     }
+}
+
+#[test]
+fn the_command_line_is_on_unless_interfaces_says_otherwise_and_one_must_be() {
+    let node = |interfaces: &str| {
+        parse_node(
+            &format!("version: 1\nname: laptop\naccess: private\noffers: {{}}\n{interfaces}"),
+            Path::new("node.yaml"),
+        )
+    };
+    assert!(node("").unwrap().interfaces.cli, "left out: on");
+    assert!(node("interfaces: { cli: {} }\n").unwrap().interfaces.cli);
+    let err = node("interfaces: {}\n").unwrap_err().to_string();
+    assert!(err.contains("turns on no interface"), "{err}");
+    let err = node("interfaces: { web: {} }\n").unwrap_err().to_string();
+    assert!(err.contains("web"), "{err}");
+    let hub = parse_hub(
+        &format!("{HUB}interfaces: {{}}\n"),
+        Path::new("hub.yaml"),
+        &env(&[]),
+    );
+    assert!(
+        hub.unwrap_err()
+            .to_string()
+            .contains("turns on no interface")
+    );
 }

@@ -122,12 +122,21 @@ impl SettingsFile {
         Ok((self.changed)())
     }
 
-    /// Write `text` in place of the file, after an edit by hand: refused when
-    /// it would not load or changes what Nix declares. What to say of it.
-    pub fn replace(&self, before: &str, text: &str) -> Result<Option<String>, Error> {
+    /// Write `text` in place of the file, as an edit of it: refused when it
+    /// would not load or changes what Nix declares, and, given `before`, the
+    /// text it was made from, when the file changed since. What to say of it.
+    pub fn replace(&self, text: &str, before: Option<&str>) -> Result<Option<String>, Error> {
+        let now = self.read()?;
+        if before.is_some_and(|b| b != now) {
+            return Err(Error::new(
+                Code::Conflict,
+                format!("{} changed since it was read", self.path.display()),
+            )
+            .hint("read it again, and make the change on what it is now"));
+        }
         for m in self.managed() {
             let get = |t: &str| settings::get(t, &m).map_err(Error::invalid);
-            if get(before)? != get(text)? {
+            if get(&now)? != get(text)? {
                 return Err(Error::new(
                     Code::Conflict,
                     format!("`{m}` is set in your Nix configuration"),
@@ -211,6 +220,12 @@ struct Unset {
 #[derive(Deserialize)]
 struct Nothing {}
 
+#[derive(Deserialize)]
+struct Replace {
+    text: String,
+    before: Option<String>,
+}
+
 const KEY: &str = "The setting: its keys joined by dots, such as `server.listen`.";
 const GET: &[Field] = &[Field::text("key", KEY).positional()];
 const SET: &[Field] = &[
@@ -220,9 +235,16 @@ const SET: &[Field] = &[
         .positional(),
 ];
 const UNSET: &[Field] = &[Field::text("key", KEY).required().positional()];
+const REPLACE: &[Field] = &[
+    Field::text("text", "The whole file.").required(),
+    Field::text(
+        "before",
+        "The text it was made from: refused when the file changed since.",
+    ),
+];
 
-/// `config.get`, `config.set`, `config.unset` and `config.path` on a
-/// context's settings file, for those `access` lets.
+/// `config.get`, `config.set`, `config.unset`, `config.replace` and
+/// `config.path` on a context's settings file, for those `access` lets.
 pub fn operations<C: WithSettings + 'static>(access: Access) -> Vec<Operation<C>> {
     vec![
         operation(
@@ -277,6 +299,25 @@ pub fn operations<C: WithSettings + 'static>(access: Access) -> Vec<Operation<C>
                 let note = file.unset(&input.key)?;
                 Ok(json!({
                     "said": format!("{}: taken out of {}", input.key, file.path.display()),
+                    "note": note,
+                }))
+            },
+        ),
+        operation(
+            Spec {
+                name: "config.replace",
+                summary: "Write the whole file, as an edit of it: refused when it would not load, changes what Nix declares, or the file changed since `before` was read.",
+                access,
+                input: REPLACE,
+            },
+            |c: &C, _: &Caller, input: Replace| {
+                let file = c.settings_file()?;
+                if input.before.as_deref() == Some(input.text.as_str()) {
+                    return Ok(json!({ "said": format!("{} is unchanged", file.path.display()) }));
+                }
+                let note = file.replace(&input.text, input.before.as_deref())?;
+                Ok(json!({
+                    "said": format!("{} is changed", file.path.display()),
                     "note": note,
                 }))
             },
@@ -361,6 +402,25 @@ mod tests {
         assert_eq!(
             run("config.path", json!({})).unwrap()["path"],
             path.display().to_string()
+        );
+        // A whole file, as an edit of what was read; not of what was before.
+        std::fs::remove_file(dir.join(MANAGED_FILE)).unwrap();
+        let read = run("config.get", json!({})).unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let edited = read.replace("laptop", "desk");
+        let err = run(
+            "config.replace",
+            json!({ "text": edited, "before": "name: x\n" }),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, Code::Conflict);
+        run("config.replace", json!({ "text": edited, "before": read })).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("name: desk")
         );
         std::fs::remove_file(&path).unwrap();
         let err = run("config.get", json!({})).unwrap_err();

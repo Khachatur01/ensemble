@@ -189,14 +189,18 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
         Some((url, token)) => (Some(url.clone()), Some(token.clone())),
         None => (None, None),
     };
+    // What `ensemble node …` asks of it while it runs.
+    let operations = operations();
     let daemon = daemon::Daemon::new(
         node.clone(),
         hub.clone(),
         team.clone(),
         ctx.node_env()?,
         &dir,
+        &operations,
         &say,
-    );
+    )
+    .map_err(|e| format!("node serve: {e}"))?;
     let worker = match (&url, &token) {
         (Some(url), Some(token)) if node.offers.runs.is_some() || node.offers.models.is_some() => {
             Some(
@@ -313,6 +317,25 @@ fn notes() -> Result<(), String> {
 /// What the node's operations are given: its settings file, node.yaml.
 pub struct NodeContext {
     settings: SettingsFile,
+    /// In the running node: read its hub's token again, and say what it did.
+    relink: Option<Box<Relink>>,
+}
+
+type Relink = dyn Fn() -> Result<String, String> + Send + Sync;
+
+/// node.yaml, checked as a node before it is written.
+fn node_settings() -> Result<SettingsFile, String> {
+    let path = node_file()?;
+    let checked = path.clone();
+    Ok(SettingsFile::new(
+        path,
+        "`ensemble node setup`",
+        move |text| {
+            config::parse_node(text, &checked)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+    ))
 }
 
 impl WithSettings for NodeContext {
@@ -322,18 +345,27 @@ impl WithSettings for NodeContext {
 }
 
 impl NodeContext {
-    /// This computer's node: node.yaml, checked as a node before it is
-    /// written; a change restarts the running node.
+    /// This computer's node, which does not run: node.yaml, checked as a node
+    /// before it is written.
     pub fn new() -> Result<Self, String> {
-        let path = node_file()?;
-        let checked = path.clone();
-        let settings = SettingsFile::new(path, "`ensemble node setup`", move |text| {
-            config::parse_node(text, &checked)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+        Ok(NodeContext {
+            settings: node_settings()?,
+            relink: None,
         })
-        .on_change(|| node_running().then(restart_node));
-        Ok(NodeContext { settings })
+    }
+
+    /// The node, in the process that runs it, which reads its hub's token
+    /// again with `relink`.
+    pub fn running(
+        relink: impl Fn() -> Result<String, String> + Send + Sync + 'static,
+    ) -> Result<Self, String> {
+        let settings = node_settings()?.on_change(|| {
+            Some("The running node uses it once it starts again: `systemctl --user restart ensemble-node` where a service runs it.".into())
+        });
+        Ok(NodeContext {
+            settings,
+            relink: Some(Box::new(relink)),
+        })
     }
 
     /// Its settings file alone, for what only a command line does with it.
@@ -440,9 +472,8 @@ fn login(c: &NodeContext, input: Login) -> Result<serde_json::Value, Error> {
             ensemble::config::settings::get(&file.read()?, "hub").map_err(Error::invalid)?;
         if named.as_deref() == Some(url) {
             // The running node takes the new token as it is.
-            if node_running() {
-                let socket = state::node_socket(&state::node_dir()?);
-                said.push(match ensemble::runtime::block_on(daemon::relink(&socket)) {
+            if let Some(relink) = &c.relink {
+                said.push(match relink() {
                     Ok(relinked) => format!("The running node: {relinked}."),
                     Err(e) => e,
                 });
@@ -505,39 +536,6 @@ fn node_running() -> bool {
     state::node_dir()
         .is_ok_and(|dir| std::os::unix::net::UnixStream::connect(state::node_socket(&dir)).is_ok())
 }
-
-/// The running node read node.yaml when it started: start it again, so it
-/// reads the change, when its user service runs it; else say how.
-fn restart_node() -> String {
-    let systemctl = |args: &[&str]| {
-        std::process::Command::new("systemctl")
-            .arg("--user")
-            .args(args)
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    };
-    // The service's process is the node that runs here, not another one.
-    let node = state::node_dir()
-        .ok()
-        .and_then(|dir| ensemble::lock::holder(&dir));
-    let service = systemctl(&["show", "--property=MainPID", "--value", SERVICE])
-        .and_then(|pid| pid.parse::<u32>().ok());
-    if node.is_none() || service != node {
-        "The running node read node.yaml when it started: stop it and start it again (`ensemble node serve`) to use the change.".into()
-    } else if systemctl(&["restart", SERVICE]).is_some() {
-        "The node's service was restarted, so it uses the change.".into()
-    } else {
-        format!(
-            "The node's service could not be restarted: `systemctl --user restart {SERVICE}` uses the change."
-        )
-    }
-}
-
-/// The user service that runs the node, as the Nix modules name it.
-const SERVICE: &str = "ensemble-node";
 
 /// Log in to the hub at `url` as `user` with `password`, make an access token
 /// for this computer, and log out again.

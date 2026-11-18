@@ -35,6 +35,7 @@
       "description": "Where `ensemble hub serve` listens for nodes, which share to and recall from its knowledge vault, and how people join.",
       "$ref": "#/definitions/server"
     },
+    "interfaces": { "$ref": "#/definitions/interfaces" },
     "roles": {
       "description": "The hub's roles, named as you like, each a list of what its users may do. Users and their tokens are kept in database.db beside this file, not here: `ensemble hub user add NAME --role R`.",
       "type": "object",
@@ -46,6 +47,19 @@
     }
   },
   "definitions": {
+    "interfaces": {
+      "description": "How it is managed: each interface it turns on. Left out, the command line is on; at least one must be.",
+      "type": "object",
+      "required": [],
+      "additionalProperties": false,
+      "properties": {
+        "cli": {
+          "description": "`ensemble hub …` or `ensemble node …` on its computer, run by the running process over its socket when it runs.",
+          "type": "object",
+          "additionalProperties": false
+        }
+      }
+    },
     "server": {
       "type": "object",
       "required": ["listen", "registration", "sessions", "lockout"],

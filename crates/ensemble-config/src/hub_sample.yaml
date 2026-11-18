@@ -94,3 +94,9 @@ roles:                           # names are yours; the first admin: `ensemble h
   admin: [admin, share, recall, tasks, compute, host]
   member: [share, recall, tasks, compute]
   reader: [recall]
+
+# ---------------------------------------------------------------------------
+# Interfaces: how the hub is managed. Left out, the command line is on.
+# ---------------------------------------------------------------------------
+interfaces:
+  cli: {}                        # `ensemble hub …` on this computer, run by the running hub

@@ -37,6 +37,8 @@ pub struct Node {
     /// `ensemble node login`. None: it uses no hub.
     pub hub: Option<String>,
     pub offers: Offers,
+    /// How it may be managed.
+    pub interfaces: Interfaces,
     pub source: PathBuf,
 }
 
@@ -95,6 +97,7 @@ pub(crate) struct RawNode {
     pub(crate) access: Access,
     pub(crate) hub: Option<String>,
     pub(crate) offers: RawOffers,
+    pub(crate) interfaces: Option<RawInterfaces>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,6 +215,7 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
             names,
         }
     });
+    let interfaces = interfaces(raw.interfaces.as_ref(), &mut problems);
     if problems.is_empty() {
         Ok(Node {
             version: raw.version,
@@ -219,6 +223,7 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
             access: raw.access,
             hub,
             offers: Offers { runs, models },
+            interfaces,
             source: path.to_path_buf(),
         })
     } else {

@@ -6,12 +6,14 @@
 
 use clap::FromArgMatches;
 use ensemble::config::{self, Config, SystemEnv};
+use ensemble::ops::Error;
 use ensemble::teams;
 use ensemble::{setup, state};
 
 mod cli;
 mod cmd;
 mod daemon;
+mod local;
 mod ops_cli;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -48,21 +50,46 @@ fn dispatch(
         matches.get_one::<PathBuf>("dir"),
     )?;
     match matches.subcommand() {
-        Some(("hub", under)) => {
+        Some(("hub", under)) if ops_cli::matched(hub, under).is_some() || is_extra(under) => {
+            // The running hub runs it, else this process does; a hub that
+            // runs with no socket takes no commands.
+            let hub_dir = state::hub_dir()?;
+            let route = local::Route::to(&state::hub_socket(&hub_dir), || {
+                if let Some(pid) = ensemble::lock::holder(&hub_dir) {
+                    return Err(format!(
+                        "the running hub (process {pid}) takes no commands: its `interfaces.cli` is off. Turn it on in hub.yaml, or in your Nix configuration where that sets it, and start the hub again"
+                    ));
+                }
+                cmd::hub::context(&ctx)
+            });
+            let call = |name: &str, input| {
+                route
+                    .as_ref()
+                    .map_err(|e| Error::failed(e.clone()))?
+                    .call(hub, name, input)
+            };
             if let Some((name, leaf)) = ops_cli::matched(hub, under) {
-                return ops_cli::run(hub, &cmd::hub::context(&ctx)?, name, leaf);
+                return ops_cli::run(hub, &call, name, leaf);
             }
             let file = || cmd::hub::context(&ctx).map(|c| c.into_settings());
-            if let Some(done) = cmd::config::run_extra(under, file) {
+            if let Some(done) = cmd::config::run_extra(under, &call, file) {
                 return done;
             }
         }
-        Some(("node", under)) => {
+        Some(("node", under)) if ops_cli::matched(node, under).is_some() || is_extra(under) => {
+            let socket = state::node_socket(&state::node_dir()?);
+            let route = local::Route::to(&socket, cmd::node::NodeContext::new);
+            let call = |name: &str, input| {
+                route
+                    .as_ref()
+                    .map_err(|e| Error::failed(e.clone()))?
+                    .call(node, name, input)
+            };
             if let Some((name, leaf)) = ops_cli::matched(node, under) {
-                return ops_cli::run(node, &cmd::node::NodeContext::new()?, name, leaf);
+                return ops_cli::run(node, &call, name, leaf);
             }
             let file = || cmd::node::NodeContext::new().map(|c| c.into_settings());
-            if let Some(done) = cmd::config::run_extra(under, file) {
+            if let Some(done) = cmd::config::run_extra(under, &call, file) {
                 return done;
             }
         }
@@ -409,4 +436,13 @@ fn confirm(question: &str, yes: bool) -> Result<bool, String> {
     }
     let answer = ask(&format!("{question} [y/N]"), Some("n"))?;
     Ok(matches!(answer.to_lowercase().as_str(), "y" | "yes"))
+}
+
+/// Whether `matches`, under `hub` or `node`, names `config edit` or `config
+/// merge`, which only the command line has.
+fn is_extra(matches: &clap::ArgMatches) -> bool {
+    matches!(
+        matches.subcommand(),
+        Some(("config", c)) if matches!(c.subcommand_name(), Some("edit" | "merge"))
+    )
 }

@@ -125,6 +125,12 @@ impl<'a> Server<'a> {
         }
     }
 
+    /// Its operations, and what they are given: what its REST API runs, and
+    /// the one who runs it, on its socket.
+    pub fn operations(&self) -> (&ensemble_ops::Registry<HubContext>, &HubContext) {
+        (&self.operations, &self.hub)
+    }
+
     pub(crate) fn users(&self) -> Result<Users, String> {
         let accounts = self.hub.accounts().map_err(|e| e.to_string())?;
         accounts.users().map_err(|e| e.to_string())

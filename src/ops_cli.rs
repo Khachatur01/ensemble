@@ -5,7 +5,7 @@
 //! secret is never an argument: when an operation needs one, it is asked for,
 //! without echo, or read from stdin, and the operation runs again.
 
-use ensemble::ops::{Access, Caller, Code, Field, Kind, Registry};
+use ensemble::ops::{Access, Code, Error, Field, Kind, Registry};
 use serde_json::{Map, Value, json};
 use std::process::ExitCode;
 
@@ -120,19 +120,19 @@ fn input(fields: &[Field], matches: &clap::ArgMatches) -> Value {
     Value::Object(out)
 }
 
-/// Run the operation `name` as the one who runs it, with what `matches`
-/// gives, asking for the secrets it needs; print what it says, its answer on
-/// stdout and its note on stderr.
+/// Run the operation `name` of `registry` through `call`, where it runs, with
+/// what `matches` gives, asking for the secrets it needs; print what it says,
+/// its answer on stdout and its note on stderr.
 pub fn run<C>(
     registry: &Registry<C>,
-    context: &C,
+    call: &dyn Fn(&str, Value) -> Result<Value, Error>,
     name: &str,
     matches: &clap::ArgMatches,
 ) -> Result<ExitCode, String> {
     let op = registry.get(name).ok_or("no such operation")?;
     let mut given = input(op.spec.input, matches);
     let output = loop {
-        match registry.run(context, &Caller::Local, name, given.clone()) {
+        match call(name, given.clone()) {
             Ok(output) => break output,
             Err(e) => {
                 // A secret it needs, not asked for yet: ask, and run again.

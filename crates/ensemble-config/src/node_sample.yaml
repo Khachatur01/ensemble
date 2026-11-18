@@ -36,3 +36,7 @@ offers:
     base_url: http://127.0.0.1:11434/v1
     timeout_seconds: 600           # the most one request may take
     names: [qwen3.5:9b]            # the models offered, as the server names them
+
+# How the node is managed. Left out, the command line is on.
+interfaces:
+  cli: {}                          # `ensemble node …` on this computer, run by the running node

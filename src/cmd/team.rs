@@ -36,7 +36,7 @@ pub fn run(ctx: &Ctx, command: TeamCommand) -> Result<ExitCode, String> {
                 reload_node();
                 None
             });
-            super::config::run(&file, action)
+            super::config::run(file, action)
         }
     }
 }

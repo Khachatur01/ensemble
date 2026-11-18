@@ -13,12 +13,14 @@
 //! purpose: a folder served once is served until the node stops.
 
 use crate::STOP;
+use crate::cmd::node::NodeContext;
 use ensemble::board::RemoteBoard;
 use ensemble::config::{Config, Node};
 use ensemble::folders::Folders;
 use ensemble::knowledge::KnowledgeAccess;
 use ensemble::link::{RemoteMemory, Token};
 use ensemble::mcp;
+use ensemble::ops::{Code, Error, Registry};
 use ensemble::queue::Queue;
 use ensemble::router::Ensemble;
 use ensemble::runs::Runs;
@@ -54,7 +56,10 @@ pub struct Daemon<'a> {
     env_file: Option<PathBuf>,
     /// Counts reloads, so that open sessions tell their clients the tools
     /// changed.
-    tools_changed: tokio::sync::watch::Sender<u64>,
+    tools_changed: Arc<tokio::sync::watch::Sender<u64>>,
+    /// The node's operations, and what they are given here; none when its
+    /// `interfaces.cli` is off.
+    operations: Option<(&'a Registry<NodeContext>, NodeContext)>,
     folders: Folders,
     open: Mutex<HashMap<PathBuf, Arc<Folder>>>,
     /// The folders' workers, which stopping waits for.
@@ -71,19 +76,32 @@ impl<'a> Daemon<'a> {
         team: Config,
         env_file: Option<PathBuf>,
         dir: &Path,
+        operations: &'a Registry<NodeContext>,
         say: &'a (dyn Fn(&str) + Sync),
-    ) -> Self {
-        Daemon {
+    ) -> Result<Self, String> {
+        let tools_changed = Arc::new(tokio::sync::watch::Sender::new(0));
+        let operations = if node.interfaces.cli {
+            let (hub, changed) = (hub.clone(), tools_changed.clone());
+            let relink = move || match &hub {
+                Some((url, token)) => read_token_again(url, token, &changed),
+                None => Err("the node names no hub".to_string()),
+            };
+            Some((operations, NodeContext::running(relink)?))
+        } else {
+            None
+        };
+        Ok(Daemon {
             node,
             hub,
             team: RwLock::new(team),
             env_file,
-            tools_changed: tokio::sync::watch::Sender::new(0),
+            tools_changed,
+            operations,
             folders: Folders::new(dir),
             open: Mutex::new(HashMap::new()),
             workers: Mutex::new(Vec::new()),
             say,
-        }
+        })
     }
 
     /// Serve sessions on `socket` until [`STOP`] is set, after starting the
@@ -149,8 +167,8 @@ impl<'a> Daemon<'a> {
 
     /// Read a session's hello, `{"dir": "/abs/folder"}`, and answer it: the
     /// folder's worker, or why there is none. `{"reload": true}` reloads the
-    /// teams instead, and `{"relink": true}` reads the hub's token again; each
-    /// answers what it did, and no session follows.
+    /// teams instead, and `{"op": …, "input": …}` runs one of the node's
+    /// operations (`local`); each answers what it did, and no session follows.
     async fn hello(
         &self,
         mut stream: UnixStream,
@@ -158,13 +176,23 @@ impl<'a> Daemon<'a> {
     ) -> Result<Option<(Arc<Folder>, UnixStream)>, String> {
         let line = read_line(&mut stream).await?;
         let asked = serde_json::from_str::<serde_json::Value>(&line).unwrap_or_default();
-        if asked["reload"] == true || asked["relink"] == true {
-            let did = if asked["reload"] == true {
-                self.reload(reloaded)
-            } else {
-                self.relink()
+        if asked.get("op").is_some() {
+            let reply = match &self.operations {
+                Some((registry, context)) => crate::local::answer(registry, context, &asked)
+                    .unwrap_or_else(|| serde_json::json!({ "error": Error::invalid("`op` must name an operation") })),
+                None => serde_json::json!({ "error": Error::new(
+                    Code::Forbidden,
+                    "this node takes no commands: its `interfaces.cli` is off",
+                ) }),
             };
-            let reply = match did {
+            stream
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
+            return Ok(None);
+        }
+        if asked["reload"] == true {
+            let reply = match self.reload(reloaded) {
                 Ok(said) => serde_json::json!({"ok": true, "said": said}),
                 Err(e) => serde_json::json!({"error": e}),
             };
@@ -214,26 +242,6 @@ impl<'a> Daemon<'a> {
         );
         *self.team.write().unwrap_or_else(|e| e.into_inner()) = team;
         self.tools_changed.send_modify(|n| *n += 1);
-        (self.say)(&said);
-        Ok(said)
-    }
-
-    /// Read the token of the hub it names again, as `ensemble node login`
-    /// kept it: every link to the hub connects again with it, and sessions
-    /// are told their tools may have changed.
-    fn relink(&self) -> Result<String, String> {
-        let Some((url, token)) = &self.hub else {
-            return Err("the node names no hub".into());
-        };
-        let kept = ensemble::link::Tokens::load()?
-            .get(url)
-            .map(String::from)
-            .ok_or_else(|| format!("no token is kept for {url}; `ensemble node login {url}`"))?;
-        if !token.set(&kept) {
-            return Ok(format!("the node uses this token for {url} already"));
-        }
-        self.tools_changed.send_modify(|n| *n += 1);
-        let said = format!("signed in to {url} again: the node uses the new token");
         (self.say)(&said);
         Ok(said)
     }
@@ -310,7 +318,7 @@ impl<'a> Daemon<'a> {
 
 /// Listen on `socket`, in a folder only this user may enter. A socket left by
 /// a node that died is replaced; one a running node answers on is not.
-fn listen(socket: &Path) -> Result<UnixListener, String> {
+pub(crate) fn listen(socket: &Path) -> Result<UnixListener, String> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     let dir = socket.parent().ok_or("the socket has no folder")?;
     std::fs::DirBuilder::new()
@@ -338,7 +346,7 @@ fn listen(socket: &Path) -> Result<UnixListener, String> {
 
 /// One line, read a byte at a time so nothing after it is taken from the
 /// stream.
-async fn read_line(stream: &mut UnixStream) -> Result<String, String> {
+pub(crate) async fn read_line(stream: &mut UnixStream) -> Result<String, String> {
     let mut line = Vec::new();
     loop {
         let byte = stream.read_u8().await.map_err(|e| e.to_string())?;
@@ -414,13 +422,6 @@ pub async fn reload(socket: &Path) -> Result<String, String> {
         .map_err(|e| format!("the node kept its teams as they were: {e}"))
 }
 
-/// Ask the node on `socket` to read its hub's token again, and what it said.
-pub async fn relink(socket: &Path) -> Result<String, String> {
-    ask(socket, "relink")
-        .await
-        .map_err(|e| format!("the node kept its token as it was: {e}"))
-}
-
 /// Send the node on `socket` `{"<what>": true}`, and what it said it did.
 async fn ask(socket: &Path, what: &str) -> Result<String, String> {
     let mut stream = UnixStream::connect(socket)
@@ -436,4 +437,25 @@ async fn ask(socket: &Path, what: &str) -> Result<String, String> {
         Some(e) => Err(e.to_string()),
         None => Ok(reply["said"].as_str().unwrap_or("done").to_string()),
     }
+}
+
+/// Read the token of the hub at `url` again, as `ensemble node login` kept
+/// it, into `token`, which every link to the hub follows; tell the open
+/// sessions their tools may have changed. What it did.
+fn read_token_again(
+    url: &str,
+    token: &Token,
+    tools_changed: &tokio::sync::watch::Sender<u64>,
+) -> Result<String, String> {
+    let kept = ensemble::link::Tokens::load()?
+        .get(url)
+        .map(String::from)
+        .ok_or_else(|| format!("no token is kept for {url}; `ensemble node login {url}`"))?;
+    if !token.set(&kept) {
+        return Ok(format!("the node uses this token for {url} already"));
+    }
+    tools_changed.send_modify(|n| *n += 1);
+    Ok(format!(
+        "signed in to {url} again: the node uses the new token"
+    ))
 }

@@ -103,6 +103,18 @@ pub fn node_dir() -> Result<PathBuf, String> {
     Ok(root()?.join("node"))
 }
 
+/// What a hub this computer runs keeps while it runs: its lock. A computer
+/// runs one hub.
+pub fn hub_dir() -> Result<PathBuf, String> {
+    Ok(root()?.join("hub"))
+}
+
+/// Where the hub whose state is in `hub_dir` takes the operations of
+/// `ensemble hub …`, as [`node_socket`] says.
+pub fn hub_socket(hub_dir: &Path) -> PathBuf {
+    node_socket(hub_dir)
+}
+
 /// Where the node whose state is in `node_dir` listens for `ensemble mcp`. A
 /// socket's path must be short, so it is not in the state directory but in
 /// the runtime one (`$XDG_RUNTIME_DIR`, else `/tmp`), in a folder only its
