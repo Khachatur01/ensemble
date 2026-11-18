@@ -1,11 +1,12 @@
-//! A node: a worker that gives this computer's power to the people of a hub
-//! server. `ensemble node serve` runs one, from a `node.yaml`.
+//! What a runner offers through a hub server: this computer's power, for the
+//! people of the hub. `ensemble runner serve` keeps it, from the `offers` of
+//! its `runner.yaml`.
 //!
 //! It keeps one connection to the hub, says what it is (`node`), and then
 //! does what comes:
 //!
 //! - a `run` event: the files it carries are written into a folder of the
-//!   run's own, the agent it names (one this node offers, from the helper
+//!   run's own, the agent it names (one this runner offers, from the helper
 //!   team in `offers.runs`) works there, and what the agent said and changed
 //!   goes back; a `run_cancel` stops it;
 //! - a `model_call` event: the request goes to the model server in
@@ -14,12 +15,12 @@
 //! Each goes on beside the connection, in its task. Only the connection uses
 //! the socket: the others hand it what to send.
 //!
-//! A shared node works for other people, so an agent it offers must run on
+//! A shared runner works for other people, so an agent it offers must run on
 //! models from `llm_backends`: an agent CLI's own login is its owner's, and
 //! is never used for someone else's work.
 
 use ensemble_agents::router::Ensemble;
-use ensemble_config::{Access, Adapter, Config, Node, OpenCodeModel};
+use ensemble_config::{Access, Adapter, Config, OpenCodeModel, Runner};
 use ensemble_core::runtime::{self, blocking};
 use ensemble_core::snapshot;
 use ensemble_link::client::{Connection, Failure, Token};
@@ -50,8 +51,8 @@ type Outbox = UnboundedSender<(&'static str, Value)>;
 
 /// Every agent `node` offers is in `config`, and a shared node offers only
 /// agents on `llm_backends`.
-fn check_offers(node: &Node, config: &Config) -> Result<(), String> {
-    let Some(runs) = &node.offers.runs else {
+fn check_offers(runner: &Runner, config: &Config) -> Result<(), String> {
+    let Some(runs) = &runner.offers.runs else {
         return Ok(());
     };
     for name in &runs.agents {
@@ -61,7 +62,7 @@ fn check_offers(node: &Node, config: &Config) -> Result<(), String> {
                 config.agent_names().join(", ")
             ));
         };
-        if node.access == Access::Shared && !on_llm_backends(&agent.adapter) {
+        if runner.access == Access::Shared && !on_llm_backends(&agent.adapter) {
             return Err(format!(
                 "offers.runs: '{name}' runs on {}, which uses an agent CLI's own login or provider, and a shared node never lends that; offer an agent of type opencode on llm_backends, builtin, or direct",
                 agent.runs_on()
@@ -75,7 +76,7 @@ fn check_offers(node: &Node, config: &Config) -> Result<(), String> {
 pub struct Worker {
     url: String,
     token: Token,
-    node: Node,
+    runner: Runner,
     /// The node's helper team, when it offers runs.
     team: Option<Ensemble>,
     /// Where runs work, each in a folder of its own.
@@ -93,13 +94,13 @@ impl Worker {
     pub fn new(
         url: &str,
         token: Token,
-        node: Node,
+        runner: Runner,
         team: Option<Config>,
         scratch: PathBuf,
     ) -> Result<Worker, String> {
-        let team = match (&node.offers.runs, team) {
+        let team = match (&runner.offers.runs, team) {
             (Some(_), Some(config)) => {
-                check_offers(&node, &config)?;
+                check_offers(&runner, &config)?;
                 Some(Ensemble::new(config, None).with_state(scratch.join("state")))
             }
             (Some(_), None) => {
@@ -110,7 +111,7 @@ impl Worker {
         Ok(Worker {
             url: url.to_string(),
             token,
-            node,
+            runner,
             team,
             scratch,
             busy: Mutex::new(HashMap::new()),
@@ -124,7 +125,7 @@ impl Worker {
     /// its next connection.
     pub fn reload(&self, config: &Config) -> Result<(), String> {
         if let Some(team) = &self.team {
-            check_offers(&self.node, config)?;
+            check_offers(&self.runner, config)?;
             team.set_config(config.clone());
         }
         Ok(())
@@ -132,7 +133,7 @@ impl Worker {
 
     /// What this node says it is when it connects.
     fn hello(&self) -> Value {
-        let agents: Vec<Value> = match (&self.node.offers.runs, &self.team) {
+        let agents: Vec<Value> = match (&self.runner.offers.runs, &self.team) {
             (Some(runs), Some(team)) => runs
                 .agents
                 .iter()
@@ -148,10 +149,10 @@ impl Worker {
                 .collect(),
             _ => Vec::new(),
         };
-        let models = self.node.offers.models.as_ref();
+        let models = self.runner.offers.models.as_ref();
         json!({
-            "name": self.node.name,
-            "access": self.node.access.as_str(),
+            "name": self.runner.name,
+            "access": self.runner.access.as_str(),
             "agents": agents,
             "models": models.map(|m| m.names.clone()).unwrap_or_default(),
             "model_timeout_seconds": models.map(|m| m.timeout_seconds),
@@ -213,7 +214,7 @@ impl Worker {
             "node {} serving {} ({})",
             me["node"].as_str().unwrap_or("?"),
             self.url,
-            self.node.access.as_str()
+            self.runner.access.as_str()
         ));
         let (outbox, mut sending) = unbounded_channel::<(&'static str, Value)>();
         // The runs going on, so a cancel finds its run.
@@ -294,7 +295,7 @@ impl Worker {
             format!("failed: {why}")
         };
         let agent = data["agent"].as_str().unwrap_or("");
-        let (Some(team), Some(runs)) = (&self.team, &self.node.offers.runs) else {
+        let (Some(team), Some(runs)) = (&self.team, &self.runner.offers.runs) else {
             return fail("this node offers no runs".into(), false);
         };
         if !runs.agents.iter().any(|a| a == agent) {
@@ -401,7 +402,7 @@ impl Worker {
             reply["call"] = call.clone();
             let _ = outbox.send((MODEL_REPLY, reply));
         };
-        let Some(models) = &self.node.offers.models else {
+        let Some(models) = &self.runner.offers.models else {
             return send(json!({"error": "this node serves no models"}));
         };
         let path = data["path"].as_str().unwrap_or("");

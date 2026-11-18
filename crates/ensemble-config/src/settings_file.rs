@@ -1,9 +1,9 @@
-//! One settings file (node.yaml, hub.yaml, or a team's config.yaml) changed
+//! One settings file (runner.yaml, hub.yaml, or a team's config.yaml) changed
 //! by its settings, as text, so that comments and order survive
 //! ([`settings`](crate::settings)), and the `config.*` operations on it. A
 //! change is loaded before it is written, and refused when it would not load.
 //!
-//! The settings declared in Nix (`services.ensemble.node.settings`,
+//! The settings declared in Nix (`services.ensemble.runner.settings`,
 //! `services.ensemble.hub.settings`) are merged into the file by the Nix
 //! module whenever the service starts, which notes them in `.nix-managed`
 //! beside it: a change to one of them would be undone, so it is refused.
@@ -195,7 +195,7 @@ pub fn write_atomically(path: &Path, text: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
-/// A context with a settings file: a hub's or a node's.
+/// A context with a settings file: a hub's or a runner's.
 pub trait WithSettings {
     /// Its settings file.
     fn settings_file(&self) -> Result<&SettingsFile, Error>;
@@ -361,9 +361,9 @@ mod tests {
     #[test]
     fn settings_are_read_set_and_refused_as_data() {
         let dir = scratch("ops");
-        let path = dir.join("node.yaml");
+        let path = dir.join("runner.yaml");
         std::fs::write(&path, "# mine\nname: laptop\nhub: wss://a\n").unwrap();
-        let file = SettingsFile::new(path.clone(), "`ensemble node setup`", |t| {
+        let file = SettingsFile::new(path.clone(), "`ensemble runner setup`", |t| {
             if t.contains("name: \"\"") || t.contains("name: ''") {
                 Err("name: is empty".into())
             } else {
@@ -424,7 +424,10 @@ mod tests {
         );
         std::fs::remove_file(&path).unwrap();
         let err = run("config.get", json!({})).unwrap_err();
-        assert_eq!(err.hint.as_deref(), Some("`ensemble node setup` writes it"));
+        assert_eq!(
+            err.hint.as_deref(),
+            Some("`ensemble runner setup` writes it")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

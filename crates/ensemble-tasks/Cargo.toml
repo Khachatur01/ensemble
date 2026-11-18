@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Ensemble's tasks: kept on the hub and leased by nodes, the queue that runs them, the tools that delegate, and review of a task's branch."
+description = "Ensemble's tasks: kept on the hub and leased by runners, and the worker that runs them."
 
 [dependencies]
 async-trait.workspace = true

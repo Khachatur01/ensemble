@@ -1,11 +1,12 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/hub.schema.json
 
 # hub.yaml — a hub, written by `ensemble hub init` in ~/.config/ensemble/hub/.
-# Run it with `ensemble hub serve`. A hub provides services and connects nodes:
-# it has no helper team and runs no agents. Nodes connect to it (each names it
-# as `hub:` in its node.yaml): their agents share to and recall from the
-# knowledge vault here, the issues assigned to their owners in the tracker reach
-# their helper teams, and shared nodes lend their power through it. It may serve
+# Run it with `ensemble hub serve`. A hub provides services and connects
+# runners: it has no helper team and runs no agents. Client agents reach it
+# over MCP (`interfaces.mcp`) to share to and recall from the knowledge vault
+# here and to make tasks; runners connect to it (each names it as `hub:` in its
+# runner.yaml) and run the tasks, those of the tracker's issues too, with their
+# helper teams; shared runners lend their power through it. It may serve
 # a team, or one person on their own computer. API keys never go here: they come
 # from the environment, or from a file passed with --env-file. Accounts are not
 # here either: they are kept in database.db beside it (`ensemble hub user`, or
@@ -64,7 +65,7 @@ knowledge:
 # Tasks: issues in the tracker with the label reach the helper team of the
 # member they are assigned to. An account names itself in the tracker with
 # `tracker_user` (PUT /api/v1/me, or `ensemble hub user tracker`); each member's
-# node takes them into the folder of the project's name where it last ran.
+# runner works on them in the repository of the project's name in its workspace.
 # Leave this block out for no inbox.
 # ---------------------------------------------------------------------------
 tasks:
@@ -79,7 +80,7 @@ tasks:
 # reverse proxy in front for the internet, or listen on a LAN or VPN address.
 # ---------------------------------------------------------------------------
 server:
-  listen: 127.0.0.1:7700         # nodes and the REST API under /api/v1/
+  listen: 127.0.0.1:7700         # runners and the REST API under /api/v1/
   registration:
     type: approval               # anyone may sign up; an admin approves. Or: { type: closed }
     max_pending: 20              # sign-ups waiting at once
@@ -89,8 +90,8 @@ server:
     failures: 5                  # failed logins before a name is refused
     minutes: 15                  # and for how long
 roles:                           # names are yours; the first admin: `ensemble hub user add`
-  # Permissions: share, recall, tasks, admin; compute (use shared nodes) and
-  # host (connect a shared node that works for those with compute).
+  # Permissions: share, recall, tasks, admin; compute (use shared runners) and
+  # host (connect a shared runner that works for those with compute).
   admin: [admin, share, recall, tasks, compute, host]
   member: [share, recall, tasks, compute]
   reader: [recall]

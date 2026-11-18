@@ -1,5 +1,5 @@
-//! The helper teams of this computer's node, kept in one directory
-//! (`~/.local/share/ensemble/teams/`), as the node and the commands use them:
+//! The helper teams of this computer's runner, kept in one directory
+//! (`~/.config/ensemble/runner/teams/`), as the runner and the commands use them:
 //! every team that is ready, combined into one helper team whose agents are
 //! named `<team>/<agent>`; and putting teams there, as a person makes, links
 //! or pulls them, or as an agent writes one for the person to approve.
@@ -14,7 +14,7 @@ use crate::remote;
 use crate::state;
 use std::path::{Path, PathBuf};
 
-/// The directory of the node's teams.
+/// The directory of the runner's teams.
 pub fn dir() -> Result<PathBuf, String> {
     state::teams_dir()
 }
@@ -48,7 +48,7 @@ pub fn load_all(env_file: Option<&Path>, env: &dyn Env) -> Result<(Config, Vec<S
     for team in teams::list(&dir) {
         if team.pending {
             waiting.push(format!(
-                "team '{}' waits for your approval: ensemble node team approve {}",
+                "team '{}' waits for your approval: ensemble runner team approve {}",
                 team.name, team.name
             ));
             continue;
@@ -69,7 +69,7 @@ pub fn editable(name: &str) -> Result<PathBuf, String> {
     let team = teams::entry(&dir()?, name).ok_or_else(|| missing(name))?;
     match &team.origin {
         Origin::Pulled { url, .. } => Err(format!(
-            "team '{name}' is pulled from {url}, so it is read-only: clone it, change your copy, and `ensemble node team link` that folder"
+            "team '{name}' is pulled from {url}, so it is read-only: clone it, change your copy, and `ensemble runner team link` that folder"
         )),
         _ => Ok(team.config_dir().expect("a team made or linked here")),
     }
@@ -78,7 +78,7 @@ pub fn editable(name: &str) -> Result<PathBuf, String> {
 /// What to say when there is no team `name`.
 pub fn missing(name: &str) -> String {
     format!(
-        "no team '{name}'. `ensemble node team list` lists them; `ensemble node team new {name}` makes one."
+        "no team '{name}'. `ensemble runner team list` lists them; `ensemble runner team new {name}` makes one."
     )
 }
 

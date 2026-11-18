@@ -1,4 +1,4 @@
-//! `ensemble node agent …`: the agents of the node's teams, named
+//! `ensemble runner agent …`: the agents of the runner's teams, named
 //! `<team>/<agent>`: how each runs, one task sent to one, their health and
 //! record, and adding or removing one in its team's config.yaml.
 
@@ -267,7 +267,7 @@ fn stats(
     Ok(ExitCode::SUCCESS)
 }
 
-/// `ensemble node agent add <team>/<name>`: an agent added to its team, every
+/// `ensemble runner agent add <team>/<name>`: an agent added to its team, every
 /// setting written.
 fn add(agent: &str, new: &config::edit::NewAgent) -> Result<ExitCode, String> {
     let (name, path) = in_team(agent, "agent add")?;
@@ -285,7 +285,7 @@ fn add(agent: &str, new: &config::edit::NewAgent) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `ensemble node agent remove <team>/<name>`.
+/// `ensemble runner agent remove <team>/<name>`.
 fn remove(agent: &str) -> Result<ExitCode, String> {
     let (name, path) = in_team(agent, "agent remove")?;
     let name = name.as_str();

@@ -1,7 +1,8 @@
-//! `ensemble hub serve`: the hub as a server for a team. Each member's node
-//! opens one WebSocket, signed in with its token, and asks for what its role
-//! allows. Shares go into the organization vault under the signed-in user's
-//! name, never a name the node sends.
+//! `ensemble hub serve`: the hub as a server for a team. Each member's runner
+//! opens a WebSocket, signed in with its token, and asks for what its role
+//! allows; the hub's MCP asks the same way for a client agent. Shares go into
+//! the organization vault under the signed-in user's name, never a name the
+//! client sends.
 //!
 //! The same port serves the REST API under `/api/v1/` (`api`): a request that
 //! asks for a WebSocket upgrade is the link, anything else is REST.
@@ -38,7 +39,7 @@ use tokio_tungstenite::tungstenite::{self, Message};
 /// How long a connection may take to send its request's head.
 const HEAD_WAIT: Duration = Duration::from_secs(10);
 
-/// The sending half of a node's link.
+/// The sending half of a runner's link.
 type Sender = SplitSink<WebSocketStream<http::Replay<TcpStream>>, Message>;
 
 /// A hub server: its knowledge, its roles, how people join, and where its
@@ -95,7 +96,7 @@ impl<'a> Server<'a> {
         self
     }
 
-    /// Accept nodes on `listener` until `stop` is set, each connection a task
+    /// Accept runners on `listener` until `stop` is set, each connection a task
     /// of its own. `say` gets one line per connection and per request, never
     /// what was shared. The server lives as long as the process, so it is
     /// borrowed for good.
@@ -196,7 +197,7 @@ impl<'a> Server<'a> {
         ended
     }
 
-    /// Serve one node's link until it closes or `stop` is set.
+    /// Serve one runner's link until it closes or `stop` is set.
     #[allow(clippy::too_many_arguments)]
     async fn link(
         &self,
@@ -236,7 +237,7 @@ impl<'a> Server<'a> {
             };
             let reply = match serde_json::from_str::<Request>(&text) {
                 Ok(req) => {
-                    // A run's progress, a model's chunks and the tasks a node
+                    // A run's progress, a model's chunks and the tasks a runner
                     // looks at every few seconds would drown the rest.
                     if !matches!(req.method.as_str(), RUN_PROGRESS | MODEL_REPLY)
                         && !TASK_METHODS.contains(&req.method.as_str())
@@ -389,7 +390,7 @@ fn refused() -> ErrorResponse {
     resp
 }
 
-/// Tell the node something unasked.
+/// Tell the runner something unasked.
 async fn push(sender: &mut Sender, event: &Event) -> Result<(), String> {
     let json = serde_json::to_string(event).map_err(|e| e.to_string())?;
     sender
@@ -564,7 +565,7 @@ pub(crate) mod tests {
         assert!(reply.error.is_none(), "{reply:?}");
         let shares = ensemble_knowledge::Vault::new(hub.tmp.0.join("vault")).shares();
         assert_eq!(shares.len(), 1);
-        assert_eq!(shares[0].shared_by, "ana", "never a name the node sends");
+        assert_eq!(shares[0].shared_by, "ana", "never a name the client sends");
         assert_eq!(shares[0].project.as_deref(), Some("shop"));
 
         let mut rex = connect(&hub.url, Some(&hub.rex)).unwrap();

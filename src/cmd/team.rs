@@ -1,9 +1,9 @@
-//! `ensemble node team …`: the node's helper teams, kept in its teams
+//! `ensemble runner team …`: the runner's helper teams, kept in its teams
 //! directory: made here, linked, pulled from git and pinned, or written by an
 //! agent and approved.
 
 use crate::cli::TeamCommand;
-use crate::{Ctx, absolute, board_for, confirm, reload_node};
+use crate::{Ctx, absolute, boards, confirm, reload_runner};
 use ensemble::board::Board;
 use ensemble::config::{self, Config, SystemEnv};
 use ensemble::{remote, setup, tasks, teams};
@@ -19,7 +19,7 @@ pub fn run(ctx: &Ctx, command: TeamCommand) -> Result<ExitCode, String> {
         TeamCommand::Update { name, git_ref, yes } => update(&name, git_ref, yes),
         TeamCommand::Approve { name, yes } => approve(ctx, &name, yes),
         TeamCommand::Remove { name, yes } => remove(&name, yes),
-        TeamCommand::Check => check(ctx.teams()?, &ctx.dir),
+        TeamCommand::Check => check(ctx.teams()?),
         TeamCommand::Schema => {
             print!("{}", config::SCHEMA);
             Ok(ExitCode::SUCCESS)
@@ -27,13 +27,13 @@ pub fn run(ctx: &Ctx, command: TeamCommand) -> Result<ExitCode, String> {
         TeamCommand::Config { name, action } => {
             let path = config::config_path(&teams::editable(&name)?);
             let checked = path.clone();
-            let file = config::SettingsFile::new(path, "`ensemble node team new`", move |text| {
+            let file = config::SettingsFile::new(path, "`ensemble runner team new`", move |text| {
                 config::parse(text, &checked, &std::collections::BTreeMap::new())
                     .map(|_| ())
                     .map_err(|e| e.to_string())
             })
             .on_change(|| {
-                reload_node();
+                reload_runner();
                 None
             });
             super::config::run(file, action)
@@ -41,13 +41,13 @@ pub fn run(ctx: &Ctx, command: TeamCommand) -> Result<ExitCode, String> {
     }
 }
 
-/// `ensemble node team list`: the node's teams, where each comes from, and
+/// `ensemble runner team list`: the runner's teams, where each comes from, and
 /// its agents.
 fn list(ctx: &Ctx) -> Result<ExitCode, String> {
     let list = teams::list()?;
     if list.is_empty() {
         println!(
-            "No teams in {}. Make one with `ensemble node team new <name>`, or pull one with `ensemble node team pull <url>`.",
+            "No teams in {}. Make one with `ensemble runner team new <name>`, or pull one with `ensemble runner team pull <url>`.",
             teams::dir()?.display()
         );
     }
@@ -56,7 +56,7 @@ fn list(ctx: &Ctx) -> Result<ExitCode, String> {
         let loaded = teams::config_dir(team).and_then(|dir| {
             config::load(
                 &config::config_path(&dir),
-                ctx.node_env()?.as_deref(),
+                ctx.runner_env()?.as_deref(),
                 &SystemEnv,
             )
             .map_err(|e| e.to_string())
@@ -86,10 +86,10 @@ fn new(name: Option<String>, stdout: bool) -> Result<ExitCode, String> {
     let name = name.as_deref().ok_or("team new: needs the team's name")?;
     let dir = teams::make(name, config::SAMPLE).map_err(|e| format!("team new: {e}"))?;
     println!(
-        "wrote {}: the team '{name}', a sample with every setting. Edit its agents, then check it with `ensemble node team check`. API keys go in ~/.config/ensemble/node/.env or the environment; never in this directory.",
+        "wrote {}: the team '{name}', a sample with every setting. Edit its agents, then check it with `ensemble runner team check`. API keys go in ~/.config/ensemble/runner/.env or the environment; never in this directory.",
         config::config_path(&dir).display()
     );
-    reload_node();
+    reload_runner();
     Ok(ExitCode::SUCCESS)
 }
 
@@ -97,7 +97,7 @@ fn link(name: &str, dir: &Path) -> Result<ExitCode, String> {
     let target = absolute(dir)?;
     teams::link(name, &target).map_err(|e| format!("team link: {e}"))?;
     println!("linked {} as the team '{name}'.", target.display());
-    reload_node();
+    reload_runner();
     Ok(ExitCode::SUCCESS)
 }
 
@@ -106,7 +106,7 @@ fn pull(spec: &str, name: Option<String>, yes: bool) -> Result<ExitCode, String>
         remote::Source::Remote { url, sha, git_ref } => (url, sha, git_ref),
         remote::Source::Local(_) => {
             return Err(format!(
-                "team pull: {spec} is a folder; link it with `ensemble node team link <name> {spec}`"
+                "team pull: {spec} is a folder; link it with `ensemble runner team link <name> {spec}`"
             ));
         }
     };
@@ -123,7 +123,7 @@ fn pull(spec: &str, name: Option<String>, yes: bool) -> Result<ExitCode, String>
         "pulled {} as the team '{name}'.",
         remote::pinned(&url, &sha)
     );
-    reload_node();
+    reload_runner();
     Ok(ExitCode::SUCCESS)
 }
 
@@ -150,7 +150,7 @@ fn update(name: &str, git_ref: Option<String>, yes: bool) -> Result<ExitCode, St
     trust(url, &new, yes)?;
     teams::pin(name, url, &new, false)?;
     println!("'{name}' is at {} now.", remote::pinned(url, &new));
-    reload_node();
+    reload_runner();
     Ok(ExitCode::SUCCESS)
 }
 
@@ -162,7 +162,7 @@ fn approve(ctx: &Ctx, name: &str, yes: bool) -> Result<ExitCode, String> {
     }
     let config = config::load(
         &config::config_path(&team.path),
-        ctx.node_env()?.as_deref(),
+        ctx.runner_env()?.as_deref(),
         &SystemEnv,
     )
     .map_err(|e| format!("team approve: {e}"))?;
@@ -180,17 +180,17 @@ fn approve(ctx: &Ctx, name: &str, yes: bool) -> Result<ExitCode, String> {
     }
     teams::approve(name)?;
     println!("approved '{name}'.");
-    reload_node();
+    reload_runner();
     Ok(ExitCode::SUCCESS)
 }
 
 fn remove(name: &str, yes: bool) -> Result<ExitCode, String> {
-    if !confirm(&format!("Remove the team '{name}' from this node?"), yes)? {
+    if !confirm(&format!("Remove the team '{name}' from this runner?"), yes)? {
         return Err("nothing was removed.".into());
     }
     teams::remove(name)?;
     println!("removed '{name}'.");
-    reload_node();
+    reload_runner();
     Ok(ExitCode::SUCCESS)
 }
 
@@ -222,14 +222,14 @@ fn trust(url: &str, sha: &str, yes: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// `ensemble node team check`: every team, loaded and validated, reported as
-/// one helper team, with the tasks on the hub this node cannot run.
-fn check(config: Config, dir: &Path) -> Result<ExitCode, String> {
+/// `ensemble runner team check`: every team, loaded and validated, reported as
+/// one helper team, with the tasks on the hub this runner cannot run.
+fn check(config: Config) -> Result<ExitCode, String> {
     // Reaching here means every team already loaded and validated; loading
     // returns an error that names the team otherwise.
     if config.agents.is_empty() {
         return Err(format!(
-            "check: no team in {} has agents. Make one with `ensemble node team new <name>`, or pull one with `ensemble node team pull <url>`.",
+            "check: no team in {} has agents. Make one with `ensemble runner team new <name>`, or pull one with `ensemble runner team pull <url>`.",
             config.source.display()
         ));
     }
@@ -295,14 +295,15 @@ fn check(config: Config, dir: &Path) -> Result<ExitCode, String> {
         }
     }
 
-    // A task this node would run fails only when it starts; say so now.
+    // A task this runner would run fails only when it starts; say so now.
     let mut bad = Vec::new();
-    if let Ok(board) = board_for(dir, "check") {
+    for (project, board) in boards("check").unwrap_or_default() {
         match ensemble::runtime::block_on(board.scan()) {
             Ok(all) => {
                 let unfinished: Vec<&tasks::Task> =
                     all.iter().filter(|t| t.status.is_none()).collect();
                 let mut elsewhere = Vec::new();
+                let mut failing = Vec::new();
                 for t in &unfinished {
                     let t = &t.ticket;
                     if t.agent.is_empty() {
@@ -310,13 +311,13 @@ fn check(config: Config, dir: &Path) -> Result<ExitCode, String> {
                     }
                     if config.agent(&t.agent).is_none() {
                         elsewhere.push(format!(
-                            "{}: agent '{}' is not one of this node's; another of your nodes runs it",
+                            "{}: agent '{}' is not one of this runner's; another of your runners runs it",
                             t.id, t.agent
                         ));
                     } else if let Some(gate) = &t.gate
                         && config.gate_for(&t.agent, &gate.name).is_none()
                     {
-                        bad.push(format!(
+                        failing.push(format!(
                             "{}: gate '{}' is not configured under `gates`; it would fail at once",
                             t.id, gate.name
                         ));
@@ -325,25 +326,29 @@ fn check(config: Config, dir: &Path) -> Result<ExitCode, String> {
                 if !all.is_empty() {
                     println!();
                     println!(
-                        "tasks: {} on {}, {} unfinished",
+                        "tasks of {project}: {} on {}, {} unfinished",
                         all.len(),
                         board.place(),
                         unfinished.len()
                     );
-                    for line in bad.iter().chain(&elsewhere) {
+                    for line in failing.iter().chain(&elsewhere) {
                         println!("  {line}");
                     }
                 }
+                bad.extend(failing);
             }
             Err(e) => {
                 println!();
-                println!("tasks: cannot read them on {}: {e}", board.place());
+                println!(
+                    "tasks of {project}: cannot read them on {}: {e}",
+                    board.place()
+                );
             }
         }
     }
 
     println!();
-    println!("mcp: ready. `ensemble node agent health` checks the agent CLIs and LLM backends.");
+    println!("ready. `ensemble runner agent health` checks the agent CLIs and LLM backends.");
     Ok(if bad.is_empty() {
         ExitCode::SUCCESS
     } else {

@@ -301,11 +301,10 @@ mod tests {
         assert!(made["expires"].is_string());
         let token = made["token"].as_str().unwrap().to_string();
 
-        let link = crate::RemoteMemory::new(&hub.url, &token, None);
+        let link = crate::Link::new(&hub.url, &token);
         let hello = block_on(link.hello()).unwrap();
         assert_eq!(hello.permissions, vec!["recall"]);
-        use ensemble_knowledge::KnowledgeAccess;
-        let share = block_on(link.call("share", &json!({"title": "t", "text": "x"}))).unwrap();
+        let share = block_on(link.ask("share", json!({"title": "t", "text": "x"})));
         assert!(share.unwrap_err().contains("do not allow `share`"));
 
         let (status, _) = call(
@@ -329,7 +328,7 @@ mod tests {
             None,
         );
         assert_eq!(status, 200);
-        assert!(block_on(crate::RemoteMemory::new(&hub.url, &token, None).hello()).is_err());
+        assert!(block_on(crate::Link::new(&hub.url, &token).hello()).is_err());
 
         let (status, _) = call(&hub.url, "POST", "/api/v1/logout", Some(&session), None);
         assert_eq!(status, 200);

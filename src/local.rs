@@ -1,5 +1,5 @@
 //! Operations run by the process whose state they change. A running hub or
-//! node takes them on its local socket, which only its OS user may open: one
+//! runner takes them on its local socket, which only its OS user may open: one
 //! line asks `{"op": name, "input": {…}}`, and one answers `{"ok": output}` or
 //! `{"error": error}`, as the one who runs it asked (`Caller::Local`). When it
 //! is not running, the command line runs the operation itself, on the files

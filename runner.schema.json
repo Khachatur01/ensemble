@@ -1,14 +1,14 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/node.schema.json",
-  "title": "Ensemble node: node.yaml",
-  "description": "This computer's node: a worker that runs the helper teams in its teams directory for its owner's agent sessions, from any folder, and, through a hub server, lends this computer's power. In ~/.config/ensemble/node/node.yaml; a computer runs one node. Nothing has a default value; `hub` and a block under `offers` that are left out are not used.",
+  "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/runner.schema.json",
+  "title": "Ensemble runner: runner.yaml",
+  "description": "This computer's runner: a worker that runs the tasks its hub keeps for the git repositories of its workspace with the helper teams in its teams directory, and, through the hub, lends this computer's power. In ~/.config/ensemble/runner/runner.yaml; a computer runs one runner. Nothing has a default value; `hub` and a block under `offers` that are left out are not used.",
   "type": "object",
-  "required": ["version", "name", "access", "offers"],
+  "required": ["version", "name", "access", "workspace", "offers"],
   "additionalProperties": false,
   "properties": {
     "version": {
-      "description": "Node file format version. Always 1.",
+      "description": "Runner file format version. Always 1.",
       "const": 1
     },
     "name": {
@@ -17,11 +17,16 @@
       "pattern": "^[A-Za-z0-9._-]+$"
     },
     "access": {
-      "description": "private: it works for its owner alone. shared: also for everyone whose role has `compute`; connecting it needs `host`. A shared node offers only agents that run on llm_backends, never on an agent CLI's subscription.",
+      "description": "private: it works for its owner alone. shared: also for everyone whose role has `compute`; connecting it needs `host`. A shared runner offers only agents that run on llm_backends, never on an agent CLI's subscription.",
       "enum": ["private", "shared"]
     },
+    "workspace": {
+      "description": "The folder it works in, such as ~/ensemble. Each git repository directly inside it is a project, named for its folder: the runner runs the tasks the hub keeps for it, and finds a repository added later within half a minute. ~/ is the home directory; a relative path is beside runner.yaml.",
+      "type": "string",
+      "minLength": 1
+    },
     "hub": {
-      "description": "The hub server it connects to, ws:// or wss://, signed in to with `ensemble node login`: the hub's knowledge for its sessions, the tasks the hub has for you, and what it offers. Leave it out for no hub.",
+      "description": "The hub server it connects to, ws:// or wss://, signed in to with `ensemble runner login`: the tasks the hub has for you, and what it offers. Leave it out for no hub.",
       "type": "string",
       "pattern": "^wss?://"
     },
@@ -44,14 +49,14 @@
       "additionalProperties": false,
       "properties": {
         "cli": {
-          "description": "`ensemble hub …` or `ensemble node …` on its computer, run by the running process over its socket when it runs.",
+          "description": "`ensemble hub …` or `ensemble runner …` on its computer, run by the running process over its socket when it runs.",
           "type": "object",
           "additionalProperties": false
         }
       }
     },
     "runs": {
-      "description": "Agents of the node's teams, which others name with an agent of `type: node`. A task gets a copy of the files git tracks, works in a folder of its own, and sends back what it changed.",
+      "description": "Agents of the runner's teams, which others name with an agent of `type: node`. A run gets a copy of the files git tracks, works in a folder of its own, and sends back what it changed.",
       "type": "object",
       "required": ["agents"],
       "additionalProperties": false,

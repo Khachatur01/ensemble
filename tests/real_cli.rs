@@ -23,7 +23,7 @@ fn on_path(program: &str) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// A scratch computer, with its own XDG directories, whose node has one team,
+/// A scratch computer, with its own XDG directories, whose runner has one team,
 /// `probe`, of one agent of a real CLI, and a project to work in.
 struct Project(PathBuf);
 
@@ -31,7 +31,7 @@ impl Project {
     fn new(config: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("ensemble-real-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let team = dir.join("config/ensemble/node/teams/probe");
+        let team = dir.join("config/ensemble/runner/teams/probe");
         std::fs::create_dir_all(&team).unwrap();
         std::fs::create_dir_all(dir.join("work")).unwrap();
         std::fs::write(team.join("config.yaml"), config).unwrap();
@@ -65,7 +65,7 @@ fn config(agent: &str, adapter: &str) -> String {
 
 fn check(agent: &str, adapter: &str) {
     let project = Project::new(&config(agent, adapter));
-    let health = project.ensemble(&["node", "agent", "health"]);
+    let health = project.ensemble(&["runner", "agent", "health"]);
     assert!(
         health.status.success(),
         "health failed: {}{}",
@@ -73,7 +73,7 @@ fn check(agent: &str, adapter: &str) {
         String::from_utf8_lossy(&health.stderr)
     );
     let run = project.ensemble(&[
-        "node",
+        "runner",
         "agent",
         "run",
         &format!("probe/{agent}"),

@@ -1,7 +1,7 @@
 //! The project directory an agent works in, and what a run changed in it.
 //!
-//! The directory is fixed for a session (the folder `ensemble mcp` runs in);
-//! no request can name another.
+//! The directory is fixed for a worker (the repository it runs the tasks of);
+//! a task may name a folder inside it, never one outside.
 //! An external agent edits files itself, so Ensemble finds out what changed by
 //! comparing the project before and after the run.
 

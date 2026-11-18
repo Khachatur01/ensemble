@@ -1,24 +1,24 @@
-//! Where tasks are kept: on the hub, per account and project (a working
-//! folder's name), so that a task outlives the node that runs it.
+//! Where tasks are kept: on the hub, per account and project (a
+//! repository's name), so that a task outlives the runner that runs it.
 //!
-//! A node does not own a task; it **leases** it. It claims a task that may
+//! A runner does not own a task; it **leases** it. It claims a task that may
 //! start for a while ([`LEASE`]), renews the claim as it runs, and says how the
-//! run ended: a result, a question, or a hand-off to another agent. A node
+//! run ended: a result, a question, or a hand-off to another agent. A runner
 //! that stops cleanly puts its tasks back; one that dies stops renewing, its
-//! lease runs out, and any node of the person with the agent runs the task
-//! again. A node whose lease ran out and was taken cannot write a result, so a
+//! lease runs out, and any runner of the person with the agent runs the task
+//! again. A runner whose lease ran out and was taken cannot write a result, so a
 //! task is never done twice.
 //!
 //! Where the work is decides who may go on with it. A task whose run works on
 //! a branch that is pushed (a worktree agent, a repository with a remote) is
-//! **movable**: when its run stops, the node says where its branch is
-//! ([`Progress`]), and the next node fetches it and carries on. Any other task
+//! **movable**: when its run stops, the runner says where its branch is
+//! ([`Progress`]), and the next runner fetches it and carries on. Any other task
 //! changes one computer's folder, so once it has run there it is **pinned**
-//! to that node, and waits for it.
+//! to that runner, and waits for it.
 //!
-//! [`Board`] is what the queue and the tools use. The hub keeps its tasks in
+//! [`Board`] is what the queue uses. The hub keeps its tasks in
 //! its database ([`DbBoard`]) and answers the link's task methods with them
-//! ([`Service`]); a node reaches them over the link ([`RemoteBoard`]).
+//! ([`Service`]); a runner reaches them over the link ([`RemoteBoard`]).
 
 use crate::tasks::{Detail, Outcome, Status, Task, Ticket, slug, utc, yaml_str};
 use async_trait::async_trait;
@@ -35,15 +35,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
-/// How long a claim lasts unless renewed: a node that dies gives its tasks
+/// How long a claim lasts unless renewed: a runner that dies gives its tasks
 /// up within this.
 pub const LEASE: Duration = Duration::from_secs(60);
 
-/// Whether a node may run a task.
+/// Whether a runner may run a task.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Claim {
-    /// It is this node's until its lease runs out.
+    /// It is this runner's until its lease runs out.
     Taken,
     /// It is not, and why: it runs elsewhere, waits, or has ended.
     Refused(String),
@@ -64,7 +64,7 @@ pub enum Renewal {
 /// Where a task's work was pushed when a run of it last stopped.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Progress {
-    /// The node that pushed it.
+    /// The runner that pushed it.
     pub node: String,
     pub branch: String,
     pub commit: String,
@@ -76,7 +76,7 @@ pub struct Progress {
 pub enum Cancelled {
     /// It had not started, and is cancelled.
     Before,
-    /// It runs on this node, which stops it.
+    /// It runs on this runner, which stops it.
     Running(String),
     /// It had ended already.
     Ended,
@@ -116,8 +116,6 @@ pub trait Board: Send + Sync {
     async fn scan(&self) -> Result<Vec<Task>, String>;
     /// One task with what it said, if there is one.
     async fn get(&self, id: &str) -> Result<Option<Detail>, String>;
-    /// Keep `ticket` as a new task, and return its id. Its own id is not used.
-    async fn create(&self, ticket: &Ticket) -> Result<String, String>;
     /// Run task `id` on `node` for `lease`, if it may start. Unless the run is
     /// `movable`, the task stays with `node` from now on.
     async fn claim(
@@ -130,7 +128,7 @@ pub trait Board: Send + Sync {
     /// Keep running it for another `lease`.
     async fn renew(&self, id: &str, node: &str, lease: Duration) -> Result<Renewal, String>;
     /// Stop running it, unfinished, with its work pushed as `progress`: a
-    /// node runs it again.
+    /// runner runs it again.
     async fn release(&self, id: &str, node: &str, progress: Option<Progress>)
     -> Result<(), String>;
     /// Say how a run of it ended, with its work pushed as `progress`.
@@ -141,11 +139,6 @@ pub trait Board: Send + Sync {
         end: End,
         progress: Option<Progress>,
     ) -> Result<(), String>;
-    /// Answer the question it waits on.
-    async fn answer(&self, id: &str, text: &str) -> Result<(), String>;
-    /// Give it to `agent`, from the backlog or from whoever has it.
-    async fn assign(&self, id: &str, agent: &str) -> Result<(), String>;
-    async fn cancel(&self, id: &str) -> Result<Cancelled, String>;
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +157,7 @@ struct Record {
     handoffs: String,
     lease: Option<Lease>,
     interrupted_on: Option<String>,
-    /// The node whose folder its work is in, when that work cannot move.
+    /// The runner whose folder its work is in, when that work cannot move.
     pinned_to: Option<String>,
     /// Where its work was pushed when a run last stopped.
     progress: Option<Progress>,
@@ -188,7 +181,7 @@ struct Lease {
 }
 
 impl Record {
-    /// The node whose lease has not run out.
+    /// The runner whose lease has not run out.
     fn holder(&self, now: u64) -> Option<&str> {
         self.lease
             .as_ref()
@@ -210,7 +203,7 @@ impl Record {
                 .filter(|_| self.result.is_none())
                 .map(str::to_string),
             interrupted_on: match (&self.lease, &self.interrupted_on) {
-                // Its node stopped renewing.
+                // Its runner stopped renewing.
                 (Some(l), _) if l.until <= now && self.result.is_none() => Some(l.node.clone()),
                 (None, Some(node)) if self.result.is_none() => Some(node.clone()),
                 _ => None,
@@ -413,7 +406,7 @@ impl DbBoard {
 
     /// Lease task `id` to `node` for `seconds`, if it may start: assigned,
     /// not ended, not waiting on an answer or another task, not running on
-    /// another node, and not pinned to one. A node that claims a task it held
+    /// another runner, and not pinned to one. A runner that claims a task it held
     /// before, such as after it started again, gets it back. Unless the run
     /// is `movable`, the task is pinned to `node`.
     pub fn take(&self, id: &str, node: &str, seconds: u64, movable: bool) -> Result<Claim, String> {
@@ -594,7 +587,7 @@ impl DbBoard {
         })
     }
 
-    /// Cancel task `id`: at once when it has not started, by its node when it
+    /// Cancel task `id`: at once when it has not started, by its runner when it
     /// runs.
     pub fn stop(&self, id: &str) -> Result<Cancelled, String> {
         self.change(id, |r, now| {
@@ -659,9 +652,6 @@ impl Board for DbBoard {
     async fn get(&self, id: &str) -> Result<Option<Detail>, String> {
         blocking(|| self.detail(id))
     }
-    async fn create(&self, ticket: &Ticket) -> Result<String, String> {
-        blocking(|| self.add(ticket))
-    }
     async fn claim(
         &self,
         id: &str,
@@ -690,15 +680,6 @@ impl Board for DbBoard {
         progress: Option<Progress>,
     ) -> Result<(), String> {
         blocking(|| self.end(id, node, end, progress))
-    }
-    async fn answer(&self, id: &str, text: &str) -> Result<(), String> {
-        blocking(|| self.reply(id, text))
-    }
-    async fn assign(&self, id: &str, agent: &str) -> Result<(), String> {
-        blocking(|| self.give(id, agent))
-    }
-    async fn cancel(&self, id: &str) -> Result<Cancelled, String> {
-        blocking(|| self.stop(id))
     }
 }
 
@@ -863,7 +844,7 @@ impl TaskService for Service {
 }
 
 // ---------------------------------------------------------------------------
-// On a node
+// On a runner
 // ---------------------------------------------------------------------------
 
 /// One project's tasks on the hub, over the link.
@@ -909,12 +890,6 @@ impl Board for RemoteBoard {
     async fn get(&self, id: &str) -> Result<Option<Detail>, String> {
         read(&self.ask(TASK, json!({ "id": id })).await?, "task")
     }
-    async fn create(&self, ticket: &Ticket) -> Result<String, String> {
-        read(
-            &self.ask(TASK_CREATE, json!({ "ticket": ticket })).await?,
-            "id",
-        )
-    }
     async fn claim(
         &self,
         id: &str,
@@ -953,26 +928,13 @@ impl Board for RemoteBoard {
         let params = json!({ "id": id, "node": node, "end": end, "progress": progress });
         self.ask(TASK_FINISH, params).await.map(|_| ())
     }
-    async fn answer(&self, id: &str, text: &str) -> Result<(), String> {
-        self.ask(TASK_ANSWER, json!({ "id": id, "text": text }))
-            .await
-            .map(|_| ())
-    }
-    async fn assign(&self, id: &str, agent: &str) -> Result<(), String> {
-        self.ask(TASK_ASSIGN, json!({ "id": id, "agent": agent }))
-            .await
-            .map(|_| ())
-    }
-    async fn cancel(&self, id: &str) -> Result<Cancelled, String> {
-        read(&self.ask(TASK_CANCEL, json!({ "id": id })).await?, "cancel")
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tasks::GateRef;
     use crate::tasks::tests::draft;
-    use crate::tasks::{GateRef, entry_line};
     use ensemble_core::workspace::testing::TempDir;
 
     fn board(tmp: &TempDir) -> DbBoard {
@@ -1097,7 +1059,6 @@ mod tests {
             (t.running_on.as_deref(), t.interrupted_on.as_deref()),
             (None, Some("laptop"))
         );
-        assert!(entry_line(t, &[], None).contains("queued (interrupted on laptop)"));
         assert_eq!(b.take(&id, "gpu-box", 60, true).unwrap(), Claim::Taken);
         // The laptop comes back: the task is not its any more.
         assert_eq!(b.keep(&id, "laptop", 60).unwrap(), Renewal::Lost);
@@ -1117,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn a_task_put_back_is_free_for_any_node() {
+    fn a_task_put_back_is_free_for_any_runner() {
         let tmp = TempDir::new();
         let b = board(&tmp);
         let id = b.add(&draft("A", "web/coder", "t")).unwrap();
@@ -1139,7 +1100,7 @@ mod tests {
     }
 
     #[test]
-    fn work_that_cannot_move_waits_for_its_node_and_work_that_can_is_carried_on() {
+    fn work_that_cannot_move_waits_for_its_runner_and_work_that_can_is_carried_on() {
         let tmp = TempDir::new();
         let b = board(&tmp);
         // In the desk's folder: it stays with the desk.
@@ -1148,11 +1109,7 @@ mod tests {
         b.put_back(&here, "desk", None).unwrap();
         let t = &b.list().unwrap()[0];
         assert_eq!(t.pinned_to.as_deref(), Some("desk"));
-        assert!(
-            entry_line(t, &[], None).contains("interrupted on desk, where its work is"),
-            "{}",
-            entry_line(t, &[], None)
-        );
+        assert_eq!(t.interrupted_on.as_deref(), Some("desk"));
         assert_eq!(
             b.take(&here, "laptop", 60, true).unwrap(),
             Claim::Refused("its work is in desk's folder, so it waits for desk".into())
@@ -1297,13 +1254,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_node_reaches_its_tasks_through_the_hub() {
+    async fn a_runner_reaches_its_tasks_through_the_hub() {
         let tmp = TempDir::new();
         let hub = ensemble_link::server::testing::start_with_tasks(Box::leak(Box::new(
             Service::new(&tmp.0),
         )));
         let laptop = RemoteBoard::new(&hub.url, &hub.ana, "shop");
-        let id = laptop.create(&draft("A", "web/coder", "t")).await.unwrap();
+        let kept = DbBoard::new(&tmp.0, "ana", "shop");
+        let id = kept.add(&draft("A", "web/coder", "t")).unwrap();
         assert_eq!(id, "0001-a");
         assert_eq!(
             laptop.claim(&id, "laptop", LEASE, true).await.unwrap(),
@@ -1326,9 +1284,6 @@ mod tests {
         let d = laptop.get(&id).await.unwrap().unwrap();
         assert_eq!(d.outcome.unwrap().reply(), "All done.\n");
         assert_eq!(laptop.get("0009").await.unwrap(), None);
-        assert_eq!(laptop.cancel(&id).await.unwrap(), Cancelled::Ended);
-        // Kept for ana, never for the name a node sends.
-        assert_eq!(DbBoard::new(&tmp.0, "ana", "shop").list().unwrap().len(), 1);
         let err = RemoteBoard::new(&hub.url, &hub.ana, "a/b")
             .scan()
             .await
@@ -1352,7 +1307,8 @@ mod tests {
         let laptop = RemoteBoard::new(&hub.url, &hub.ana, "shop");
         let mut ticket = draft("Retry fetches", "web/coder", "t");
         ticket.goal = Some("Requests survive a flaky network.".into());
-        let id = laptop.create(&ticket).await.unwrap();
+        let kept = DbBoard::new(&tmp.0, "ana", "shop");
+        let id = kept.add(&ticket).unwrap();
         // Asking is no end: nothing is given.
         laptop.claim(&id, "laptop", LEASE, true).await.unwrap();
         let ask = End::Ask {
@@ -1361,7 +1317,7 @@ mod tests {
         };
         laptop.finish(&id, "laptop", ask, None).await.unwrap();
         assert!(given.lock().unwrap().is_empty());
-        laptop.answer(&id, "502 and 503").await.unwrap();
+        kept.reply(&id, "502 and 503").unwrap();
         laptop.claim(&id, "laptop", LEASE, true).await.unwrap();
         laptop
             .finish(
@@ -1396,10 +1352,7 @@ mod tests {
                 status: Status::Failed,
                 text: "x".into(),
             }),
-            ..DbBoard::new(&tmp.0, "ana", "shop")
-                .detail(&id)
-                .unwrap()
-                .unwrap()
+            ..kept.detail(&id).unwrap().unwrap()
         };
         assert_eq!(learned("shop", &failed), None);
     }

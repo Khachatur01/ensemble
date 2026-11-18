@@ -1,8 +1,8 @@
-# The Home Manager module: this computer's node, `ensemble node serve`, for
-# the person whose home it is, on Linux (a systemd user service) and on macOS
-# (a launchd agent). What its settings and teams should always be may be
-# written in Nix, like the NixOS module's node; the rest is made with
-# `ensemble`, as on any platform. It runs once there is a node.
+# The Home Manager module: this computer's runner, `ensemble runner serve`,
+# for the person whose home it is, on Linux (a systemd user service) and on
+# macOS (a launchd agent). What its settings and teams should always be may be
+# written in Nix, like the NixOS module's runner; the rest is made with
+# `ensemble`, as on any platform. It runs once there is a runner.
 { self }:
 {
   config,
@@ -12,20 +12,20 @@
 }:
 let
   inherit (lib) mkEnableOption mkIf mkOption types;
-  cfg = config.services.ensemble.node;
+  cfg = config.services.ensemble.runner;
   yaml = pkgs.formats.yaml { };
-  node = import ./node.nix { inherit lib; };
-  files = node.files { inherit pkgs yaml cfg; };
-  links = node.linkScript {
+  runner = import ./runner.nix { inherit lib; };
+  files = runner.files { inherit pkgs yaml cfg; };
+  links = runner.linkScript {
     inherit pkgs files;
     inherit (cfg) package;
   };
   path = lib.makeBinPath ([ cfg.package pkgs.git ] ++ cfg.extraPackages);
-  # Written by `ensemble node setup`, with what `settings` declares merged in.
-  nodeYaml = "${config.xdg.configHome}/ensemble/node/node.yaml";
+  # Written by `ensemble runner setup`, with what `settings` declares merged in.
+  runnerYaml = "${config.xdg.configHome}/ensemble/runner/runner.yaml";
   command = [
     (lib.getExe cfg.package)
-    "node"
+    "runner"
     "serve"
   ]
   ++ lib.optionals (cfg.environmentFile != null) [
@@ -34,10 +34,10 @@ let
   ];
 in
 {
-  options.services.ensemble.node = {
+  options.services.ensemble.runner = {
     enable = mkEnableOption ''
-      this computer's Ensemble node, `ensemble node serve`: your agent
-      sessions reach it through `ensemble mcp`
+      this computer's Ensemble runner, `ensemble runner serve`: it works on the
+      tasks of its hub in the git repositories of its workspace
     '';
     package = mkOption {
       type = types.package;
@@ -46,20 +46,20 @@ in
       description = "The Ensemble package.";
     };
   }
-  // node.options { inherit pkgs yaml; };
+  // runner.options { inherit pkgs yaml; };
 
   config = mkIf cfg.enable {
     home.packages = [ cfg.package ];
 
-    # The node file and the teams, linked in on every switch.
-    home.activation.ensembleNode = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    # The runner file and the teams, linked in on every switch.
+    home.activation.ensembleRunner = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
       run ${links}
     '';
 
-    systemd.user.services.ensemble-node = mkIf pkgs.stdenv.hostPlatform.isLinux {
+    systemd.user.services.ensemble-runner = mkIf pkgs.stdenv.hostPlatform.isLinux {
       Unit = {
-        Description = "Ensemble node";
-        ConditionPathExists = nodeYaml;
+        Description = "Ensemble runner";
+        ConditionPathExists = runnerYaml;
       };
       Service = {
         ExecStart = lib.escapeShellArgs command;
@@ -69,15 +69,15 @@ in
       Install.WantedBy = [ "default.target" ];
     };
 
-    launchd.agents.ensemble-node = mkIf pkgs.stdenv.hostPlatform.isDarwin {
+    launchd.agents.ensemble-runner = mkIf pkgs.stdenv.hostPlatform.isDarwin {
       enable = true;
       config = {
         ProgramArguments = command;
         EnvironmentVariables.PATH = "${path}:/usr/bin:/bin";
-        # Kept running while there is a node to run.
-        KeepAlive.PathState.${nodeYaml} = true;
+        # Kept running while there is a runner to run.
+        KeepAlive.PathState.${runnerYaml} = true;
         RunAtLoad = true;
-        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/ensemble-node.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/ensemble-runner.log";
       };
     };
   };

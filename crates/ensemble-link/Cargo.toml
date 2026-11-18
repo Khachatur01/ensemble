@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Ensemble's hub server and the link to it: users and tokens, the WebSocket protocol, the server, and the node's client."
+description = "Ensemble's hub server and the link to it: users and tokens, the WebSocket protocol, MCP for client agents, the server, and the runner's client."
 
 [dependencies]
 ensemble-store.workspace = true

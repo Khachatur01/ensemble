@@ -1,5 +1,5 @@
 //! `hub.yaml`: a hub's settings, in `~/.config/ensemble/hub/`. A hub provides
-//! services and connects nodes: it has no helper team and runs no agents. It is
+//! services and connects runners: it has no helper team and runs no agents. It is
 //! always a server (`ensemble hub serve`), for a team or for one person on
 //! their own computer: its `server`, the `roles` of its accounts, its
 //! `knowledge`, and, optionally, the `tasks` it hands out from a tracker.
@@ -70,7 +70,7 @@ pub enum IssueTracker {
     LocalMarkdown { dir: PathBuf },
 }
 
-/// A hub server: where it listens for nodes, and how people join.
+/// A hub server: where it listens for runners, and how people join.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Server {
     pub listen: std::net::SocketAddr,
@@ -105,9 +105,9 @@ pub enum Permission {
     Tasks,
     /// Manage users: approve sign-ups, give roles, revoke tokens.
     Admin,
-    /// Use other people's shared nodes: run agents they offer, and their models.
+    /// Use other people's shared runners: run agents they offer, and their models.
     Compute,
-    /// Connect a shared node, which works for others whose role has `compute`.
+    /// Connect a shared runner, which works for others whose role has `compute`.
     Host,
 }
 
@@ -302,7 +302,7 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
         return Err(ConfigError::Invalid {
             path: path.to_path_buf(),
             problems: vec![
-                "server: a hub is always a server now, never part of a node: add `server` and `roles` (`ensemble hub init --stdout` prints them), and remove `tasks.user` and `tasks.projects`. One person runs it on their own computer, and their node names it as `hub:` in node.yaml"
+                "server: a hub is always a server now, never part of a runner: add `server` and `roles` (`ensemble hub init --stdout` prints them), and remove `tasks.user` and `tasks.projects`. One person runs it on their own computer, and their runner names it as `hub:` in runner.yaml"
                     .into(),
             ],
         });

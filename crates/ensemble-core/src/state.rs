@@ -35,8 +35,8 @@ pub fn cache_root() -> Result<PathBuf, String> {
 }
 
 /// `$XDG_CONFIG_HOME/ensemble`, or `~/.config/ensemble`: everything a person
-/// sets up on this computer, in two fixed folders: `node/` for its node and
-/// `hub/` for a hub it runs.
+/// sets up on this computer, in two fixed folders: `runner/` for its runner
+/// and `hub/` for a hub it runs.
 pub fn config_root() -> Result<PathBuf, String> {
     let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
         Some(dir) => PathBuf::from(dir),
@@ -50,19 +50,19 @@ pub fn config_root() -> Result<PathBuf, String> {
     Ok(base.join("ensemble"))
 }
 
-/// The file in `node/` and in `hub/` that holds their secrets, such as API
+/// The file in `runner/` and in `hub/` that holds their secrets, such as API
 /// keys, as `NAME=value` lines: hidden, out of the YAML, readable only by you.
 pub const ENV_FILE: &str = ".env";
 
-/// This computer's node: `node.yaml`, its helper teams in `teams/`, its
+/// This computer's runner: `runner.yaml`, its helper teams in `teams/`, its
 /// secrets in `.env`, and its hub tokens in `hubs.json`.
-pub fn node_config_dir() -> Result<PathBuf, String> {
-    Ok(config_root()?.join("node"))
+pub fn runner_config_dir() -> Result<PathBuf, String> {
+    Ok(config_root()?.join("runner"))
 }
 
-/// The node's helper teams: a folder per team, named for it.
+/// The runner's helper teams: a folder per team, named for it.
 pub fn teams_dir() -> Result<PathBuf, String> {
-    Ok(node_config_dir()?.join("teams"))
+    Ok(runner_config_dir()?.join("teams"))
 }
 
 /// A hub this computer runs (`ensemble hub serve`): `hub.yaml`, its secrets
@@ -97,10 +97,10 @@ pub fn team_dir(config: &Path) -> Result<PathBuf, String> {
     Ok(root()?.join("orgs").join(labelled(&canonical)))
 }
 
-/// What this computer's node keeps: its lock, the folders it worked in, its
-/// runs for others. A computer runs one node.
-pub fn node_dir() -> Result<PathBuf, String> {
-    Ok(root()?.join("node"))
+/// What this computer's runner keeps: its lock and its runs for others. A
+/// computer runs one runner.
+pub fn runner_dir() -> Result<PathBuf, String> {
+    Ok(root()?.join("runner"))
 }
 
 /// What a hub this computer runs keeps while it runs: its lock. A computer
@@ -110,19 +110,22 @@ pub fn hub_dir() -> Result<PathBuf, String> {
 }
 
 /// Where the hub whose state is in `hub_dir` takes the operations of
-/// `ensemble hub …`, as [`node_socket`] says.
+/// `ensemble hub …`, as [`runner_socket`] says.
 pub fn hub_socket(hub_dir: &Path) -> PathBuf {
-    node_socket(hub_dir)
+    runner_socket(hub_dir)
 }
 
-/// Where the node whose state is in `node_dir` listens for `ensemble mcp`. A
-/// socket's path must be short, so it is not in the state directory but in
-/// the runtime one (`$XDG_RUNTIME_DIR`, else `/tmp`), in a folder only its
-/// user may enter, named by a hash of `node_dir`.
-pub fn node_socket(node_dir: &Path) -> PathBuf {
+/// Where the runner whose state is in `runner_dir` takes the operations of
+/// `ensemble runner …`. A socket's path must be short, so it is not in the
+/// state directory but in the runtime one (`$XDG_RUNTIME_DIR`, else `/tmp`),
+/// in a folder only its user may enter, named by a hash of `runner_dir`.
+pub fn runner_socket(runner_dir: &Path) -> PathBuf {
     // What the kernel takes, less room to spare.
     const MAX_SOCKET_PATH: usize = 100;
-    let file = format!("{:016x}.sock", fnv1a(node_dir.to_string_lossy().as_bytes()));
+    let file = format!(
+        "{:016x}.sock",
+        fnv1a(runner_dir.to_string_lossy().as_bytes())
+    );
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .filter(|v| !v.is_empty())
         .map(|d| PathBuf::from(d).join("ensemble").join(&file))

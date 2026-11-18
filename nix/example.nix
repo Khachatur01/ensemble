@@ -1,5 +1,5 @@
 # An example NixOS configuration: one person's computer that runs a hub for
-# themselves and a node that names it, both written in Nix, with one helper
+# themselves and a runner that names it, both written in Nix, with one helper
 # team. She manages both with `ensemble` as herself.
 # The flake's `checks` evaluate it, so it stays a configuration that works.
 { pkgs, ... }:
@@ -53,10 +53,11 @@
     };
   };
 
-  services.ensemble.node = {
+  services.ensemble.runner = {
     enable = true;
     user = "ana";
-    environmentFile = "/run/secrets/ensemble-node.env";
+    environmentFile = "/run/secrets/ensemble-runner.env";
+    workspace = "~/ensemble";
     extraPackages = [ pkgs.hello ];
     settings = {
       version = 1;

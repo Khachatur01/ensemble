@@ -6,7 +6,7 @@
 use std::path::Path;
 
 /// Bottom to top: a crate may depend only on crates before it.
-const ORDER: [&str; 12] = [
+const ORDER: [&str; 11] = [
     "ensemble-core",
     "ensemble-ops",
     "ensemble-config",
@@ -18,7 +18,6 @@ const ORDER: [&str; 12] = [
     "ensemble-tasks",
     "ensemble-inbox",
     "ensemble-node",
-    "ensemble-mcp",
 ];
 
 /// The workspace crates a manifest names, in any dependency table.

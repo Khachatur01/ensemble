@@ -1,16 +1,12 @@
-//! `ensemble node …`: this computer's node, which runs your helper teams and
-//! reaches its hub; and what an agent CLI runs, `mcp` and `hook`.
+//! `ensemble runner …`: this computer's runner, which runs the tasks of your
+//! hub with your helper teams, in the git repositories of its workspace.
 
-use crate::cli::NodeCommand;
+use crate::cli::RunnerCommand;
 #[cfg(unix)]
 use crate::on_signal;
-use crate::{
-    Ctx, STOP, absolute, ask, daemon, host_name, hostname, knowledge_for, node_file, node_hub,
-    run_registration, this_node,
-};
+use crate::{Ctx, STOP, ask, daemon, host_name, hostname, runner_file, runner_hub, this_runner};
 use ensemble::config::settings_file::{self, SettingsFile, WithSettings};
 use ensemble::config::{self, Config, SystemEnv};
-use ensemble::knowledge::KnowledgeAccess;
 use ensemble::ops::{Access, Caller, Code, Error, Field, Registry, Spec, operation};
 use ensemble::router::Ensemble;
 use ensemble::{setup, state, teams};
@@ -18,48 +14,47 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::process::ExitCode;
 
-pub fn run(ctx: &Ctx, command: NodeCommand) -> Result<ExitCode, String> {
+pub fn run(ctx: &Ctx, command: RunnerCommand) -> Result<ExitCode, String> {
     match command {
-        NodeCommand::Setup {
-            client,
+        RunnerCommand::Setup {
             name,
-            global,
+            workspace,
             yes,
-        } => setup(ctx, client, name, global, yes),
-        NodeCommand::Init { force, stdout } => init(force, stdout),
-        NodeCommand::Serve => serve(ctx),
-        NodeCommand::Reload => {
-            let said = ensemble::runtime::block_on(daemon::reload(&state::node_socket(
-                &state::node_dir()?,
+        } => setup(ctx, name, workspace, yes),
+        RunnerCommand::Init { force, stdout } => init(force, stdout),
+        RunnerCommand::Serve => serve(ctx),
+        RunnerCommand::Reload => {
+            let said = ensemble::runtime::block_on(daemon::reload(&state::runner_socket(
+                &state::runner_dir()?,
             )))
-            .map_err(|e| format!("node reload: {e}"))?;
+            .map_err(|e| format!("runner reload: {e}"))?;
             println!("{said}");
             Ok(ExitCode::SUCCESS)
         }
-        NodeCommand::Status => status(ctx),
-        NodeCommand::Doctor => Ok(if report_doctor(&ctx.teams()?, &ctx.dir)? {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        }),
-        NodeCommand::Connect {
-            client,
-            global,
-            hooks,
-        } => connect(ctx, &client, global, hooks),
-        NodeCommand::Peers => peers(),
-        NodeCommand::Team(c) => super::team::run(ctx, c),
-        NodeCommand::Agent(c) => super::agent::run(ctx, c),
+        RunnerCommand::Status => status(),
+        RunnerCommand::Doctor => {
+            let workspace = this_runner().ok().map(|r| r.workspace);
+            Ok(
+                if report_doctor(&ctx.teams()?, workspace.as_deref(), &ctx.dir)? {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                },
+            )
+        }
+        RunnerCommand::Peers => peers(),
+        RunnerCommand::Team(c) => super::team::run(ctx, c),
+        RunnerCommand::Agent(c) => super::agent::run(ctx, c),
     }
 }
 
-/// `ensemble node init`: write this computer's node file.
+/// `ensemble runner init`: write this computer's runner file.
 fn init(force: bool, stdout: bool) -> Result<ExitCode, String> {
     if stdout {
-        print!("{}", config::node::NODE_SAMPLE);
+        print!("{}", config::runner::RUNNER_SAMPLE);
         return Ok(ExitCode::SUCCESS);
     }
-    let path = node_file()?;
+    let path = runner_file()?;
     if path.exists() && !force {
         return Err(format!(
             "{} already exists. Pass --force to overwrite it.",
@@ -70,49 +65,64 @@ fn init(force: bool, stdout: bool) -> Result<ExitCode, String> {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
-    std::fs::write(&path, config::node::NODE_SAMPLE)
+    std::fs::write(&path, config::runner::RUNNER_SAMPLE)
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     println!(
-        "wrote {}: name the node, say whom it works for and what it offers",
+        "wrote {}: name the runner, say whom it works for, where it works and what it offers",
         path.display()
     );
     Ok(ExitCode::SUCCESS)
 }
 
-/// `ensemble node status`: the node, whether it runs, its hub and its teams.
-fn status(ctx: &Ctx) -> Result<ExitCode, String> {
-    let node = this_node()?;
+/// `ensemble runner status`: the runner, whether it runs, its workspace, its
+/// hub and its teams.
+fn status() -> Result<ExitCode, String> {
+    let runner = this_runner()?;
     println!(
-        "node {} ({}): {}",
-        node.name,
-        node.access.as_str(),
-        if node_running() {
+        "runner {} ({}): {}",
+        runner.name,
+        runner.access.as_str(),
+        if runner_running() {
             "running"
         } else {
-            "not running; start it with `ensemble node serve`"
+            "not running; start it with `ensemble runner serve`"
         }
     );
-    println!("  file: {}", node.source.display());
-    match &node.hub {
+    println!("  file: {}", runner.source.display());
+    let projects: Vec<String> = daemon::repositories(&runner.workspace)
+        .iter()
+        .filter_map(|r| r.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    println!(
+        "  workspace: {}, {}",
+        runner.workspace.display(),
+        if projects.is_empty() {
+            "with no git repository yet".to_string()
+        } else {
+            format!("projects: {}", projects.join(", "))
+        }
+    );
+    match &runner.hub {
         Some(url) => {
             // The hub says whether the token kept for it still works.
             let said = match ensemble::link::Tokens::load()?.get(url) {
-                None => format!("not signed in: `ensemble node login {url}`"),
-                Some(token) => match ensemble::runtime::block_on(
-                    ensemble::link::RemoteMemory::new(url, token, None).hello(),
-                ) {
-                    Ok(hello) => format!(
-                        "signed in as {} ({}: {})",
-                        hello.user,
-                        hello.role,
-                        hello.permissions.join(", ")
-                    ),
-                    Err(e) => format!("the hub cannot be used: {e}"),
-                },
+                None => format!("not signed in: `ensemble runner login {url}`"),
+                Some(token) => {
+                    match ensemble::runtime::block_on(ensemble::link::Link::new(url, token).hello())
+                    {
+                        Ok(hello) => format!(
+                            "signed in as {} ({}: {})",
+                            hello.user,
+                            hello.role,
+                            hello.permissions.join(", ")
+                        ),
+                        Err(e) => format!("the hub cannot be used: {e}"),
+                    }
+                }
             };
             println!("  hub: {url}, {said}");
         }
-        None => println!("  hub: none, so no tasks and no knowledge"),
+        None => println!("  hub: none, so no tasks"),
     }
     let listed = teams::list()?;
     let (ready, waiting): (Vec<_>, Vec<_>) = listed.iter().partition(|t| !t.pending);
@@ -140,21 +150,19 @@ fn status(ctx: &Ctx) -> Result<ExitCode, String> {
             )
         }
     );
-    let _ = ctx;
     Ok(ExitCode::SUCCESS)
 }
 
-/// `ensemble node serve`: run this computer's node until stopped.
-/// It serves `ensemble mcp` sessions from any folder with its teams, and runs
-/// the tasks of its folders; with a hub, it also offers what it offers. A
-/// change to node.yaml has it start again, in this process: sessions carry on
-/// through their `ensemble mcp`, and running tasks start again from where
-/// their work was last pushed.
+/// `ensemble runner serve`: run this computer's runner until stopped. It runs
+/// the tasks of the repositories in its workspace with its teams; with a hub,
+/// it also offers what it offers. A change to runner.yaml has it start again,
+/// in this process: running tasks start again from where their work was last
+/// pushed.
 fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
-    let dir = state::node_dir()?;
+    let dir = state::runner_dir()?;
     let _lock = ensemble::lock::acquire(&dir).map_err(|pid| {
-        let name = this_node().map(|n| n.name).unwrap_or_default();
-        format!("node serve: process {pid} already runs the node '{name}'")
+        let name = this_runner().map(|r| r.name).unwrap_or_default();
+        format!("runner serve: process {pid} already runs the runner '{name}'")
     })?;
     #[cfg(unix)]
     unsafe {
@@ -166,66 +174,61 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
         if !crate::restarting() {
             break;
         }
-        eprintln!("ensemble: starting again with node.yaml as it is now");
+        eprintln!("ensemble: starting again with runner.yaml as it is now");
     }
     eprintln!("ensemble: stopped");
     Ok(ExitCode::SUCCESS)
 }
 
-/// The node, as node.yaml says now, until it stops or starts again.
+/// The runner, as runner.yaml says now, until it stops or starts again.
 fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
-    let path = node_file()?;
-    let node = config::load_node(&path)
+    let path = runner_file()?;
+    let runner = config::load_runner(&path)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| {
             format!(
-                "node serve: no node file at {}; `ensemble node init` writes one",
+                "runner serve: no runner file at {}; `ensemble runner init` writes one",
                 path.display()
             )
         })?;
-    let (team, waiting) = teams::load_all(ctx.node_env()?.as_deref(), &SystemEnv)
-        .map_err(|e| format!("node serve: {e}"))?;
+    let (team, waiting) = teams::load_all(ctx.runner_env()?.as_deref(), &SystemEnv)
+        .map_err(|e| format!("runner serve: {e}"))?;
     let say = |line: &str| eprintln!("ensemble: {line}");
     for line in &waiting {
         say(line);
     }
-    // With a hub: its tasks, and the link that offers what the node offers.
-    // One token for all of it, replaced when `ensemble node login` signs in
+    // With a hub: its tasks, and the link that offers what the runner offers.
+    // One token for all of it, replaced when `ensemble runner login` signs in
     // again.
-    let hub = match &node.hub {
+    let hub = match &runner.hub {
         Some(_) => {
-            let (url, token) = node_hub("node serve")?;
+            let (url, token) = runner_hub("runner serve")?;
             Some((url, ensemble::link::Token::new(&token)))
         }
         None => None,
     };
-    let (url, token) = match &hub {
-        Some((url, token)) => (Some(url.clone()), Some(token.clone())),
-        None => (None, None),
-    };
-    // What `ensemble node …` asks of it while it runs.
+    // What `ensemble runner …` asks of it while it runs.
     let operations = operations();
     let daemon = daemon::Daemon::new(
-        node.clone(),
+        runner.clone(),
         hub.clone(),
         team.clone(),
-        ctx.node_env()?,
-        dir,
+        ctx.runner_env()?,
         &operations,
         &say,
     )
-    .map_err(|e| format!("node serve: {e}"))?;
-    let worker = match (&url, &token) {
-        (Some(url), Some(token)) if node.offers.runs.is_some() || node.offers.models.is_some() => {
+    .map_err(|e| format!("runner serve: {e}"))?;
+    let worker = match &hub {
+        Some((url, token)) if runner.offers.runs.is_some() || runner.offers.models.is_some() => {
             Some(
                 ensemble::node::Worker::new(
                     url,
                     token.clone(),
-                    node.clone(),
+                    runner.clone(),
                     Some(team.clone()),
                     dir.join("runs"),
                 )
-                .map_err(|e| format!("node serve: {e}"))?,
+                .map_err(|e| format!("runner serve: {e}"))?,
             )
         }
         _ => None,
@@ -237,7 +240,7 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
         }
         Ok(())
     };
-    let socket = state::node_socket(dir);
+    let socket = state::runner_socket(dir);
     let refused = std::sync::Mutex::new(None);
     let served = {
         let stop = &STOP;
@@ -254,129 +257,63 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
         STOP.store(true, std::sync::atomic::Ordering::Relaxed);
         served
     };
-    served.map_err(|e| format!("node serve: {e}"))?;
+    served.map_err(|e| format!("runner serve: {e}"))?;
     if let Some(e) = refused.into_inner().unwrap() {
-        return Err(format!("node serve: the hub refused this node: {e}"));
+        return Err(format!("runner serve: the hub refused this runner: {e}"));
     }
     Ok(())
 }
 
-/// `ensemble mcp`: a session of this computer's running node, in `dir`.
-pub fn mcp(ctx: &Ctx) -> Result<ExitCode, String> {
-    let path = node_file()?;
-    let node = config::load_node(&path)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| {
-            format!(
-                "mcp: no node file at {}. `ensemble node setup` writes one, or `ensemble node init`; then start the node with `ensemble node serve`",
-                path.display()
-            )
-        })?;
-    let socket = state::node_socket(&state::node_dir()?);
-    ensemble::runtime::shared()
-        .block_on(daemon::bridge(&socket, &ctx.dir, &node.name))
-        .map_err(|e| format!("mcp: {e}"))?;
-    Ok(ExitCode::SUCCESS)
-}
-
-/// `ensemble hook`: what a CLI's session hook prints, the vault's notes
-/// about the prompt or the project, each once per session. It never fails the
-/// CLI's turn: a problem is said on stderr, and nothing is printed.
-pub fn hook() -> Result<ExitCode, String> {
-    if let Err(e) = notes() {
-        eprintln!("ensemble: hook: {e}");
-    }
-    Ok(ExitCode::SUCCESS)
-}
-
-fn notes() -> Result<(), String> {
-    use ensemble::hooks::{Given, MAX_PRINTED, fresh_notes, read_event};
-    use std::io::Read;
-    let mut input = String::new();
-    std::io::stdin()
-        .read_to_string(&mut input)
-        .map_err(|e| format!("cannot read the event: {e}"))?;
-    let event = read_event(&input)?;
-    let mut given = Given::load(&state::root()?.join("hooks"), &event.session);
-    if event.forgets() {
-        given.notes.clear();
-    }
-    let Some(topic) = event.topic() else {
-        return given.save();
-    };
-    let dir = match &event.cwd {
-        Some(cwd) => cwd.clone(),
-        None => std::env::current_dir().map_err(|e| e.to_string())?,
-    };
-    // A node with no hub has no notes to give: nothing to say.
-    if this_node()?.hub.is_none() {
-        return Ok(());
-    }
-    let knowledge = knowledge_for(&dir, "hook")?;
-    let answer = match ensemble::runtime::block_on(knowledge.call(
-        ensemble::knowledge::RECALL,
-        &serde_json::json!({ "query": topic }),
-    )) {
-        Some(answer) => answer?,
-        None => return Ok(()),
-    };
-    let answer = ensemble::knowledge::recalled_within(&answer, MAX_PRINTED);
-    if let Some(notes) = fresh_notes(&answer, &mut given.notes) {
-        print!("{notes}");
-    }
-    given.save()
-}
-
-/// What the node's operations are given: its settings file, node.yaml.
-pub struct NodeContext {
+/// What the runner's operations are given: its settings file, runner.yaml.
+pub struct RunnerContext {
     settings: SettingsFile,
-    /// In the running node: read its hub's token again, and say what it did.
+    /// In the running runner: read its hub's token again, and say what it did.
     relink: Option<Box<Relink>>,
 }
 
 type Relink = dyn Fn() -> Result<String, String> + Send + Sync;
 
-/// node.yaml, checked as a node before it is written.
-fn node_settings() -> Result<SettingsFile, String> {
-    let path = node_file()?;
+/// runner.yaml, checked as a runner before it is written.
+fn runner_settings() -> Result<SettingsFile, String> {
+    let path = runner_file()?;
     let checked = path.clone();
     Ok(SettingsFile::new(
         path,
-        "`ensemble node setup`",
+        "`ensemble runner setup`",
         move |text| {
-            config::parse_node(text, &checked)
+            config::parse_runner(text, &checked)
                 .map(|_| ())
                 .map_err(|e| e.to_string())
         },
     ))
 }
 
-impl WithSettings for NodeContext {
+impl WithSettings for RunnerContext {
     fn settings_file(&self) -> Result<&SettingsFile, Error> {
         Ok(&self.settings)
     }
 }
 
-impl NodeContext {
-    /// This computer's node, which does not run: node.yaml, checked as a node
-    /// before it is written.
+impl RunnerContext {
+    /// This computer's runner, which does not run: runner.yaml, checked as a
+    /// runner before it is written.
     pub fn new() -> Result<Self, String> {
-        Ok(NodeContext {
-            settings: node_settings()?,
+        Ok(RunnerContext {
+            settings: runner_settings()?,
             relink: None,
         })
     }
 
-    /// The node, in the process that runs it, which reads its hub's token
+    /// The runner, in the process that runs it, which reads its hub's token
     /// again with `relink`.
     pub fn running(
         relink: impl Fn() -> Result<String, String> + Send + Sync + 'static,
     ) -> Result<Self, String> {
-        let settings = node_settings()?.on_change(|| {
+        let settings = runner_settings()?.on_change(|| {
             crate::restart();
-            Some("The running node starts again with it; open sessions carry on.".into())
+            Some("The running runner starts again with it; running tasks go on from their pushed work.".into())
         });
-        Ok(NodeContext {
+        Ok(RunnerContext {
             settings,
             relink: Some(Box::new(relink)),
         })
@@ -415,17 +352,17 @@ const LOGIN: &[Field] = &[
 ];
 const LOGOUT: &[Field] = &[URL];
 
-/// Every operation of the node.
-pub fn operations() -> Registry<NodeContext> {
-    let mut all = settings_file::operations::<NodeContext>(Access::Local);
+/// Every operation of the runner.
+pub fn operations() -> Registry<RunnerContext> {
+    let mut all = settings_file::operations::<RunnerContext>(Access::Local);
     all.push(operation(
         Spec {
             name: "login",
-            summary: "Sign in to a hub (ws:// or wss://) and keep its token for the node.",
+            summary: "Sign in to a hub (ws:// or wss://) and keep its token for the runner.",
             access: Access::Local,
             input: LOGIN,
         },
-        |c: &NodeContext, _: &Caller, input: Login| login(c, input),
+        |c: &RunnerContext, _: &Caller, input: Login| login(c, input),
     ));
     all.push(operation(
         Spec {
@@ -434,14 +371,14 @@ pub fn operations() -> Registry<NodeContext> {
             access: Access::Local,
             input: LOGOUT,
         },
-        |c: &NodeContext, _: &Caller, input: Logout| logout(c, &input.url),
+        |c: &RunnerContext, _: &Caller, input: Logout| logout(c, &input.url),
     ));
     Registry::new(all)
 }
 
 /// `login`: check a hub's token, made here from your account or elsewhere,
-/// keep it, and have the node name the hub.
-fn login(c: &NodeContext, input: Login) -> Result<serde_json::Value, Error> {
+/// keep it, and have the runner name the hub.
+fn login(c: &RunnerContext, input: Login) -> Result<serde_json::Value, Error> {
     let url = input.url.as_str();
     if !url.starts_with("ws://") && !url.starts_with("wss://") {
         return Err(Error::invalid(format!(
@@ -463,9 +400,8 @@ fn login(c: &NodeContext, input: Login) -> Result<serde_json::Value, Error> {
             );
         }
     };
-    let hello =
-        ensemble::runtime::block_on(ensemble::link::RemoteMemory::new(url, &token, None).hello())
-            .map_err(|e| Error::new(Code::Unauthorized, e).on("token"))?;
+    let hello = ensemble::runtime::block_on(ensemble::link::Link::new(url, &token).hello())
+        .map_err(|e| Error::new(Code::Unauthorized, e).on("token"))?;
     let mut tokens = ensemble::link::Tokens::load()?;
     tokens.set(url, &token);
     tokens.save()?;
@@ -475,20 +411,20 @@ fn login(c: &NodeContext, input: Login) -> Result<serde_json::Value, Error> {
         hello.role,
         hello.permissions.join(", ")
     )];
-    // The node names the hub it uses.
+    // The runner names the hub it uses.
     let file = c.settings_file()?;
     if !file.path.exists() {
         said.push(format!(
-            "There is no node yet: `ensemble node setup` writes one; then name this hub in it with `ensemble node config set hub {url}`."
+            "There is no runner yet: `ensemble runner setup` writes one; then name this hub in it with `ensemble runner config set hub {url}`."
         ));
     } else {
         let named =
             ensemble::config::settings::get(&file.read()?, "hub").map_err(Error::invalid)?;
         if named.as_deref() == Some(url) {
-            // The running node takes the new token as it is.
+            // The running runner takes the new token as it is.
             if let Some(relink) = &c.relink {
                 said.push(match relink() {
-                    Ok(relinked) => format!("The running node: {relinked}."),
+                    Ok(relinked) => format!("The running runner: {relinked}."),
                     Err(e) => e,
                 });
             }
@@ -497,13 +433,13 @@ fn login(c: &NodeContext, input: Login) -> Result<serde_json::Value, Error> {
                 Ok(note) => {
                     said.push(match named {
                         Some(before) => {
-                            format!("The node names this hub now, in place of {before}.")
+                            format!("The runner names this hub now, in place of {before}.")
                         }
-                        None => "The node names this hub now.".into(),
+                        None => "The runner names this hub now.".into(),
                     });
                     said.extend(note);
                 }
-                Err(e) => said.push(format!("The node's hub was not changed: {e}")),
+                Err(e) => said.push(format!("The runner's hub was not changed: {e}")),
             }
         }
     }
@@ -515,9 +451,9 @@ fn login(c: &NodeContext, input: Login) -> Result<serde_json::Value, Error> {
     }))
 }
 
-/// `logout`: forget a hub's token, and have the node name no hub when it
+/// `logout`: forget a hub's token, and have the runner name no hub when it
 /// named that one.
-fn logout(c: &NodeContext, url: &str) -> Result<serde_json::Value, Error> {
+fn logout(c: &RunnerContext, url: &str) -> Result<serde_json::Value, Error> {
     let mut tokens = ensemble::link::Tokens::load()?;
     let mut said = Vec::new();
     if tokens.remove(url) {
@@ -526,7 +462,7 @@ fn logout(c: &NodeContext, url: &str) -> Result<serde_json::Value, Error> {
     } else {
         said.push(format!("no token kept for {url}"));
     }
-    // A node that names it would reach no hub: it names none now.
+    // A runner that names it would reach no hub: it names none now.
     let file = c.settings_file()?;
     if file.path.exists()
         && ensemble::config::settings::get(&file.read()?, "hub")
@@ -536,19 +472,20 @@ fn logout(c: &NodeContext, url: &str) -> Result<serde_json::Value, Error> {
     {
         match file.unset("hub") {
             Ok(note) => {
-                said.push("The node names no hub now.".into());
+                said.push("The runner names no hub now.".into());
                 said.extend(note);
             }
-            Err(e) => said.push(format!("The node still names it: {e}")),
+            Err(e) => said.push(format!("The runner still names it: {e}")),
         }
     }
     Ok(serde_json::json!({ "said": said.join("\n") }))
 }
 
-/// Whether this computer's node runs: it answers on its socket.
-fn node_running() -> bool {
-    state::node_dir()
-        .is_ok_and(|dir| std::os::unix::net::UnixStream::connect(state::node_socket(&dir)).is_ok())
+/// Whether this computer's runner runs: it answers on its socket.
+fn runner_running() -> bool {
+    state::runner_dir().is_ok_and(|dir| {
+        std::os::unix::net::UnixStream::connect(state::runner_socket(&dir)).is_ok()
+    })
 }
 
 /// Log in to the hub at `url` as `user` with `password`, make an access token
@@ -614,9 +551,9 @@ fn token_from_account(url: &str, user: &str, password: &str) -> Result<String, E
         .ok_or_else(|| Error::failed("the hub sent no token"))
 }
 
-/// `ensemble node peers`: the nodes of your node's hub you may use now.
+/// `ensemble runner peers`: the runners of your runner's hub you may use now.
 fn peers() -> Result<ExitCode, String> {
-    let (url, token) = node_hub("node peers")?;
+    let (url, token) = runner_hub("runner peers")?;
     let token = token.as_str();
     let listed = ensemble::runtime::block_on(async {
         let mut link = ensemble::link::client::Connection::open(&url, token).await?;
@@ -629,7 +566,7 @@ fn peers() -> Result<ExitCode, String> {
     })?;
     let nodes = listed["nodes"].as_array().cloned().unwrap_or_default();
     if nodes.is_empty() {
-        println!("No node you may use is connected to {url}.");
+        println!("No runner you may use is connected to {url}.");
     }
     for n in nodes {
         let names = |key: &str, field: Option<&str>| -> String {
@@ -662,59 +599,12 @@ fn peers() -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `ensemble node connect --client C`: register Ensemble with the agent CLI you
-/// talk to, so that its sessions reach this computer's node; with `--hooks`,
-/// the session hooks that recall from the node's hub too.
-fn connect(ctx: &Ctx, client: &str, global: bool, hooks: bool) -> Result<ExitCode, String> {
-    let reg = setup::registration(client, &setup::ensemble_command(), global)?;
-    // The hooks are checked before anything is registered, so that a request
-    // that cannot be met changes nothing.
-    let hooks = if hooks {
-        // The hooks recall from the hub the node names; without one they say nothing.
-        if this_node().is_ok_and(|n| n.hub.is_none()) {
-            println!(
-                "note: this computer's node names no hub yet, so the hooks give no notes until it does"
-            );
-        }
-        let env_file = ctx.env_file.as_deref().map(absolute).transpose()?;
-        let home =
-            setup::home().ok_or("connect: cannot find your home directory: HOME is not set")?;
-        let path = ensemble::hooks::settings_path(client, global, &home, &ctx.dir)
-            .map_err(|e| format!("connect: --hooks: {e}"))?;
-        let command =
-            ensemble::hooks::hook_command(&setup::ensemble_command(), env_file.as_deref());
-        Some((path, command))
-    } else {
-        None
-    };
-    run_registration(&reg)?;
-    if let Some((path, command)) = hooks {
-        ensemble::hooks::install_into(&path, &command)?;
-        println!("Hooks written to {}: `{command}`", path.display());
-        if client == config::CODEX_AGENT {
-            println!("Codex runs them once you trust them: open /hooks in Codex.");
-        }
-    }
-    let node = node_file()?;
-    if !node.exists() {
-        println!(
-            "There is no node yet: `ensemble node setup` writes {}, or `ensemble node init`.",
-            node.display()
-        );
-    }
-    println!(
-        "Registered. Restart {client}: its sessions reach your node, which `ensemble node serve` runs."
-    );
-    Ok(ExitCode::SUCCESS)
-}
-
-/// `ensemble node setup`: find the agent CLIs, write this computer's node if there
-/// is none, register Ensemble with the client, and check the node's teams.
+/// `ensemble runner setup`: find the agent CLIs, write this computer's runner
+/// if there is none, and check the runner's teams.
 fn setup(
     ctx: &Ctx,
-    client: Option<String>,
     name: Option<String>,
-    global: bool,
+    workspace: Option<String>,
     yes: bool,
 ) -> Result<ExitCode, String> {
     let interactive = std::io::stdin().is_terminal() && !yes;
@@ -738,96 +628,79 @@ fn setup(
             )
         }
     );
-    let client = match client {
-        Some(c) => c,
-        None => {
-            let there: Vec<&str> = [
-                (found.claude, config::CLAUDE_CODE_AGENT),
-                (found.opencode, config::OPENCODE_AGENT),
-                (found.codex, config::CODEX_AGENT),
-            ]
-            .iter()
-            .filter(|(yes, _)| *yes)
-            .map(|(_, name)| *name)
-            .collect();
-            match there.as_slice() {
-                [] => {
-                    return Err("setup: no agent CLI found on PATH. Install `claude` (Claude Code), `opencode` or `codex`, then run `ensemble node setup` again.".into());
-                }
-                [only] => only.to_string(),
-                several if interactive => ask(
-                    &format!("Which agent do you talk to? ({})", several.join(", ")),
-                    Some(several[0]),
-                )?,
-                several => {
-                    return Err(format!(
-                        "setup: {} are installed; say which one you talk to with --client.",
-                        several.join(", ")
-                    ));
-                }
-            }
-        }
-    };
-    let path = node_file()?;
+    if !(found.claude || found.opencode || found.codex) {
+        println!(
+            "No agent CLI is on PATH: agents of type claude-code, opencode or codex need theirs installed (`claude`, `opencode`, `codex`); builtin and direct agents need none."
+        );
+    }
+    let path = runner_file()?;
     if path.exists() {
         println!("{} exists; keeping it.", path.display());
     } else {
         let name = match name {
             Some(name) => name,
             None if interactive => ask(
-                "What is this computer's node called? A hub knows it as <you>/<name>.",
+                "What is this computer's runner called? A hub knows it as <you>/<name>.",
                 host_name().as_deref(),
             )?,
             None => {
-                return Err("setup: name this computer's node with --name <name>.".into());
+                return Err("setup: name this computer's runner with --name <name>.".into());
             }
         };
-        let text = setup::node_file(&name)?;
+        let workspace = match workspace {
+            Some(workspace) => workspace,
+            None if interactive => ask(
+                "Which folder does it work in? Each git repository directly inside it is a project.",
+                Some(setup::WORKSPACE),
+            )?,
+            None => setup::WORKSPACE.to_string(),
+        };
+        let text = setup::runner_file(&name, &workspace)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
         }
         std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-        println!("Wrote {}: the node '{name}'.", path.display());
-    }
-    let reg = setup::registration(&client, &setup::ensemble_command(), global)?;
-    let registered = run_registration(&reg);
-    if let Err(e) = &registered {
-        println!("{e}");
+        println!(
+            "Wrote {}: the runner '{name}', working in {workspace}.",
+            path.display()
+        );
     }
     println!();
-    config::load_node(&path)
+    let runner = config::load_runner(&path)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("setup: {} went away", path.display()))?;
-    let (team, waiting) = teams::load_all(ctx.node_env()?.as_deref(), &SystemEnv)?;
+    let (team, waiting) = teams::load_all(ctx.runner_env()?.as_deref(), &SystemEnv)?;
     for line in &waiting {
         println!("{line}");
     }
     let healthy = if team.agents.is_empty() {
         println!(
-            "The node has no helper team yet. Make one with `ensemble node team new <name>`, pull one with `ensemble node team pull <url>`, or ask your agent to make one once the node runs."
+            "The runner has no helper team yet. Make one with `ensemble runner team new <name>`, or pull one with `ensemble runner team pull <url>`."
         );
         true
     } else {
-        report_doctor(&team, &ctx.dir)?
+        report_doctor(&team, Some(&runner.workspace), &ctx.dir)?
     };
     println!();
-    if registered.is_ok() && healthy {
+    if healthy {
         println!(
-            "Done. Start your node with `ensemble node serve` and keep it running; then in {client}, try: \"have the helper team implement X\" (restart {client} first if it was running)."
+            "Done. Clone the repositories its tasks are for into {}, sign in to your hub with `ensemble runner login <url> --user <name>`, and start the runner with `ensemble runner serve`; keep it running.",
+            runner.workspace.display()
         );
         Ok(ExitCode::SUCCESS)
     } else {
         println!(
-            "Setup is not finished: fix what is listed above, then run `ensemble node setup` again."
+            "Setup is not finished: fix what is listed above, then run `ensemble runner setup` again."
         );
         Ok(ExitCode::FAILURE)
     }
 }
 
-/// Print what is wrong, each with its fix, and say whether nothing was.
-fn report_doctor(config: &Config, dir: &Path) -> Result<bool, String> {
-    let mut findings = setup::structure(config, dir);
+/// Print what is wrong, each with its fix, and say whether nothing was. The
+/// agent CLIs are started in `dir`.
+fn report_doctor(config: &Config, workspace: Option<&Path>, dir: &Path) -> Result<bool, String> {
+    let mut findings = setup::structure(config, workspace);
     let ensemble = Ensemble::new(config.clone(), Some(dir.to_path_buf()));
     for (name, result) in ensemble.health() {
         findings.push(setup::health_finding(&name, &result, config));

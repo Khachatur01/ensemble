@@ -335,7 +335,6 @@ mod tests {
             isolation: Isolation::Shared,
             budget: Budget::Unlimited,
             limit: None,
-            recall: None,
             adapter: Adapter::Builtin(ba.clone()),
         };
         (a, ba)

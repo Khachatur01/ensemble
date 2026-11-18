@@ -296,7 +296,7 @@ pub fn use_source(source: &Source) -> Result<Resolved, String> {
             remote: None,
         }),
         Source::Remote { url, sha: None, .. } => Err(format!(
-            "{url} is not pinned to a commit, and Ensemble never follows a branch. `ensemble node team pull {url}` pins it to the commit its default branch is at."
+            "{url} is not pinned to a commit, and Ensemble never follows a branch. `ensemble runner team pull {url}` pins it to the commit its default branch is at."
         )),
         Source::Remote {
             url,
@@ -305,7 +305,7 @@ pub fn use_source(source: &Source) -> Result<Resolved, String> {
         } => {
             if !is_trusted(url, sha)? {
                 return Err(format!(
-                    "{url} at {sha} is not trusted yet, and its config decides what runs on this machine. Read what it would run and trust it with: ensemble node team pull {}",
+                    "{url} at {sha} is not trusted yet, and its config decides what runs on this machine. Read what it would run and trust it with: ensemble runner team pull {}",
                     pinned(url, sha)
                 ));
             }
@@ -661,7 +661,7 @@ mod tests {
             git_ref: None,
         };
         let err = use_source(&source(&first)).unwrap_err();
-        assert!(err.contains("ensemble node team pull"), "{err}");
+        assert!(err.contains("ensemble runner team pull"), "{err}");
         assert!(!is_trusted(&url, &first).unwrap());
         trust(&url, &first).unwrap();
         trust(&url, &first).unwrap();

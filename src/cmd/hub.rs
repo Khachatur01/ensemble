@@ -252,7 +252,8 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
         {
             crate::restart();
             return Some(
-                "The running hub starts again to use it; nodes connect again by themselves.".into(),
+                "The running hub starts again to use it; runners connect again by themselves."
+                    .into(),
             );
         }
         if let Ok(accounts) = server.operations().1.accounts() {

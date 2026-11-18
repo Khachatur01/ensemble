@@ -1,8 +1,8 @@
-//! One worker per directory. The worker that runs a folder's tasks, in the
-//! node, holds a lock file in the folder's state directory, and the one that
-//! distills a knowledge vault holds one in the vault's `.git`; another that
-//! finds it held leaves that work to it. The node holds one in its own state
-//! directory, so a computer runs one node.
+//! One worker per directory. The worker that runs a repository's tasks, in
+//! the runner, holds a lock file in the repository's state directory, and the
+//! one that distills a knowledge vault holds one in the vault's `.git`; another
+//! that finds it held leaves that work to it. The runner holds one in its own
+//! state directory, so a computer runs one runner.
 
 use std::path::{Path, PathBuf};
 

@@ -5,7 +5,7 @@
 //! An account has a name, a role and a password, kept as a PBKDF2-HMAC-SHA256
 //! hash. Logging in with the password gives a **session** token, which lasts
 //! the hub's `sessions.hours`. From a session, a person makes **access
-//! tokens** for their nodes and scripts: each named, with an optional expiry,
+//! tokens** for their runners, agents and scripts: each named, with an optional expiry,
 //! and optional scopes that narrow what the account's role allows. A token is
 //! shown once, when it is made; only its SHA-256 is kept.
 //!
@@ -55,7 +55,7 @@ impl Status {
 pub enum Kind {
     /// From a login: proves the password, expires after `sessions.hours`.
     Session,
-    /// Made from a session, for a node or a script.
+    /// Made from a session, for a runner, an agent or a script.
     #[default]
     Personal,
 }

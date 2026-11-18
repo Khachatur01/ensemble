@@ -1,17 +1,17 @@
-//! The helper teams a node holds: one directory, `teams/`, with a folder per
-//! team named for it (`~/.local/share/ensemble/teams/web/`). A team is there
+//! The helper teams a runner holds: one directory, `teams/`, with a folder per
+//! team named for it (`~/.config/ensemble/runner/teams/web/`). A team is there
 //! in one of three ways:
 //!
 //! - **made here**: a folder with its `config.yaml`, written by a person
-//!   (`ensemble node team new`) or by an agent at the person's request, which waits
+//!   (`ensemble runner team new`) or by an agent at the person's request, which waits
 //!   for approval (a `pending` file beside it) until the person approves it;
 //! - **linked**: a symbolic link to a folder elsewhere, such as a checkout of
-//!   the team's repository (`ensemble node team link`);
+//!   the team's repository (`ensemble runner team link`);
 //! - **pulled**: a folder with `pulled.json`, naming a git repository and the
-//!   commit it is pinned to (`ensemble node team pull`); the team itself is the
+//!   commit it is pinned to (`ensemble runner team pull`); the team itself is the
 //!   clone in the cache, checked and trusted per commit.
 //!
-//! The node runs every team that is ready at once, as one [`Config`]: each
+//! The runner runs every team that is ready at once, as one [`Config`]: each
 //! name of a team (its agents, model servers, limits and gates) becomes
 //! `<team>/<name>`, so agents are named `web/coder`.
 
@@ -64,7 +64,7 @@ impl TeamEntry {
         };
         if self.pending {
             format!(
-                "{origin}, waiting for approval: ensemble node team approve {}",
+                "{origin}, waiting for approval: ensemble runner team approve {}",
                 self.name
             )
         } else {
@@ -76,7 +76,7 @@ impl TeamEntry {
 /// Is `name` usable as a team's name: letters, digits, `-`, `_` and `.`, not
 /// starting with a dot?
 pub fn valid_team_name(name: &str) -> bool {
-    crate::node::valid_name(name) && !name.starts_with('.')
+    crate::runner::valid_name(name) && !name.starts_with('.')
 }
 
 /// The teams in `dir`, by name. A folder whose name is not a team's, or that
@@ -163,7 +163,7 @@ pub fn create_pending(dir: &Path, name: &str, text: &str, by: &str) -> Result<Pa
         std::fs::write(
             path.join(PENDING_FILE),
             format!(
-                "Written by {by}. It runs once you approve it: ensemble node team approve {name}\n"
+                "Written by {by}. It runs once you approve it: ensemble runner team approve {name}\n"
             ),
         )
     });

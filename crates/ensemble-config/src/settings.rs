@@ -1,6 +1,6 @@
 //! One setting of a YAML file, read or changed as text, so that its comments,
-//! its order and everything else in it stay as they were: what `ensemble node
-//! config`, `ensemble hub config` and `ensemble node team config` do. A
+//! its order and everything else in it stay as they were: what `ensemble runner
+//! config`, `ensemble hub config` and `ensemble runner team config` do. A
 //! setting is named by its path, its keys joined by dots, such as
 //! `server.listen`. The caller checks the result by loading it before it is
 //! written anywhere.
@@ -363,8 +363,8 @@ fn join(lines: Vec<String>, original: &str) -> String {
 mod tests {
     use super::*;
 
-    const NODE: &str = "\
-# This computer's node.
+    const RUNNER: &str = "\
+# This computer's runner.
 version: 1
 name: laptop        # its name
 access: private
@@ -381,49 +381,49 @@ offers:
 
     #[test]
     fn a_setting_is_read_as_it_is() {
-        assert_eq!(get(NODE, "name").unwrap().as_deref(), Some("laptop"));
-        assert_eq!(get(NODE, "version").unwrap().as_deref(), Some("1"));
+        assert_eq!(get(RUNNER, "name").unwrap().as_deref(), Some("laptop"));
+        assert_eq!(get(RUNNER, "version").unwrap().as_deref(), Some("1"));
         assert_eq!(
-            get(NODE, "offers.models.base_url").unwrap().as_deref(),
+            get(RUNNER, "offers.models.base_url").unwrap().as_deref(),
             Some("http://127.0.0.1:11434/v1")
         );
         assert_eq!(
-            get(NODE, "offers.runs").unwrap().as_deref(),
+            get(RUNNER, "offers.runs").unwrap().as_deref(),
             Some("agents:\n- web/coder")
         );
-        assert_eq!(get(NODE, "hub").unwrap(), None);
-        assert_eq!(get(NODE, "name.first").unwrap(), None);
-        assert!(get(NODE, "a..b").is_err());
+        assert_eq!(get(RUNNER, "hub").unwrap(), None);
+        assert_eq!(get(RUNNER, "name.first").unwrap(), None);
+        assert!(get(RUNNER, "a..b").is_err());
     }
 
     #[test]
     fn a_setting_is_changed_in_place_with_its_comment() {
-        let out = set(NODE, "name", "gpu-box").unwrap();
+        let out = set(RUNNER, "name", "gpu-box").unwrap();
         assert_eq!(
             out,
-            NODE.replace(
+            RUNNER.replace(
                 "name: laptop        # its name",
                 "name: gpu-box  # its name"
             )
         );
-        let out = set(NODE, "offers.models.base_url", "http://10.0.0.2:8888/v1").unwrap();
+        let out = set(RUNNER, "offers.models.base_url", "http://10.0.0.2:8888/v1").unwrap();
         assert!(
             out.contains("    base_url: http://10.0.0.2:8888/v1\n    serve: [qwen]\n"),
             "{out}"
         );
-        assert!(out.starts_with("# This computer's node.\n") && out.ends_with("# the end\n"));
+        assert!(out.starts_with("# This computer's runner.\n") && out.ends_with("# the end\n"));
     }
 
     #[test]
     fn a_block_set_whole_loses_what_it_held() {
-        let out = set(NODE, "offers.runs", "{}").unwrap();
+        let out = set(RUNNER, "offers.runs", "{}").unwrap();
         assert!(out.contains("  runs: {}\n  models:\n"), "{out}");
         assert!(!out.contains("web/coder"), "{out}");
     }
 
     #[test]
     fn a_missing_setting_is_added_where_it_belongs() {
-        let out = set(NODE, "hub", "ws://127.0.0.1:7700").unwrap();
+        let out = set(RUNNER, "hub", "ws://127.0.0.1:7700").unwrap();
         assert!(
             out.ends_with("# the end\nhub: ws://127.0.0.1:7700\n"),
             "{out}"
@@ -433,7 +433,7 @@ offers:
             Some("ws://127.0.0.1:7700")
         );
 
-        let out = set(NODE, "offers.models.max_concurrent", "2").unwrap();
+        let out = set(RUNNER, "offers.models.max_concurrent", "2").unwrap();
         assert!(
             out.contains("    serve: [qwen]\n    max_concurrent: 2\n\n# the end"),
             "{out}"
@@ -466,20 +466,20 @@ offers:
 
     #[test]
     fn a_setting_is_taken_out_and_an_empty_mapping_says_so() {
-        let out = unset(NODE, "offers.models").unwrap();
+        let out = unset(RUNNER, "offers.models").unwrap();
         assert!(
             out.contains("  runs:\n    agents: [web/coder]\n\n# the end"),
             "{out}"
         );
         let out = unset(&out, "offers.runs").unwrap();
         assert!(out.contains("offers: {}\n  # what it lends\n"), "{out}");
-        assert!(unset(NODE, "hub").unwrap_err().contains("no `hub`"));
+        assert!(unset(RUNNER, "hub").unwrap_err().contains("no `hub`"));
     }
 
     #[test]
     fn settings_are_merged_one_by_one_and_what_is_beside_them_stays() {
         let doc = "name: rogstrix\noffers:\n  models:\n    serve: [qwen, llama]\n  runs: {}\nhub: \"ws://127.0.0.1:7700\"\n";
-        let (out, paths) = merge(NODE, doc).unwrap();
+        let (out, paths) = merge(RUNNER, doc).unwrap();
         assert_eq!(paths, ["name", "offers.models.serve", "offers.runs", "hub"]);
         assert!(out.contains("name: \"rogstrix\"  # its name\n"), "{out}");
         assert!(

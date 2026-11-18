@@ -6,8 +6,10 @@ work flows through them and how they run at once. **Part two, "Decisions and
 direction"**, records what was decided with the owner and where Ensemble is
 going; its build order says what is done and what is not. The questions at the
 end are open; everything else is decided unless marked otherwise. Part two's
-"Hub, adapters and runners" (decided 2026-11-19) changes much of part one:
-the node becomes a runner, and clients reach the hub alone.
+"Hub, adapters and runners" (decided 2026-11-19) is being built: the runner
+is a pure worker and clients reach the hub alone, while the separate
+executables, signing in over the link, the runner's workspace as a place it
+clones into, and shared LLM backends are still to come.
 
 `README.md` is the user's guide: every setting, command and tool. This document
 is the map behind it.
@@ -17,66 +19,66 @@ is the map behind it.
 ## The pieces
 
 Ensemble is an agentic development system, not an MCP server: a **hub** that
-provides services, and **nodes** that provide computing power, with work
-spread across them. MCP is how an agent CLI reaches a node. It is one binary,
-`ensemble`, in these roles:
+provides services, and **runners** that provide computing power, with work
+spread across them. It is one binary, `ensemble`, in these roles:
 
-- **The node**: a computational resource. It holds a helper team, runs its
-  agents (agent CLIs, Ensemble's own loop) and works through tasks, and may
-  offer the model servers of its machine. A private node works for its owner;
-  a shared one lends its agents and models to others on the hub, so a team
-  spreads its load over every machine it has. It serves its owner's agent
-  sessions from any folder.
 - **The hub**: the services: task tracking (issues from a tracker become tasks
-  on the right person's node), knowledge, accounts and tokens, routing runs
-  and model calls between nodes, and integrations (Telegram and others, to
-  come). It has no team and runs no agents. It is always its own process,
-  `ensemble hub serve`, on a server for a team or on one person's computer,
-  and each node names it as `hub:` in its `node.yaml`.
-- **The helper teams**: each a `config.yaml` in the node's teams directory,
-  its agents named `<team>/<agent>`, each run by an
-  adapter (an agent CLI started headless, an agent loop of Ensemble's own, one
-  chat request to a model, or a run on another node).
-- **The ways in**: the agent CLI a person already uses, which reaches its node
-  over MCP and sees the helper team as tools; the hub's tracker, whose issues
-  become tasks; and, to come, the hub's integrations, chat API and web UI.
-
-On one computer:
+  for the right person), knowledge, accounts and tokens, routing runs and
+  model calls between runners, and MCP over HTTP for client agents. It has no
+  team and runs no agents. It is always its own process, `ensemble hub serve`,
+  on a server for a team or on one person's computer, and each runner names it
+  as `hub:` in its `runner.yaml`.
+- **The runner**: a computational resource and a pure worker. It holds the
+  helper teams, runs their agents (agent CLIs, Ensemble's own loop) on the
+  tasks the hub keeps for its owner, in the git repositories of its workspace,
+  and may offer the agents and model servers of its machine. A private runner
+  works for its owner; a shared one lends its agents and models to others on
+  the hub, so a team spreads its load over every machine it has. It serves no
+  client.
+- **The helper teams**: each a `config.yaml` in the runner's teams directory,
+  its agents named `<team>/<agent>`, each run by an adapter (an agent CLI
+  started headless, an agent loop of Ensemble's own, one chat request to a
+  model, or a run on another runner).
+- **The ways in**: the agent CLI a person already uses, which reaches the hub
+  over MCP with an account's token as the API key and installs nothing of
+  Ensemble: it shares, recalls and makes tasks; the hub's tracker, whose issues
+  become tasks; and, to come, the hub's REST API, sources and web UI.
 
 ```text
-  your agent CLI (Claude Code, Codex, OpenCode, ...)
-        │  MCP: JSON-RPC 2.0, one object per line, on stdio
+  client agents (Claude Code, Codex, OpenCode, claude.ai)
+        │  MCP over HTTP: /mcp on the hub's port, a token as the API key
         ▼
-  ensemble mcp          a bridge
-        │  Unix socket: one hello line, then MCP both ways
+  ensemble hub serve          accounts, tokens, knowledge, the tasks,
+        ▲                     the tracker inbox, the connected runners
+        │  the link: a WebSocket each runner opens, signed in with a token
+        │
+  ensemble runner serve       one per computer: a worker per git repository
+        │                     of its workspace, which leases its tasks
         ▼
-  ensemble node serve   one per computer: sessions from any folder,
-        │               a worker per folder it served
-        ▼
-  the helper team (config.yaml)
+  the helper teams (config.yaml)
         │  router: agent → adapter; model from its `try` list
         ▼
   claude -p · opencode run · codex exec        agent CLIs, as subprocesses
   builtin                                      harness-rs's loop, in-process
   direct                                       one chat request
-  node                                         a run on another computer
+  node                                         a run on another runner
         │
         ▼
   model servers (llm_backends), or the CLI's own login
 ```
 
-With a hub server for a team:
+What a runner and the hub keep open between them:
 
 ```text
-  member's node                              ensemble hub serve
-  ─────────────                              ──────────────────
-  RemoteMemory (a session's knowledge) ══╗   accounts, sessions, tokens (database.db)
-  RemoteBoard (a folder's tasks)       ══╬══ the tasks, leased to nodes (database.db)
-  Worker (runs and models it offers)   ══╝   the knowledge vault and its distiller
+  member's runner                            ensemble hub serve
+  ───────────────                            ──────────────────
+  RemoteBoard (a repository's tasks)   ══╗   accounts, sessions, tokens (database.db)
+  Worker (runs and models it offers)   ══╝   the tasks, leased to runners (database.db)
+                                             the knowledge vault and its distiller
                                              the tracker inbox (database.db)
-  `node` adapter (a run elsewhere)     ══    the connected nodes, runs, /nodes/v1/
-                                             REST /api/v1/
-     ══ one WebSocket each, opened by the node, signed in with a bearer token
+  `node` adapter (a run elsewhere)     ══    the connected runners, runs, /nodes/v1/
+                                             REST /api/v1/, MCP /mcp
+     ══ one WebSocket each, opened by the runner, signed in with a bearer token
 ```
 
 ## Processes
@@ -85,17 +87,16 @@ Every process is the same binary. What runs in each:
 
 | command | what it runs | ends |
 | --- | --- | --- |
-| `ensemble mcp` | a bridge: it connects to the node's socket, sends `{"dir": "<folder>"}`, and carries MCP between stdio and the socket a message a line; when the node goes away while the session goes on, it answers the requests left with an error to try again, waits for the node to come back, says the session's `initialize` again and tells the client its tools may have changed | when the node closes the session |
-| `ensemble node serve` | the node, one per computer: a socket for sessions and for the operations `ensemble node …` asks of it, a worker per folder that runs the tasks the hub keeps for its project, and with the hub its `node.yaml` names, a link that offers runs and models (`Worker`) | on SIGINT or SIGTERM; a change to `node.yaml` has it start again in the same process |
+| `ensemble runner serve` | the runner, one per computer: a worker per git repository directly inside its workspace, each running the tasks the hub keeps for the repository's project, the workspace looked at again every 30 seconds; a socket for the operations `ensemble runner …` asks of it and for reloading its teams; and with the hub its `runner.yaml` names and `offers`, a link that offers runs and models (`Worker`) | on SIGINT or SIGTERM; a change to `runner.yaml` has it start again in the same process |
 | `ensemble hub serve` | the hub, from `~/.config/ensemble/hub/`: one port for the link, the REST API, `/nodes/v1/` and, with `interfaces.mcp`, MCP for client agents at `/mcp`; a socket for the operations `ensemble hub …` asks of it; the tasks; the vault's distiller; the tracker inbox | on SIGINT or SIGTERM; a change to `hub.yaml` it cannot use as it runs has it start again in the same process |
-| everything else | one command: read the config and the state, or ask the hub, do one thing, print; `task new`, `task assign` and `task answer` also tell the node about the folder, so that its worker runs there | at once |
+| everything else | one command: read the config and the state, or ask the running process over its socket, do one thing, print | at once |
 
-A folder's tasks are run by one worker of the computer at a time: whoever
-holds the lock file (`worker.lock`) in the folder's state directory; across
-computers, a lease on the hub keeps one node on a task. A node that finds the lock
-taken serves sessions there but starts no tasks. A lock left by a dead process
-is taken over. The same lock keeps one node per computer, one distiller per
-vault and one inbox per hub.
+A repository's tasks are run by one worker of the computer at a time: whoever
+holds the lock file (`worker.lock`) in the repository's state directory;
+across computers, a lease on the hub keeps one runner on a task. A runner that
+finds the lock taken leaves that repository to the process that holds it. A
+lock left by a dead process is taken over. The same lock keeps one runner per
+computer, one distiller per vault and one inbox per hub.
 
 ## Crates
 
@@ -104,61 +105,63 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 
 | crate | what it is | files |
 | --- | --- | --- |
-| `ensemble-core` | what everything shares | the error vocabulary (`port.rs`); the per-user state, cache and config directories (`state.rs`); the working folder, a `repo` inside it and what a run changed (`workspace.rs`); the record of runs behind `ensemble node agent stats` (`records.rs`); the one-worker lock (`lock.rs`); dates in UTC (`time.rs`); the files a run on a node carries there and back (`snapshot.rs`); the folders a node served, by project (`folders.rs`); the async runtime and its bridges to code that blocks (`runtime.rs`) |
+| `ensemble-core` | what everything shares | the error vocabulary (`port.rs`); the per-user state, cache and config directories (`state.rs`); the working folder, a `repo` inside it and what a run changed (`workspace.rs`); the record of runs behind `ensemble runner agent stats` (`records.rs`); the one-worker lock (`lock.rs`); dates in UTC (`time.rs`); the files a run on another runner carries there and back (`snapshot.rs`); the async runtime and its bridges to code that blocks (`runtime.rs`) |
 | `ensemble-ops` | operations, defined once for every interface | the operation, its spec (name, summary, who may run it, input fields), errors as data, the caller, and the registry that checks both before it runs one (`lib.rs`) |
-| `ensemble-config` | the three files a person writes | `config.yaml`: the document as written (`raw.rs`), the environment, `.env` files and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), adding and removing an agent as text, comments kept (`edit.rs`); one setting read, set or merged as text (`settings.rs`); a settings file, with the Nix-declared settings kept, and its `config.*` operations (`settings_file.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); `hub.yaml` (`hub.rs`); `node.yaml` (`node.rs`) |
+| `ensemble-config` | the three files a person writes | `config.yaml`: the document as written (`raw.rs`), the environment, `.env` files and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), adding and removing an agent as text, comments kept (`edit.rs`); one setting read, set or merged as text (`settings.rs`); a settings file, with the Nix-declared settings kept, and its `config.*` operations (`settings_file.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); `hub.yaml` (`hub.rs`); `runner.yaml` (`runner.rs`); the `interfaces` of each (`interfaces.rs`) |
 | `ensemble-backends` | talking to model servers | one chat request in the server's own format (`chat.rs`); which models a server serves (`models.rs`); the first usable model of a `try` list (`resolve.rs`); texts as vectors (`embed.rs`); a stand-in server for tests (`testing.rs`) |
 | `ensemble-store` | Turso files | the hub's `database.db`, opened for each read or change, and any other Turso file, such as the vault's cache of vectors (`lib.rs`) |
-| `ensemble-knowledge` | the hub's knowledge | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); notes by meaning, with their vectors in `.ensemble/embeddings.db` (`meaning.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait a session uses (`lib.rs`) |
-| `ensemble-link` | the hub server and the link to it | MCP over HTTP for client agents (`mcp.rs`); the hub's operations, its accounts, tokens, sessions and settings (`accounts.rs`); accounts and hashed tokens (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API, each route one of the operations (`api.rs`), over a small HTTP reader (`http.rs`); the frames of the link (`protocol.rs`); the hub's side, a task per connection (`server.rs`); connected nodes, runs and model calls, `/nodes/v1/` (`nodes.rs`); the node's side, `Connection`, `Link` (one reconnecting) and `RemoteMemory` (`client.rs`); the token file (`tokens.rs`) |
+| `ensemble-knowledge` | the hub's knowledge | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); notes by meaning, with their vectors in `.ensemble/embeddings.db` (`meaning.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait (`lib.rs`) |
+| `ensemble-link` | the hub server and the link to it | MCP over HTTP for client agents (`mcp.rs`); the hub's operations, its accounts, tokens, sessions and settings (`accounts.rs`); accounts and hashed tokens (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API, each route one of the operations (`api.rs`), over a small HTTP reader (`http.rs`); the frames of the link (`protocol.rs`); the hub's side, a task per connection (`server.rs`); connected runners, runs and model calls, `/nodes/v1/` (`nodes.rs`); the runner's side, `Connection` and `Link`, one reconnecting, which says who its token is (`client.rs`); the token file (`tokens.rs`) |
 | `ensemble-agents` | running one agent once | the adapters (`external/`): `claude_code.rs`, `opencode.rs`, `codex.rs`, `builtin.rs`, `direct.rs`, `node.rs`, the subprocess runner (`process.rs`) and gates (`gate.rs`); a git worktree per task (`worktree.rs`); the router: agents to adapters, models, records, `health` (`router.rs`) |
-| `ensemble-tasks` | work handed to the team | tickets and tasks as the hub has them (`tasks.rs`); where they are kept and leased: the `Board` trait, the hub's `DbBoard` and the `Service` that answers the link, a node's `RemoteBoard` (`board.rs`); what a node keeps of its runs (`runs.rs`); the queue that runs tasks and background delegations within slots and budgets (`queue.rs`); the MCP tools (`delegation.rs`); review and merge of a worktree task (`review.rs`) |
+| `ensemble-tasks` | the work of the helper teams | tickets and tasks as the hub has them (`tasks.rs`); where they are kept and leased: the `Board` trait, the hub's `DbBoard` and the `Service` that answers the link, a runner's `RemoteBoard` (`board.rs`); what a runner keeps of its runs (`runs.rs`); the worker that runs a repository's tasks within slots and budgets (`queue.rs`); one run of an agent and what it came to (`delegation.rs`) |
 | `ensemble-inbox` | issues from a tracker into tasks | the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`); an issue made a task and what the task reports (`work.rs`); the hub's inbox (`relay.rs`) |
-| `ensemble-node` | a node's link to a hub | `Worker`: runs and model calls for others (`lib.rs`) |
-| `ensemble-mcp` | MCP over stdio | the session loop (`lib.rs`), the tool catalogue (`protocol.rs`), notifications (`notify.rs`) |
-| `ensemble` (the root) | the binary | the command line, parsed with clap (`src/cli.rs`), and what each group of commands does (`src/cmd/`: `node`, `team`, `agent`, `task`, `knowledge`, `hub`); the node's sessions and the bridge (`src/daemon.rs`); what `node setup`, `node connect` and `node doctor` find and register (`src/setup.rs`); session hooks (`src/hooks.rs`); the node's teams, loaded, made, linked, pulled and approved (`src/teams.rs`), over git repositories pinned and trusted per commit (`src/remote.rs`) |
-| `nix/` | not a crate: the NixOS module (`nixos-module.nix`: a hub as a system service, the node as a user service, each run as the person it is for), the Home Manager module (`home-manager-module.nix`: the node on Linux or macOS), what they share about a node (`node.nix`), and an example configuration the flake's checks build (`example.nix`). Settings declared in Nix are merged into the person's own files at each start, and `ensemble` refuses to change them (`.nix-managed` names them); the rest is made and changed with `ensemble`, as on any platform |
+| `ensemble-node` | what a runner offers through a hub | `Worker`: runs and model calls for others (`lib.rs`) |
+| `ensemble` (the root) | the binary | the command line, parsed with clap (`src/cli.rs`), the commands made from the hub's and the runner's operations (`src/ops_cli.rs`), and what each group of commands does (`src/cmd/`: `runner`, `team`, `agent`, `hub`, `config`); the runner's workers, socket and reload (`src/daemon.rs`); operations run by the running process over its socket, or here (`src/local.rs`); what `runner setup` and `runner doctor` find and check (`src/setup.rs`); the runner's teams, loaded, made, linked, pulled and approved (`src/teams.rs`), over git repositories pinned and trusted per commit (`src/remote.rs`) |
+| `nix/` | not a crate: the NixOS module (`nixos-module.nix`: a hub as a system service, the runner as a user service, each run as the person it is for), the Home Manager module (`home-manager-module.nix`: the runner on Linux or macOS), what they share about a runner (`runner.nix`), and an example configuration the flake's checks build (`example.nix`). Settings declared in Nix are merged into the person's own files at each start, and `ensemble` refuses to change them (`.nix-managed` names them); the rest is made and changed with `ensemble`, as on any platform |
 
-Two rules keep the layers apart. The MCP session knows the tools and the
-router, not which CLIs exist. The router knows agents; only the adapters know
-how a CLI is started and read.
+Two rules keep the layers apart. The worker knows the router, not which CLIs
+exist. The router knows agents; only the adapters know how a CLI is started
+and read.
 
 ## Configuration and state
 
 What a person writes is **configuration**, reviewed and never changed by
-Ensemble except on request (`node agent add`, `node team new`, an approved
-`team_create`):
+Ensemble except on request (`runner agent add`, `runner team new`,
+`runner config set`):
 
 | file | where | holds |
 | --- | --- | --- |
-| `config.yaml` | a helper team's folder in the node's teams directory (`~/.config/ensemble/node/teams/<name>/`), a folder linked there, or a pulled repository's clone | `llm_backends`, `limits`, `gates`, `tracker`, `agents` |
-| `hub.yaml` | `~/.config/ensemble/hub/`, on the computer that runs the hub | `owner`, the hub's own `llm_backends`, `knowledge`, `tasks`, `server` and `roles` |
-| `node.yaml` | `~/.config/ensemble/node/`, one per computer | `name`, `access`, `hub`, `offers` |
+| `config.yaml` | a helper team's folder in the runner's teams directory (`~/.config/ensemble/runner/teams/<name>/`), a folder linked there, or a pulled repository's clone | `llm_backends`, `limits`, `gates`, `tracker`, `agents` |
+| `hub.yaml` | `~/.config/ensemble/hub/`, on the computer that runs the hub | `owner`, the hub's own `llm_backends`, `knowledge`, `tasks`, `server`, `roles` and `interfaces` |
+| `runner.yaml` | `~/.config/ensemble/runner/`, one per computer | `name`, `access`, `workspace`, `hub`, `offers`, `interfaces` |
 
 No setting has a default: every one is written, and a missing one is refused by
 name. Each file is changed by hand or setting by setting from the command line
-(`ensemble node config`, `ensemble hub config`, `ensemble node team config`;
-`settings.rs` changes one setting as text, keeping comments), loaded before it
-is written. A block that is absent means its module is off. No file holds a secret:
-keys are named by the variable that holds them, read from the environment or
-from a hidden `.env` beside the file that names them, `node/.env` for the
-node's teams and `hub/.env` for the hub (`--env-file` reads another file in
-their place). The node and the hub keep separate secrets because they are
-separate services, often of separate users. Each file has a JSON Schema at the repository root, checked
-against the code by the tests.
+(`ensemble runner config`, `ensemble hub config`, `ensemble runner team
+config`; `settings.rs` changes one setting as text, keeping comments), loaded
+before it is written. A block that is absent means its module is off. A path
+(the hub's vault and tracker, the runner's workspace) is beside its file when
+it is relative, and the runner's `workspace` may start with `~/`. No file
+holds a secret: keys are named by the variable that holds them, read from the
+environment or from a hidden `.env` beside the file that names them,
+`runner/.env` for the runner's teams and `hub/.env` for the hub
+(`--env-file` reads another file in their place). The runner and the hub keep
+separate secrets because they are separate services, often of separate users.
+Each file has a JSON Schema at the repository root, checked against the code
+by the tests.
 
 What Ensemble learns while it runs is **state**, per user, never in a project
 or a config directory:
 
 | path | holds |
 | --- | --- |
-| `~/.local/state/ensemble/workdirs/<folder>-<hash>/` | a working folder's `runs/`, `worktrees/`, `state.json` and `worker.lock` |
-| `~/.local/state/ensemble/orgs/teams-<hash>/` | the teams' `usage.json` (budgets) and `records.jsonl` (`ensemble node agent stats`), by `<team>/<agent>`, shared by every folder |
-| `~/.local/state/ensemble/node/` | the node's lock, `folders.json` (the folder last used for each project), `runs/` for others |
-| `$XDG_RUNTIME_DIR/ensemble/<hash>.sock` | a node's socket, in a folder only its user may enter (`/tmp/ensemble-<user>/` without `XDG_RUNTIME_DIR`) |
-| `~/.config/ensemble/node/hubs.json` | the node's hub tokens, one per URL, mode 0600 |
-| `~/.config/ensemble/node/.env`, `~/.config/ensemble/hub/.env` | the keys the node's teams and the hub's backends name, written by you, mode 0600 |
-| `~/.config/ensemble/node/teams/` | the node's helper teams: a folder per team, its `config.yaml`, a link to a folder elsewhere, or `pulled.json` (repository and commit); `pending` beside a team an agent wrote |
+| `~/.local/state/ensemble/workdirs/<folder>-<hash>/` | a repository's `runs/`, `worktrees/` and `worker.lock` |
+| `~/.local/state/ensemble/orgs/teams-<hash>/` | the teams' `usage.json` (budgets) and `records.jsonl` (`ensemble runner agent stats`), by `<team>/<agent>`, shared by every repository |
+| `~/.local/state/ensemble/runner/` | the runner's lock, `runs/` for others |
+| `$XDG_RUNTIME_DIR/ensemble/<hash>.sock` | the runner's and the hub's sockets, in a folder only their user may enter (`/tmp/ensemble-<user>/` without `XDG_RUNTIME_DIR`) |
+| `~/.config/ensemble/runner/hubs.json` | the runner's hub tokens, one per URL, mode 0600 |
+| `~/.config/ensemble/runner/.env`, `~/.config/ensemble/hub/.env` | the keys the runner's teams and the hub's backends name, written by you, mode 0600 |
+| `~/.config/ensemble/runner/teams/` | the runner's helper teams: a folder per team, its `config.yaml`, a link to a folder elsewhere, or `pulled.json` (repository and commit); `pending` beside a team that waits for approval |
 | `~/.cache/ensemble/` | clones of pulled teams, checked against their commit each time |
 
 `<hash>` is a hash of the whole path, so two folders of one name are kept
@@ -170,18 +173,15 @@ it is meant to be read, in Obsidian or anything that reads Markdown.
 Ensemble is async, on tokio (one shared multi-thread runtime,
 `ensemble_core::runtime`).
 
-- **A session is one task.** Its tool calls are futures in one
-  `FuturesUnordered`, beside the loop that reads requests, so several calls run
-  at once and each can borrow what the session holds. Replies and
-  notifications go through a channel to one writer, so messages never
-  interleave.
-- **A queue is one task.** `Queue::work` scans the folder's tasks every two
-  seconds, starts what may start, and keeps the running tasks and background
-  delegations as futures in one `FuturesUnordered`. It wakes early on a
-  `Notify` when something is submitted, ends or frees a slot.
-- **A node** spawns a task per session, and one per folder's queue. Its link
-  to a hub is one task whose runs and model calls go on beside it; they hand
-  what to send to the link through a channel.
+- **A worker is one task.** `Queue::work` scans its repository's tasks on the
+  hub every two seconds, starts what may start, and keeps the running tasks as
+  futures in one `FuturesUnordered`, beside the look at the board, so a run
+  renewing its claim and the look share one link. It wakes early on a
+  `Notify` when a run ends or frees a slot.
+- **A runner** spawns a task per repository's worker, and looks at its
+  workspace every 30 seconds between the requests on its socket. Its link to
+  a hub for what it offers is one task whose runs and model calls go on
+  beside it; they hand what to send to the link through a channel.
 - **A hub server** spawns a task per connection, so one slow request holds up
   no other. Connections reach each other through outboxes: a channel per
   connection that others fill and its own task empties.
@@ -197,133 +197,126 @@ Ensemble is async, on tokio (one shared multi-thread runtime,
 - **Loops that are not async** (a vault's distiller, a tracker's inbox) run on
   threads of their own, polling every few seconds.
 - **Stopping**: SIGINT and SIGTERM set one flag. Every loop watches it, the
-  queues close, running tasks are stopped (and, having no result, run again
-  next time), and the node waits up to ten seconds for them.
+  workers close, running tasks are stopped and put back on the hub, and the
+  runner waits up to ten seconds for them.
 
-What a node keeps for a folder, and what a hub server's connections borrow, is
-made once and lives as long as the process, so it is leaked on purpose
-(`Box::leak`) and borrowed as `'static`.
+What a runner keeps for a repository, and what a hub server's connections
+borrow, is made once and lives as long as the process, so it is leaked on
+purpose (`Box::leak`) and borrowed as `'static`.
 
 ## Teams
 
-The node runs every team in its teams directory at once. When it starts it
+The runner runs every team in its teams directory at once. When it starts it
 reads each one (`src/teams.rs`): a folder made here, a link to a folder
 elsewhere, or a pulled repository, whose clone in the cache is checked against
-its pinned commit and must be trusted. A team an agent wrote is skipped, with a
-line saying it waits for approval; a team that cannot be loaded stops the node,
-naming it. The teams are then combined into one helper team
+its pinned commit and must be trusted. A team marked `pending` is skipped,
+with a line saying it waits for approval; a team that cannot be loaded stops
+the runner, naming it. The teams are then combined into one helper team
 (`ensemble_config::teams::combine`): each name of a team, its agents, model
 servers, limits and gates, becomes `<team>/<name>`, and every reference inside
 it (an agent's `limit`, its models' backends) is renamed with it. So the
-router, the queue, budgets, records and tasks work as with one team, with
+router, the workers, budgets, records and tasks work as with one team, with
 agents named `web/coder`; a task's `gate: { name: test }` means the gate
 `test` of its agent's team.
 
-- **Made**: `node team new` writes the sample; `node agent add` and `node agent remove` edit
-  it as text, comments kept.
-- **Linked**: `team add` makes a symbolic link to a folder with a
+- **Made**: `runner team new` writes the sample; `runner agent add` and
+  `runner agent remove` edit it as text, comments kept.
+- **Linked**: `team link` makes a symbolic link to a folder with a
   `config.yaml`, such as a checkout a company keeps.
 - **Pulled**: `team pull` resolves a tag or branch to a commit, clones it into
   the cache, shows what it would run, and records the trust and
   `pulled.json`; `team update` moves the pin the same way. A branch is never
   followed at run time.
-- **Written by an agent**: `team_create` checks the config and writes it with
-  a `pending` file; `team approve` shows what it would run and removes the
-  file. The agent has no tool to change a team that exists.
+- **Waiting for approval**: a team folder with a `pending` file beside its
+  `config.yaml` runs nothing until `team approve` shows what it would run and
+  removes the file.
 
-The commands that read teams (`node team check`, `node doctor`, the `node agent`
-commands, `task new`) load them the same way. A running node reloads them when a `node team` command
-changes the directory, or on `ensemble node reload` after a change by hand:
-it reads them again, and if one cannot be loaded it keeps the teams it had
-and says why. Otherwise each folder's `Ensemble` gets the new teams with
-`set_config` (a run going on keeps the snapshot it started with), the node's
-offers and its inbox get them too, and every open session sends its client
-`notifications/tools/list_changed`, so the client asks for the tools again.
+The commands that read teams (`runner team check`, `runner doctor`, the
+`runner agent` commands) load them the same way. A running runner reloads them
+when a `runner team` command changes the directory, or on `ensemble runner
+reload` after a change by hand: it reads them again, and if one cannot be
+loaded it keeps the teams it had and says why. Otherwise each repository's
+`Ensemble` gets the new teams with `set_config` (a run going on keeps the
+snapshot it started with), and the runner's offers get them too.
 
-## A delegation
+## A run
 
-Your agent calls `delegate` with an agent's name, `<team>/<agent>`, and a task:
+A worker runs an agent on a task (`delegation::run_delegation`, in
+`ensemble-tasks`), and so does `ensemble runner agent run`:
 
-1. The session hands the call to `delegation::call` (`ensemble-tasks`), as a
-   future of the session's task. The client's `progressToken` names it in the
-   notifications.
-2. The queue takes a **slot** of the agent (`max_concurrent`, or its shared
-   `limit`), waiting if they are all busy, and counts the run against its
-   **budget**, refusing it when over.
-3. If the agent has `recall`, the hub's knowledge is asked about the task, and
-   the notes go after the task's context.
-4. The **router** (`ensemble-agents`) picks the adapter, and for an agent on
+1. The worker has taken a **slot** of the agent (`max_concurrent`, or its
+   shared `limit`) and counted the run against its **budget**.
+2. The **router** (`ensemble-agents`) picks the adapter, and for an agent on
    `llm_backends` resolves the first model of its `try` list whose backend
    answers and serves it (`ensemble-backends`; what a backend serves is
    remembered for a minute).
-5. The **adapter** runs it. A CLI adapter starts the CLI in the working folder
-   in its own process group, with the agent's prompt, tools and model, and
-   reads its JSON events line by line as they come; each step and tool call
-   becomes a progress notification. `builtin` runs harness-rs's loop in
-   process; `direct` sends one chat request; `node` sends the run to a hub
-   (see "Nodes").
-6. At `max_seconds` or on a cancel (`notifications/cancelled`), the whole
-   process tree is killed and what was done is returned, marked unfinished.
-7. The working folder is compared before and after, for agents that can write,
-   and the result lists the files changed, the commands run, steps, tool
-   calls and tokens. A run that overlapped another in the same folder says so.
-8. One line is appended to `records.jsonl`; the slot is given back.
+3. The **adapter** runs it. A CLI adapter starts the CLI in the repository (or
+   the task's worktree) in its own process group, with the agent's prompt,
+   tools and model, and reads its JSON events line by line as they come; each
+   step and tool call becomes a line of the task's activity log. `builtin`
+   runs harness-rs's loop in process; `direct` sends one chat request; `node`
+   sends the run to a hub (see "Runs and models for others").
+4. At `max_seconds`, or when the task is cancelled or its worker closes, the
+   whole process tree is killed and what was done is returned, marked
+   unfinished.
+5. The folder is compared before and after, for agents that can write, and the
+   result lists the files changed, the commands run, steps, tool calls and
+   tokens. A run that overlapped another in the same folder says so.
+6. One line is appended to `records.jsonl`; the slot is given back.
 
-A failed delegation comes back as a tool result with `isError: true`, never a
-JSON-RPC error, so the model learns why. With `background: true` the call
-answers at once with an id (`adhoc-N`) and steps 2 to 8 go on in the queue's
-task; `status`, `wait` and `cancel` follow it.
+A failed run is a result too, with why it failed and whether another attempt
+could work, and it becomes the task's result.
 
 ## A task
 
 A task is kept on the hub, in its database, for one account and one project
-(a working folder's name): its ticket, its assignee, its questions and
-answers, what agents handed on, its result, and its **lease**. It comes from
-the `submit` tool, `ensemble task new`, or the hub's inbox. The hub never runs one; a
-node leases it. Each folder's worker, every two seconds and whenever
-something changes, asks the hub for its project's tasks (`RemoteBoard`, over
-one link that opens again when it breaks), and:
+(a repository's name): its ticket, its assignee, its questions and answers,
+what agents handed on, its result, and its **lease**. It comes from a client
+agent's `submit` over the hub's MCP, or from the hub's inbox. The hub never
+runs one; a runner leases it. The worker of each repository of a runner's
+workspace, every two seconds and whenever a run ends, asks the hub for its
+project's tasks (`RemoteBoard`, over one link that opens again when it
+breaks), and:
 
 1. skips tasks that ended, with no assignee (backlog), waiting for an answer,
-   with `after` tasks not yet `done`, or running on another node;
+   with `after` tasks not yet `done`, or running on another runner;
 2. waits while the agent is over budget, its slots are busy, or (with
    `when_none: wait`) no model of its `try` list can be used;
-3. **claims** the task for a minute (`task_claim`); another node that was first
-   wins, and the task is left;
+3. **claims** the task for a minute (`task_claim`); another runner that was
+   first wins, and the task is left;
 4. for `isolation: worktree`, makes or reuses a git worktree on the branch
    `ensemble/<id>`, from where its work was last pushed when it has been;
-5. recalls notes once, if the agent has `recall`;
-6. runs the agent as a delegation, then the task's **gate** if it names one,
+5. runs the agent (see "A run"), then the task's **gate** if it names one,
    running the agent again with the gate's output until it passes or
    `attempts` are used, all the while renewing the claim every 15 seconds
    (`task_renew`), which also says when someone cancelled the task;
-7. says how the run ended (`task_finish`): `NEEDS INPUT: <question>` keeps the
-   question and the task waits for `answer`; `HAND OFF: <agent> <what
+6. says how the run ended (`task_finish`): `NEEDS INPUT: <question>` keeps the
+   question and the task waits for an answer; `HAND OFF: <agent> <what
    remains>` reassigns it with a note; otherwise its result (`done`, `failed`
    or `cancelled`), after committing everything on the task's branch in a
-   worktree. Nothing is merged: that is `ensemble task merge`, which only a person
-   runs.
+   worktree. Nothing is merged: the person merges the branch.
 
-A node that stops puts its running tasks back (`task_release`); one that dies
-stops renewing, and the hub treats its claim as gone once it runs out. Either
-way the task is `queued (interrupted on <node>)`, and the next node to look
-runs it again. A node whose claim ran out, and whose task another took, is
-refused when it says how its run ended, so a task never ends twice. The hub's
-clock alone decides when a claim runs out.
+A runner that stops puts its running tasks back (`task_release`); one that
+dies stops renewing, and the hub treats its claim as gone once it runs out.
+Either way the hub marks the task interrupted on that runner, and the next
+runner to look runs it again. A runner whose claim ran out, and whose task another
+took, is refused when it says how its run ended, so a task never ends twice.
+The hub's clock alone decides when a claim runs out.
 
 Where the work is decides who goes on with it. A claim says whether the run
 is **movable**: its agent works in a worktree, and the repository has a remote
-`origin`. Whenever a movable run stops, the node commits what it did on the
+`origin`. Whenever a movable run stops, the runner commits what it did on the
 task's branch, pushes the branch, and tells the hub where it is (`progress`:
-node, branch, commit, with `task_release` or `task_finish`); the next run, on
-any node, fetches it and makes or moves its worktree there, and its agent is
-told to go on from it. A run that is not movable changes one computer's
-folder, so the hub **pins** the task to that node from its first claim, and
-no other node may claim it. `review` and `merge` fetch a branch pushed from
-another computer, and move a local one that is behind it up to it.
+runner, branch, commit, with `task_release` or `task_finish`); the next run,
+on any runner with the repository in its workspace, fetches it and makes or
+moves its worktree there, and its agent is told to go on from it. A run that
+is not movable changes one computer's repository, so the hub **pins** the task
+to that runner from its first claim, and no other runner may claim it.
 
-What a run does as it goes (its activity lines) is in `runs/<id>/` on the node
-that runs it, which is how `status` shows what an agent is doing there.
+What a run does as it goes (its activity lines) is in `runs/<id>/log.txt` in
+the repository's state directory on the runner that runs it. A task done is
+shared to the hub's knowledge as its account's, for the distiller to learn
+from.
 
 ## Knowledge
 
@@ -343,16 +336,14 @@ that runs it, which is how `status` shows what an agent is doing there.
   one chat request per step, with no tools. Shared text goes between markers
   with a nonce, an answer must be the JSON asked for, and anything else goes
   to `review/`.
-- **A session reaches knowledge through `KnowledgeAccess`**, an async trait
-  with two implementations: `RemoteMemory`, the hub's vault over the link,
-  opened on first use and opened again once when it breaks, which is what a
-  node uses; and `Memory`, the vault on disk (its file and git work through
-  `runtime::blocking`), which is what the hub itself uses. The
-  session offers the knowledge tools the hub allows, and the queue uses the
-  same trait to give notes to agents with `recall`.
-- **Session hooks** (`ensemble hook`) put notes into Claude Code and Codex
-  sessions on `SessionStart` and `UserPromptSubmit`, each note once per
-  session, through the same trait.
+- **Client agents reach knowledge over the hub's MCP**: `share` and `recall`,
+  as the token's permissions allow, each run as the link's request of the
+  same name (`Server::answer`). The MCP server's instructions tell the agent
+  when to recall and to share when the person asks. `Memory`, the vault on
+  disk (its file and git work through `runtime::blocking`), is what the hub
+  uses, through the `KnowledgeAccess` trait.
+- **Helper agents get no knowledge**: a runner has no knowledge tools. What a
+  task reports when it is done is shared, under its account, from the hub.
 - **On the hub** a share is kept under the signed-in account's name, and the
   running hub distills; `ensemble hub knowledge distill` does it by hand on
   the hub's computer.
@@ -370,82 +361,87 @@ folder of markdown issues is the one implementation so far.
   project, kept like any other (for the agent its `<label>:<team>/<agent>`
   label names, or in the backlog), and which issue became which task is a
   **delivery** in the hub's database. Then each poll looks at the task: the
-  node that runs it, its question (posted, and the assignee's next comment is
-  the answer), its result (posted once). An issue closed cancels its task.
-  Nodes know nothing of trackers: they run the task like any other.
+  runner that runs it, its question (posted, and the assignee's next comment
+  is the answer), its result (posted once). An issue closed cancels its task.
+  Runners know nothing of trackers: they run the task like any other.
 
-## Nodes
+## Runs and models for others
 
-A node with `offers` and a hub server keeps a link that does what comes
+A runner with `offers` and a hub server keeps a link that does what comes
 (`ensemble-node`'s `Worker`):
 
 - **A run.** A requester's agent of `type: node` (the `node` adapter) sends the
   hub a `run` request with the task and a snapshot of the files git tracks or
-  would track (at most 24 MiB). The hub picks the first of the named nodes that
-  is connected, may be used by that account, and offers the agent, and sends
-  it a `run` event. The node writes the files into a folder of the run's own,
-  waits for a slot of the agent, runs its owner's agent there, and sends
-  `run_progress` lines and a `run_done` with the changed files. The requester
-  writes them into its folder; gates, worktrees and commits stay there. When
-  either side goes away the other is told; a cancel is a `run_cancel`.
+  would track (at most 24 MiB). The hub picks the first of the named runners
+  that is connected, may be used by that account, and offers the agent, and
+  sends it a `run` event. The runner writes the files into a folder of the
+  run's own, waits for a slot of the agent, runs its owner's agent there, and
+  sends `run_progress` lines and a `run_done` with the changed files. The
+  requester writes them into its folder; gates, worktrees and commits stay
+  there. When either side goes away the other is told; a cancel is a
+  `run_cancel`.
 - **A model call.** An OpenAI-compatible request to `/nodes/v1/` on the hub's
   port, with an access token as the API key, goes as a `model_call` event to
-  the least busy node that serves the model (the caller's own first). The node
-  sends it to its model server with reqwest and streams the answer back in
-  `model_reply` chunks, which the hub writes to the caller as they come.
+  the least busy runner that serves the model (the caller's own first). The
+  runner sends it to its model server with reqwest and streams the answer back
+  in `model_reply` chunks, which the hub writes to the caller as they come.
 
-The hub keeps nodes as presence only: a node is a connection that said `node`,
-and nothing of it is kept once it is gone. A private node works for its owner;
-a shared one also for accounts with `compute`, and connecting one needs
-`host`. A shared node may offer only agents on `llm_backends`, so a CLI's own
-login is never lent.
+The hub keeps such runners as presence only: a runner is a connection that
+said `node`, and nothing of it is kept once it is gone. A private runner works
+for its owner; a shared one also for accounts with `compute`, and connecting
+one needs `host`. A shared runner may offer only agents on `llm_backends`, so
+a CLI's own login is never lent.
 
 ## The link
 
-The node opens one WebSocket and signs in with `Authorization: Bearer <token>`
+The runner opens WebSockets and signs in with `Authorization: Bearer <token>`
 during the upgrade (401 without a valid one). Frames are JSON text: requests
 `{id, method, params}`, replies `{id, result}` or `{id, error}`, and events
-`{event, data}` the hub sends unasked. A node may open several links: one for
-the hub's knowledge and one for the tasks in each folder it serves, one for
-what it offers, and one per run it sends elsewhere.
+`{event, data}` the hub sends unasked. A runner opens one link for the tasks of
+each repository it works in, one for what it offers, one per run it sends
+elsewhere, and a short one for `hello` when it signs in or says its status.
 
-| for | the node asks | the hub sends |
+| for | the runner asks | the hub sends |
 | --- | --- | --- |
-| knowledge | `hello` (who am I, which permissions), `share`, `recall` | |
-| tasks | each with its `project`: `tasks`, `task`, `task_create`, `task_claim`, `task_renew`, `task_release`, `task_finish`, `task_answer`, `task_assign`, `task_cancel` | |
-| nodes | `node` (I am a node: name, access, agents, models), `nodes` (which may I use), `run`, `run_cancel`, and as a node `run_progress`, `run_done`, `model_reply` | `run`, `run_cancel` and `model_call` events to a node; `run_progress` and `run_done` events to whoever asked for a run (a `run_done` that failed when the node went away) |
+| who it is | `hello` (who am I, which permissions) | |
+| tasks | each with its `project`: `tasks`, `task`, `task_claim`, `task_renew`, `task_release`, `task_finish` | |
+| runs and models | `node` (I am a runner that offers: name, access, agents, models), `nodes` (which may I use), `run`, `run_cancel`, and as one that offers `run_progress`, `run_done`, `model_reply` | `run`, `run_cancel` and `model_call` events to a runner; `run_progress` and `run_done` events to whoever asked for a run (a `run_done` that failed when the runner went away) |
 
-Every request is checked against the token's permissions (its role, narrowed by
-its scopes), read again from the hub's state, so a revoked token stops at
-once. The permissions are `share`, `recall`, `tasks`, `admin`, `compute` and
-`host`. The same port serves the REST API under `/api/v1/` (accounts,
-sessions, access tokens, admin) and `/nodes/v1/`; a request that asks for a
-WebSocket upgrade is the link, anything else is HTTP. The server speaks plain
-HTTP; for the internet a TLS reverse proxy goes in front.
+The hub's MCP runs its tools as the same requests (`share`, `recall`, and
+`task_create`, `task_answer`, `task_assign`, `task_cancel` with the reading
+ones), so the link and MCP cannot differ. Every request is checked against the
+token's permissions (its role, narrowed by its scopes), read again from the
+hub's state, so a revoked token stops at once. The permissions are `share`,
+`recall`, `tasks`, `admin`, `compute` and `host`. The same port serves the
+REST API under `/api/v1/` (accounts, sessions, access tokens, admin),
+`/nodes/v1/` and `/mcp`; a request that asks for a WebSocket upgrade is the
+link, anything else is HTTP. The server speaks plain HTTP; for the internet a
+TLS reverse proxy goes in front.
 
 ## Errors
 
 One error type, `port::Error`, for every adapter and probe: an agent CLI that
 would not start and a model server that answered 503 are the same event to the
-calling agent. Each error says where it came from, whether a retry could work,
-and is written to be read by the model that will see it.
+task that ran it. Each error says where it came from, whether a retry could
+work, and is written to be read by the person or the model that will see it.
 
 ## Safety boundaries
 
 - **No sandbox of Ensemble's own.** Agents use their CLIs' own tools with your
   permissions; `tools` and `permission_mode` (or Codex's sandbox) limit them.
   `builtin`'s file tools cannot leave the working folder; its `shell` can.
-  `node team check` and `node doctor` warn about agents that can change files in place.
+  `runner team check` and `runner doctor` warn about agents that can change
+  files in place.
 - **What runs is what the config says.** A task cannot bring a command; gates
   are defined in `config.yaml`. A remote helper team is pinned to a commit and
   trusted per commit.
 - **Secrets** are never in a file Ensemble reads as config, and are passed to a
   CLI only as the provider key of the backend it runs on.
 - **Subscriptions stay with their owner.** Claude Code runs only through its
-  official CLI on its owner's login; a shared node never lends one.
+  official CLI on its owner's login; a shared runner never lends one.
 - **Shared text is data.** The distilling model has no tools; recalled notes
   are marked as reference data.
-- **The hub keeps hashes.** Passwords as PBKDF2, tokens as SHA-256. A node's
+- **The hub keeps hashes.** Passwords as PBKDF2, tokens as SHA-256. A runner's
   token file and socket folder are its user's alone.
 
 # Part two: decisions and direction
@@ -498,9 +494,8 @@ on their own runs both on their computer. (Decided 2026-11-19.)
 
 ## Hub, adapters and runners
 
-(Decided 2026-11-19; not built yet: see the build order. Part one describes
-what is built, the node that this makes a runner, and is rewritten as this is
-built.)
+(Decided 2026-11-19; being built: see the build order. Part one describes
+what is built, and is rewritten as this is built.)
 
 ```text
  runner ─┐                         knowledge (the distiller's models)
@@ -1059,15 +1054,15 @@ crate holds it today.
 | tasks | tasks kept on the hub and leased, the inbox, `IssueTracker` adapters, hand-off | identity, team | `ensemble-tasks`, `ensemble-inbox` |
 | vault | vault repositories, schema, index, visibility | identity | `ensemble-knowledge` (no visibility yet) |
 | pipeline | ingest, filter, extract, integrate, review | vault, backends | `ensemble-knowledge` |
-| recall | context packages | vault | `ensemble-knowledge`, `src/hooks.rs` |
+| recall | context packages | vault | `ensemble-knowledge`, and `ensemble-link` (`mcp.rs`) for client agents |
 | capture | recorder, quick capture, privacy gate | pipeline | not built |
 | connectors | chats, mail, CRM, tracker events, each its own | pipeline or tasks | not built |
 | sources | connectors per provider (Microsoft 365, Telegram), collect and filter before the distiller | pipeline, backends | not built (decided 2026-11-19) |
 | relay | runners' offered backends, used by the hub and other runners over a second WebSocket | link, backends | not built (decided 2026-11-19) |
-| wiring | the hub's MCP over HTTP for client agents | api | `ensemble-mcp` (over stdio today), `src/setup.rs`, `src/hooks.rs` |
-| operations | every action on a hub or a runner, once, for every interface | identity, config | `ensemble-ops`; the hub's in `ensemble-link` (`accounts.rs`), the node's in `src/cmd/node.rs` (accounts, tokens, settings, signing in so far) |
+| wiring | the hub's MCP over HTTP for client agents | api | `ensemble-link` (`mcp.rs`) |
+| operations | every action on a hub or a runner, once, for every interface | identity, config | `ensemble-ops`; the hub's in `ensemble-link` (`accounts.rs`), the runner's in `src/cmd/runner.rs` (accounts, tokens, settings, signing in so far) |
 | interfaces | the CLI, the REST API, and later a web UI or a desktop app, as adapters over the operations | operations | the CLI made from the operations (`src/ops_cli.rs`), the rest by hand in `src/cmd/`; the REST routes in `ensemble-link` (`api.rs`) |
-| api | chat API, MCP endpoint, REST | identity | `ensemble-link` (REST only) |
+| api | chat API, MCP endpoint, REST | identity | `ensemble-link` (REST, and MCP in `mcp.rs`) |
 | web | the UI | api | not built |
 | link | hub-to-runner connection | identity | `ensemble-link`, `ensemble-node` |
 
@@ -1144,7 +1139,14 @@ crate holds it today.
     Nix package, with one crate for the link's messages; the node becomes the
     runner, a pure worker: no MCP for clients, no hooks, no delegations;
     signing in and joining over the link, with join codes, and no HTTP from a
-    runner to the hub; the protocol version checked on connecting.
+    runner to the hub; the protocol version checked on connecting. (In
+    progress: the node is the runner, `ensemble runner …` and
+    `runner.yaml`; the stdio MCP, session hooks, delegations, the `task` and
+    `knowledge` commands and the agents' `recall` are gone, so clients use
+    the hub's MCP alone; the runner runs a worker for each git repository of
+    its `workspace`, looked at again every 30 seconds. Not yet: the two
+    crates and executables, signing in and joining over the link, the
+    protocol version.)
 19. The runner's workspace: a task's repository found or cloned, worked on a
     branch and pushed; a question when it is not found; a task given back,
     and blocked when no runner can reach its repository; the related notes in

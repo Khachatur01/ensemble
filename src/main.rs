@@ -1,8 +1,8 @@
 //! The `ensemble` binary: the command line (`cli`), the commands made from the
-//! hub's and the node's operations (`ops_cli`), and what each other group of
-//! commands does (`cmd`). `ensemble mcp` is what an agent CLI starts, a
-//! session of the node; everything else is for the person who runs the node,
-//! or a hub, and the work in their folders.
+//! hub's and the runner's operations (`ops_cli`), and what each other group of
+//! commands does (`cmd`). Every command is for the person who runs this
+//! computer's runner, or a hub; client agents reach a hub over MCP, and run
+//! nothing of Ensemble.
 
 use clap::FromArgMatches;
 use ensemble::config::{self, Config, SystemEnv};
@@ -27,9 +27,9 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let hub = ensemble::link::accounts::operations();
-    let node = cmd::node::operations();
-    let matches = cli::command(&hub, &node).get_matches();
-    match dispatch(&matches, &hub, &node) {
+    let runner = cmd::runner::operations();
+    let matches = cli::command(&hub, &runner).get_matches();
+    match dispatch(&matches, &hub, &runner) {
         Ok(code) => code,
         Err(message) => {
             eprintln!("ensemble: {message}");
@@ -38,12 +38,12 @@ fn main() -> ExitCode {
     }
 }
 
-/// Run what `matches` names: one of the hub's or the node's operations, or
+/// Run what `matches` names: one of the hub's or the runner's operations, or
 /// one of the other commands.
 fn dispatch(
     matches: &clap::ArgMatches,
     hub: &ensemble::ops::Registry<ensemble::link::accounts::HubContext>,
-    node: &ensemble::ops::Registry<cmd::node::NodeContext>,
+    runner: &ensemble::ops::Registry<cmd::runner::RunnerContext>,
 ) -> Result<ExitCode, String> {
     let ctx = Ctx::new(
         matches.get_one::<PathBuf>("env_file").cloned(),
@@ -76,19 +76,19 @@ fn dispatch(
                 return done;
             }
         }
-        Some(("node", under)) if ops_cli::matched(node, under).is_some() || is_extra(under) => {
-            let socket = state::node_socket(&state::node_dir()?);
-            let route = local::Route::to(&socket, cmd::node::NodeContext::new);
+        Some(("runner", under)) if ops_cli::matched(runner, under).is_some() || is_extra(under) => {
+            let socket = state::runner_socket(&state::runner_dir()?);
+            let route = local::Route::to(&socket, cmd::runner::RunnerContext::new);
             let call = |name: &str, input| {
                 route
                     .as_ref()
                     .map_err(|e| Error::failed(e.clone()))?
-                    .call(node, name, input)
+                    .call(runner, name, input)
             };
-            if let Some((name, leaf)) = ops_cli::matched(node, under) {
-                return ops_cli::run(node, &call, name, leaf);
+            if let Some((name, leaf)) = ops_cli::matched(runner, under) {
+                return ops_cli::run(runner, &call, name, leaf);
             }
-            let file = || cmd::node::NodeContext::new().map(|c| c.into_settings());
+            let file = || cmd::runner::RunnerContext::new().map(|c| c.into_settings());
             if let Some(done) = cmd::config::run_extra(under, &call, file) {
                 return done;
             }
@@ -96,13 +96,13 @@ fn dispatch(
         _ => {}
     }
     let cli = cli::Cli::from_arg_matches(matches).map_err(|e| e.to_string())?;
-    run(&ctx, cli, hub, node)
+    run(&ctx, cli, hub, runner)
 }
 
 /// What every command is given: the global options, resolved.
 struct Ctx {
     env_file: Option<PathBuf>,
-    /// The folder the command works in.
+    /// The folder an agent works in, for the commands that run one.
     dir: PathBuf,
 }
 
@@ -144,9 +144,9 @@ impl Ctx {
         Some(file)
     }
 
-    /// The node's: `~/.config/ensemble/node/.env`, or `--env-file`.
-    fn node_env(&self) -> Result<Option<PathBuf>, String> {
-        Ok(self.env_file_in(state::node_config_dir()?))
+    /// The runner's: `~/.config/ensemble/runner/.env`, or `--env-file`.
+    fn runner_env(&self) -> Result<Option<PathBuf>, String> {
+        Ok(self.env_file_in(state::runner_config_dir()?))
     }
 
     /// A hub's: `~/.config/ensemble/hub/.env`, or `--env-file`.
@@ -154,9 +154,9 @@ impl Ctx {
         Ok(self.env_file_in(state::hub_config_dir()?))
     }
 
-    /// The node's teams, as one helper team, saying which wait for approval.
+    /// The runner's teams, as one helper team, saying which wait for approval.
     fn teams(&self) -> Result<Config, String> {
-        let (config, waiting) = teams::load_all(self.node_env()?.as_deref(), &SystemEnv)?;
+        let (config, waiting) = teams::load_all(self.runner_env()?.as_deref(), &SystemEnv)?;
         for line in &waiting {
             eprintln!("ensemble: {line}");
         }
@@ -168,85 +168,78 @@ fn run(
     ctx: &Ctx,
     cli: cli::Cli,
     hub: &ensemble::ops::Registry<ensemble::link::accounts::HubContext>,
-    node: &ensemble::ops::Registry<cmd::node::NodeContext>,
+    runner: &ensemble::ops::Registry<cmd::runner::RunnerContext>,
 ) -> Result<ExitCode, String> {
     use cli::Command;
     match cli.command {
-        Command::Node(c) => cmd::node::run(ctx, c),
+        Command::Runner(c) => cmd::runner::run(ctx, c),
         Command::Hub(c) => cmd::hub::run(ctx, c),
-        Command::Task(c) => cmd::task::run(ctx, c),
-        Command::Knowledge(c) => cmd::knowledge::run(ctx, c),
         Command::Completions { shell } => {
             use std::io::Write;
             let mut script = Vec::new();
-            clap_complete::generate(shell, &mut cli::command(hub, node), "ensemble", &mut script);
+            clap_complete::generate(
+                shell,
+                &mut cli::command(hub, runner),
+                "ensemble",
+                &mut script,
+            );
             // Piped into `head` or the like, the rest is not wanted: no error.
             let _ = std::io::stdout().write_all(&script);
             Ok(ExitCode::SUCCESS)
         }
-        Command::Mcp => cmd::node::mcp(ctx),
-        Command::Hook => cmd::node::hook(),
     }
 }
 
-/// This computer's node file, `~/.config/ensemble/node/node.yaml`: a computer
-/// runs one node.
-fn node_file() -> Result<PathBuf, String> {
-    Ok(config::node_path(&state::node_config_dir()?))
+/// This computer's runner file, `~/.config/ensemble/runner/runner.yaml`: a
+/// computer runs one runner.
+fn runner_file() -> Result<PathBuf, String> {
+    Ok(config::runner_path(&state::runner_config_dir()?))
 }
 
-/// This computer's node, from its node file.
-fn this_node() -> Result<config::Node, String> {
-    let path = node_file()?;
-    config::load_node(&path)
+/// This computer's runner, from its runner file.
+fn this_runner() -> Result<config::Runner, String> {
+    let path = runner_file()?;
+    config::load_runner(&path)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| {
             format!(
-                "no node file at {}; `ensemble node setup` or `ensemble node init` writes one",
+                "no runner file at {}; `ensemble runner setup` or `ensemble runner init` writes one",
                 path.display()
             )
         })
 }
 
-/// The hub server this computer's node names, and its token.
-fn node_hub(command: &str) -> Result<(String, String), String> {
-    let node = this_node().map_err(|e| format!("{command}: {e}"))?;
-    let url = node.hub.ok_or_else(|| {
+/// The hub server this computer's runner names, and its token.
+fn runner_hub(command: &str) -> Result<(String, String), String> {
+    let runner = this_runner().map_err(|e| format!("{command}: {e}"))?;
+    let url = runner.hub.ok_or_else(|| {
         format!(
-            "{command}: this computer's node names no hub; add `hub: wss://…` to {}",
-            node.source.display()
+            "{command}: this computer's runner names no hub; `ensemble runner login <url>` names one in {}",
+            runner.source.display()
         )
     })?;
     let token = ensemble::link::Tokens::load()?
         .get(&url)
         .ok_or_else(|| {
-            format!("{command}: no token for the hub {url}. Sign in first: ensemble node login {url} --user <name>")
+            format!("{command}: no token for the hub {url}. Sign in first: ensemble runner login {url} --user <name>")
         })?
         .to_string();
     Ok((url, token))
 }
 
-/// The knowledge of this computer's node's hub, for work in `dir`.
-fn knowledge_for(dir: &Path, command: &str) -> Result<ensemble::link::RemoteMemory, String> {
-    let (url, token) = node_hub(command)?;
-    let project = dir.file_name().map(|n| n.to_string_lossy().into_owned());
-    Ok(ensemble::link::RemoteMemory::new(&url, &token, project))
-}
-
-/// The tasks of the working folder's project, on this computer's node's
-/// hub.
-fn board_for(dir: &Path, command: &str) -> Result<ensemble::board::RemoteBoard, String> {
-    let (url, token) = node_hub(command)?;
-    let project = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .ok_or_else(|| {
-            format!(
-                "{command}: {} has no name to keep tasks under",
-                dir.display()
-            )
-        })?;
-    Ok(ensemble::board::RemoteBoard::new(&url, &token, &project))
+/// The tasks of each project in this computer's runner's workspace, on its
+/// hub: the project's name and its board.
+fn boards(command: &str) -> Result<Vec<(String, ensemble::board::RemoteBoard)>, String> {
+    let runner = this_runner().map_err(|e| format!("{command}: {e}"))?;
+    let (url, token) = runner_hub(command)?;
+    Ok(daemon::repositories(&runner.workspace)
+        .iter()
+        .filter_map(|dir| dir.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .map(|project| {
+            let board = ensemble::board::RemoteBoard::new(&url, &token, &project);
+            (project, board)
+        })
+        .collect())
 }
 
 /// A secret, such as a password: typed at the terminal without echo, or read
@@ -283,11 +276,6 @@ fn read_secret(prompt: &str) -> Result<String, String> {
     eprintln!();
     read.map_err(|e| format!("cannot read the terminal: {e}"))?;
     Ok(line.trim_end_matches(['\n', '\r']).to_string())
-}
-
-/// Where tasks and runs are kept for the work done in `dir`.
-fn state_for(dir: &Path) -> Result<PathBuf, String> {
-    state::dir_for(dir)
 }
 
 /// `program` and `args` as one line a shell would read back the same way.
@@ -347,28 +335,7 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-/// Run a registration, saying first what it is. The client's own words come
-/// through, and so does its exit status.
-fn run_registration(reg: &setup::Registration) -> Result<(), String> {
-    println!("$ {}", reg.line());
-    match std::process::Command::new(reg.program)
-        .args(&reg.args)
-        .status()
-    {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!(
-            "`{}` failed ({status}). Run the command above yourself to see why.",
-            reg.program
-        )),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
-            "`{}` is not on PATH. Install it, then run the command above.",
-            reg.program
-        )),
-        Err(e) => Err(format!("cannot run `{}`: {e}", reg.program)),
-    }
-}
-
-/// This computer's name, offered as the node's name when setup asks.
+/// This computer's name, offered as the runner's name when setup asks.
 fn host_name() -> Option<String> {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .or_else(|_| std::fs::read_to_string("/etc/hostname"))
@@ -387,42 +354,28 @@ fn hostname() -> String {
         .unwrap_or_else(|| "this computer".into())
 }
 
-/// After a team is added, changed or removed: have the running node use it
+/// After a team is added, changed or removed: have the running runner use it
 /// now, and say what happened.
-fn reload_node() {
-    let reloaded = state::node_dir()
-        .and_then(|d| ensemble::runtime::block_on(daemon::reload(&state::node_socket(&d))));
+fn reload_runner() {
+    let reloaded = state::runner_dir()
+        .and_then(|d| ensemble::runtime::block_on(daemon::reload(&state::runner_socket(&d))));
     match reloaded {
-        Ok(said) => println!("The node uses it now: {said}."),
-        Err(e) if e.starts_with("no node is running") => {
-            println!("No node is running; it reads its teams when it starts.")
+        Ok(said) => println!("The runner uses it now: {said}."),
+        Err(e) if e.starts_with("no runner is running") => {
+            println!("No runner is running; it reads its teams when it starts.")
         }
         Err(e) => println!("{e}"),
     }
 }
 
-/// Tell this computer's node about `dir`, so that its worker runs the
-/// folder's tasks, and say what happens next.
-fn tell_node(dir: &Path) -> String {
-    let told = state::node_dir().and_then(|node| {
-        ensemble::runtime::block_on(daemon::touch(&state::node_socket(&node), dir))
-    });
-    match told {
-        Ok(()) => "your node runs it, or another of yours with its agent".into(),
-        Err(e) => format!(
-            "{e}; another of your nodes with its agent runs it, or this one once it does (`ensemble node serve`)"
-        ),
-    }
-}
-
-/// Set by SIGINT and SIGTERM, so that a node or a hub server stops cleanly.
+/// Set by SIGINT and SIGTERM, so that a runner or a hub server stops cleanly.
 static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Set with [`STOP`] when the running hub or node stops to start again in the
+/// Set with [`STOP`] when the running hub or runner stops to start again in the
 /// same process, with its settings as they are now.
 static RESTART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Have the running hub or node stop and start again, in this process.
+/// Have the running hub or runner stop and start again, in this process.
 fn restart() {
     RESTART.store(true, std::sync::atomic::Ordering::Relaxed);
     STOP.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -457,7 +410,7 @@ fn confirm(question: &str, yes: bool) -> Result<bool, String> {
     Ok(matches!(answer.to_lowercase().as_str(), "y" | "yes"))
 }
 
-/// Whether `matches`, under `hub` or `node`, names `config edit` or `config
+/// Whether `matches`, under `hub` or `runner`, names `config edit` or `config
 /// merge`, which only the command line has.
 fn is_extra(matches: &clap::ArgMatches) -> bool {
     matches!(

@@ -1,34 +1,33 @@
 //! The command line: what each command takes, and the help it shows. Commands
-//! are grouped by what they act on: this computer's `node` (its teams and
-//! agents too), a `hub` this computer runs, and the `task`s and `knowledge` of
-//! the folder you work in.
+//! are grouped by what they act on: this computer's `runner` (its teams and
+//! agents too), and a `hub` this computer runs.
 
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use ensemble::ops::Registry;
 use std::path::PathBuf;
 
 const AFTER_HELP: &str = "\
 Files:
-  ~/.config/ensemble/node/   node.yaml, teams/ (one folder per team), .env, hubs.json
+  ~/.config/ensemble/runner/ runner.yaml, teams/ (one folder per team), .env, hubs.json
   ~/.config/ensemble/hub/    hub.yaml, .env, database.db, vault/ (a hub this computer runs)
-  ~/.local/state/ensemble/   run logs and worktrees, per working folder
+  ~/.local/state/ensemble/   run logs and worktrees, per repository
 
 API keys are never written in a config file: a backend names the variable that
-holds its key, read from the environment, or from the node's or the hub's .env
-(or --env-file).";
+holds its key, read from the environment, or from the runner's or the hub's .env
+(or --env-file). Client agents reach the hub over MCP, with an account's token.";
 
-/// An agentic development system: a hub of services and nodes of computing
-/// power, reached over MCP.
+/// An agentic development system: a hub of services that client agents reach
+/// over MCP, and runners of computing power.
 #[derive(Debug, Parser)]
 #[command(name = "ensemble", version, after_help = AFTER_HELP, max_term_width = 100)]
 pub struct Cli {
     /// A file of NAME=value lines read for variables the environment does not
-    /// set, instead of the node's or the hub's .env.
+    /// set, instead of the runner's or the hub's .env.
     #[arg(long, global = true, value_name = "PATH")]
     pub env_file: Option<PathBuf>,
-    /// The folder you work in: where agents work, and whose name is the
-    /// project its tasks and knowledge are kept under. Default: the current
-    /// directory.
+    /// The folder an agent works in for `runner agent run`, and where
+    /// `runner agent health` and `runner doctor` start agent CLIs. Default:
+    /// the current directory.
     #[arg(short, long, global = true, value_name = "PATH")]
     pub dir: Option<PathBuf>,
     #[command(subcommand)]
@@ -36,8 +35,8 @@ pub struct Cli {
 }
 
 /// The whole command line: the commands below, with those made from the
-/// hub's and the node's operations (`ops_cli`) under `hub` and `node`.
-pub fn command<H, N>(hub: &Registry<H>, node: &Registry<N>) -> clap::Command {
+/// hub's and the runner's operations (`ops_cli`) under `hub` and `runner`.
+pub fn command<H, R>(hub: &Registry<H>, runner: &Registry<R>) -> clap::Command {
     let hub_groups = [
         ("user", "The hub's accounts."),
         ("role", "The hub's roles."),
@@ -46,70 +45,54 @@ pub fn command<H, N>(hub: &Registry<H>, node: &Registry<N>) -> clap::Command {
             "The hub's settings, hub.yaml, by their keys joined by dots, such as server.listen",
         ),
     ];
-    let node_groups = [(
+    let runner_groups = [(
         "config",
-        "The node's settings, node.yaml, by their keys joined by dots, such as hub",
+        "The runner's settings, runner.yaml, by their keys joined by dots, such as hub",
     )];
     Cli::command()
         .mut_subcommand("hub", |c| {
             crate::cmd::config::extras(crate::ops_cli::mount(c, hub, &hub_groups))
         })
-        .mut_subcommand("node", |c| {
-            crate::cmd::config::extras(crate::ops_cli::mount(c, node, &node_groups))
+        .mut_subcommand("runner", |c| {
+            crate::cmd::config::extras(crate::ops_cli::mount(c, runner, &runner_groups))
         })
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// This computer's node: it runs your helper teams, and reaches its hub.
+    /// This computer's runner: it runs the tasks of your hub with your helper
+    /// teams.
     #[command(subcommand)]
-    Node(NodeCommand),
-    /// A hub this computer runs: accounts, tasks, knowledge, and the link
-    /// nodes connect to.
+    Runner(RunnerCommand),
+    /// A hub this computer runs: accounts, tasks, knowledge, MCP for client
+    /// agents, and the link runners connect to.
     #[command(subcommand)]
     Hub(HubCommand),
-    /// The tasks of the folder you work in, kept on your node's hub.
-    #[command(subcommand)]
-    Task(TaskCommand),
-    /// The knowledge of your node's hub, for the folder you work in.
-    #[command(subcommand)]
-    Knowledge(KnowledgeCommand),
     /// Print a completion script for a shell, such as `ensemble completions
     /// zsh > ~/.zfunc/_ensemble`.
     Completions {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
-    /// A session of your node over MCP on stdio: what your agent CLI starts,
-    /// in the folder you work in.
-    #[command(hide = true)]
-    Mcp,
-    /// What a Claude Code or Codex session hook runs: the notes about the
-    /// prompt not given in the session yet.
-    #[command(hide = true)]
-    Hook,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum NodeCommand {
-    /// Set this computer up: find the agent CLIs, write the node if there is
-    /// none, connect the agent you talk to, and check the teams.
+pub enum RunnerCommand {
+    /// Set this computer up: find the agent CLIs, write the runner if there is
+    /// none, and check the teams.
     Setup {
-        /// The agent CLI you talk to; asked when several are installed.
-        #[arg(long, value_parser = ensemble::setup::CLIENTS)]
-        client: Option<String>,
-        /// The node's name; asked, or this computer's name.
+        /// The runner's name; asked, or this computer's name.
         #[arg(long)]
         name: Option<String>,
-        /// Register Ensemble for every project of yours, not only this one.
-        #[arg(long)]
-        global: bool,
+        /// The folder it works in, of git repositories; asked, or ~/ensemble.
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<String>,
         /// Ask nothing: take what is given and found.
         #[arg(long)]
         yes: bool,
     },
-    /// Write the node, ~/.config/ensemble/node/node.yaml: its name, whom it
-    /// works for, its hub, and what it offers.
+    /// Write the runner, ~/.config/ensemble/runner/runner.yaml: its name, whom
+    /// it works for, its workspace, its hub, and what it offers.
     Init {
         /// Overwrite one that exists.
         #[arg(long)]
@@ -118,36 +101,24 @@ pub enum NodeCommand {
         #[arg(long)]
         stdout: bool,
     },
-    /// Run the node until Ctrl-C or SIGTERM: sessions from any folder reach
-    /// its teams, and the tasks of its folders run. A computer runs one.
+    /// Run the runner until Ctrl-C or SIGTERM: it works on the tasks of the git
+    /// repositories in its workspace. A computer runs one.
     Serve,
-    /// Have the running node read its teams again, after one was changed by
+    /// Have the running runner read its teams again, after one was changed by
     /// hand.
     Reload,
-    /// The node: its name, its hub, whether it runs, and its teams.
+    /// The runner: its name, its workspace, its hub, whether it runs, and its
+    /// teams.
     Status,
-    /// Say what is wrong with the node's teams and the CLIs and models they
+    /// Say what is wrong with the runner's teams and the CLIs and models they
     /// need, and how to fix each thing.
     Doctor,
-    /// Register Ensemble with the agent CLI you talk to, so its sessions reach
-    /// the node.
-    Connect {
-        #[arg(value_parser = ensemble::setup::CLIENTS)]
-        client: String,
-        /// Register it for every project of yours, not only this one.
-        #[arg(long)]
-        global: bool,
-        /// Also add session hooks (Claude Code, Codex) that put the hub's
-        /// notes about each prompt into the conversation.
-        #[arg(long)]
-        hooks: bool,
-    },
-    /// The other nodes of your hub you may use, with their agents and models.
+    /// The other runners of your hub you may use, with their agents and models.
     Peers,
-    /// The node's helper teams.
+    /// The runner's helper teams.
     #[command(subcommand)]
     Team(TeamCommand),
-    /// The agents of the node's teams, named <team>/<agent>.
+    /// The agents of the runner's teams, named <team>/<agent>.
     #[command(subcommand)]
     Agent(AgentCommand),
 }
@@ -193,7 +164,7 @@ pub enum TeamCommand {
         #[arg(long)]
         yes: bool,
     },
-    /// Take a team out of the node; a linked folder or a pulled clone is left.
+    /// Take a team out of the runner; a linked folder or a pulled clone is left.
     Remove {
         name: String,
         #[arg(long)]
@@ -266,104 +237,6 @@ pub enum AgentCommand {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum TaskCommand {
-    /// The tasks of this folder's project, and where each stands.
-    List {
-        /// Only those whose status starts with this, such as queued or done.
-        #[arg(long)]
-        status: Option<String>,
-    },
-    /// One task: its ticket, where it stands, its question or its result.
-    Show { id: String },
-    /// Make a task. Without --agent it waits in the backlog.
-    New(Box<NewTask>),
-    /// Give a task to an agent: from the backlog, or to someone else.
-    Assign { id: String, agent: String },
-    /// Answer the question a task stopped to ask.
-    Answer {
-        id: String,
-        #[arg(required = true, num_args = 1..)]
-        text: Vec<String>,
-    },
-    /// Cancel a task: at once when it has not started, by its node when it
-    /// runs.
-    Cancel { id: String },
-    /// The branch, the change and the result of a task that worked in a git
-    /// worktree.
-    Review { id: String },
-    /// The whole change on that branch.
-    Diff { id: String },
-    /// Merge that branch, once the task is done. Only you run this: your agent
-    /// has no tool for it.
-    Merge {
-        id: String,
-        /// One commit.
-        #[arg(long)]
-        squash: bool,
-        /// Then remove the task's worktree and branch.
-        #[arg(long)]
-        cleanup: bool,
-    },
-}
-
-#[derive(Debug, Args)]
-pub struct NewTask {
-    /// One line naming it.
-    pub title: String,
-    /// Who does it, <team>/<agent>.
-    #[arg(long)]
-    pub agent: Option<String>,
-    /// The task; read from stdin when not given.
-    #[arg(long)]
-    pub text: Option<String>,
-    /// The outcome wanted, in a sentence.
-    #[arg(long)]
-    pub goal: Option<String>,
-    /// Background the agent needs.
-    #[arg(long)]
-    pub context: Option<String>,
-    /// A folder of the working folder to work in.
-    #[arg(long)]
-    pub repo: Option<String>,
-    /// A check from `gates` its work must pass: NAME, or NAME:ATTEMPTS.
-    #[arg(long)]
-    pub gate: Option<String>,
-    /// Tasks that must be done first.
-    #[arg(long, value_delimiter = ',', value_name = "ID,ID")]
-    pub after: Vec<String>,
-    /// Where the work is.
-    #[arg(long, value_delimiter = ',', value_name = "FILE,FILE")]
-    pub files: Vec<String>,
-    /// What it must not do or change.
-    #[arg(long, value_delimiter = ',', value_name = "TEXT,TEXT")]
-    pub constraints: Vec<String>,
-    /// How to tell it is done.
-    #[arg(long, value_delimiter = ',', value_name = "TEXT,TEXT")]
-    pub done_when: Vec<String>,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum KnowledgeCommand {
-    /// Keep knowledge in the hub's vault, as an agent's `share` tool does.
-    Share {
-        /// What it is about.
-        #[arg(long)]
-        title: String,
-        /// The text; read from stdin when not given.
-        #[arg(long)]
-        text: Option<String>,
-        /// Who may recall it: private, only you; hub, everyone on the hub.
-        #[arg(long, default_value = "private", value_parser = ["private", "hub"])]
-        visibility: String,
-    },
-    /// The hub's notes about a topic, as an agent's `recall` tool gets them.
-    Recall {
-        #[arg(required = true, num_args = 1..)]
-        topic: Vec<String>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 pub enum HubCommand {
     /// Write a sample hub: hub.yaml with every setting, and its vault.
     Init {
@@ -427,7 +300,7 @@ mod tests {
     fn whole() -> clap::Command {
         command(
             &ensemble::link::accounts::operations(),
-            &crate::cmd::node::operations(),
+            &crate::cmd::runner::operations(),
         )
     }
 
@@ -468,30 +341,10 @@ mod tests {
                 .is_err()
         );
         let matches = whole()
-            .try_get_matches_from(["ensemble", "node", "login", "wss://hub", "--user", "ana"])
+            .try_get_matches_from(["ensemble", "runner", "login", "wss://hub", "--user", "ana"])
             .unwrap();
-        let node = crate::cmd::node::operations();
+        let runner = crate::cmd::runner::operations();
         let (_, under) = matches.subcommand().unwrap();
-        assert_eq!(crate::ops_cli::matched(&node, under).unwrap().0, "login");
-    }
-
-    #[test]
-    fn a_task_takes_its_lists_comma_separated() {
-        let cli = Cli::try_parse_from([
-            "ensemble",
-            "task",
-            "new",
-            "Add retry",
-            "--agent",
-            "web/coder",
-            "--after",
-            "0001-a,0002-b",
-        ])
-        .unwrap();
-        let Command::Task(TaskCommand::New(t)) = cli.command else {
-            panic!("{cli:?}");
-        };
-        assert_eq!(t.after, ["0001-a", "0002-b"]);
-        assert_eq!(t.agent.as_deref(), Some("web/coder"));
+        assert_eq!(crate::ops_cli::matched(&runner, under).unwrap().0, "login");
     }
 }

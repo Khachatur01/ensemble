@@ -1,13 +1,13 @@
-//! How a hub or a node is reached: the interfaces its `interfaces` block
+//! How a hub or a runner is reached: the interfaces its `interfaces` block
 //! turns on. Left out, the command line is on; a block that turns on nothing
 //! that manages it is refused, as nothing could manage it then.
 
 use serde::Deserialize;
 
-/// The interfaces a hub or a node turns on.
+/// The interfaces a hub or a runner turns on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Interfaces {
-    /// `ensemble hub …` or `ensemble node …` on its computer: run by the
+    /// `ensemble hub …` or `ensemble runner …` on its computer: run by the
     /// running process, over its socket, when it runs.
     pub cli: bool,
     /// The hub's MCP over HTTP, for client agents. A hub's alone.
@@ -47,10 +47,10 @@ pub(crate) struct RawInterfaces {
     pub(crate) mcp: Option<RawMcp>,
 }
 
-/// A node's `interfaces` block: it serves no one, so the command line alone.
+/// A runner's `interfaces` block: it serves no one, so the command line alone.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawNodeInterfaces {
+pub(crate) struct RawRunnerInterfaces {
     pub(crate) cli: Option<RawCli>,
 }
 
@@ -86,9 +86,9 @@ pub(crate) fn interfaces(raw: Option<&RawInterfaces>, problems: &mut Vec<String>
     )
 }
 
-/// The interfaces a node's `raw` block turns on.
-pub(crate) fn node_interfaces(
-    raw: Option<&RawNodeInterfaces>,
+/// The interfaces a runner's `raw` block turns on.
+pub(crate) fn runner_interfaces(
+    raw: Option<&RawRunnerInterfaces>,
     problems: &mut Vec<String>,
 ) -> Interfaces {
     let Some(raw) = raw else {

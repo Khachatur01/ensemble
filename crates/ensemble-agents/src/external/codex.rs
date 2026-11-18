@@ -319,7 +319,6 @@ mod tests {
             isolation: ensemble_config::Isolation::Shared,
             budget: ensemble_config::Budget::Unlimited,
             limit: None,
-            recall: None,
             adapter: Adapter::Codex(cx.clone()),
         };
         (a, cx)

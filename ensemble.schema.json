@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json",
   "title": "Ensemble helper team: config.yaml",
-  "description": "A helper team: the agents a calling agent can delegate to, and the LLM backends they can run on. Nothing has a default value: every setting is written, except the two that may be left out because leaving them out means 'not used' (an agent's `prompt` and a backend's `api_key_env`).",
+  "description": "A helper team: the agents that work on tasks, and the LLM backends they can run on. Nothing has a default value: every setting is written, except the two that may be left out because leaving them out means 'not used' (an agent's `prompt` and a backend's `api_key_env`).",
   "type": "object",
   "required": [
     "version",
@@ -37,24 +37,12 @@
       "additionalProperties": { "$ref": "#/definitions/gate" }
     },
     "agents": {
-      "description": "The helper team's agents, one professional each. The key is the agent's name, which the calling agent delegates by. The names are yours.",
+      "description": "The helper team's agents, one professional each. The key is the agent's name, which a task names it by. The names are yours.",
       "type": "object",
       "additionalProperties": { "$ref": "#/definitions/agent" }
     }
   },
   "definitions": {
-    "agent_recall": {
-      "type": "object",
-      "required": ["max_chars"],
-      "additionalProperties": false,
-      "properties": {
-        "max_chars": {
-          "description": "Most characters of notes given with one task. Keep it small for a model with a short context.",
-          "type": "integer",
-          "minimum": 1
-        }
-      }
-    },
     "limit": {
       "type": "object",
       "required": ["max_concurrent", "budget"],
@@ -81,7 +69,7 @@
       "additionalProperties": false,
       "properties": {
         "type": {
-          "description": "per_hour_tokens: runs may use at most `tokens` tokens in any hour, counted from what each run reports. A run that reports none counts none. Over it, tasks wait and delegations are refused, saying when the next run is allowed.",
+          "description": "per_hour_tokens: runs may use at most `tokens` tokens in any hour, counted from what each run reports. A run that reports none counts none. Over it, tasks wait until the next run is allowed.",
           "const": "per_hour_tokens"
         },
         "tokens": {
@@ -114,7 +102,7 @@
       "additionalProperties": false,
       "properties": {
         "type": {
-          "description": "per_hour: at most `delegations` runs started in any hour, counted across sessions. Over it, tasks wait and delegations are refused, saying when the next run is allowed.",
+          "description": "per_hour: at most `delegations` runs started in any hour. Over it, tasks wait until the next run is allowed.",
           "const": "per_hour"
         },
         "delegations": {
@@ -240,36 +228,32 @@
       "additionalProperties": false,
       "properties": {
         "prompt": {
-          "description": "What this agent is for. Its first line is what the calling agent sees when it lists the team; the whole of it goes into the agent's system prompt: added to Claude Code's own, added to or in place of OpenCode's own (see the adapter's `system_prompt`), and alone for a `direct` agent. Keep it short for small local models. Leave it out and a CLI agent runs on its CLI's own system prompt alone; a `direct` agent then has none.",
+          "description": "What this agent is for. Its first line is what the hub lists for it; the whole of it goes into the agent's system prompt: added to Claude Code's own, added to or in place of OpenCode's own (see the adapter's `system_prompt`), and alone for a `direct` agent. Keep it short for small local models. Leave it out and a CLI agent runs on its CLI's own system prompt alone; a `direct` agent then has none.",
           "type": "string"
         },
         "max_seconds": {
-          "description": "Wall-clock limit for one delegation. At the limit the agent's process is stopped and what it did is returned, marked unfinished.",
+          "description": "Wall-clock limit for one run. At the limit the agent's process is stopped and what it did is returned, marked unfinished.",
           "type": "integer",
           "minimum": 1
-        },
-        "recall": {
-          "description": "Give the agent, with each task and delegation, the notes the hub's knowledge vault has about it, within the hub's recall limits and `max_chars`. It needs the hub the node names (`hub:` in node.yaml). Leave it out and the agent is given no notes; with it, the notes go to whatever model the agent runs on.",
-          "$ref": "#/definitions/agent_recall"
         },
         "limit": {
           "description": "The name of one of the team's `limits`, in place of `max_concurrent` and `budget`: the slots and the budget are then shared with every agent that names it.",
           "type": "string"
         },
         "max_concurrent": {
-          "description": "Most delegations to this agent that run at once in a session, background tasks and blocking calls alike; more wait for a free slot. 1 suits a model server that serves one request at a time. Written with `budget`, or not at all when `limit` is.",
+          "description": "Most runs of this agent at once; more tasks wait for a free slot. 1 suits a model server that serves one request at a time. Written with `budget`, or not at all when `limit` is.",
           "type": "integer",
           "minimum": 1
         },
         "isolation": {
-          "description": "Where its tasks run. shared: in the project directory. worktree: each task in its own git worktree (.ensemble/worktrees/<id>) on the branch ensemble/<id>, where its work is committed; Ensemble never merges it. Delegations, blocking or in the background, always run in the project.",
+          "description": "Where its tasks run. shared: in the repository itself. worktree: each task in its own git worktree (.ensemble/worktrees/<id>) on the branch ensemble/<id>, where its work is committed; Ensemble never merges it.",
           "enum": [
             "shared",
             "worktree"
           ]
         },
         "budget": {
-          "description": "How many runs it may start in an hour: tasks, each gate retry, and delegations, blocking or in the background. `type` decides which other settings there are.",
+          "description": "How many runs it may start in an hour: tasks and each gate retry. `type` decides which other settings there are.",
           "oneOf": [
             {
               "$ref": "#/definitions/budget_unlimited"
@@ -313,7 +297,7 @@
       "additionalProperties": false,
       "properties": {
         "type": {
-          "description": "node: an agent a node of a hub server offers. The task and a copy of the files git tracks go to the node; the agent works there in a folder of its own on the node owner's models, and what it changed comes back and is written here, where gates, branches and commits stay. Needs `ensemble node login` to the hub, and `compute` for another person's shared node.",
+          "description": "node: an agent a node of a hub server offers. The task and a copy of the files git tracks go to the node; the agent works there in a folder of its own on the node owner's models, and what it changed comes back and is written here, where gates, branches and commits stay. Needs `ensemble runner login` to the hub, and `compute` for another person's shared node.",
           "const": "node"
         },
         "hub": {
@@ -327,7 +311,7 @@
           "minLength": 1
         },
         "nodes": {
-          "description": "The nodes that may run it, as <owner>/<name>, tried in order: the first one connected that offers the agent runs it. `ensemble node peers` lists them.",
+          "description": "The nodes that may run it, as <owner>/<name>, tried in order: the first one connected that offers the agent runs it. `ensemble runner peers` lists them.",
           "type": "array",
           "minItems": 1,
           "items": { "type": "string", "pattern": "^[^/]+/[A-Za-z0-9._-]+$" }
@@ -423,7 +407,7 @@
           ]
         },
         "max_turns": {
-          "description": "Most agent turns Claude Code may take for one delegation.",
+          "description": "Most agent turns Claude Code may take for one run.",
           "type": "integer",
           "minimum": 1
         },
@@ -494,7 +478,7 @@
           ]
         },
         "max_steps": {
-          "description": "Most agentic steps OpenCode may take for one delegation; at the limit it reports what it did.",
+          "description": "Most agentic steps OpenCode may take for one run; at the limit it reports what it did.",
           "type": "integer",
           "minimum": 1
         },
@@ -506,7 +490,7 @@
       }
     },
     "when_none": {
-      "description": "What happens when none of the models in `try` can be used: no backend answers, or none serves its model. fail: the delegation or task fails, saying what each backend answered. wait: a task waits in the queue and is tried again later; a delegation, which someone is waiting for, fails.",
+      "description": "What happens when none of the models in `try` can be used: no backend answers, or none serves its model. fail: the task fails, saying what each backend answered. wait: a task waits in the queue and is tried again later; a run someone waits for, such as `ensemble runner agent run`, fails.",
       "enum": ["fail", "wait"]
     },
     "builtin_candidate": {
@@ -564,7 +548,7 @@
           }
         },
         "max_steps": {
-          "description": "Most model calls for one delegation; at the limit the loop asks for a final answer.",
+          "description": "Most model calls for one run; at the limit the loop asks for a final answer.",
           "type": "integer",
           "minimum": 1
         },

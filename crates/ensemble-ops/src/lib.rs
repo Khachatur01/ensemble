@@ -1,4 +1,4 @@
-//! Operations: everything a person can do to a hub or a node, defined once.
+//! Operations: everything a person can do to a hub or a runner, defined once.
 //! An interface, the CLI or the REST API or one to come, is an adapter over
 //! them: it shows an operation by its [`Spec`] and reaches it through a
 //! [`Registry`], and knows nothing of what it does.
@@ -164,7 +164,7 @@ impl Field {
 /// Who may run an operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
-    /// Only who runs the hub or the node, on its computer: the CLI.
+    /// Only who runs the hub or the runner, on its computer: the CLI.
     Local,
     /// An account whose role, and token, have this permission; and who runs
     /// it, on its computer.
@@ -181,7 +181,7 @@ pub enum Access {
 /// Who asks for an operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Caller {
-    /// Who runs the hub or the node, on its computer.
+    /// Who runs the hub or the runner, on its computer.
     Local,
     /// A signed-in account, with the permissions of its role and token.
     Account {
@@ -342,7 +342,7 @@ pub struct Said {
 
 type Run<C> = dyn Fn(&C, &Caller, Value) -> Result<Value, Error> + Send + Sync;
 
-/// One operation, over a context `C`: what a hub or a node gives it.
+/// One operation, over a context `C`: what a hub or a runner gives it.
 pub struct Operation<C> {
     pub spec: Spec,
     run: Box<Run<C>>,
@@ -402,7 +402,7 @@ pub fn said(output: &Value) -> Said {
     }
 }
 
-/// The operations of a hub or a node, by name.
+/// The operations of a hub or a runner, by name.
 pub struct Registry<C> {
     operations: Vec<Operation<C>>,
 }

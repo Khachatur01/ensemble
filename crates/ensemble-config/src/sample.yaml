@@ -1,23 +1,22 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json
 
-# config.yaml — a helper team of agents, written by `ensemble node team new`. It lives
-# in a folder of its own (often its own git repo), apart from any project; the
-# folder your agent opens is where the team works. It can be yours alone, or one
-# your company shares and you pull. API keys never go here: they come from the
-# environment, or from a file passed with --env-file.
+# config.yaml — a helper team of agents, written by `ensemble runner team new`.
+# It lives in a folder of its own (often its own git repo), apart from any
+# project; the repository a task names is where the team works. It can be yours
+# alone, or one your company shares and you pull. API keys never go here: they
+# come from the environment, or from a file passed with --env-file.
 #
 # Nothing has a default value: every setting is written here, and one that is
 # missing is refused by name. Only a few may be left out, because leaving them
-# out means "not used": an agent's `prompt` and `recall`, and a backend's
-# `api_key_env`.
+# out means "not used": an agent's `prompt`, and a backend's `api_key_env`.
 # This file is a map of what can be set rather than a team to keep as it is:
 # delete the agents you do not want and change the rest. Check it with
-# `ensemble node team check`, see how an agent is started with
-# `ensemble node agent show <team>/<agent>`, and check that everything it needs is there
-# with `ensemble node agent health`.
+# `ensemble runner team check`, see how an agent is started with
+# `ensemble runner agent show <team>/<agent>`, and check that everything it
+# needs is there with `ensemble runner agent health`.
 #
-# Your node runs every team in its teams directory, where `ensemble node team new`
-# writes this; the agent you talk to hands work to `<team>/<agent>` through it.
+# Your runner runs every team in its teams directory, where `ensemble runner
+# team new` writes this; the tasks of your hub go to `<team>/<agent>`.
 
 version: 1
 
@@ -90,27 +89,22 @@ limits:
 gates: {}
 
 # ---------------------------------------------------------------------------
-# Agents: the helper team, one professional each. The names are yours; your
-# agent delegates by name and reads the first line of each `prompt` to choose.
-# Each runs an agent CLI you have installed, headless in this project, or makes
-# one request to a model.
+# Agents: the helper team, one professional each. The names are yours; a task
+# names its agent, and the first line of each `prompt` says what it is for.
+# Each runs an agent CLI you have installed, headless in the task's repository,
+# or makes one request to a model.
 # ---------------------------------------------------------------------------
 agents:
   # The OpenCode CLI on a model from llm_backends.
   coder:
-    # What it is for. The first line is what your agent sees in `agents`; the
-    # whole of it is the agent's system prompt. Leave it out for no system
+    # What it is for. The first line is what the hub lists among its agents;
+    # the whole of it is the agent's system prompt. Leave it out for no system
     # prompt.
     prompt: |
       You implement exactly what is asked, in the style of the surrounding
       code. Read the relevant files first, make the change, and report what
       you changed.
-    # With a hub (named as `hub:` in node.yaml), each task and delegation comes
-    # with the notes of the vault about it, at most this many characters. They
-    # go to the model the agent runs on. Leave it out for no notes.
-    recall:
-      max_chars: 3000
-    # Wall-clock limit for one delegation.
+    # Wall-clock limit for one run.
     max_seconds: 1800
     # Its slots and budget come from a shared limit above, in place of its own
     # `max_concurrent` and `budget`.
@@ -155,12 +149,12 @@ agents:
       You find where things are in the codebase and report file:line with a
       one-line note each. You do not edit.
     max_seconds: 1800
-    # Most delegations to it that run at once; more wait for a free slot.
+    # Most runs of it at once; more tasks wait for a free slot.
     # 1 suits a model server that serves one request at a time.
     max_concurrent: 1
     isolation: shared
     # How many runs it may start in an hour: `unlimited`, or `per_hour` with
-    # `delegations` (tasks, gate retries and delegations all count).
+    # `delegations` (tasks and gate retries both count).
     budget:
       type: unlimited
     adapter:
@@ -223,15 +217,15 @@ agents:
       # read, list, grep and glob only look; write and edit change files;
       # shell runs any command in the working directory.
       tools: [read, list, grep, glob, edit, write, shell]
-      # Most model calls for one delegation.
+      # Most model calls for one run.
       max_steps: 40
       # Most tokens of answer per model call.
       max_tokens: 4000
 
-  # An agent a node of a hub server offers, such as a colleague's shared node
+  # An agent a runner of a hub server offers, such as a colleague's shared runner
   # on a machine with big GPUs. The task and a copy of the files git tracks go
   # there; what the agent changed comes back and is written here, where gates,
-  # branches and commits stay. Needs `ensemble node login <hub>`.
+  # branches and commits stay. Needs `ensemble runner login <hub>`.
   heavy-coder:
     prompt: |
       Implements large changes on a big model.
@@ -243,10 +237,10 @@ agents:
     adapter:
       type: node
       hub: wss://hub.example.com
-      # The agent the nodes offer, by its name in their helper team.
+      # The agent the runners offer, by its name in their helper team.
       agent: coder
-      # The nodes that may run it, as <owner>/<name>, tried in order;
-      # `ensemble node peers` lists them.
+      # The runners that may run it, as <owner>/<name>, tried in order;
+      # `ensemble runner peers` lists them.
       nodes: [kim/gpu-box]
 
   # The Codex CLI, on your own login.

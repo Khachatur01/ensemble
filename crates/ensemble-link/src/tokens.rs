@@ -1,5 +1,5 @@
-//! Where a node keeps its hub tokens: `~/.config/ensemble/node/hubs.json`
-//! (under `$XDG_CONFIG_HOME` when that is set), one token per hub URL. Only its user can read it, like an SSH key; `ensemble node login` writes it.
+//! Where a runner keeps its hub tokens: `~/.config/ensemble/runner/hubs.json`
+//! (under `$XDG_CONFIG_HOME` when that is set), one token per hub URL. Only its user can read it, like an SSH key; `ensemble runner login` writes it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,7 +20,7 @@ pub fn normal(url: &str) -> String {
 impl Tokens {
     /// The token file in the user's config directory.
     pub fn load() -> Result<Tokens, String> {
-        Tokens::load_from(&ensemble_core::state::node_config_dir()?)
+        Tokens::load_from(&ensemble_core::state::runner_config_dir()?)
     }
 
     /// The token file in `dir`.

@@ -1,11 +1,10 @@
-//! Getting started: finding what is installed, writing this computer's node,
-//! registering Ensemble with the agent CLI you talk to (the client), and saying
-//! what is wrong and how to fix it. The pieces that touch nothing outside take
+//! Getting started: finding what is installed, writing this computer's runner,
+//! and saying what is wrong and how to fix it. The pieces that touch nothing outside take
 //! what they need as arguments, so tests can run them without a terminal or a
 //! network.
 
-use crate::config::node::{NODE_FILENAME, NODE_SCHEMA_URL_LINE, NODE_SUPPORTED_VERSION};
-use crate::config::{Adapter, Budget, CLAUDE_CODE_AGENT, CODEX_AGENT, Config, OPENCODE_AGENT};
+use crate::config::runner::{RUNNER_FILENAME, RUNNER_SCHEMA_URL_LINE, RUNNER_SUPPORTED_VERSION};
+use crate::config::{Adapter, Budget, CLAUDE_CODE_AGENT, Config, OPENCODE_AGENT};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -72,105 +71,21 @@ pub fn detect(probe: bool) -> Detected {
     }
 }
 
-/// The agent CLIs `connect` knows how to register with: the clients.
-pub const CLIENTS: [&str; 3] = [CLAUDE_CODE_AGENT, OPENCODE_AGENT, CODEX_AGENT];
+/// The workspace `setup` offers: a folder in the home directory.
+pub const WORKSPACE: &str = "~/ensemble";
 
-/// What registers Ensemble with a client: the program and its arguments.
-#[derive(Debug)]
-pub struct Registration {
-    pub program: &'static str,
-    pub args: Vec<String>,
-}
-
-impl Registration {
-    /// As one line a shell would read back the same way.
-    pub fn line(&self) -> String {
-        std::iter::once(self.program)
-            .chain(self.args.iter().map(String::as_str))
-            .map(shell_word)
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-}
-
-pub fn shell_word(s: &str) -> String {
-    let plain = !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_-./:=@,+".contains(c));
-    if plain {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', r"'\''"))
-    }
-}
-
-/// How to register `ensemble mcp` with `client`: each session it starts is a
-/// session of this computer's node.
-pub fn registration(client: &str, ensemble: &str, global: bool) -> Result<Registration, String> {
-    let (program, mut args): (&'static str, Vec<String>) = match client {
-        CLAUDE_CODE_AGENT => (
-            "claude",
-            vec![
-                "mcp".into(),
-                "add".into(),
-                "--scope".into(),
-                if global { "user" } else { "local" }.into(),
-                "ensemble".into(),
-                "--".into(),
-            ],
-        ),
-        OPENCODE_AGENT => {
-            let mut args = vec!["mcp".to_string(), "add".into()];
-            if global {
-                args.push("--global".into());
-            }
-            args.push("ensemble".into());
-            args.push("--".into());
-            ("opencode", args)
-        }
-        CODEX_AGENT => {
-            // Codex keeps its servers in one config of its own, so there is
-            // no scope to choose.
-            (
-                "codex",
-                vec!["mcp".into(), "add".into(), "ensemble".into(), "--".into()],
-            )
-        }
-        other => {
-            return Err(format!(
-                "unknown client '{other}'. Clients: {}.",
-                CLIENTS.join(", ")
-            ));
-        }
-    };
-    args.push(ensemble.to_string());
-    args.push("mcp".into());
-    Ok(Registration { program, args })
-}
-
-/// The text of a node file: the node `name`, private, offering nothing.
-/// Checked by loading it.
-pub fn node_file(name: &str) -> Result<String, String> {
+/// The text of a runner file: the runner `name`, private, working in
+/// `workspace`, offering nothing. Checked by loading it.
+pub fn runner_file(name: &str, workspace: &str) -> Result<String, String> {
     let quoted = |s: &str| serde_json::Value::String(s.to_string()).to_string();
     let mut text = format!(
-        "{NODE_SCHEMA_URL_LINE}\n\n# This computer's node, which `ensemble node serve` runs. `ensemble node init\n# --stdout` prints every setting.\n\nversion: {NODE_SUPPORTED_VERSION}\n\nname: {}\naccess: private\n",
-        quoted(name)
+        "{RUNNER_SCHEMA_URL_LINE}\n\n# This computer's runner, which `ensemble runner serve` runs. `ensemble runner\n# init --stdout` prints every setting.\n\nversion: {RUNNER_SUPPORTED_VERSION}\n\nname: {}\naccess: private\n\n# Each git repository directly inside it is a project the runner works on.\nworkspace: {}\n",
+        quoted(name),
+        quoted(workspace)
     );
-    text.push_str("offers: {}\n\n# How the node is managed: `ensemble node …` on this computer.\ninterfaces:\n  cli: {}\n");
-    crate::config::parse_node(&text, Path::new(NODE_FILENAME)).map_err(|e| e.to_string())?;
+    text.push_str("offers: {}\n\n# How the runner is managed: `ensemble runner …` on this computer.\ninterfaces:\n  cli: {}\n");
+    crate::config::parse_runner(&text, Path::new(RUNNER_FILENAME)).map_err(|e| e.to_string())?;
     Ok(text)
-}
-
-/// The `ensemble` to register: the one on `PATH` when there is one, else this
-/// very program.
-pub fn ensemble_command() -> String {
-    if on_path("ensemble") {
-        "ensemble".into()
-    } else {
-        std::env::current_exe()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "ensemble".into())
-    }
 }
 
 /// How much a finding matters.
@@ -259,34 +174,41 @@ pub fn risks(config: &Config) -> Vec<Finding> {
                     "{} has a token budget, which counts only the tokens its runs report",
                     a.name
                 ),
-                "`ensemble node agent stats` shows `-` for an agent whose runs report none; its budget never fills",
+                "`ensemble runner agent stats` shows `-` for an agent whose runs report none; its budget never fills",
             ));
         }
     }
     out
 }
 
-/// Checks that need no running agent: the structure of the helper team.
-pub fn structure(config: &Config, workdir: &Path) -> Vec<Finding> {
+/// Checks that need no running agent: the structure of the helper team, and
+/// whether the runner's `workspace`, when it has one, holds a project.
+pub fn structure(config: &Config, workspace: Option<&Path>) -> Vec<Finding> {
     let mut out = Vec::new();
     if config.agents.is_empty() {
         out.push(Finding::bad(
-            "the node has no helper team with agents",
-            "make one with `ensemble node team new <name>`, pull one with `ensemble node team pull <url>`, or ask your agent to make one",
+            "the runner has no helper team with agents",
+            "make one with `ensemble runner team new <name>`, or pull one with `ensemble runner team pull <url>`",
         ));
     }
-    let wants_git = config
-        .agents
-        .values()
-        .any(|a| a.isolation == crate::config::Isolation::Worktree);
-    if wants_git && !workdir.join(".git").exists() {
-        out.push(Finding::note(
-            format!(
-                "{} is not a git repository, and some agents run tasks in worktrees",
-                workdir.display()
-            ),
-            "open a repository, or give tasks a `repo` that is one",
-        ));
+    if let Some(workspace) = workspace {
+        let repositories = std::fs::read_dir(workspace)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|e| e.path().join(".git").exists())
+                    .count()
+            })
+            .unwrap_or(0);
+        if repositories == 0 {
+            out.push(Finding::note(
+                format!(
+                    "the workspace {} holds no git repository, so the runner has no project to work on",
+                    workspace.display()
+                ),
+                "clone the repositories its tasks are for into it",
+            ));
+        }
     }
     out.extend(risks(config));
     if out.iter().all(|f| f.level != Level::Problem) {
@@ -333,7 +255,7 @@ pub fn health_finding(
 
 /// The command that takes `agent`, such as `web/coder`, out of its team.
 fn remove_command(agent: &str) -> String {
-    format!("ensemble node agent remove {agent}")
+    format!("ensemble runner agent remove {agent}")
 }
 
 /// The directory `~` stands for.
@@ -380,39 +302,15 @@ mod tests {
     }
 
     #[test]
-    fn a_registration_starts_a_session_of_the_node_in_the_clients_scope() {
-        let r = registration("claude-code", "ensemble", false).unwrap();
-        assert_eq!(
-            r.line(),
-            "claude mcp add --scope local ensemble -- ensemble mcp"
-        );
-        let r = registration("claude-code", "/opt/e b/ensemble", true).unwrap();
-        assert_eq!(
-            r.line(),
-            "claude mcp add --scope user ensemble -- '/opt/e b/ensemble' mcp"
-        );
-        let r = registration("opencode", "ensemble", true).unwrap();
-        assert_eq!(
-            r.line(),
-            "opencode mcp add --global ensemble -- ensemble mcp"
-        );
-        let r = registration("codex", "ensemble", true).unwrap();
-        assert_eq!(r.line(), "codex mcp add ensemble -- ensemble mcp");
-        assert!(
-            registration("emacs", "ensemble", false)
-                .unwrap_err()
-                .contains("Clients: claude-code")
-        );
-    }
-
-    #[test]
-    fn a_node_file_is_written_complete_and_loads() {
-        let text = node_file("desk-2").unwrap();
-        let node = crate::config::parse_node(&text, Path::new("node.yaml")).unwrap();
-        assert_eq!(node.name, "desk-2");
-        assert_eq!(node.access, crate::config::Access::Private);
-        assert!(node.offers.runs.is_none() && node.offers.models.is_none());
-        assert!(node_file("a/b").is_err(), "a name is checked");
+    fn a_runner_file_is_written_complete_and_loads() {
+        let text = runner_file("desk-2", "/code").unwrap();
+        let runner = crate::config::parse_runner(&text, Path::new("runner.yaml")).unwrap();
+        assert_eq!(runner.name, "desk-2");
+        assert_eq!(runner.access, crate::config::Access::Private);
+        assert_eq!(runner.workspace, Path::new("/code"));
+        assert!(runner.offers.runs.is_none() && runner.offers.models.is_none());
+        assert!(runner_file("a/b", "/code").is_err(), "a name is checked");
+        assert!(runner_file("desk", "").is_err(), "a workspace is needed");
     }
 
     #[test]
@@ -430,7 +328,7 @@ mod tests {
         assert_eq!(finding.level, Level::Problem);
         let fix = finding.fix.unwrap();
         assert!(
-            fix.contains("ensemble node agent remove web/coder"),
+            fix.contains("ensemble runner agent remove web/coder"),
             "{fix}"
         );
     }
@@ -439,15 +337,15 @@ mod tests {
     fn the_structure_check_names_what_is_wrong() {
         let c = loads(&team());
         let tmp = crate::workspace::testing::TempDir::new();
-        let findings = structure(&c, &tmp.0);
+        let findings = structure(&c, Some(&tmp.0));
         assert!(
             findings
                 .iter()
-                .any(|f| f.level == Level::Note && f.what.contains("not a git repository")),
+                .any(|f| f.level == Level::Note && f.what.contains("holds no git repository")),
             "{findings:?}"
         );
-        std::fs::create_dir(tmp.0.join(".git")).unwrap();
-        let findings = structure(&c, &tmp.0);
+        std::fs::create_dir_all(tmp.0.join("shop/.git")).unwrap();
+        let findings = structure(&c, Some(&tmp.0));
         assert!(
             findings.iter().all(|f| f.level == Level::Ok),
             "{findings:?}"
@@ -458,13 +356,13 @@ mod tests {
             "reviewer",
         )
         .unwrap();
-        let findings = structure(&loads(&bare), &tmp.0);
+        let findings = structure(&loads(&bare), None);
         assert!(
             findings.iter().any(|f| f.level == Level::Problem
                 && f.what.contains("no helper team")
                 && f.fix
                     .as_deref()
-                    .is_some_and(|x| x.contains("ensemble node team new <name>"))),
+                    .is_some_and(|x| x.contains("ensemble runner team new <name>"))),
             "{findings:?}"
         );
     }

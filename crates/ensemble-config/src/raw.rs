@@ -94,18 +94,8 @@ pub(crate) struct RawAgent {
     /// The name of one of the team's `limits`, which it then shares with the
     /// other agents that name it, in place of `max_concurrent` and `budget`.
     pub(crate) limit: Option<String>,
-    /// Notes from the hub's knowledge vault about each task, given to the
-    /// agent with it. Absent: the agent is given none.
-    pub(crate) recall: Option<RawAgentRecall>,
     /// What runs the agent, and how.
     pub(crate) adapter: RawAdapter,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawAgentRecall {
-    /// Most characters of notes it is given with one task.
-    pub(crate) max_chars: u32,
 }
 
 /// How much an agent may run. `type` decides which settings it has.

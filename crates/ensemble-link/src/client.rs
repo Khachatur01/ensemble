@@ -1,15 +1,11 @@
-//! The node's side of the link: one WebSocket to a hub server ([`Connection`]);
-//! a link that opens one when it is first needed, and again once when it breaks
-//! ([`Link`]); and a hub server's knowledge over it, used by an agent session as
-//! if the vault were here ([`RemoteMemory`]).
+//! The runner's side of the link: one WebSocket to a hub server
+//! ([`Connection`]); and a link that opens one when it is first needed, and
+//! again once when it breaks ([`Link`]).
 
-use crate::protocol::{Event, HELLO, RECALL, Reply, Request, SHARE};
-use async_trait::async_trait;
-use ensemble_knowledge::{KnowledgeAccess, Tool, Visibility};
+use crate::protocol::{Event, HELLO, Reply, Request};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
-use std::sync::Mutex;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -67,7 +63,7 @@ impl Connection {
         .map_err(|_| format!("cannot reach the hub {url}: it did not answer in time"))?;
         let (socket, _) = opened.map_err(|e| match e {
             tungstenite::Error::Http(resp) if resp.status() == 401 => format!(
-                "the hub {url} did not accept the token; `ensemble node login {url}` with a new one"
+                "the hub {url} did not accept the token; `ensemble runner login {url}` with a new one"
             ),
             e => format!("cannot reach the hub {url}: {e}"),
         })?;
@@ -124,7 +120,7 @@ impl Connection {
             })
     }
 
-    /// Ask the hub without waiting for its answer: what a node says about a
+    /// Ask the hub without waiting for its answer: what a runner says about a
     /// run while it goes on reading events. The answer is read, and dropped,
     /// with the events. Returns the request's id.
     pub async fn send(&mut self, method: &str, params: Value) -> Result<u64, String> {
@@ -170,16 +166,15 @@ impl Connection {
     }
 }
 
-/// Who the node is on the hub, and what it may do there.
+/// Who the runner is on the hub, and what it may do there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
     pub user: String,
     pub role: String,
     pub permissions: Vec<String>,
-    pub instructions: String,
 }
 
-/// A hub token that may be replaced while it is used, as when `ensemble node
+/// A hub token that may be replaced while it is used, as when `ensemble runner
 /// login` signs in again: every link given it connects again with the new one.
 #[derive(Clone)]
 pub struct Token(std::sync::Arc<tokio::sync::watch::Sender<String>>);
@@ -268,6 +263,11 @@ impl Link {
         unreachable!("the loop returns")
     }
 
+    /// Who the token is on the hub, and what it may do there.
+    pub async fn hello(&self) -> Result<Hello, String> {
+        self.ask(HELLO, json!({})).await.map(|v| hello_from(&v))
+    }
+
     /// Close the connection, if one is open; the next request opens another.
     pub async fn close(&self) {
         if let Some((mut link, _)) = self.socket.lock().await.take() {
@@ -276,58 +276,8 @@ impl Link {
     }
 }
 
-/// A hub server's knowledge, over the link.
-pub struct RemoteMemory {
-    link: Link,
-    /// The working folder's name, never its path.
-    project: Option<String>,
-    client: Mutex<Option<String>>,
-    /// The hub's hello, and the token it was for.
-    hello: Mutex<Option<(String, Hello)>>,
-}
-
-impl RemoteMemory {
-    pub fn new(url: &str, token: &str, project: Option<String>) -> Self {
-        Self::with_token(url, Token::new(token), project)
-    }
-
-    /// The knowledge of the hub at `url`, following `token` when it is
-    /// replaced.
-    pub fn with_token(url: &str, token: Token, project: Option<String>) -> Self {
-        RemoteMemory {
-            link: Link::with_token(url, token),
-            project,
-            client: Mutex::new(None),
-            hello: Mutex::new(None),
-        }
-    }
-
-    pub fn url(&self) -> &str {
-        self.link.url()
-    }
-
-    /// Who the node is on the hub; asked once per token, then remembered.
-    pub async fn hello(&self) -> Result<Hello, String> {
-        let token = self.link.token.get();
-        if let Some((for_token, hello)) =
-            self.hello.lock().unwrap_or_else(|e| e.into_inner()).clone()
-            && for_token == token
-        {
-            return Ok(hello);
-        }
-        let v = self.ask(HELLO, json!({})).await?;
-        let hello = hello_from(&v);
-        *self.hello.lock().unwrap_or_else(|e| e.into_inner()) = Some((token, hello.clone()));
-        Ok(hello)
-    }
-
-    async fn ask(&self, method: &str, params: Value) -> Result<Value, String> {
-        self.link.ask(method, params).await
-    }
-}
-
 /// A `hello` answer, read.
-pub fn hello_from(v: &Value) -> Hello {
+fn hello_from(v: &Value) -> Hello {
     let text = |k: &str| v[k].as_str().unwrap_or("").to_string();
     Hello {
         user: text("user"),
@@ -341,87 +291,6 @@ pub fn hello_from(v: &Value) -> Hello {
                     .collect()
             })
             .unwrap_or_default(),
-        instructions: text("instructions"),
-    }
-}
-
-#[async_trait]
-impl KnowledgeAccess for RemoteMemory {
-    async fn tools(&self) -> Vec<Tool> {
-        // A hub that cannot be asked yet gets every tool; the call says why
-        // it fails.
-        let permissions = self.hello().await.map(|h| h.permissions).ok();
-        ensemble_knowledge::tool_definitions()
-            .into_iter()
-            .filter(|t| {
-                permissions
-                    .as_ref()
-                    .is_none_or(|p| p.iter().any(|p| p == t.name))
-            })
-            .collect()
-    }
-
-    async fn instructions(&self) -> String {
-        match self.hello().await {
-            Ok(h) => h.instructions,
-            Err(_) => ensemble_knowledge::instructions_for(&[SHARE, RECALL]),
-        }
-    }
-
-    async fn call(&self, name: &str, args: &Value) -> Option<Result<String, String>> {
-        let text = |key: &str| {
-            args.get(key)
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string()
-        };
-        match name {
-            SHARE => {
-                let client = self
-                    .client
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                Some(
-                    self.ask(
-                        SHARE,
-                        json!({
-                            "title": text("title"),
-                            "text": text("text"),
-                            "client": client,
-                            "project": self.project,
-                            "visibility": args.get("visibility"),
-                        }),
-                    )
-                    .await
-                    .map(|v| {
-                        let visibility = v["visibility"]
-                            .as_str()
-                            .and_then(Visibility::parse)
-                            .unwrap_or_default();
-                        format!(
-                            "Shared as {} on the hub {} ({}). It turns it into notes in the background.",
-                            v["id"].as_str().unwrap_or("?"),
-                            self.url(),
-                            ensemble_knowledge::shared_with(visibility)
-                        )
-                    }),
-                )
-            }
-            RECALL => Some(
-                self.ask(RECALL, json!({ "query": text("query") }))
-                    .await
-                    .map(|v| v["text"].as_str().unwrap_or("").to_string()),
-            ),
-            _ => None,
-        }
-    }
-
-    fn set_client(&self, name: &str) {
-        let name = name.trim();
-        if !name.is_empty() {
-            *self.client.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.to_string());
-        }
     }
 }
 
@@ -431,82 +300,47 @@ mod tests {
     use crate::server::testing::start;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_members_session_shares_and_recalls_on_the_hub() {
+    async fn hello_says_who_the_token_is_and_a_bad_token_is_named() {
         let hub = start();
-        let m = RemoteMemory::new(&hub.url, &hub.ana, Some("shop".into()));
-        assert_eq!(m.hello().await.unwrap().user, "ana");
-        let names: Vec<&str> = m.tools().await.iter().map(|t| t.name).collect();
-        assert_eq!(names, vec!["share", "recall"]);
-        m.set_client("claude-code");
-        let said = m
-            .call(
-                "share",
-                &json!({"title": "Ports", "text": "The shop listens on 8080."}),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(said.starts_with("Shared as "), "{said}");
-        let shares = ensemble_knowledge::Vault::new(hub.tmp.0.join("vault")).shares();
-        assert_eq!(shares.len(), 1);
+        let hello = Link::new(&hub.url, &hub.ana).hello().await.unwrap();
         assert_eq!(
-            (
-                shares[0].shared_by.as_str(),
-                shares[0].client.as_deref(),
-                shares[0].project.as_deref()
-            ),
-            ("ana", Some("claude-code"), Some("shop"))
+            (hello.user.as_str(), hello.role.as_str()),
+            ("ana", "member")
         );
-        let notes = m
-            .call("recall", &json!({"query": "deploy"}))
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(notes.contains("Tuesdays"), "{notes}");
-        assert!(m.call("delegate", &json!({})).await.is_none());
-    }
+        assert!(
+            hello.permissions.contains(&"share".to_string()),
+            "{hello:?}"
+        );
+        let rex = Link::new(&hub.url, &hub.rex).hello().await.unwrap();
+        assert_eq!(rex.permissions, vec!["recall"]);
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_reader_is_offered_recall_only_and_a_bad_token_is_named() {
-        let hub = start();
-        let rex = RemoteMemory::new(&hub.url, &hub.rex, None);
-        let names: Vec<&str> = rex.tools().await.iter().map(|t| t.name).collect();
-        assert_eq!(names, vec!["recall"]);
-        assert!(!rex.instructions().await.contains("`share`"));
-
-        let bad = RemoteMemory::new(&hub.url, "ens_wrong", None);
-        let err = bad.hello().await.unwrap_err();
+        let err = Link::new(&hub.url, "ens_wrong").hello().await.unwrap_err();
         assert!(err.contains("did not accept the token"), "{err}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn the_link_is_opened_again_when_it_breaks() {
         let hub = start();
-        let m = RemoteMemory::new(&hub.url, &hub.ana, None);
-        m.hello().await.unwrap();
+        let link = Link::new(&hub.url, &hub.ana);
+        link.hello().await.unwrap();
         // Break it from this side: the next request opens a new one.
-        if let Some((link, _)) = m.link.socket.lock().await.as_mut() {
-            link.close().await;
+        if let Some((open, _)) = link.socket.lock().await.as_mut() {
+            open.close().await;
         }
-        let notes = m.call("recall", &json!({"query": "deploy"})).await.unwrap();
-        assert!(notes.is_ok(), "{notes:?}");
+        assert_eq!(link.hello().await.unwrap().user, "ana");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_replaced_token_is_used_from_the_next_request_on() {
         let hub = start();
         let token = Token::new("ens_wrong");
-        let m = RemoteMemory::with_token(&hub.url, token.clone(), None);
-        assert!(m.hello().await.is_err());
+        let link = Link::with_token(&hub.url, token.clone());
+        assert!(link.hello().await.is_err());
         assert!(token.set(&hub.rex));
         assert!(!token.set(&hub.rex), "the same token is no change");
-        assert_eq!(m.hello().await.unwrap().user, "rex");
-        let names = |tools: Vec<Tool>| tools.iter().map(|t| t.name).collect::<Vec<_>>();
-        assert_eq!(names(m.tools().await), vec![RECALL]);
-        // Another account: who the node is, and its tools, follow it.
+        assert_eq!(link.hello().await.unwrap().user, "rex");
         token.set(&hub.ana);
-        assert_eq!(m.hello().await.unwrap().user, "ana");
-        assert_eq!(names(m.tools().await), vec![SHARE, RECALL]);
+        assert_eq!(link.hello().await.unwrap().user, "ana");
     }
 }
 
@@ -515,8 +349,9 @@ mod task_tests {
     use super::*;
     use crate::protocol::{TASK_METHODS, TASKS, TaskService};
     use crate::server::testing::start_with;
+    use std::sync::Mutex;
 
-    /// What nodes asked of the tasks.
+    /// What runners asked of the tasks.
     #[derive(Default)]
     struct FakeTasks {
         heard: Mutex<Vec<(String, String, Value)>>,
@@ -550,7 +385,7 @@ mod task_tests {
                 TASKS.to_string(),
                 json!({"project": "shop", "owner": "mallory"})
             )],
-            "the account is the token's, never one the node sends"
+            "the account is the token's, never one the runner sends"
         );
     }
 

@@ -13,7 +13,7 @@
 //! A **session** comes from logging in with the password, and only a session
 //! may change the password or make and revoke access tokens, so a stolen access
 //! token cannot make more. An **access token** may be narrowed by scopes, and
-//! is what nodes and scripts use.
+//! is what runners, client agents and scripts use.
 
 use crate::users::{Kind, Roles, Token, User, Users, UsersError};
 use ensemble_config::settings_file::{self, SettingsFile, WithSettings};
@@ -261,7 +261,7 @@ const TRACKER: &[Field] = &[
 /// What a new token's owner is told.
 fn token_note(c: &HubContext, name: &str, token: &str) -> String {
     let mut note = format!(
-        "This is {name}'s token, shown once. On their computer: ensemble node login <hub-url> --token <token>"
+        "This is {name}'s token, shown once. On their computer: ensemble runner login <hub-url> --token <token>"
     );
     if let Some(add) = mcp_line(c, token) {
         note.push_str(&format!(
@@ -462,7 +462,7 @@ fn user_operations() -> Vec<Operation<HubContext>> {
                 Ok(json!({
                     "name": input.name, "revoked": revoked,
                     "said": format!(
-                        "revoked {revoked} token(s) of {}; their nodes are signed out at their next request",
+                        "revoked {revoked} token(s) of {}; their runners and agents are signed out at their next request",
                         input.name
                     ),
                 }))

@@ -1,5 +1,5 @@
 {
-  description = "ensemble — an agentic development system: a hub of services and nodes of computing power";
+  description = "ensemble — an agentic development system: a hub of services and runners of computing power";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -27,7 +27,7 @@
           nativeCheckInputs = [ pkgs.git ];
 
           meta = {
-            description = "An agentic development system: a hub of services and nodes of computing power, reached over MCP";
+            description = "An agentic development system: a hub of services that client agents reach over MCP, and runners of computing power";
             mainProgram = "ensemble";
           };
         };
@@ -54,12 +54,12 @@
         };
       });
 
-      # A hub as a system service and this computer's node as a user service,
-      # each run as the person it is for: `services.ensemble.{hub,node}`.
+      # A hub as a system service and this computer's runner as a user service,
+      # each run as the person it is for: `services.ensemble.{hub,runner}`.
       # Their files are written in Nix, or made with `ensemble`.
       nixosModules.default = import ./nix/nixos-module.nix { inherit self; };
-      # This computer's node for one person, on Linux or macOS:
-      # `services.ensemble.node`.
+      # This computer's runner for one person, on Linux or macOS:
+      # `services.ensemble.runner`.
       homeManagerModules.default = import ./nix/home-manager-module.nix { inherit self; };
 
       checks = forAll (
@@ -68,7 +68,7 @@
           inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) ensemble;
         }
         // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-          # The NixOS module evaluates, and makes the hub's and the node's units.
+          # The NixOS module evaluates, and makes the hub's and the runner's units.
           nixos-module =
             let
               system = nixpkgs.lib.nixosSystem {
@@ -89,7 +89,7 @@
             in
             pkgs.linkFarm "ensemble-nixos-module" {
               "ensemble-hub.service" = system.config.systemd.units."ensemble-hub.service".unit;
-              "ensemble-node.service" = system.config.systemd.user.units."ensemble-node.service".unit;
+              "ensemble-runner.service" = system.config.systemd.user.units."ensemble-runner.service".unit;
             };
         }
       );

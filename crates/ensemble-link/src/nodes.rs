@@ -164,7 +164,7 @@ impl Routes {
         may_host: bool,
     ) -> Result<Value, String> {
         let name = params["name"].as_str().unwrap_or("").trim().to_string();
-        if !ensemble_config::node::valid_name(&name) {
+        if !ensemble_config::runner::valid_name(&name) {
             return Err(format!(
                 "node: '{name}' is not a node name: letters, digits, '-', '_' or '.'"
             ));

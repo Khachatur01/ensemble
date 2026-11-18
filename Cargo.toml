@@ -22,14 +22,14 @@ ureq = "3"
 # and completions for the shells.
 clap = { version = "4", features = ["derive", "wrap_help", "string"] }
 clap_complete = "4"
-# Async HTTP for what streams for long: a node's model calls. Already in the
+# Async HTTP for what streams for long: a runner's model calls. Already in the
 # tree through harness-rs, with these features.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 # killpg: a time limit or a cancel must take an agent CLI's whole process tree
 # down, and std can signal one pid. Already in the tree via ureq, so this costs
 # no extra compilation.
 libc = "0.2"
-# The link between a node and a hub server: one WebSocket on tokio, TLS through
+# The link between a runner and a hub server: one WebSocket on tokio, TLS through
 # rustls, which ureq already brings.
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 # The hub server's accounts and task deliveries: Turso, the Rust rewrite of
@@ -38,13 +38,13 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = ["c
 turso = { version = "=0.8.3", default-features = false }
 # Hashing hub tokens and making new ones; already in the tree through rustls.
 ring = "0.17"
-# The async runtime. Agents, the link and the node run on it; harness-rs, the
+# The async runtime. Agents, the link and the runner run on it; harness-rs, the
 # built-in agent's loop, is async too.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "net", "signal", "fs"] }
 tokio-util = "0.7"
 async-trait = "0.1"
 # Running many futures of one task at once, borrowing what the task holds:
-# the tool calls of a session, the runs of a queue.
+# the runs of a queue.
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # The `builtin` adapter: an agent loop, its tools and model clients, in this
 # binary, so an agent on an LLM backend needs no CLI installed. Pinned exactly:
@@ -64,14 +64,13 @@ ensemble-link = { path = "crates/ensemble-link" }
 ensemble-agents = { path = "crates/ensemble-agents" }
 ensemble-tasks = { path = "crates/ensemble-tasks" }
 ensemble-inbox = { path = "crates/ensemble-inbox" }
-ensemble-mcp = { path = "crates/ensemble-mcp" }
 ensemble-node = { path = "crates/ensemble-node" }
 
 [package]
 name = "ensemble"
 version.workspace = true
 edition.workspace = true
-description = "An agentic development system: a hub of services (task tracking, knowledge, integrations) and nodes of computing power (agents, model servers), reached over MCP."
+description = "An agentic development system: a hub of services (task tracking, knowledge, integrations) that client agents reach over MCP, and runners of computing power (agents, model servers)."
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
@@ -91,7 +90,6 @@ ensemble-core.workspace = true
 ensemble-inbox.workspace = true
 ensemble-knowledge.workspace = true
 ensemble-link.workspace = true
-ensemble-mcp.workspace = true
 ensemble-node.workspace = true
 ensemble-ops.workspace = true
 ensemble-tasks.workspace = true

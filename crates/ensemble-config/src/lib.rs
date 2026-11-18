@@ -26,11 +26,11 @@ use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILENAME: &str = "config.yaml";
 
-/// The JSON Schema for `config.yaml`, for editors. `ensemble node team schema`
+/// The JSON Schema for `config.yaml`, for editors. `ensemble runner team schema`
 /// prints it; the tests keep it in step with the structs below.
 pub const SCHEMA: &str = include_str!("../../../ensemble.schema.json");
 
-/// The config `ensemble node team new` writes: every setting at least once, with what
+/// The config `ensemble runner team new` writes: every setting at least once, with what
 /// it does. The tests keep it loading and complete.
 pub const SAMPLE: &str = include_str!("sample.yaml");
 
@@ -131,23 +131,10 @@ pub struct AgentConfig {
     /// The shared limit it takes `max_concurrent` and `budget` from, when it
     /// names one: its slots and its budget are then shared with the others.
     pub limit: Option<String>,
-    /// What it is given from the hub's knowledge with each task; `None` when
-    /// it is given nothing.
-    pub recall: Option<AgentRecall>,
     pub adapter: Adapter,
 }
 
-/// Notes from the hub's knowledge vault that an agent is given with each task
-/// and delegation: those about the task, within the hub's recall limits and
-/// the agent's own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AgentRecall {
-    /// Most characters of notes given with one task.
-    pub max_chars: u32,
-}
-
-/// Where an agent's tasks run. Delegations, blocking or in the background,
-/// always run in the project: their caller is waiting to see the change.
+/// Where an agent's tasks run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Isolation {
@@ -194,7 +181,7 @@ pub enum Adapter {
 /// definition sent from here, so the node's owner decides what runs there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeAdapter {
-    /// The hub server, `ws://` or `wss://`, signed in to with `ensemble node login`.
+    /// The hub server, `ws://` or `wss://`, signed in to with `ensemble runner login`.
     pub hub: String,
     /// The agent the nodes offer.
     pub agent: String,
@@ -288,7 +275,7 @@ pub struct BuiltinAdapter {
     pub fallback: Fallback,
     /// Of [`BUILTIN_TOOLS`], the ones it may use.
     pub tools: Vec<String>,
-    /// Most model calls for one delegation.
+    /// Most model calls for one run.
     pub max_steps: u32,
     /// Most tokens of answer per model call.
     pub max_tokens: u32,
@@ -621,7 +608,7 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::NotFound { path } => write!(
                 f,
-                "no {CONFIG_FILENAME} at {}. `ensemble node team list` lists the teams; `ensemble node team new <name>` makes one.",
+                "no {CONFIG_FILENAME} at {}. `ensemble runner team list` lists the teams; `ensemble runner team new <name>` makes one.",
                 path.display()
             ),
             ConfigError::HubNotFound { path } => write!(
@@ -652,8 +639,8 @@ pub mod edit;
 mod env;
 pub mod hub;
 mod interfaces;
-pub mod node;
 mod raw;
+pub mod runner;
 pub mod settings;
 pub mod settings_file;
 pub mod teams;
@@ -665,10 +652,10 @@ pub use hub::{
     Tasks, hub_path, load_hub, parse_hub,
 };
 pub use interfaces::{Interfaces, Mcp};
-pub(crate) use interfaces::{RawInterfaces, RawNodeInterfaces, interfaces, node_interfaces};
-pub use node::{
-    Access, NODE_FILENAME, Node, OfferedModels, OfferedRuns, Offers, load_node, node_path,
-    parse_node,
+pub(crate) use interfaces::{RawInterfaces, RawRunnerInterfaces, interfaces, runner_interfaces};
+pub use runner::{
+    Access, OfferedModels, OfferedRuns, Offers, RUNNER_FILENAME, Runner, load_runner, parse_runner,
+    runner_path,
 };
 pub use settings_file::{SettingsFile, WithSettings};
 pub use validate::{load, parse};

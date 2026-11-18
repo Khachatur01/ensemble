@@ -1,8 +1,8 @@
-//! What a node keeps for the runs it does in one working folder, under the
-//! folder's state directory: each run's activity log in `runs/<id>/log.txt`,
+//! What a runner keeps for the runs it does in one repository, under the
+//! repository's state directory: each run's activity log in `runs/<id>/log.txt`,
 //! the worktrees of tasks that run in one, and how much each agent with a
 //! budget ran lately. The tasks themselves are kept on the hub
-//! ([`crate::board`]); this is only the working side of the ones this node
+//! ([`crate::board`]); this is only the working side of the ones this runner
 //! runs, which `runs/` keeps out of git should the state directory be put in
 //! a repository.
 
@@ -80,14 +80,6 @@ impl Runs {
         }
     }
 
-    /// A run's activity log, when this node ran it.
-    pub fn log_of(&self, id: &str) -> Option<String> {
-        if !crate::tasks::valid_id(id) {
-            return None;
-        }
-        fs::read_to_string(self.runs.join(id).join(LOG_FILE)).ok()
-    }
-
     /// When each agent started its recent runs, in seconds since the epoch.
     pub fn usage(&self) -> BTreeMap<String, Vec<u64>> {
         fs::read_to_string(self.usage_path())
@@ -114,20 +106,6 @@ impl Runs {
             eprintln!("ensemble: cannot record usage: {e}");
         }
     }
-
-    /// The highest `adhoc-N` a run directory has, so a new session does not
-    /// reuse one.
-    pub fn last_adhoc(&self) -> u64 {
-        let Ok(entries) = fs::read_dir(&self.runs) else {
-            return 0;
-        };
-        entries
-            .filter_map(Result::ok)
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter_map(|n| n.strip_prefix("adhoc-")?.parse().ok())
-            .max()
-            .unwrap_or(0)
-    }
 }
 
 #[cfg(test)]
@@ -139,18 +117,16 @@ mod tests {
     fn runs_keep_a_log_and_ignore_themselves() {
         let tmp = TempDir::new();
         let runs = Runs::new(&tmp.0);
-        runs.log("adhoc-3", "scout · step 1");
-        runs.log("adhoc-3", "scout · step 2");
+        runs.log("0003-look", "scout · step 1");
+        runs.log("0003-look", "scout · step 2");
         assert_eq!(
-            runs.log_of("adhoc-3").unwrap(),
+            fs::read_to_string(tmp.0.join("runs/0003-look/log.txt")).unwrap(),
             "scout · step 1\nscout · step 2\n"
         );
         assert_eq!(
             fs::read_to_string(tmp.0.join("runs/.gitignore")).unwrap(),
             "*\n"
         );
-        assert_eq!(runs.last_adhoc(), 3);
-        assert_eq!(runs.log_of("../x"), None);
     }
 
     #[test]

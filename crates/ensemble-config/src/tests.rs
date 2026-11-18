@@ -445,11 +445,6 @@ fn the_schema_names_exactly_the_keys_the_config_accepts() {
         ),
         ("limit", accepted_keys::<RawLimit>(), "limits"),
         (
-            "agent_recall",
-            accepted_keys::<RawAgentRecall>(),
-            "an agent's recall",
-        ),
-        (
             "budget_per_hour_tokens",
             accepted_keys::<RawPerHourTokens>(),
             "per_hour_tokens budget",
@@ -543,11 +538,7 @@ fn the_schema_requires_every_key_but_the_optional_two() {
     for (def, keys) in [
         ("openai_compatible_api_backend", vec!["api_key_env"]),
         ("anthropic_api_backend", vec!["api_key_env"]),
-        (
-            "agent",
-            vec!["prompt", "max_concurrent", "budget", "limit", "recall"],
-        ),
-        ("agent_recall", vec![]),
+        ("agent", vec!["prompt", "max_concurrent", "budget", "limit"]),
         ("limit", vec![]),
         ("budget_per_hour_tokens", vec![]),
         ("gate", vec![]),
@@ -737,14 +728,6 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
         ),
         ("anthropic_api_backend", of_type(&backends, ANTHROPIC_API)),
         ("agent", agents.clone()),
-        (
-            "agent_recall",
-            agents
-                .iter()
-                .map(|a| &a["recall"])
-                .filter(|r| !r.is_null())
-                .collect(),
-        ),
         ("budget_unlimited", budgets("unlimited")),
         ("budget_per_hour", budgets("per_hour")),
         ("claude_code_adapter", adapters(CLAUDE_CODE_AGENT)),
@@ -1211,29 +1194,6 @@ fn a_prompt_is_optional_and_absent_means_none() {
         );
     let c = parse(&with, &p(), &env(&[])).unwrap();
     assert_eq!(c.agents["coder"].prompt.as_deref(), Some("Writes code."));
-}
-
-#[test]
-fn recall_is_optional_absent_means_none_and_needs_a_size() {
-    let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
-    assert_eq!(c.agents["coder"].recall, None);
-    let with = |recall: &str| {
-        REFERENCE.replacen(
-            "  coder:\n    max_seconds: 900\n",
-            &format!("  coder:\n    recall: {recall}\n    max_seconds: 900\n"),
-            1,
-        )
-    };
-    let c = parse(&with("{ max_chars: 2000 }"), &p(), &env(&[])).unwrap();
-    assert_eq!(
-        c.agents["coder"].recall,
-        Some(AgentRecall { max_chars: 2000 })
-    );
-    assert!(
-        joined_problems(&with("{ max_chars: 0 }"))
-            .contains("agents.coder.recall: `max_chars` must be greater than 0")
-    );
-    assert!(parse(&with("{}"), &p(), &env(&[])).is_err());
 }
 
 /// A helper team of a `coder` and a `planner`, with one gate.
@@ -1748,21 +1708,23 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
 }
 
 // ---------------------------------------------------------------------------
-// node.yaml
+// runner.yaml
 
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_node_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
-    let node = parse_node(node::NODE_SAMPLE, Path::new("node.yaml")).unwrap();
-    assert_eq!(node.hub.as_deref(), Some("wss://hub.example.com"));
+fn a_runner_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
+    let runner = parse_runner(runner::RUNNER_SAMPLE, Path::new("runner.yaml")).unwrap();
+    assert_eq!(runner.hub.as_deref(), Some("wss://hub.example.com"));
     assert_eq!(
-        (node.name.as_str(), node.access),
-        ("laptop", node::Access::Private)
+        (runner.name.as_str(), runner.access),
+        ("laptop", runner::Access::Private)
     );
-    let runs = node.offers.runs.as_ref().expect("the sample offers runs");
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    assert_eq!(runner.workspace, home.join("ensemble"), "~ is the home");
+    let runs = runner.offers.runs.as_ref().expect("the sample offers runs");
     assert_eq!(runs.agents, vec!["web/coder"]);
-    let models = node
+    let models = runner
         .offers
         .models
         .as_ref()
@@ -1771,15 +1733,16 @@ fn a_node_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
     assert_eq!(models.api_key_env, None);
 
     let problems = |yaml: &str| {
-        parse_node(yaml, Path::new("node.yaml"))
+        parse_runner(yaml, Path::new("runner.yaml"))
             .unwrap_err()
             .to_string()
     };
     let said = problems(
-        "version: 1\nname: a/b\naccess: shared\nhub: http://hub\noffers:\n  runs: { agents: [] }\n  models: { base_url: localhost, timeout_seconds: 0, names: [] }\n",
+        "version: 1\nname: a/b\naccess: shared\nworkspace: \"\"\nhub: http://hub\noffers:\n  runs: { agents: [] }\n  models: { base_url: localhost, timeout_seconds: 0, names: [] }\n",
     );
     for wanted in [
         "name: 'a/b'",
+        "workspace: is empty",
         "hub: 'http://hub' must start with ws://",
         "offers.runs.agents: name at least one",
         "offers.models.base_url",
@@ -1788,56 +1751,62 @@ fn a_node_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
     ] {
         assert!(said.contains(wanted), "{wanted}: {said}");
     }
-    let said =
-        problems("version: 1\nname: box\naccess: shared\noffers:\n  runs: { agents: [coder] }\n");
+    let said = problems(
+        "version: 1\nname: box\naccess: shared\nworkspace: /code\noffers:\n  runs: { agents: [coder] }\n",
+    );
     assert!(said.contains("as `<team>/<agent>`"), "{said}");
     assert!(said.contains("there is no `hub`"), "{said}");
-    let bare = parse_node(
-        "version: 1\nname: box\naccess: shared\noffers: {}\n",
-        Path::new("node.yaml"),
+    let bare = parse_runner(
+        "version: 1\nname: box\naccess: shared\nworkspace: work\noffers: {}\n",
+        Path::new("/home/ana/.config/ensemble/runner/runner.yaml"),
     )
     .unwrap();
     assert_eq!(
+        bare.workspace,
+        Path::new("/home/ana/.config/ensemble/runner/work"),
+        "a relative path is beside the file"
+    );
+    assert_eq!(
         bare.offers,
-        node::Offers {
+        runner::Offers {
             runs: None,
             models: None
         }
     );
     assert!(
-        load_node(Path::new("/nonexistent/node.yaml"))
+        load_runner(Path::new("/nonexistent/runner.yaml"))
             .unwrap()
             .is_none()
     );
-    let schema: serde_json::Value = serde_json::from_str(node::NODE_SCHEMA).unwrap();
-    assert_eq!(schema_keys(&schema), accepted_keys::<node::RawNode>());
-    let mut required = accepted_keys::<node::RawNode>();
+    let schema: serde_json::Value = serde_json::from_str(runner::RUNNER_SCHEMA).unwrap();
+    assert_eq!(schema_keys(&schema), accepted_keys::<runner::RawRunner>());
+    let mut required = accepted_keys::<runner::RawRunner>();
     required.retain(|k| k != "hub" && k != "interfaces");
     assert_eq!(schema_required(&schema), required);
     let defs = &schema["definitions"];
     assert_eq!(
         schema_keys(&defs["interfaces"]),
-        accepted_keys::<interfaces::RawNodeInterfaces>()
+        accepted_keys::<interfaces::RawRunnerInterfaces>()
     );
     assert_eq!(
         schema_keys(&schema["properties"]["offers"]),
-        accepted_keys::<node::RawOffers>()
+        accepted_keys::<runner::RawOffers>()
     );
     assert_eq!(
         schema_keys(&defs["runs"]),
-        accepted_keys::<node::RawOfferedRuns>()
+        accepted_keys::<runner::RawOfferedRuns>()
     );
     assert_eq!(
         schema_required(&defs["runs"]),
-        accepted_keys::<node::RawOfferedRuns>()
+        accepted_keys::<runner::RawOfferedRuns>()
     );
-    let models_keys = accepted_keys::<node::RawOfferedModels>();
+    let models_keys = accepted_keys::<runner::RawOfferedModels>();
     assert_eq!(schema_keys(&defs["models"]), models_keys);
     let mut required = models_keys.clone();
     required.retain(|k| k != "api_key_env");
     assert_eq!(schema_required(&defs["models"]), required);
     let id = schema["$id"].as_str().unwrap();
-    assert!(node::NODE_SAMPLE.starts_with(&format!("# yaml-language-server: $schema={id}")));
+    assert!(runner::RUNNER_SAMPLE.starts_with(&format!("# yaml-language-server: $schema={id}")));
 }
 
 #[test]
@@ -1914,22 +1883,24 @@ fn a_builtin_agent_runs_on_llm_backends_with_tools_it_has() {
 
 #[test]
 fn the_command_line_is_on_unless_interfaces_says_otherwise_and_one_must_be() {
-    let node = |interfaces: &str| {
-        parse_node(
-            &format!("version: 1\nname: laptop\naccess: private\noffers: {{}}\n{interfaces}"),
-            Path::new("node.yaml"),
+    let runner = |interfaces: &str| {
+        parse_runner(
+            &format!(
+                "version: 1\nname: laptop\naccess: private\nworkspace: /code\noffers: {{}}\n{interfaces}"
+            ),
+            Path::new("runner.yaml"),
         )
     };
-    assert!(node("").unwrap().interfaces.cli, "left out: on");
-    assert!(node("interfaces: { cli: {} }\n").unwrap().interfaces.cli);
-    let err = node("interfaces: {}\n").unwrap_err().to_string();
+    assert!(runner("").unwrap().interfaces.cli, "left out: on");
+    assert!(runner("interfaces: { cli: {} }\n").unwrap().interfaces.cli);
+    let err = runner("interfaces: {}\n").unwrap_err().to_string();
     assert!(err.contains("turns on nothing that manages it"), "{err}");
-    let err = node("interfaces: { web: {} }\n").unwrap_err().to_string();
+    let err = runner("interfaces: { web: {} }\n").unwrap_err().to_string();
     assert!(err.contains("web"), "{err}");
-    let err = node("interfaces: { cli: {}, mcp: { url: \"http://x\" } }\n")
+    let err = runner("interfaces: { cli: {}, mcp: { url: \"http://x\" } }\n")
         .unwrap_err()
         .to_string();
-    assert!(err.contains("mcp"), "a node serves no MCP: {err}");
+    assert!(err.contains("mcp"), "a runner serves no MCP: {err}");
     let hub = |interfaces: &str| {
         parse_hub(
             &format!("{HUB}interfaces: {interfaces}\n"),

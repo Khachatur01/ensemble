@@ -1,16 +1,16 @@
-//! What a node and a hub server say to each other: JSON text frames over one
-//! WebSocket the node opens, signed in with `Authorization: Bearer <token>`
+//! What a runner and a hub server say to each other: JSON text frames over one
+//! WebSocket the runner opens, signed in with `Authorization: Bearer <token>`
 //! when it connects.
 //!
-//! - The node asks: `{"id": 1, "method": "share", "params": {...}}`.
+//! - The runner asks: `{"id": 1, "method": "share", "params": {...}}`.
 //! - The hub answers: `{"id": 1, "result": {...}}` or `{"id": 1, "error": "..."}`.
 //! - The hub may also tell: `{"event": "...", "data": {...}}`, unasked: a run
-//!   or a model call for a node that offers them.
+//!   or a model call for a runner that offers them.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Who the node signed in as, what they may do, and the knowledge tools and
+/// Who the runner signed in as, what they may do, and the knowledge tools and
 /// instructions their agent gets.
 pub const HELLO: &str = "hello";
 /// Keep knowledge in the organization vault: `{title, text, client, project}`.
@@ -29,13 +29,13 @@ pub const TASKS: &str = "tasks";
 pub const TASK: &str = "task";
 /// A new task: `{project, ticket}`, answered with `{id}`.
 pub const TASK_CREATE: &str = "task_create";
-/// Run a task on this node, for a while: `{project, id, node, seconds}`,
+/// Run a task on this runner, for a while: `{project, id, node, seconds}`,
 /// answered with `{claimed}` and, when not, `{why}`.
 pub const TASK_CLAIM: &str = "task_claim";
 /// Keep running it: `{project, id, node, seconds}`, answered with `{renewal}`:
-/// `kept`, `cancel` (someone cancelled it) or `lost` (another node has it).
+/// `kept`, `cancel` (someone cancelled it) or `lost` (another runner has it).
 pub const TASK_RENEW: &str = "task_renew";
-/// Stop running it, unfinished, for any node to run again: `{project, id,
+/// Stop running it, unfinished, for any runner to run again: `{project, id,
 /// node}`.
 pub const TASK_RELEASE: &str = "task_release";
 /// How a run ended: `{project, id, node, end}`.
@@ -45,7 +45,7 @@ pub const TASK_ANSWER: &str = "task_answer";
 /// Give a task to an agent: `{project, id, agent}`.
 pub const TASK_ASSIGN: &str = "task_assign";
 /// Cancel a task: `{project, id}`, answered with `{cancel}`: `before` it
-/// started, `running` (its node stops it) or `ended` already.
+/// started, `running` (its runner stops it) or `ended` already.
 pub const TASK_CANCEL: &str = "task_cancel";
 /// Every task method, for the server to pass on.
 pub const TASK_METHODS: [&str; 10] = [
@@ -103,7 +103,7 @@ pub fn socket_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketCon
         .max_frame_size(Some(MAX_MESSAGE))
 }
 
-/// Something the hub tells a node unasked.
+/// Something the hub tells a runner unasked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub event: String,

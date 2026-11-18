@@ -1,5 +1,5 @@
 //! The CLI as an interface over operations: each operation the one who runs a
-//! hub or a node may run is a command, made from its spec. A name's dots are
+//! hub or a runner may run is a command, made from its spec. A name's dots are
 //! the command's path (`user.add` is `ensemble hub user add`), its fields its
 //! arguments: positional ones by their place, the others as `--options`. A
 //! secret is never an argument: when an operation needs one, it is asked for,

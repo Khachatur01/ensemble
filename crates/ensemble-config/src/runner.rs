@@ -1,40 +1,42 @@
-//! `node.yaml`: one node, a worker that gives this computer's power to its
-//! owner and, when shared, to the people of a hub server: `~/.config/ensemble/
-//! node.yaml`. A computer runs one node.
+//! `runner.yaml`: one runner, a worker that gives this computer's power to its
+//! owner and, when shared, to the people of a hub server:
+//! `~/.config/ensemble/runner/runner.yaml`. A computer runs one runner.
 //!
-//! A node says who it works for (its owner alone, or also the others whose
-//! role has `compute`) and what it offers: agents of its teams that run tasks
-//! sent to it, named `<team>/<agent>`, and the models a server here serves.
-//! Its teams are the folders of its teams directory (`teams`). It is tied to
-//! no project: your agent CLI's sessions reach its teams from any folder
-//! through `ensemble mcp`, and a task from a hub goes to the folder of
-//! its project's name where a session last ran.
+//! A runner says who it works for (its owner alone, or also the others whose
+//! role has `compute`), where it works (its workspace, a folder of git
+//! repositories, each a project named for its folder), and what it offers:
+//! agents of its teams that run work sent to it, named `<team>/<agent>`, and
+//! the models a server here serves. Its teams are the folders of its teams
+//! directory (`teams`).
 
 use super::validate::explain;
 use super::*;
 use serde::Deserialize;
 
-pub const NODE_FILENAME: &str = "node.yaml";
-pub const NODE_SUPPORTED_VERSION: u32 = 1;
+pub const RUNNER_FILENAME: &str = "runner.yaml";
+pub const RUNNER_SUPPORTED_VERSION: u32 = 1;
 
-/// The JSON Schema for `node.yaml`.
-pub const NODE_SCHEMA: &str = include_str!("../../../node.schema.json");
+/// The JSON Schema for `runner.yaml`.
+pub const RUNNER_SCHEMA: &str = include_str!("../../../runner.schema.json");
 
-/// The first line of a node file, which points an editor at its schema.
-pub const NODE_SCHEMA_URL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/node.schema.json";
+/// The first line of a runner file, which points an editor at its schema.
+pub const RUNNER_SCHEMA_URL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/runner.schema.json";
 
-/// The file `ensemble node init` writes.
-pub const NODE_SAMPLE: &str = include_str!("node_sample.yaml");
+/// The file `ensemble runner init` writes.
+pub const RUNNER_SAMPLE: &str = include_str!("runner_sample.yaml");
 
-/// One node.
+/// One runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Node {
+pub struct Runner {
     pub version: u32,
     /// Its name, which a hub knows as `<owner>/<name>`.
     pub name: String,
     pub access: Access,
+    /// The folder it works in: each git repository directly inside it is a
+    /// project, named for its folder, whose tasks the runner runs.
+    pub workspace: PathBuf,
     /// The hub server it connects to, `ws://` or `wss://`, signed in to with
-    /// `ensemble node login`. None: it uses no hub.
+    /// `ensemble runner login`. None: it uses no hub.
     pub hub: Option<String>,
     pub offers: Offers,
     /// How it may be managed.
@@ -42,7 +44,7 @@ pub struct Node {
     pub source: PathBuf,
 }
 
-/// Whom a node works for.
+/// Whom a runner works for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Access {
@@ -61,7 +63,7 @@ impl Access {
     }
 }
 
-/// What a node offers through a hub. Each block is there or not: absent, it
+/// What a runner offers through a hub. Each block is there or not: absent, it
 /// is not offered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Offers {
@@ -69,8 +71,8 @@ pub struct Offers {
     pub models: Option<OfferedModels>,
 }
 
-/// Agents of the node's teams, which run tasks sent to the node in a folder
-/// of their own and send back what they changed.
+/// Agents of the runner's teams, which run work sent to the runner in a
+/// folder of their own and send back what they changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfferedRuns {
     /// Which agents of its teams others may run, as `<team>/<agent>`.
@@ -91,13 +93,14 @@ pub struct OfferedModels {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawNode {
+pub(crate) struct RawRunner {
     pub(crate) version: u32,
     pub(crate) name: String,
     pub(crate) access: Access,
+    pub(crate) workspace: String,
     pub(crate) hub: Option<String>,
     pub(crate) offers: RawOffers,
-    pub(crate) interfaces: Option<RawNodeInterfaces>,
+    pub(crate) interfaces: Option<RawRunnerInterfaces>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,13 +125,13 @@ pub(crate) struct RawOfferedModels {
     pub(crate) names: Vec<String>,
 }
 
-/// The node file in `dir`, usually `~/.config/ensemble`.
-pub fn node_path(dir: &Path) -> PathBuf {
-    dir.join(NODE_FILENAME)
+/// The runner file in `dir`, usually `~/.config/ensemble/runner`.
+pub fn runner_path(dir: &Path) -> PathBuf {
+    dir.join(RUNNER_FILENAME)
 }
 
-/// The node file at `path`, or none when there is no such file.
-pub fn load_node(path: &Path) -> Result<Option<Node>, ConfigError> {
+/// The runner file at `path`, or none when there is no such file.
+pub fn load_runner(path: &Path) -> Result<Option<Runner>, ConfigError> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -139,18 +142,18 @@ pub fn load_node(path: &Path) -> Result<Option<Node>, ConfigError> {
             });
         }
     };
-    parse_node(&text, path).map(Some)
+    parse_runner(&text, path).map(Some)
 }
 
-pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
-    let raw: RawNode = serde_norway::from_str(text).map_err(|e| ConfigError::Syntax {
+pub fn parse_runner(text: &str, path: &Path) -> Result<Runner, ConfigError> {
+    let raw: RawRunner = serde_norway::from_str(text).map_err(|e| ConfigError::Syntax {
         path: path.to_path_buf(),
         detail: explain(&e),
     })?;
     let mut problems = Vec::new();
-    if raw.version != NODE_SUPPORTED_VERSION {
+    if raw.version != RUNNER_SUPPORTED_VERSION {
         problems.push(format!(
-            "version: {} is not supported; this build understands node version {NODE_SUPPORTED_VERSION}",
+            "version: {} is not supported; this build understands runner version {RUNNER_SUPPORTED_VERSION}",
             raw.version
         ));
     }
@@ -160,6 +163,10 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
             "name: '{name}' must be letters, digits, '-', '_' or '.', such as laptop or gpu-box"
         ));
     }
+    let workspace = workspace_path(raw.workspace.trim(), path).unwrap_or_else(|e| {
+        problems.push(format!("workspace: {e}"));
+        PathBuf::new()
+    });
     let hub = raw.hub.as_ref().map(|h| h.trim().to_string());
     if let Some(h) = &hub
         && !(h.starts_with("ws://") || h.starts_with("wss://"))
@@ -169,8 +176,9 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
         ));
     }
     if hub.is_none() && (raw.offers.runs.is_some() || raw.offers.models.is_some()) {
-        problems
-            .push("offers: a node offers what it has through a hub, and there is no `hub`".into());
+        problems.push(
+            "offers: a runner offers what it has through a hub, and there is no `hub`".into(),
+        );
     }
     let runs = raw.offers.runs.as_ref().map(|r| {
         let agents: Vec<String> = r.agents.iter().map(|a| a.trim().to_string()).collect();
@@ -215,12 +223,13 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
             names,
         }
     });
-    let interfaces = node_interfaces(raw.interfaces.as_ref(), &mut problems);
+    let interfaces = runner_interfaces(raw.interfaces.as_ref(), &mut problems);
     if problems.is_empty() {
-        Ok(Node {
+        Ok(Runner {
             version: raw.version,
             name,
             access: raw.access,
+            workspace,
             hub,
             offers: Offers { runs, models },
             interfaces,
@@ -234,7 +243,23 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
     }
 }
 
-/// A node's name: what a hub's users write after `<owner>/`.
+/// The folder `workspace` names in the runner file at `path`: `~/…` in the
+/// home directory, and a relative path beside the file, as hub.yaml's paths
+/// are.
+fn workspace_path(workspace: &str, path: &Path) -> Result<PathBuf, String> {
+    if workspace.is_empty() {
+        return Err("is empty: name the folder the runner works in, such as ~/ensemble".into());
+    }
+    if let Some(rest) = workspace.strip_prefix("~/") {
+        let home = std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .ok_or_else(|| format!("'{workspace}' starts with ~, and HOME is not set"))?;
+        return Ok(PathBuf::from(home).join(rest));
+    }
+    Ok(path.parent().unwrap_or(Path::new(".")).join(workspace))
+}
+
+/// A runner's name: what a hub's users write after `<owner>/`.
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name

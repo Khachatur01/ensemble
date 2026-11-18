@@ -1,11 +1,11 @@
 # The NixOS module: a hub, `ensemble hub serve`, as a system service, and this
-# computer's node, `ensemble node serve`, as a user service. Each runs as the
+# computer's runner, `ensemble runner serve`, as a user service. Each runs as the
 # person it is for, from their `~/.config/ensemble/`, so they manage it with
 # `ensemble` as on any platform. What should always hold is written in Nix:
-# the settings declared here are merged into `hub.yaml` and `node.yaml` when
+# the settings declared here are merged into `hub.yaml` and `runner.yaml` when
 # each starts, and teams are linked in. The rest is made and changed with
-# `ensemble` (`ensemble hub init`, `ensemble node setup`, `… config set`,
-# `ensemble node team …`), which refuses to change what Nix declares. Each
+# `ensemble` (`ensemble hub init`, `ensemble runner setup`, `… config set`,
+# `ensemble runner team …`), which refuses to change what Nix declares. Each
 # process starts once its file is there.
 { self }:
 {
@@ -24,17 +24,17 @@ let
     ;
   cfg = config.services.ensemble;
   yaml = pkgs.formats.yaml { };
-  node = import ./node.nix { inherit lib; };
+  runner = import ./runner.nix { inherit lib; };
   package = cfg.package;
 
   hub = cfg.hub;
   hubDir = "${config.users.users.${hub.user}.home}/.config/ensemble/hub";
   hubYaml = if hub.settings == null then null else yaml.generate "hub.yaml" hub.settings;
 
-  nodeCfg = cfg.node;
-  nodeFiles = node.files {
+  runnerCfg = cfg.runner;
+  runnerFiles = runner.files {
     inherit pkgs yaml;
-    cfg = nodeCfg;
+    cfg = runnerCfg;
   };
 in
 {
@@ -49,7 +49,7 @@ in
     hub = {
       enable = mkEnableOption ''
         an Ensemble hub, `ensemble hub serve`: knowledge, tasks, accounts, and
-        the link nodes connect to. It runs as `services.ensemble.hub.user`,
+        the link runners connect to. It runs as `services.ensemble.hub.user`,
         from their `~/.config/ensemble/hub/`, and they manage it with
         `ensemble hub …` as themselves
       '';
@@ -131,24 +131,24 @@ in
       };
     };
 
-    node = {
+    runner = {
       enable = mkEnableOption ''
-        this computer's Ensemble node, `ensemble node serve`, as a user service
-        of `services.ensemble.node.user`: its agent sessions reach it through
-        `ensemble mcp`
+        this computer's Ensemble runner, `ensemble runner serve`, as a user
+        service of `services.ensemble.runner.user`: it works on the tasks of
+        its hub in the git repositories of its workspace
       '';
 
       user = mkOption {
         type = types.str;
-        description = "The person the node works for: its user service runs for them alone.";
+        description = "The person the runner works for: its user service runs for them alone.";
         example = "ana";
       };
     }
-    // node.options { inherit pkgs yaml; };
+    // runner.options { inherit pkgs yaml; };
   };
 
   config = mkMerge [
-    (mkIf (hub.enable || nodeCfg.enable) {
+    (mkIf (hub.enable || runnerCfg.enable) {
       environment.systemPackages = [ package ];
     })
 
@@ -207,39 +207,39 @@ in
       };
     })
 
-    (mkIf nodeCfg.enable {
-      systemd.user.services.ensemble-node = {
-        description = "Ensemble node";
+    (mkIf runnerCfg.enable {
+      systemd.user.services.ensemble-runner = {
+        description = "Ensemble runner";
         wantedBy = [ "default.target" ];
         unitConfig = {
-          ConditionUser = nodeCfg.user;
+          ConditionUser = runnerCfg.user;
         }
-        # Without settings, it waits for `ensemble node setup`.
-        // lib.optionalAttrs (nodeFiles.nodeYaml == null) {
-          ConditionPathExists = "%h/.config/ensemble/node/node.yaml";
+        # Without settings, it waits for `ensemble runner setup`.
+        // lib.optionalAttrs (runnerFiles.runnerYaml == null) {
+          ConditionPathExists = "%h/.config/ensemble/runner/runner.yaml";
         };
         restartTriggers =
-          lib.optional (nodeFiles.nodeYaml != null) nodeFiles.nodeYaml
-          ++ lib.attrValues nodeFiles.teams;
+          lib.optional (runnerFiles.runnerYaml != null) runnerFiles.runnerYaml
+          ++ lib.attrValues runnerFiles.teams;
         path = [
           package
           pkgs.git
         ]
-        ++ nodeCfg.extraPackages;
+        ++ runnerCfg.extraPackages;
         serviceConfig = {
-          ExecStartPre = node.linkScript {
+          ExecStartPre = runner.linkScript {
             inherit pkgs package;
-            files = nodeFiles;
+            files = runnerFiles;
           };
           ExecStart = lib.escapeShellArgs (
             [
               (lib.getExe package)
-              "node"
+              "runner"
               "serve"
             ]
-            ++ lib.optionals (nodeCfg.environmentFile != null) [
+            ++ lib.optionals (runnerCfg.environmentFile != null) [
               "--env-file"
-              nodeCfg.environmentFile
+              runnerCfg.environmentFile
             ]
           );
           Restart = "on-failure";

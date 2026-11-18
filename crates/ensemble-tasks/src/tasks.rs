@@ -1,8 +1,8 @@
 //! Tasks: tickets the calling agent, a person or the hub's inbox writes, that
 //! agents work through. A task is kept on the hub ([`crate::board`]), not on
-//! the computer that runs it, so any of the person's nodes with its agent may
-//! run it, and another takes it over when that node stops. What a run does as
-//! it goes, its log and its worktree, stays on the node that runs it
+//! the computer that runs it, so any of the person's runners with its agent may
+//! run it, and another takes it over when that runner stops. What a run does as
+//! it goes, its log and its worktree, stays on the runner that runs it
 //! ([`crate::runs`]).
 //!
 //! A ticket says what to do: a `title`, the `agent` it is for (none: the
@@ -177,12 +177,12 @@ pub struct Task {
     pub status: Option<Status>,
     /// The question it waits on, while nobody has answered it.
     pub question: Option<String>,
-    /// The node running it now.
+    /// The runner running it now.
     pub running_on: Option<String>,
-    /// The node that was running it when it stopped unfinished; a node runs
+    /// The runner that was running it when it stopped unfinished; a runner runs
     /// it again.
     pub interrupted_on: Option<String>,
-    /// The node whose folder its work is in, which alone may go on with it.
+    /// The runner whose folder its work is in, which alone may go on with it.
     pub pinned_to: Option<String>,
 }
 
@@ -203,86 +203,6 @@ pub struct Detail {
     pub handoffs: Option<String>,
     /// Where its work was pushed when a run of it last stopped.
     pub progress: Option<crate::board::Progress>,
-}
-
-/// One line about a task: its id, agent, where it stands and its title.
-/// `budget_wait` is the seconds until its agent may start another run, when
-/// it may not now. The tool `status` and the commands `ensemble task list` and
-/// `ensemble task` all show a task this way.
-pub fn entry_line(task: &Task, all: &[Task], budget_wait: Option<u64>) -> String {
-    let t = &task.ticket;
-    if let Some(status) = task.status {
-        return format!("{} · {} · {} · {}", t.id, t.agent, status.as_str(), t.title);
-    }
-    if t.agent.is_empty() {
-        return format!("{} · - · backlog · {}", t.id, t.title);
-    }
-    let blockers = waiting_for(t, all);
-    let state = if let Some(q) = &task.question {
-        format!("needs input: {q}")
-    } else if let Some(node) = &task.running_on {
-        format!("running on {node}")
-    } else if let Some(wait) = budget_wait {
-        format!("queued, over its agent's budget for {}", minutes(wait))
-    } else if !blockers.is_empty() {
-        format!("blocked by {}", blockers.join(", "))
-    } else if let Some(node) = &task.interrupted_on {
-        match &task.pinned_to {
-            Some(pinned) if pinned == node => {
-                format!("queued (interrupted on {node}, where its work is)")
-            }
-            _ => format!("queued (interrupted on {node})"),
-        }
-    } else {
-        "queued".into()
-    };
-    format!("{} · {} · {state} · {}", t.id, t.agent, t.title)
-}
-
-/// How many tasks are active: assigned, not ended, and not waiting on an answer
-/// or on a task that ended without being done.
-pub fn active_tasks(all: &[Task]) -> usize {
-    all.iter()
-        .filter(|t| {
-            t.status.is_none()
-                && !t.ticket.agent.is_empty()
-                && t.question.is_none()
-                && !waiting_for(&t.ticket, all).iter().any(|w| {
-                    w.ends_with("(failed)")
-                        || w.ends_with("(cancelled)")
-                        || w.ends_with("(no such task)")
-                })
-        })
-        .count()
-}
-
-/// A line saying the helper team has nothing active, and what is waiting for
-/// the owner; `None` while something is.
-pub fn idle_line(all: &[Task]) -> Option<String> {
-    if active_tasks(all) > 0 {
-        return None;
-    }
-    let unfinished: Vec<&Task> = all.iter().filter(|t| t.status.is_none()).collect();
-    let backlog = unfinished
-        .iter()
-        .filter(|t| t.ticket.agent.is_empty())
-        .count();
-    let asking = unfinished.iter().filter(|t| t.question.is_some()).count();
-    let mut waiting = Vec::new();
-    if backlog > 0 {
-        waiting.push(format!("{backlog} in the backlog, to be assigned"));
-    }
-    if asking > 0 {
-        waiting.push(format!("{asking} waiting for an answer"));
-    }
-    Some(format!(
-        "Idle: no active tasks{}. The helper team waits for planning: tell your agent what to do next.",
-        if waiting.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", waiting.join(", "))
-        }
-    ))
 }
 
 /// What `ticket` still waits for: each task in its `after` that is not done,
@@ -470,44 +390,6 @@ pub(crate) mod tests {
             ["2 (failed)", "3 (not done yet)", "9 (no such task)"]
         );
         assert!(waiting_for(&all[0].ticket, &all).is_empty());
-    }
-
-    #[test]
-    fn a_line_says_where_a_task_stands() {
-        let mut t = queued("0001-a", &[]);
-        assert_eq!(entry_line(&t, &[], None), "0001-a · coder · queued · t");
-        t.interrupted_on = Some("laptop".into());
-        assert!(entry_line(&t, &[], None).contains("queued (interrupted on laptop)"));
-        t.pinned_to = Some("laptop".into());
-        assert!(
-            entry_line(&t, &[], None).contains("queued (interrupted on laptop, where its work is)")
-        );
-        assert!(
-            entry_line(&t, &[], Some(90)).contains("over its agent's budget for 2 more minutes")
-        );
-        t.running_on = Some("gpu-box".into());
-        assert!(entry_line(&t, &[], None).contains("running on gpu-box"));
-        t.question = Some("Which one?".into());
-        assert!(entry_line(&t, &[], None).contains("needs input: Which one?"));
-        t.status = Some(Status::Done);
-        assert_eq!(entry_line(&t, &[], None), "0001-a · coder · done · t");
-        t.ticket.agent.clear();
-        t.status = None;
-        assert_eq!(entry_line(&t, &[], None), "0001-a · - · backlog · t");
-    }
-
-    #[test]
-    fn the_team_is_idle_when_nothing_assigned_can_go_on() {
-        let mut asking = queued("1", &[]);
-        asking.question = Some("?".into());
-        let mut backlog = queued("2", &[]);
-        backlog.ticket.agent.clear();
-        let idle = idle_line(&[asking.clone(), backlog]).unwrap();
-        assert!(
-            idle.contains("1 in the backlog") && idle.contains("1 waiting for an answer"),
-            "{idle}"
-        );
-        assert_eq!(idle_line(&[asking, queued("3", &[])]), None);
     }
 
     #[test]

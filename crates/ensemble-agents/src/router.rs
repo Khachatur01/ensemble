@@ -82,7 +82,7 @@ impl std::fmt::Display for RouteError {
             } => write!(
                 f,
                 "agent '{agent}' has no model it can run on now: {}.{} \
-                 `ensemble node agent health` shows what each backend answers.",
+                 `ensemble runner agent health` shows what each backend answers.",
                 refusals
                     .iter()
                     .map(|r| format!("{} ({}): {}", r.backend, r.model, r.why))
@@ -113,7 +113,7 @@ impl RouteError {
 }
 
 pub struct Ensemble {
-    /// The helper team, which a node replaces when its teams change; each run
+    /// The helper team, which a runner replaces when its teams change; each run
     /// keeps the one it started with.
     config: RwLock<Arc<Config>>,
     workdir: Option<PathBuf>,
@@ -214,7 +214,7 @@ impl Ensemble {
     }
 
     /// The index of the model a run of `name` would use now, asking its
-    /// backends, or why there is none. For `ensemble node agent show --probe`.
+    /// backends, or why there is none. For `ensemble runner agent show --probe`.
     pub fn probe(&self, name: &str) -> Result<usize, RouteError> {
         let config = self.config();
         let agent = Self::resolve(&config, name)?;
@@ -281,7 +281,7 @@ impl Ensemble {
             .clone()
     }
 
-    /// Replace the helper team: what a node does when its teams change. Runs
+    /// Replace the helper team: what a runner does when its teams change. Runs
     /// going on finish with the one they had; what starts after uses this.
     pub fn set_config(&self, config: Config) {
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(config);
@@ -302,7 +302,7 @@ impl Ensemble {
         })
     }
 
-    /// Where an agent runs, and on which model. Used by `ensemble node agent list`;
+    /// Where an agent runs, and on which model. Used by `ensemble runner agent list`;
     /// starts nothing.
     pub fn route_of(&self, name: &str) -> Result<(String, String), RouteError> {
         let config = self.config();

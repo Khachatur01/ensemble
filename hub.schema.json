@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/hub.schema.json",
   "title": "Ensemble hub: hub.yaml",
-  "description": "A hub, in ~/.config/ensemble/hub/hub.yaml: it provides services and connects nodes, and has no helper team. Always a server (`ensemble hub serve`): accounts with roles, a knowledge vault and the models that distill it, and the issues of a tracker handed to the nodes of the people they are assigned to. Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (`tasks`, and a backend's `api_key_env`).",
+  "description": "A hub, in ~/.config/ensemble/hub/hub.yaml: it provides services and connects runners, and has no helper team. Always a server (`ensemble hub serve`): accounts with roles, a knowledge vault and the models that distill it, and the issues of a tracker handed to the runners of the people they are assigned to. Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (`tasks`, and a backend's `api_key_env`).",
   "type": "object",
   "required": ["version", "owner", "llm_backends", "knowledge", "server", "roles"],
   "additionalProperties": false,
@@ -28,11 +28,11 @@
       "$ref": "#/definitions/knowledge"
     },
     "tasks": {
-      "description": "The task inbox: issues in a tracker, with the label, go to the nodes of the accounts they are assigned to, and their progress, questions and results are written back. Leave it out for no inbox.",
+      "description": "The task inbox: issues in a tracker, with the label, go to the runners of the accounts they are assigned to, and their progress, questions and results are written back. Leave it out for no inbox.",
       "$ref": "#/definitions/tasks"
     },
     "server": {
-      "description": "Where `ensemble hub serve` listens for nodes, which share to and recall from its knowledge vault, and how people join.",
+      "description": "Where `ensemble hub serve` listens for runners and the REST API, and how people join.",
       "$ref": "#/definitions/server"
     },
     "interfaces": { "$ref": "#/definitions/interfaces" },
@@ -79,7 +79,7 @@
       "additionalProperties": false,
       "properties": {
         "listen": {
-          "description": "The address and port to listen on, for nodes (WebSocket) and the REST API under /api/v1/. Put a TLS reverse proxy such as Caddy in front for the internet, or listen on a LAN or VPN address.",
+          "description": "The address and port to listen on, for runners (WebSocket), the REST API and MCP under /api/v1/. Put a TLS reverse proxy such as Caddy in front for the internet, or listen on a LAN or VPN address.",
           "type": "string",
           "examples": ["127.0.0.1:7700", "0.0.0.0:7700"]
         },
@@ -151,7 +151,7 @@
       }
     },
     "permission": {
-      "description": "share: keep knowledge in the organization vault. recall: read its notes. tasks: receive the tasks the hub's inbox finds assigned to you. admin: manage users, approve sign-ups, give roles, revoke tokens. compute: use other people's shared nodes, the agents and models they offer. host: connect a shared node, which works for those whose role has compute.",
+      "description": "share: keep knowledge in the organization vault. recall: read its notes. tasks: receive the tasks the hub's inbox finds assigned to you. admin: manage users, approve sign-ups, give roles, revoke tokens. compute: use other people's shared runners, the agents and models they offer. host: connect a shared runner, which works for those whose role has compute.",
       "enum": ["share", "recall", "tasks", "admin", "compute", "host"]
     },
     "tasks": {

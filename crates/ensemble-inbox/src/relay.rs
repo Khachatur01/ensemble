@@ -3,13 +3,13 @@
 //!
 //! 1. An open issue with the label, assigned to someone who is an account's
 //!    tracker name and whose role may receive `tasks`, and naming its project
-//!    (a working folder's name), becomes a **task** of that account, for the
+//!    (a repository's name), becomes a **task** of that account, for the
 //!    agent its `<label>:<team>/<agent>` label names or in the backlog. The
 //!    issue says so. With no such account, or no project, the issue is
 //!    blocked, saying why, once.
-//! 2. The task waits on the hub until one of the account's nodes with the
-//!    agent, and a folder of the project's name, claims it; the issue goes to
-//!    `in-progress`, naming the node.
+//! 2. The task waits on the hub until one of the account's runners with the
+//!    agent, and a repository of the project's name in its workspace, claims
+//!    it; the issue goes to `in-progress`, naming the runner.
 //! 3. What the task says comes back: a question (the issue goes to `blocked`,
 //!    and the assignee's next comment is the answer), then its result
 //!    (`review` or `blocked`). Ensemble never closes an issue.
@@ -39,9 +39,9 @@ pub enum Stage {
     /// No task: no account takes it, or it names no project; the issue says
     /// why.
     Unassigned,
-    /// A task, waiting for a node.
+    /// A task, waiting for a runner.
     Queued,
-    /// A node runs it.
+    /// A runner runs it.
     Running,
     /// The task asked a question, posted on the issue.
     Asking,

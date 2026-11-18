@@ -1,5 +1,5 @@
 //! `ensemble … config`: a settings file as the command line reaches it. For
-//! the hub and the node, `get`, `set`, `unset`, `replace` and `path` are their
+//! the hub and the runner, `get`, `set`, `unset`, `replace` and `path` are their
 //! `config.*` operations; this adds what only a command line does: `edit`, in
 //! $VISUAL or $EDITOR, which reads and writes through the operations, and
 //! `merge`, what the Nix modules run before the service starts. A team's
@@ -38,7 +38,7 @@ pub fn extras(command: clap::Command) -> clap::Command {
     })
 }
 
-/// `config edit` or `config merge`, when `matches` (a hub's or a node's
+/// `config edit` or `config merge`, when `matches` (a hub's or a runner's
 /// group of commands) names one: `edit` through `call`, `merge` on `file`,
 /// before the service starts.
 pub fn run_extra(
