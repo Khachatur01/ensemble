@@ -50,15 +50,17 @@ pub struct Server<'a> {
     /// The hub's operations, which its REST API runs.
     pub(crate) operations: ensemble_ops::Registry<HubContext>,
     /// The tasks it keeps for its accounts.
-    tasks: Option<&'a dyn TaskService>,
+    pub(crate) tasks: Option<&'a dyn TaskService>,
+    /// Whether it serves MCP at `/mcp`.
+    mcp: bool,
     /// The connected nodes, and the runs and model calls between them.
     pub(crate) routes: Routes,
 }
 
 /// Who a connection signed in as.
-struct Session {
-    token: String,
-    user: String,
+pub(crate) struct Session {
+    pub(crate) token: String,
+    pub(crate) user: String,
 }
 
 impl<'a> Server<'a> {
@@ -76,6 +78,7 @@ impl<'a> Server<'a> {
             },
             operations: crate::accounts::operations(),
             tasks: None,
+            mcp: false,
             routes: Routes::default(),
         }
     }
@@ -83,6 +86,12 @@ impl<'a> Server<'a> {
     /// Keep its accounts' tasks in `tasks`.
     pub fn with_tasks(mut self, tasks: &'a dyn TaskService) -> Self {
         self.tasks = Some(tasks);
+        self
+    }
+
+    /// Serve MCP to client agents at `/mcp`.
+    pub fn with_mcp(mut self) -> Self {
+        self.mcp = true;
         self
     }
 
@@ -151,6 +160,9 @@ impl<'a> Server<'a> {
         if !head.is_upgrade() {
             if head.path.starts_with("/nodes/v1/") {
                 return self.model_request(stream, &head, &read[end..], say).await;
+            }
+            if self.mcp && head.path == crate::mcp::PATH {
+                return self.mcp(stream, &head, &read[end..], say).await;
             }
             return self.rest(stream, &head, &read[end..], say).await;
         }
@@ -249,6 +261,11 @@ impl<'a> Server<'a> {
             .strip_prefix("Bearer ")?
             .trim()
             .to_string();
+        self.session(token)
+    }
+
+    /// The user `token` signs in as, when it is valid.
+    pub(crate) fn session(&self, token: String) -> Option<Session> {
         let user = self
             .users()
             .ok()?
@@ -261,7 +278,7 @@ impl<'a> Server<'a> {
     /// What the token may do, its account's role narrowed by its scopes,
     /// checked again for every request, so a revoked or expired token stops
     /// working at once.
-    fn permissions(&self, session: &Session) -> Result<Vec<Permission>, String> {
+    pub(crate) fn permissions(&self, session: &Session) -> Result<Vec<Permission>, String> {
         let users = self.users()?;
         let signed = users
             .authenticate(&session.token, &self.roles())
@@ -270,7 +287,7 @@ impl<'a> Server<'a> {
         Ok(signed.permissions)
     }
 
-    fn answer(&self, session: &Session, conn: u64, req: Request) -> Reply {
+    pub(crate) fn answer(&self, session: &Session, conn: u64, req: Request) -> Reply {
         let permissions = match self.permissions(session) {
             Ok(p) => p,
             Err(e) => return Reply::err(req.id, e),
@@ -401,7 +418,7 @@ pub mod testing {
 
     /// A hub server on loopback, with `ana` a member, `rex` a reader and
     /// `root` an admin, each with a token and [`PASSWORD`]. It locks a name
-    /// after 3 failed logins, and takes 2 sign-ups at a time.
+    /// after 3 failed logins, takes 2 sign-ups at a time, and serves MCP.
     pub struct Running {
         pub tmp: TempDir,
         pub url: String,
@@ -467,7 +484,8 @@ pub mod testing {
         let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
         let memory: &'static Memory = Box::leak(Box::new(memory));
         let hub: &'static ensemble_config::Hub = Box::leak(Box::new(hub));
-        let mut server = Server::new(memory, &hub.roles, hub.server, tmp.0.join("state"));
+        let mut server =
+            Server::new(memory, &hub.roles, hub.server, tmp.0.join("state")).with_mcp();
         if let Some(tasks) = tasks {
             server = server.with_tasks(tasks);
         }

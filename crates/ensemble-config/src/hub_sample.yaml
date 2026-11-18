@@ -96,7 +96,9 @@ roles:                           # names are yours; the first admin: `ensemble h
   reader: [recall]
 
 # ---------------------------------------------------------------------------
-# Interfaces: how the hub is managed. Left out, the command line is on.
+# Interfaces: how the hub is reached. Left out, the command line alone is on.
 # ---------------------------------------------------------------------------
 interfaces:
   cli: {}                        # `ensemble hub …` on this computer, run by the running hub
+  mcp:                           # MCP for client agents at <url>/mcp, an account's token as the API key
+    url: http://127.0.0.1:7700   # the address clients reach the hub at; left out: no MCP

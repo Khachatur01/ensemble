@@ -159,7 +159,8 @@ impl Memory {
             .clone()
     }
 
-    fn owner(&self) -> String {
+    /// The hub's name, as hub.yaml's `owner` says it now.
+    pub fn owner(&self) -> String {
         self.owner.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 

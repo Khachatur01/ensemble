@@ -2521,6 +2521,14 @@ fn a_hub_servers_admin_adds_users_whose_tokens_are_shown_once() {
     let token = stdout_of(&out).trim().to_string();
     assert!(token.starts_with("ens_"), "{token}");
     assert!(stderr_of(&out).contains("shown once"));
+    // The sample serves MCP, so the answer says how an agent adds the hub.
+    assert!(
+        stderr_of(&out).contains(&format!(
+            "claude mcp add --transport http ensemble http://127.0.0.1:7700/mcp --header \"Authorization: Bearer {token}\""
+        )),
+        "{}",
+        stderr_of(&out)
+    );
     let out = run(&["hub", "user", "add", "bob", "--role", "owner"]);
     assert!(!out.status.success() && stderr_of(&out).contains("no role 'owner'"));
     let out = run(&["hub", "user", "list"]);

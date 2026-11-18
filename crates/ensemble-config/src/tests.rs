@@ -1650,7 +1650,7 @@ fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
         (
             "interfaces",
             accepted_keys::<interfaces::RawInterfaces>(),
-            vec!["cli"],
+            vec!["cli", "mcp"],
         ),
         ("embed", accepted_keys::<hub::RawEmbed>(), vec![]),
         (
@@ -1817,7 +1817,7 @@ fn a_node_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
     let defs = &schema["definitions"];
     assert_eq!(
         schema_keys(&defs["interfaces"]),
-        accepted_keys::<interfaces::RawInterfaces>()
+        accepted_keys::<interfaces::RawNodeInterfaces>()
     );
     assert_eq!(
         schema_keys(&schema["properties"]["offers"]),
@@ -1923,17 +1923,43 @@ fn the_command_line_is_on_unless_interfaces_says_otherwise_and_one_must_be() {
     assert!(node("").unwrap().interfaces.cli, "left out: on");
     assert!(node("interfaces: { cli: {} }\n").unwrap().interfaces.cli);
     let err = node("interfaces: {}\n").unwrap_err().to_string();
-    assert!(err.contains("turns on no interface"), "{err}");
+    assert!(err.contains("turns on nothing that manages it"), "{err}");
     let err = node("interfaces: { web: {} }\n").unwrap_err().to_string();
     assert!(err.contains("web"), "{err}");
-    let hub = parse_hub(
-        &format!("{HUB}interfaces: {{}}\n"),
-        Path::new("hub.yaml"),
-        &env(&[]),
-    );
+    let err = node("interfaces: { cli: {}, mcp: { url: \"http://x\" } }\n")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("mcp"), "a node serves no MCP: {err}");
+    let hub = |interfaces: &str| {
+        parse_hub(
+            &format!("{HUB}interfaces: {interfaces}\n"),
+            Path::new("hub.yaml"),
+            &env(&[]),
+        )
+    };
     assert!(
-        hub.unwrap_err()
+        hub("{}")
+            .unwrap_err()
             .to_string()
-            .contains("turns on no interface")
+            .contains("turns on nothing that manages it")
     );
+    let err = hub("{ mcp: { url: \"https://hub.example.com\" } }")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("add `cli: {}`"), "MCP manages nothing: {err}");
+    let on = hub("{ cli: {}, mcp: { url: \"https://hub.example.com\" } }").unwrap();
+    assert_eq!(
+        on.interfaces.mcp.map(|m| m.endpoint()).as_deref(),
+        Some("https://hub.example.com/mcp")
+    );
+    for wrong in [
+        "hub.example.com",
+        "https://hub.example.com/",
+        "https://h/mcp",
+    ] {
+        let err = hub(&format!("{{ cli: {{}}, mcp: {{ url: \"{wrong}\" }} }}"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("interfaces.mcp.url"), "{wrong}: {err}");
+    }
 }

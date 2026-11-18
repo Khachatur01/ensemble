@@ -97,7 +97,7 @@ pub(crate) struct RawNode {
     pub(crate) access: Access,
     pub(crate) hub: Option<String>,
     pub(crate) offers: RawOffers,
-    pub(crate) interfaces: Option<RawInterfaces>,
+    pub(crate) interfaces: Option<RawNodeInterfaces>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,7 +215,7 @@ pub fn parse_node(text: &str, path: &Path) -> Result<Node, ConfigError> {
             names,
         }
     });
-    let interfaces = interfaces(raw.interfaces.as_ref(), &mut problems);
+    let interfaces = node_interfaces(raw.interfaces.as_ref(), &mut problems);
     if problems.is_empty() {
         Ok(Node {
             version: raw.version,

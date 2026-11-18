@@ -232,7 +232,12 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
         }
     });
     let tasks: &'static ensemble::board::Service = Box::leak(Box::new(tasks));
-    let server = ensemble::link::Server::new(memory, &hub.roles, server, users).with_tasks(tasks);
+    let mut server =
+        ensemble::link::Server::new(memory, &hub.roles, server, users).with_tasks(tasks);
+    if let Some(mcp) = &hub.interfaces.mcp {
+        server = server.with_mcp();
+        say(&format!("MCP for client agents at {}", mcp.endpoint()));
+    }
     let server: &'static ensemble::link::Server<'static> = Box::leak(Box::new(server));
     // A change to hub.yaml: used at once where it can be, else it starts again.
     server.operations().1.when_changed(move || {

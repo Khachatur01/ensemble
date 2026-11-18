@@ -259,10 +259,33 @@ const TRACKER: &[Field] = &[
 ];
 
 /// What a new token's owner is told.
-fn token_note(name: &str) -> String {
-    format!(
+fn token_note(c: &HubContext, name: &str, token: &str) -> String {
+    let mut note = format!(
         "This is {name}'s token, shown once. On their computer: ensemble node login <hub-url> --token <token>"
+    );
+    if let Some(add) = mcp_line(c, token) {
+        note.push_str(&format!(
+            ". For their agent, as its API key for the hub's MCP: {add}"
+        ));
+    }
+    note
+}
+
+/// The line that adds the hub's MCP to an agent with `token`, when the hub
+/// serves MCP: what a person pastes, or asks their agent to run.
+fn mcp_line(c: &HubContext, token: &str) -> Option<String> {
+    let text = c.settings.read().ok()?;
+    let hub = ensemble_config::parse_hub(
+        &text,
+        &ensemble_config::hub_path(&c.dir),
+        &ensemble_config::SystemEnv,
     )
+    .ok()?;
+    let mcp = hub.interfaces.mcp?;
+    Some(format!(
+        "claude mcp add --transport http ensemble {} --header \"Authorization: Bearer {token}\"",
+        mcp.endpoint()
+    ))
 }
 
 fn user_operations() -> Vec<Operation<HubContext>> {
@@ -335,7 +358,7 @@ fn user_operations() -> Vec<Operation<HubContext>> {
                         let token = accounts.change(|u| u.add(name, role, &accounts.roles()))?;
                         Ok(json!({
                             "name": name, "role": role, "status": "active", "token": token,
-                            "said": token, "note": token_note(name),
+                            "said": token, "note": token_note(c, name, &token),
                         }))
                     }
                 }
@@ -423,7 +446,7 @@ fn user_operations() -> Vec<Operation<HubContext>> {
             |c: &HubContext, _: &Caller, input: Named| {
                 let token = c.accounts()?.change(|u| u.token(&input.name))?;
                 Ok(
-                    json!({ "name": input.name, "token": token, "said": token, "note": token_note(&input.name) }),
+                    json!({ "name": input.name, "token": token, "said": token, "note": token_note(c, &input.name, &token) }),
                 )
             },
         ),
@@ -708,7 +731,10 @@ fn own_operations() -> Vec<Operation<HubContext>> {
                     "token": token,
                     "scopes": scopes.as_deref().map(names),
                     "expires": expires,
-                    "note": "Keep this token: it is shown once.",
+                    "note": match mcp_line(c, &token) {
+                        Some(add) => format!("Keep this token: it is shown once. For your agent, as its API key for the hub's MCP: {add}"),
+                        None => "Keep this token: it is shown once.".into(),
+                    },
                 }))
             },
         ),

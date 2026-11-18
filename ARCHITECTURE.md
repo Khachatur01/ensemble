@@ -87,7 +87,7 @@ Every process is the same binary. What runs in each:
 | --- | --- | --- |
 | `ensemble mcp` | a bridge: it connects to the node's socket, sends `{"dir": "<folder>"}`, and carries MCP between stdio and the socket a message a line; when the node goes away while the session goes on, it answers the requests left with an error to try again, waits for the node to come back, says the session's `initialize` again and tells the client its tools may have changed | when the node closes the session |
 | `ensemble node serve` | the node, one per computer: a socket for sessions and for the operations `ensemble node …` asks of it, a worker per folder that runs the tasks the hub keeps for its project, and with the hub its `node.yaml` names, a link that offers runs and models (`Worker`) | on SIGINT or SIGTERM; a change to `node.yaml` has it start again in the same process |
-| `ensemble hub serve` | the hub, from `~/.config/ensemble/hub/`: one port for the link, the REST API and `/nodes/v1/`; a socket for the operations `ensemble hub …` asks of it; the tasks; the vault's distiller; the tracker inbox | on SIGINT or SIGTERM; a change to `hub.yaml` it cannot use as it runs has it start again in the same process |
+| `ensemble hub serve` | the hub, from `~/.config/ensemble/hub/`: one port for the link, the REST API, `/nodes/v1/` and, with `interfaces.mcp`, MCP for client agents at `/mcp`; a socket for the operations `ensemble hub …` asks of it; the tasks; the vault's distiller; the tracker inbox | on SIGINT or SIGTERM; a change to `hub.yaml` it cannot use as it runs has it start again in the same process |
 | everything else | one command: read the config and the state, or ask the hub, do one thing, print; `task new`, `task assign` and `task answer` also tell the node about the folder, so that its worker runs there | at once |
 
 A folder's tasks are run by one worker of the computer at a time: whoever
@@ -110,7 +110,7 @@ A Cargo workspace. Each crate depends only on crates above it in this table;
 | `ensemble-backends` | talking to model servers | one chat request in the server's own format (`chat.rs`); which models a server serves (`models.rs`); the first usable model of a `try` list (`resolve.rs`); texts as vectors (`embed.rs`); a stand-in server for tests (`testing.rs`) |
 | `ensemble-store` | Turso files | the hub's `database.db`, opened for each read or change, and any other Turso file, such as the vault's cache of vectors (`lib.rs`) |
 | `ensemble-knowledge` | the hub's knowledge | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); notes by meaning, with their vectors in `.ensemble/embeddings.db` (`meaning.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait a session uses (`lib.rs`) |
-| `ensemble-link` | the hub server and the link to it | the hub's operations, its accounts, tokens, sessions and settings (`accounts.rs`); accounts and hashed tokens (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API, each route one of the operations (`api.rs`), over a small HTTP reader (`http.rs`); the frames of the link (`protocol.rs`); the hub's side, a task per connection (`server.rs`); connected nodes, runs and model calls, `/nodes/v1/` (`nodes.rs`); the node's side, `Connection`, `Link` (one reconnecting) and `RemoteMemory` (`client.rs`); the token file (`tokens.rs`) |
+| `ensemble-link` | the hub server and the link to it | MCP over HTTP for client agents (`mcp.rs`); the hub's operations, its accounts, tokens, sessions and settings (`accounts.rs`); accounts and hashed tokens (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API, each route one of the operations (`api.rs`), over a small HTTP reader (`http.rs`); the frames of the link (`protocol.rs`); the hub's side, a task per connection (`server.rs`); connected nodes, runs and model calls, `/nodes/v1/` (`nodes.rs`); the node's side, `Connection`, `Link` (one reconnecting) and `RemoteMemory` (`client.rs`); the token file (`tokens.rs`) |
 | `ensemble-agents` | running one agent once | the adapters (`external/`): `claude_code.rs`, `opencode.rs`, `codex.rs`, `builtin.rs`, `direct.rs`, `node.rs`, the subprocess runner (`process.rs`) and gates (`gate.rs`); a git worktree per task (`worktree.rs`); the router: agents to adapters, models, records, `health` (`router.rs`) |
 | `ensemble-tasks` | work handed to the team | tickets and tasks as the hub has them (`tasks.rs`); where they are kept and leased: the `Board` trait, the hub's `DbBoard` and the `Service` that answers the link, a node's `RemoteBoard` (`board.rs`); what a node keeps of its runs (`runs.rs`); the queue that runs tasks and background delegations within slots and budgets (`queue.rs`); the MCP tools (`delegation.rs`); review and merge of a worktree task (`review.rs`) |
 | `ensemble-inbox` | issues from a tracker into tasks | the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`); an issue made a task and what the task reports (`work.rs`); the hub's inbox (`relay.rs`) |
@@ -546,8 +546,11 @@ tasks. A key comes from an admin (`user.token`) or from the person
 one puts it together by hand.
 
 There are no session hooks: the MCP server's instructions tell the agent to
-`recall` before it works and to `share` what it learns. That is weaker than a
-hook, as the agent decides when to follow them, but every MCP client has it.
+`recall` before work where earlier decisions may matter, and to `share` when
+the person asks, as the knowledge rules say. That is weaker than a hook, as
+the agent decides when to follow them, but every MCP client has it. (Built:
+`interfaces.mcp` in `hub.yaml`, `/mcp` on the hub's port, one `POST` per
+message and no event stream, in `ensemble-link`'s `mcp.rs`.)
 
 No client connects to a runner, and there is no delegation: the helper teams
 work only on tasks, which a client makes on the hub.
@@ -1135,7 +1138,8 @@ crate holds it today.
 17. The hub serves MCP over HTTP: `share`, `recall` and the tasks, signed in
     with an account's token as the API key; the server's instructions in place
     of session hooks; a token's answer gives the URL and a line to paste.
-    Clients install nothing.
+    Clients install nothing. (Done: `interfaces.mcp.url` turns it on; the
+    node's MCP and its hooks go with step 18.)
 18. `ensemble-hub` and `ensemble-runner`, each its own crate, executable and
     Nix package, with one crate for the link's messages; the node becomes the
     runner, a pure worker: no MCP for clients, no hooks, no delegations;

@@ -1015,8 +1015,9 @@ node reads it when it starts. `ensemble node login <url>` names the hub in
 
 The command line reaches a hub or a node because its file turns it on:
 `interfaces: { cli: {} }`, which `ensemble hub init` and `ensemble node
-setup` write. Left out, the command line is on; a file that turns on no
-interface is refused, since nothing could manage it.
+setup` write. Left out, the command line is on; a file that turns it off is
+refused, since nothing could manage it. A hub may also turn on `mcp`, for
+client agents (see "The hub").
 
 ### Editor support
 
@@ -1172,6 +1173,34 @@ up with a name and password; they can log in once an admin approves them:
 $ curl -X POST https://hub.example.com/api/v1/register -d '{"name":"ana","password":"..."}'
 $ ensemble hub user approve ana --role member     # on the hub's computer, or the API, below
 ```
+
+**Client agents over MCP.** With `interfaces.mcp` in `hub.yaml`, the hub
+serves MCP over HTTP at `/mcp` on its port, and any agent that speaks MCP
+(Claude Code, Codex, OpenCode, claude.ai) adds the hub with its address and an
+account's token as the API key; nothing of Ensemble is installed on its
+computer:
+
+```yaml
+interfaces:
+  cli: {}
+  mcp:
+    url: https://hub.example.com   # the address clients reach the hub at
+```
+
+```console
+$ ensemble hub user token ana      # or `POST /api/v1/me/tokens`, for oneself
+ens_…
+note: This is ana's token, shown once. … For their agent, as its API key for the hub's MCP:
+  claude mcp add --transport http ensemble https://hub.example.com/mcp --header "Authorization: Bearer ens_…"
+```
+
+The person pastes that line, or asks their agent to add the hub with it. The
+tools are what the token may do: `share` and `recall`, and with `tasks` on a
+hub that keeps them, `agents`, `submit`, `tasks`, `task`, `answer`, `assign`
+and `cancel`, each naming the `project`. When an agent connects, the hub's
+instructions tell it to `recall` before work where earlier decisions may
+matter, and to `share` when the person asks. Each message is one `POST`
+answered with one JSON response; the hub sends nothing unasked.
 
 **The REST API** lives on the hub's port, under `/api/v1/`, for the web UI to
 come and for scripts. JSON in and out.

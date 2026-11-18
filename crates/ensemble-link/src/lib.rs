@@ -14,6 +14,7 @@ pub mod accounts;
 mod api;
 pub mod client;
 mod http;
+mod mcp;
 mod nodes;
 pub mod protocol;
 pub mod server;

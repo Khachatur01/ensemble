@@ -48,15 +48,28 @@
   },
   "definitions": {
     "interfaces": {
-      "description": "How it is managed: each interface it turns on. Left out, the command line is on; at least one must be.",
+      "description": "How it is reached: each interface it turns on. Left out, the command line alone is on; it must be on.",
       "type": "object",
       "required": [],
       "additionalProperties": false,
       "properties": {
         "cli": {
-          "description": "`ensemble hub …` or `ensemble node …` on its computer, run by the running process over its socket when it runs.",
+          "description": "`ensemble hub …` on its computer, run by the running process over its socket when it runs.",
           "type": "object",
           "additionalProperties": false
+        },
+        "mcp": {
+          "description": "MCP over HTTP at `/mcp` on the hub's port, for client agents, signed in with an account's token as the API key: share, recall and tasks. Left out: no MCP.",
+          "type": "object",
+          "required": ["url"],
+          "additionalProperties": false,
+          "properties": {
+            "url": {
+              "description": "The address clients reach the hub at, such as https://hub.example.com, with no path: a new token's answer tells them to add `<url>/mcp` to their agent.",
+              "type": "string",
+              "pattern": "^https?://[^/?# ]+$"
+            }
+          }
         }
       }
     },

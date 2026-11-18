@@ -126,12 +126,28 @@ pub async fn respond(
     status: u16,
     body: &Value,
 ) -> std::io::Result<()> {
-    let text = body.to_string();
-    let response = format!(
-        "HTTP/1.1 {status} {}\r\ncontent-type: application/json\r\ncache-control: no-store\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}",
-        reason(status),
+    respond_with(stream, status, &[], Some(body)).await
+}
+
+/// [`respond`], with more headers, and with no body when `body` is `None`.
+pub async fn respond_with(
+    stream: &mut (impl AsyncWrite + Unpin),
+    status: u16,
+    headers: &[(&str, &str)],
+    body: Option<&Value>,
+) -> std::io::Result<()> {
+    let text = body.map(Value::to_string).unwrap_or_default();
+    let mut response = format!("HTTP/1.1 {status} {}\r\n", reason(status));
+    if body.is_some() {
+        response.push_str("content-type: application/json\r\n");
+    }
+    for (name, value) in headers {
+        response.push_str(&format!("{name}: {value}\r\n"));
+    }
+    response.push_str(&format!(
+        "cache-control: no-store\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}",
         text.len()
-    );
+    ));
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await
 }
@@ -165,6 +181,7 @@ fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         201 => "Created",
+        202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
