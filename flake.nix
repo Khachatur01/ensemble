@@ -55,7 +55,8 @@
       });
 
       # A hub as a system service and this computer's node as a user service,
-      # configured in Nix: `services.ensemble.{hub,node}`.
+      # kept running: `services.ensemble.{hub,node}`. Both are set up with
+      # `ensemble`, as on any platform.
       nixosModules.default = import ./nix/nixos-module.nix { inherit self; };
       # This computer's node for one person, on Linux or macOS:
       # `services.ensemble.node`.

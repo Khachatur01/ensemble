@@ -961,9 +961,9 @@ $ touch ~/.config/ensemble/node/.env && chmod 600 ~/.config/ensemble/node/.env
 ```
 
 A hub this computer runs has its own, `~/.config/ensemble/hub/.env`, for the
-keys its backends name: the hub and the node are separate services, often run
-by separate users (the NixOS module runs the hub as `ensemble-hub`), so each
-reads only its own secrets. `--env-file <path>` reads another file instead of
+keys its backends name: the hub and the node are separate services, a team's
+hub often on another computer or of another user, so each reads only its own
+secrets. `--env-file <path>` reads another file instead of
 either, such as a secret that sops-nix or agenix puts in `/run`. Neither file
 holds the node's hub tokens: `ensemble node login` keeps those in `hubs.json`,
 also readable by you alone, because Ensemble writes them, not you.
@@ -1420,7 +1420,7 @@ node on a Unix socket.
 
 | platform | how | keeps the node running |
 | --- | --- | --- |
-| NixOS | [the NixOS module](#nixos), configured in Nix | a systemd user service |
+| NixOS | [the NixOS module](#nixos) | a systemd user service |
 | Linux with Nix | [`nix profile install`](#linux-with-nix), or [Home Manager](#home-manager-linux-and-macos) | a systemd user service |
 | Linux | [cargo](#linux-and-macos-with-cargo) | [a systemd user service](#running-the-node) |
 | macOS | [cargo](#linux-and-macos-with-cargo), or Nix with [Home Manager](#home-manager-linux-and-macos) | a launchd agent |
@@ -1429,6 +1429,10 @@ node on a Unix socket.
 The macOS build is made by the same flake and the same cargo, but the tests run
 on Linux; tell us what breaks. Native Windows is not supported: `ensemble`
 says so and exits.
+
+On every platform Ensemble is set up and changed the same way, with
+`ensemble` itself, and keeps its files in the same places
+(`~/.config/ensemble/`); the Nix modules only install it and keep it running.
 
 Besides Ensemble, install the CLIs of the adapters your teams use: `claude` for
 `claude-code`, `opencode` for `opencode`, `codex` for `codex`. The `builtin`,
@@ -1457,128 +1461,65 @@ system flake, and import the module:
 }
 ```
 
-The module has two parts, each enabled on its own, both configured in Nix:
-`hub.yaml`, `node.yaml` and the node's teams are written from it, with every
-setting as Ensemble wants it (the module adds none; `ensemble node init
---stdout`, `ensemble node team new --stdout` and `ensemble hub init --stdout` print
-them all).
-
-**This computer's node**, a systemd user service of one person, with its teams:
+The module installs `ensemble` and keeps it running; it writes no
+configuration. Everything else is as on any platform: the node, its teams,
+the hub, its accounts and keys are in `~/.config/ensemble/`, made and changed
+with `ensemble`.
 
 ```nix
 # configuration.nix
-{ pkgs, inputs, ... }:
+{ pkgs, ... }:
 {
   services.ensemble.node = {
     enable = true;
     user = "ana";                          # it runs for her alone
     extraPackages = [ pkgs.claude-code ];  # the agent CLIs on its PATH; git is always there
-    environmentFile = "/run/secrets/ensemble-node.env";  # API keys, kept out of the store; null: ~/.config/ensemble/node/.env
-    settings = {                           # node.yaml
-      version = 1;
-      name = "laptop";
-      access = "private";
-      hub = "wss://hub.example.com";       # left out: no hub
-      offers = { };
-    };
-    teams = {
-      web.source = inputs.acme-web-team;   # a team repository, pinned by flake.lock
-      docs.settings = {                    # or a team written here: its config.yaml
-        version = 1;
-        llm_backends = { };
-        limits = { };
-        gates = { };
-        agents.reviewer = {
-          prompt = "You review code and report findings as file:line: problem.";
-          max_seconds = 1800;
-          max_concurrent = 1;
-          isolation = "shared";
-          budget.type = "unlimited";
-          adapter = {
-            type = "claude-code";
-            model = "sonnet";
-            tools = [ "Read" "Grep" "Glob" ];
-            permission_mode = "dontAsk";
-            max_turns = 30;
-            command = "claude";
-          };
-        };
-      };
-    };
   };
-}
-```
 
-`node.yaml` and each team are linked into `~/.config/ensemble/node/` when the
-service starts, beside what is not declared: `hubs.json` from `ensemble node login`,
-and teams made by hand (`ensemble node team new`, `pull`, `add`), which are left
-alone. A team declared in Nix is a link into the store, so it is read-only to
-`ensemble`; its trust is your review of the Nix configuration. `ensemble` is
-put on the system's `PATH`, for the `ensemble mcp` your agent CLI starts.
-
-**A hub**, a system service of its own user, with its files in
-`/var/lib/ensemble-hub/ensemble/hub/`:
-
-```nix
-{
+  # Only on the computer that runs a hub.
   services.ensemble.hub = {
     enable = true;
-    openFirewall = false;                  # the port of server.listen
-    environmentFile = "/run/secrets/ensemble-hub.env";  # keys its backends name; null: its own hub/.env
-    settings = {                           # hub.yaml
-      version = 1;
-      owner = "acme";
-      llm_backends.central = {
-        type = "openai-compatible-api";
-        base_url = "http://127.0.0.1:8000/v1";
-        timeout_seconds = 300;
-      };
-      knowledge = {
-        vault = "vault";
-        distill = {
-          try = [ { backend = "central"; model = "qwen3.5-72b"; } ];
-          when_none = "wait";
-          max_tokens = 4000;
-        };
-        recall = { max_notes = 8; max_chars = 6000; };
-      };
-      server = {
-        listen = "127.0.0.1:7700";
-        registration = { type = "approval"; max_pending = 20; };
-        sessions.hours = 12;
-        lockout = { failures = 5; minutes = 15; };
-      };
-      roles = {
-        admin = [ "admin" "share" "recall" "tasks" "compute" "host" ];
-        member = [ "share" "recall" "tasks" "compute" ];
-      };
-    };
+    user = "ana";                          # it serves her ~/.config/ensemble/hub/
   };
+
+  # The node is a user service: without lingering it runs only while she is logged in.
+  users.users.ana.linger = true;
 }
 ```
 
-`hub.yaml` is written again on every start, and the vault is made on the first.
-Accounts live in the hub's `database.db`, not in Nix: manage them with
-`ensemble-hub`, which runs `ensemble hub …` as the hub's user:
+Then, as that user:
 
 ```console
-$ sudo ensemble-hub user add root --role admin   # prints the token once
-$ sudo ensemble-hub user password root
-$ sudo ensemble-hub knowledge status
+$ ensemble node setup                       # writes ~/.config/ensemble/node/node.yaml
+$ systemctl --user start ensemble-node      # it waited for the node file; it starts by itself from now on
+$ ensemble hub init                         # on the hub's computer
+$ sudo systemctl start ensemble-hub
+$ ensemble hub user add ana --role admin    # as herself, no sudo: it is her hub
 ```
 
-For the internet, put a TLS proxy in front (`services.caddy`, see
-[The hub](#the-hub)) and leave `openFirewall` off. A whole configuration that
-runs a hub for one person and a node that names it is in
-[`nix/example.nix`](nix/example.nix); the flake's checks build it.
+- **The node** is a systemd user service, `ensemble-node`, of `user` alone. It
+  waits until there is a node file, so it does not fail before
+  `ensemble node setup`. `extraPackages` are on its `PATH`, since a user
+  service does not get your shell's.
+- **The hub** is a system service, `ensemble-hub`, that runs as `user` and
+  serves their `~/.config/ensemble/hub/`, so that user manages it with
+  `ensemble hub …` like anywhere else. It waits until there is a `hub.yaml`.
+  For a hub of its own account, make a user for it and run `ensemble hub …` as
+  that user. Open its port with `networking.firewall.allowedTCPPorts` when
+  other computers reach it, and put a TLS proxy in front for the internet
+  (`services.caddy`, see [The hub](#the-hub)).
+- **A change** of a team takes effect at once (`ensemble node team …` reloads
+  the node); a change of `node.yaml` or `hub.yaml` after a restart:
+  `systemctl --user restart ensemble-node`, `sudo systemctl restart
+  ensemble-hub`.
 
 ### Home Manager (Linux and macOS)
 
 On any Linux with Nix, and on macOS with Nix (with or without nix-darwin), the
-Home Manager module runs this computer's node: a systemd user service on Linux,
-a launchd agent on macOS (its log in `~/Library/Logs/ensemble-node.log`). Its
-`services.ensemble.node` takes the same `settings`, `teams`, `environmentFile`
-and `extraPackages` as the NixOS module's node, without `user`:
+Home Manager module installs `ensemble` and keeps this computer's node running:
+a systemd user service on Linux, a launchd agent on macOS (its log in
+`~/Library/Logs/ensemble-node.log`). Like the NixOS module it writes no
+configuration, and the node runs once `ensemble node setup` has written it.
 
 ```nix
 # home.nix, with ensemble.homeManagerModules.default in the modules
@@ -1586,21 +1527,13 @@ and `extraPackages` as the NixOS module's node, without `user`:
 {
   services.ensemble.node = {
     enable = true;
-    extraPackages = [ pkgs.opencode ];
-    settings = {
-      version = 1;
-      name = "macbook";
-      access = "private";
-      offers = { };
-    };
-    teams.web.source = ./teams/web;    # a folder with config.yaml
+    extraPackages = [ pkgs.opencode ];   # the agent CLIs on its PATH
   };
 }
 ```
 
-`node.yaml` and the teams are linked into `~/.config/ensemble/node/` on every
-`home-manager switch`, and `ensemble` is put in `home.packages`. A hub runs on
-NixOS through the NixOS module, or anywhere with `ensemble hub serve`.
+A hub runs on NixOS through the NixOS module, or anywhere with
+`ensemble hub serve`.
 
 ### Linux with Nix
 
