@@ -29,7 +29,7 @@ pub mod secrets;
 pub mod vault;
 
 pub use pipeline::{PIPELINE_VERSION, Step};
-pub use vault::{Note, Processed, Share, Vault};
+pub use vault::{Audience, Note, Processed, Share, Vault, Visibility};
 
 /// How often the worker looks for new shares.
 const POLL: Duration = Duration::from_secs(5);
@@ -159,6 +159,9 @@ impl Memory {
     pub fn distill(&self) -> Result<Run, String> {
         let vault = self.vault();
         let _lock = self.lock()?;
+        if outdated(&vault) {
+            return self.rebuild_held(&vault);
+        }
         self.distill_held(&vault, true)
     }
 
@@ -238,8 +241,9 @@ impl Memory {
         let mut said_waiting = false;
         while !stop.load(Ordering::Relaxed) {
             let mut pause = POLL;
+            // Asked, or the notes are of another pipeline version.
             let asked = vault.lock_dir().join(REBUILD_ASKED);
-            if asked.exists() {
+            if asked.exists() || outdated(&vault) {
                 let _ = std::fs::remove_file(&asked);
                 let shares = vault.shares().len();
                 match vault.clear_products().and_then(|()| {
@@ -323,10 +327,21 @@ impl Memory {
         instructions_for(&[SHARE, RECALL])
     }
 
-    /// The notes about `query`, best first, within the hub's limits, as text
-    /// for an agent to read.
+    /// The notes about `query` the hub's owner may see: [`recall_as`](Self::recall_as)
+    /// them.
     pub fn recall(&self, query: &str) -> String {
-        let notes = self.vault().notes();
+        self.recall_as(&self.owner, query)
+    }
+
+    /// The notes about `query` the account `who` may see, best first, within
+    /// the hub's limits, as text for an agent to read.
+    pub fn recall_as(&self, who: &str, query: &str) -> String {
+        let notes: Vec<Note> = self
+            .vault()
+            .notes()
+            .into_iter()
+            .filter(|n| n.audience.sees(who))
+            .collect();
         let limits = &self.knowledge.recall;
         let found = self.find(&notes, query, limits.max_notes as usize);
         if found.is_empty() {
@@ -404,21 +419,36 @@ impl Memory {
                 .ok_or_else(|| format!("{SHARE}: `{key}` is required and must not be empty"))
         };
         let (title, text) = (text_of("title")?, text_of("text")?);
+        let visibility = visibility_of(args)?;
         let client = self
             .client
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let share = self.share(client.as_deref(), title, text)?;
+        let share = self.share(client.as_deref(), visibility, title, text)?;
         Ok(format!(
-            "Shared as {}. Ensemble turns it into notes in the background.",
-            share.id
+            "Shared as {} ({}). Ensemble turns it into notes in the background.",
+            share.id,
+            shared_with(visibility)
         ))
     }
 
     /// Keep `text`, checked for secrets first.
-    pub fn share(&self, client: Option<&str>, title: &str, text: &str) -> Result<Share, String> {
-        self.share_as(&self.owner, client, self.project.as_deref(), title, text)
+    pub fn share(
+        &self,
+        client: Option<&str>,
+        visibility: Visibility,
+        title: &str,
+        text: &str,
+    ) -> Result<Share, String> {
+        self.share_as(
+            &self.owner,
+            client,
+            self.project.as_deref(),
+            visibility,
+            title,
+            text,
+        )
     }
 
     /// Keep `text` as shared by `who`, from `client` while working in
@@ -428,6 +458,7 @@ impl Memory {
         who: &str,
         client: Option<&str>,
         project: Option<&str>,
+        visibility: Visibility,
         title: &str,
         text: &str,
     ) -> Result<Share, String> {
@@ -445,7 +476,39 @@ impl Memory {
                 vault.root().display()
             ));
         }
-        vault.add_share(who, client, project, title, text)
+        vault.add_share(who, client, project, visibility, title, text)
+    }
+}
+
+/// Whether a share was distilled by another pipeline version: then the notes
+/// are made again from every share, as a rebuild does, rather than on top of
+/// notes of another format.
+fn outdated(vault: &Vault) -> bool {
+    vault.log().iter().any(|p| p.pipeline != PIPELINE_VERSION)
+}
+
+/// The `visibility` of a `share` call: private when it names none.
+pub fn visibility_of(args: &Value) -> Result<Visibility, String> {
+    match args
+        .get("visibility")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        None | Some("") => Ok(Visibility::Private),
+        Some(v) => Visibility::parse(v).ok_or_else(|| {
+            format!(
+                "{SHARE}: visibility '{v}' is not one of {}",
+                Visibility::ALL.join(", ")
+            )
+        }),
+    }
+}
+
+/// Who may recall what comes of a share, in words.
+pub fn shared_with(visibility: Visibility) -> &'static str {
+    match visibility {
+        Visibility::Private => "private: only you may recall it",
+        Visibility::Hub => "for the hub: everyone on it who may recall",
     }
 }
 
@@ -460,7 +523,8 @@ pub fn tool_definitions() -> Vec<Tool> {
              who owns what. Leave out chatter, and anything the user wants kept private. \
              Write it self-contained, in plain words: whoever reads it later cannot see this \
              conversation. Never include secrets such as keys or passwords. Ensemble turns \
-             shares into notes in the background."
+             shares into notes in the background. It is private to the user unless they say \
+             to share it with the hub."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -472,6 +536,11 @@ pub fn tool_definitions() -> Vec<Tool> {
                     "text": {
                         "type": "string",
                         "description": "The knowledge, self-contained."
+                    },
+                    "visibility": {
+                        "type": "string",
+                        "enum": Visibility::ALL,
+                        "description": "Who may recall it: private, only the user (the default); hub, everyone on the hub, when the user says it is for the team."
                     }
                 },
                 "required": ["title", "text"]
@@ -512,7 +581,8 @@ pub fn instructions_for(tools: &[&str]) -> String {
         out.push_str(
             " When they ask you to share or remember something from this conversation, call \
              `share` with what is worth keeping, written so it stands on its own; never share \
-             unless they ask.",
+             unless they ask. It is private to them unless they say it is for the hub or the \
+             team: then give `visibility: hub`.",
         );
     }
     out
@@ -565,6 +635,24 @@ mod tests {
             ("Ana", Some("claude-code"), Some("shop"))
         );
         assert_eq!(s.text, "The shop listens on 8080.");
+        assert_eq!(s.visibility, Visibility::Private, "private unless chosen");
+        assert!(said.contains("only you may recall it"), "{said}");
+        let said = m
+            .call(
+                SHARE,
+                &json!({"title": "Reviews", "text": "Every change gets one.", "visibility": "hub"}),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(said.contains("for the hub"), "{said}");
+        let err = m
+            .call(
+                SHARE,
+                &json!({"title": "x", "text": "y", "visibility": "team"}),
+            )
+            .unwrap()
+            .unwrap_err();
+        assert!(err.contains("'team' is not one of private, hub"), "{err}");
         assert!(
             m.call("delegate", &json!({})).is_none(),
             "not a knowledge tool"
@@ -595,7 +683,7 @@ mod tests {
             kind: "fact".into(),
             title: title.into(),
             tags: Vec::new(),
-            scope: "personal".into(),
+            audience: crate::Audience::Hub,
             sources: vec!["20261110-000000-000001-aa".into()],
             shared_by: vec!["Ana".into()],
             pipeline: 1,

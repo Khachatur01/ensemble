@@ -1201,11 +1201,20 @@ same by hand. A share that looks like it holds a key or a private key is
 refused, so the agent shares again without it: the vault keeps everything it is
 given.
 
+**Private unless you say.** A share is `private`: only you recall what comes
+of it. Say it is for the team ("share this with the hub") and your agent shares
+it with `visibility: hub`, so everyone on the hub who may recall finds it;
+`ensemble knowledge share --visibility hub` does the same by hand. A note is
+made only from shares of one audience, yours or the hub's, so what you shared
+privately never joins a note others recall, nor a link from one; recall gives
+each account its own notes and the hub's. This holds for what the hub serves:
+whoever runs the hub's computer can read the vault's files.
+
 **Tasks teach it too.** When a task on the hub ends done, the hub shares what
 was asked, what was asked and answered on the way, and what the agent
-reported, as yours, with the client `task`, so what your helper agents learn
-is kept like what you share. A report that looks like it holds a key is not
-shared, and the hub's log says so.
+reported, as yours and private, with the client `task`, so what your helper
+agents learn is kept like what you share. A report that looks like it holds a
+key is not shared, and the hub's log says so.
 
 **Only Ensemble writes notes.** Each share is kept as it arrived, and the
 running hub turns it into notes in the background, or now with
@@ -1228,7 +1237,7 @@ folder in Obsidian, or anything that reads Markdown:
 vault/
   shares/<yyyy>/<mm>/<id>.md   each share as it arrived, never changed
   notes/<slug>.md              one note per topic, its related notes linked at the end;
-                               frontmatter: kind, title, tags, scope,
+                               frontmatter: kind, title, tags, visibility (and owner),
                                sources (share ids), shared_by, pipeline, updated
   review/<share-id>.md         what the pipeline would not write, and why
   log.jsonl                    what the pipeline did with each share
@@ -1239,7 +1248,9 @@ needs no migration: `ensemble hub knowledge rebuild` deletes the notes and makes
 them again from every share, in one commit. While the hub runs, it asks the hub
 instead, which clears the notes and makes them again one share at a time, as
 it distills, and goes on from there if it is stopped meanwhile; until it is
-done, `recall` finds only the notes made so far. `ensemble hub knowledge status`
+done, `recall` finds only the notes made so far. A new version of Ensemble
+whose notes differ does the same by itself: notes another version made are
+made again from every share. `ensemble hub knowledge status`
 counts shares, pending shares, notes and what waits in `review/`.
 
 **Shared text is data, not instructions.** It may carry instructions meant for
@@ -1793,7 +1804,7 @@ $ ensemble task diff <id>
 $ ensemble task merge <id> [--squash] [--cleanup]   # only you run this; undone on a conflict
 
 # The knowledge of your hub
-$ ensemble knowledge share --title T [--text T]   # text from stdin without --text
+$ ensemble knowledge share --title T [--text T] [--visibility hub]   # text from stdin without --text; private unless hub
 $ ensemble knowledge recall <topic>       # the notes, as an agent's `recall` gets them
 
 # A hub this computer runs

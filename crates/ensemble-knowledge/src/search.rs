@@ -95,7 +95,7 @@ pub(crate) mod tests {
             kind: "fact".into(),
             title: title.into(),
             tags: Vec::new(),
-            scope: "personal".into(),
+            audience: crate::Audience::Hub,
             sources: vec!["s".into()],
             shared_by: vec!["Ana".into()],
             pipeline: 1,

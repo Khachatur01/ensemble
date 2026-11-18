@@ -203,7 +203,9 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
             return;
         };
         let id = &task.task.ticket.id;
-        match memory.share_as(user, Some("task"), Some(project), &title, &text) {
+        // Private, as the task was: its account alone recalls what came of it.
+        let private = ensemble::knowledge::Visibility::Private;
+        match memory.share_as(user, Some("task"), Some(project), private, &title, &text) {
             Ok(share) => eprintln!(
                 "ensemble: knowledge: task {id} of {user} is share {}",
                 share.id

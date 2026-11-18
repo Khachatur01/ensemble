@@ -317,13 +317,15 @@ impl<'a> Server<'a> {
                     &session.user,
                     optional("client"),
                     optional("project"),
+                    ensemble_knowledge::visibility_of(&req.params)?,
                     text("title")?,
                     text("text")?,
                 )?;
-                Ok(json!({ "id": share.id }))
+                Ok(json!({ "id": share.id, "visibility": share.visibility.as_str() }))
             }),
-            RECALL => may(Permission::Recall)
-                .and_then(|()| Ok(json!({ "text": self.memory.recall(text("query")?) }))),
+            RECALL => may(Permission::Recall).and_then(|()| {
+                Ok(json!({ "text": self.memory.recall_as(&session.user, text("query")?) }))
+            }),
             method if TASK_METHODS.contains(&method) => {
                 may(Permission::Tasks).and_then(|()| match self.tasks {
                     Some(tasks) => tasks.handle(&session.user, method, &req.params),
@@ -438,7 +440,7 @@ pub mod testing {
                 kind: "decision".into(),
                 title: "Deploy day".into(),
                 tags: Vec::new(),
-                scope: "personal".into(),
+                audience: ensemble_knowledge::Audience::Hub,
                 sources: vec!["s".into()],
                 shared_by: vec!["ana".into()],
                 pipeline: 1,

@@ -343,6 +343,9 @@ pub enum KnowledgeCommand {
         /// The text; read from stdin when not given.
         #[arg(long)]
         text: Option<String>,
+        /// Who may recall it: private, only you; hub, everyone on the hub.
+        #[arg(long, default_value = "private", value_parser = ["private", "hub"])]
+        visibility: String,
     },
     /// The hub's notes about a topic, as an agent's `recall` tool gets them.
     Recall {

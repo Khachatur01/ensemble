@@ -769,9 +769,15 @@ wrote.
 
 ### Visibility and export
 
-(Not built.) A note inherits its source's visibility; merged sources take the
-strictest. Recall never returns what the asking identity may not see, and a
-prompt goes only to a backend whose operator may see it.
+A note inherits its source's visibility, and recall never returns what the
+asking identity may not see. Built: two audiences, as there are no teams of
+people in a hub. A share is `private`, for the account that shared it, unless
+it says `hub`, for every account that may recall. Rather than merging sources
+of two audiences into the strictest, a note is made only from shares of one
+audience: the distiller offers an item only the notes of its share's
+audience, to merge into or link to, so private text never flows into a note
+others see. (Decided 2026-11-18.) Not built: a prompt goes only to a backend
+whose operator may see it.
 
 General know-how gained at a workplace may be exported to the person's home hub
 as a generalized copy, under the workplace's policy (off, approval, automatic;

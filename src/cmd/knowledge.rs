@@ -9,7 +9,11 @@ use std::process::ExitCode;
 
 pub fn run(ctx: &Ctx, command: KnowledgeCommand) -> Result<ExitCode, String> {
     match command {
-        KnowledgeCommand::Share { title, text } => share(&ctx.dir, &title, text),
+        KnowledgeCommand::Share {
+            title,
+            text,
+            visibility,
+        } => share(&ctx.dir, &title, text, &visibility),
         KnowledgeCommand::Recall { topic } => {
             let knowledge = knowledge_for(&ctx.dir, "knowledge recall")?;
             let notes = ensemble::runtime::block_on(knowledge.call(
@@ -25,7 +29,12 @@ pub fn run(ctx: &Ctx, command: KnowledgeCommand) -> Result<ExitCode, String> {
 
 /// `ensemble knowledge share`: keep knowledge in the vault of this node's hub
 /// by hand, as the `share` tool does for an agent.
-fn share(dir: &Path, title: &str, text: Option<String>) -> Result<ExitCode, String> {
+fn share(
+    dir: &Path,
+    title: &str,
+    text: Option<String>,
+    visibility: &str,
+) -> Result<ExitCode, String> {
     let knowledge = knowledge_for(dir, "knowledge share")?;
     let text = match text {
         Some(text) => text,
@@ -42,7 +51,7 @@ fn share(dir: &Path, title: &str, text: Option<String>) -> Result<ExitCode, Stri
     knowledge.set_client("ensemble-cli");
     let said = ensemble::runtime::block_on(knowledge.call(
         ensemble::knowledge::SHARE,
-        &serde_json::json!({ "title": title, "text": text }),
+        &serde_json::json!({ "title": title, "text": text, "visibility": visibility }),
     ))
     .expect("share is a knowledge tool")?;
     println!("{said}");

@@ -5,7 +5,7 @@
 
 use crate::protocol::{Event, HELLO, RECALL, Reply, Request, SHARE};
 use async_trait::async_trait;
-use ensemble_knowledge::{KnowledgeAccess, Tool};
+use ensemble_knowledge::{KnowledgeAccess, Tool, Visibility};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -390,14 +390,20 @@ impl KnowledgeAccess for RemoteMemory {
                             "text": text("text"),
                             "client": client,
                             "project": self.project,
+                            "visibility": args.get("visibility"),
                         }),
                     )
                     .await
                     .map(|v| {
+                        let visibility = v["visibility"]
+                            .as_str()
+                            .and_then(Visibility::parse)
+                            .unwrap_or_default();
                         format!(
-                            "Shared as {} on the hub {}. It turns it into notes in the background.",
+                            "Shared as {} on the hub {} ({}). It turns it into notes in the background.",
                             v["id"].as_str().unwrap_or("?"),
-                            self.url()
+                            self.url(),
+                            ensemble_knowledge::shared_with(visibility)
                         )
                     }),
                 )

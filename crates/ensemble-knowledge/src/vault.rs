@@ -43,8 +43,68 @@ pub struct Share {
     pub client: Option<String>,
     /// The working folder's name, never its path.
     pub project: Option<String>,
+    /// Who may recall what comes of it.
+    pub visibility: Visibility,
     pub title: String,
     pub text: String,
+}
+
+/// Who may recall what comes of a share, as the person who shared it chose.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    /// Only the person who shared it.
+    #[default]
+    Private,
+    /// Everyone on the hub who may recall.
+    Hub,
+}
+
+impl Visibility {
+    pub const ALL: [&str; 2] = ["private", "hub"];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Visibility::Private => "private",
+            Visibility::Hub => "hub",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "private" => Some(Visibility::Private),
+            "hub" => Some(Visibility::Hub),
+            _ => None,
+        }
+    }
+}
+
+/// Who may recall a note: the audience of the shares it came from. A note is
+/// made only from shares of one audience, so what was shared privately never
+/// reaches anyone else through a note.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Audience {
+    /// Only this person.
+    Only(String),
+    /// Everyone on the hub who may recall.
+    Hub,
+}
+
+impl Audience {
+    pub fn of(share: &Share) -> Self {
+        match share.visibility {
+            Visibility::Private => Audience::Only(share.shared_by.clone()),
+            Visibility::Hub => Audience::Hub,
+        }
+    }
+
+    /// Whether the account `who` may recall it.
+    pub fn sees(&self, who: &str) -> bool {
+        match self {
+            Audience::Only(person) => person == who,
+            Audience::Hub => true,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,6 +114,9 @@ struct ShareHead {
     shared_by: String,
     client: Option<String>,
     project: Option<String>,
+    /// Missing in a share kept before there was a choice: private.
+    #[serde(default)]
+    visibility: Visibility,
     title: String,
 }
 
@@ -66,8 +129,8 @@ pub struct Note {
     pub kind: String,
     pub title: String,
     pub tags: Vec<String>,
-    /// `personal`: the only scope so far.
-    pub scope: String,
+    /// Who may recall it.
+    pub audience: Audience,
     /// The shares it was distilled from, oldest first.
     pub sources: Vec<String>,
     /// The people those shares came from.
@@ -86,7 +149,12 @@ struct NoteHead {
     kind: String,
     title: String,
     tags: Vec<String>,
-    scope: String,
+    /// Missing in a note written before there was a choice: private.
+    #[serde(default)]
+    visibility: Visibility,
+    /// Whose a private note is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
     sources: Vec<String>,
     shared_by: Vec<String>,
     pipeline: u32,
@@ -157,6 +225,7 @@ impl Vault {
         shared_by: &str,
         client: Option<&str>,
         project: Option<&str>,
+        visibility: Visibility,
         title: &str,
         text: &str,
     ) -> Result<Share, String> {
@@ -175,6 +244,7 @@ impl Vault {
             shared_by: shared_by.to_string(),
             client: client.map(str::to_string),
             project: project.map(str::to_string),
+            visibility,
             title: title.trim().to_string(),
             text: text.trim().to_string(),
         };
@@ -188,6 +258,7 @@ impl Vault {
             shared_by: share.shared_by.clone(),
             client: share.client.clone(),
             project: share.project.clone(),
+            visibility: share.visibility,
             title: share.title.clone(),
         };
         write_atomically(&path, &with_front_matter(&head, &share.text))
@@ -244,7 +315,14 @@ impl Vault {
             kind: note.kind.clone(),
             title: note.title.clone(),
             tags: note.tags.clone(),
-            scope: note.scope.clone(),
+            visibility: match note.audience {
+                Audience::Only(_) => Visibility::Private,
+                Audience::Hub => Visibility::Hub,
+            },
+            owner: match &note.audience {
+                Audience::Only(person) => Some(person.clone()),
+                Audience::Hub => None,
+            },
             sources: note.sources.clone(),
             shared_by: note.shared_by.clone(),
             pipeline: note.pipeline,
@@ -384,6 +462,7 @@ fn read_share(path: &Path) -> Option<Share> {
         shared_by: head.shared_by,
         client: head.client,
         project: head.project,
+        visibility: head.visibility,
         title: head.title,
         text: text.trim_end().to_string(),
     })
@@ -399,7 +478,15 @@ fn read_note(path: &Path) -> Option<Note> {
         kind: head.kind,
         title: head.title,
         tags: head.tags,
-        scope: head.scope,
+        audience: match head.visibility {
+            Visibility::Hub => Audience::Hub,
+            // Whose: as written, else whoever shared it first.
+            Visibility::Private => Audience::Only(
+                head.owner
+                    .or_else(|| head.shared_by.first().cloned())
+                    .unwrap_or_default(),
+            ),
+        },
         sources: head.sources,
         shared_by: head.shared_by,
         pipeline: head.pipeline,
@@ -520,6 +607,7 @@ mod tests {
                 "Ana",
                 Some("claude-code"),
                 Some("shop"),
+                Visibility::Hub,
                 " Ports ",
                 "We use 8080.\n",
             )
@@ -529,6 +617,7 @@ mod tests {
                 "Ana",
                 None,
                 None,
+                Visibility::Private,
                 "Second: with \"quotes\"",
                 "---\nnot a head\n",
             )
@@ -544,6 +633,22 @@ mod tests {
         let back = shares.iter().find(|s| s.id == second.id).unwrap();
         assert_eq!(back.text, "---\nnot a head");
         assert_eq!(back.title, "Second: with \"quotes\"");
+        assert_eq!(back.visibility, Visibility::Private);
+        // A share kept before there was a choice is private.
+        let path = vault.share_path(&second.id);
+        let file = fs::read_to_string(&path)
+            .unwrap()
+            .replace("visibility: private\n", "");
+        fs::write(&path, file).unwrap();
+        let back = vault
+            .shares()
+            .into_iter()
+            .find(|s| s.id == second.id)
+            .unwrap();
+        assert_eq!(
+            (back.visibility, Audience::of(&back)),
+            (Visibility::Private, Audience::Only("Ana".into()))
+        );
     }
 
     #[test]
@@ -567,13 +672,15 @@ mod tests {
         let tmp = TempDir::new();
         let vault = Vault::new(tmp.0.join("vault"));
         vault.init().unwrap();
-        let share = vault.add_share("Ana", None, None, "t", "x").unwrap();
+        let share = vault
+            .add_share("Ana", None, None, Visibility::Private, "t", "x")
+            .unwrap();
         let note = Note {
             slug: "ports".into(),
             kind: "fact".into(),
             title: "Ports".into(),
             tags: vec!["net".into()],
-            scope: "personal".into(),
+            audience: Audience::Only("Ana".into()),
             sources: vec![share.id.clone()],
             shared_by: vec!["Ana".into()],
             pipeline: 1,
@@ -587,8 +694,32 @@ mod tests {
             file.ends_with("on 8080.\n\n## Related\n\n- [[deploys]]\n"),
             "{file}"
         );
+        assert!(file.contains("visibility: private\nowner: Ana\n"), "{file}");
         assert_eq!(vault.note("ports"), Some(note.clone()));
-        assert_eq!(vault.notes(), vec![note]);
+        assert_eq!(vault.notes(), vec![note.clone()]);
+        // A note for the hub names no owner.
+        let hub = Note {
+            slug: "hub-ports".into(),
+            audience: Audience::Hub,
+            ..note.clone()
+        };
+        vault.write_note(&hub).unwrap();
+        let file = fs::read_to_string(vault.notes_dir().join("hub-ports.md")).unwrap();
+        assert!(
+            file.contains("visibility: hub\n") && !file.contains("owner:"),
+            "{file}"
+        );
+        assert_eq!(vault.note("hub-ports"), Some(hub));
+        // One written before there was a choice is its first sharer's.
+        let old = fs::read_to_string(vault.notes_dir().join("ports.md"))
+            .unwrap()
+            .replace("visibility: private\nowner: Ana\n", "scope: personal\n");
+        fs::write(vault.notes_dir().join("ports.md"), old).unwrap();
+        assert_eq!(
+            vault.note("ports").unwrap().audience,
+            Audience::Only("Ana".into())
+        );
+        fs::remove_file(vault.notes_dir().join("hub-ports.md")).unwrap();
         vault.write_review(&share, "contradicts", "a").unwrap();
         vault.write_review(&share, "unreadable", "b").unwrap();
         assert_eq!(vault.review_count(), 1, "one file per share");

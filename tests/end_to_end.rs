@@ -2804,14 +2804,22 @@ fn a_node_signs_in_to_a_hub_server_and_shares_and_recalls_there() {
             "Deploys",
             "--text",
             "Deploys go out on Tuesdays.",
+            "--visibility",
+            "hub",
         ])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stdout_of(&out).contains("on the hub"),
+        stdout_of(&out).contains("on the hub") && stdout_of(&out).contains("(for the hub: "),
         "{}",
         stdout_of(&out)
+    );
+    assert!(
+        share_files(&hub)
+            .iter()
+            .any(|f| f.contains("title: Deploys") && f.contains("visibility: hub")),
+        "the hub keeps who may recall it"
     );
 
     let mut session = McpSession::start(&s);
@@ -3108,7 +3116,7 @@ fn hub_with_a_note(scratch: &Scratch) -> Served {
             kind: "decision".into(),
             title: "Deploy day".into(),
             tags: Vec::new(),
-            scope: "personal".into(),
+            audience: ensemble::knowledge::Audience::Hub,
             sources: vec!["20261110-000000-000001-aa".into()],
             shared_by: vec!["Ana".into()],
             pipeline: 1,
