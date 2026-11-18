@@ -5,7 +5,9 @@ system as it is built: the processes, the crates, where things are kept, how
 work flows through them and how they run at once. **Part two, "Decisions and
 direction"**, records what was decided with the owner and where Ensemble is
 going; its build order says what is done and what is not. The questions at the
-end are open; everything else is decided unless marked otherwise.
+end are open; everything else is decided unless marked otherwise. Part two's
+"Hub, adapters and runners" (decided 2026-11-19) changes much of part one:
+the node becomes a runner, and clients reach the hub alone.
 
 `README.md` is the user's guide: every setting, command and tool. This document
 is the map behind it.
@@ -453,127 +455,236 @@ and is written to be read by the model that will see it.
 - **Helper team**: the agents a user works with, described in one `config.yaml`.
   It is flat: a list of professional agents, such as a
   coder, a reviewer, a PCB designer or an RF engineer, with no hierarchy. A
-  node holds any number of them in its teams directory and runs them all, its
+  runner holds any number of them in its teams directory and runs them all, its
   agents named `<team>/<agent>`: teams the person makes, links or pulls from a
   git repository like an image, and teams an agent writes at the person's
   request, which run once the person approves them. (Decided 2026-11-17.)
   The description is strict YAML, never natural language.
-- **Hub**: the services: identities, task tracking and the inbox, knowledge
-  vaults and the pipeline, integrations (Telegram and others), routing work
-  between nodes, model access. The word "organization" is not used for it,
-  to keep it apart from a helper team.
-- **Node**: a worker: a process that gives computing resources to its owner
-  and the hub's users. A computer runs one node. (Decided 2026-11-17; a
-  computer could run several before.) A node is
-  **private**, working only for its owner, or **shared**, lending its
-  machine's power to other users of the hub. It holds a helper team and is the
-  MCP server for its owner's agent sessions from any folder: `ensemble mcp`
-  is a bridge to it. It is tied to no project. (Decided 2026-11-16; a node
-  was one person's machine before.)
-- **Interface**: what a person talks to the system through: their own agent CLI
-  (Claude Code, Codex, OpenCode) with Ensemble's MCP tools, the hub's tracker,
-  or later the hub's integrations, chat API and web UI. There is no personal
-  agent and no manager. (Decided 2026-11-16; see "No personal agent".)
+- **Hub**: the core: identities, knowledge and its pipeline, tasks and the
+  tracker, the LLM backends it uses, and the runners connected to it. The word
+  "organization" is not used for it, to keep it apart from a helper team.
+- **Runner**: a pure worker, `ensemble-runner`: a machine's capacity to do
+  agent work, its helper teams, their agent CLIs and logins, and its models. It
+  works on the hub's tasks and serves no client. A computer runs one runner,
+  tied to no project. (Decided 2026-11-19.)
+- **Adapter**: whatever reaches the hub: MCP, the REST API, the link for
+  runners, sources, the CLI. (Decided 2026-11-19.)
+- **Source**: an adapter that brings knowledge in from outside, such as a
+  mailbox or a chat. (Decided 2026-11-19.)
+- **Interface**: what a person talks to the system through: their own agent
+  (Claude Code, Codex, OpenCode, claude.ai) with the hub's MCP tools, the hub's
+  tracker, or later a web UI over the REST API. There is no personal agent and
+  no manager. (Decided 2026-11-16; see "No personal agent".)
 
 ## What it is
 
-An agentic development system: a hub of services and nodes of computing
+An agentic development system: a hub of services and runners of computing
 power, with work spread across them; MCP is one way in. (Decided 2026-11-17:
 Ensemble is described as this, not as an MCP server.) It serves two kinds of
 user: a single developer who wants agents to work on
 tasks and save tokens by sending cheap work to cheap models, and an organization
-whose people and agents share knowledge. The same binary serves both. Features
-beyond the core are modules switched on by their own config block; a block that
-is absent means the module is not used, which is the one kind of optional
-setting the config rules allow.
+whose people and agents share knowledge. The same two executables serve both.
+Features beyond the core are modules switched on by their own config block; a
+block that is absent means the module is not used, which is the one kind of
+optional setting the config rules allow.
 
 | Level | What runs | Who it is for |
 |---|---|---|
-| 0. Node alone | Helper teams, agent runs, worktrees, gates, tasks | Anyone who wants agents to work on tasks |
-| 1. Node + a hub of one's own | A hub on the person's own computer: a knowledge vault fed by explicit shares and recalled in later runs, a tracker | Users who want their agents to remember |
-| 2. Nodes + a shared hub | Sharing, people, always-on work, a tracker shared by a team, shared nodes; later connectors and a central model server | Teams and organizations |
+| 1. A hub and a runner of one's own | Both on the person's computer: tasks, helper teams, a knowledge vault fed by shares and task reports | A developer on their own |
+| 2. A shared hub and many runners | People, always-on work, a tracker shared by a team, runners that work for others, shared backends, sources | Teams and organizations |
 
-Each level works without the next. Knowledge always belongs to a hub: a node
-with no hub has none, and a single user who wants it runs a hub of their own
-on their computer (level 1). A hub is always its own process, with no team;
-an easy way to run a node and a hub together is to come. (Decided
-2026-11-17.)
+A runner always needs a hub, and knowledge always belongs to one: one person
+on their own runs both on their computer. (Decided 2026-11-19.)
 
-## Hub and node
+## Hub, adapters and runners
 
-**Hub** (`ensemble hub`): one per group of people, always on; it provides the
-services. It owns identities and tokens, the front door for clients (built: the
-REST API and `/nodes/v1/`; to come: an OpenAI-compatible chat API, an MCP
-endpoint, a web UI), task tracking (the inbox and tracker adapters), the
-knowledge pipeline and vaults, integrations (Telegram and others, to come),
-which node runs what, and model access (to come: hub API keys, a central LLM
-server, quotas per user, a usage log).
+(Decided 2026-11-19; not built yet: see the build order. Part one describes
+what is built, the node that this makes a runner, and is rewritten as this is
+built.)
 
-**Node** (`ensemble node`): a worker. It runs its owner's helper team, wires the
-local agent CLIs (MCP, session hooks), and connects outbound to the hub over
-WebSockets, so it needs no open port. A computer runs one node, private or
-shared. (A WebSocket was chosen on
-2026-11-11, over plain HTTP with long-polling.)
+```text
+ runner ─┐                         knowledge (the distiller's models)
+ runner ─┴── link ──┐                  │
+  (WebSocket)       │                  │                 ┌─ Microsoft 365: mail, Teams
+                    └───────── hub ────┼── sources ──────┤
+                              │    │   │   (one LLM)     └─ Telegram
+                    MCP ──────┘    │   └── task tracker ── markdown issues; Jira, … later
+                    REST API ──────┘
+                       │
+                 client agents, apps, a web UI later
+```
 
-**The hub is a service, not a computational resource.** (Decided 2026-11-17;
-before, the hub was a role that could run inside a node.) It has no helper
-team and runs no agents: it keeps knowledge, hands out tasks, keeps accounts,
-and connects nodes, which do the work. It is always `ensemble hub serve`, with
+### The hub and its adapters
+
+The hub is the core: accounts, knowledge, tasks and the tracker, and the LLM
+backends it uses. Everything that reaches it is an **adapter**, turned on in
+its settings like the interfaces of "Operations and interfaces":
+
+- **MCP over HTTP**, for client agents;
+- **the REST API**, for apps, and a web UI later, offering what MCP offers,
+  as both are made from the same operations;
+- **the link**, a WebSocket, for runners;
+- **sources**, for knowledge from outside;
+- **the CLI**, over the hub's local socket, for administration.
+
+There are two executables, each its own crate and Nix package, from one
+repository: **`ensemble-hub`** and **`ensemble-runner`**. The library crates
+stay shared, and `tests/workspace.rs` checks that the runner's crate never
+depends on the hub's (knowledge, the store, sources). The link's messages are
+in one crate both build against. A runner says its protocol version when it
+connects, and a hub that cannot work with it refuses it with what to update,
+rather than fail halfway through a task.
+
+### Clients
+
+A client agent connects to the hub's MCP alone, with the hub's URL and an API
+key, its account's token: the person asks their agent to add the server, or
+adds it themselves (`claude mcp add --transport http …`). Nothing of Ensemble
+is installed on the client's computer. The tools are `share`, `recall` and the
+tasks. A key comes from an admin (`user.token`) or from the person
+(`me.token`), and the answer gives the URL and a line ready to paste, so no
+one puts it together by hand.
+
+There are no session hooks: the MCP server's instructions tell the agent to
+`recall` before it works and to `share` what it learns. That is weaker than a
+hook, as the agent decides when to follow them, but every MCP client has it.
+
+No client connects to a runner, and there is no delegation: the helper teams
+work only on tasks, which a client makes on the hub.
+
+### Runners
+
+A **runner** (`ensemble-runner`, `runner.yaml`,
+`~/.config/ensemble/runner/`) is a machine's capacity to do agent
+work: its helper teams, their agent CLIs and logins, and its models. It is a
+pure worker:
+
+- It offers no tools to clients and its helper agents have no knowledge tools.
+  The hub puts the notes related to a task, as the task's account may see
+  them, into the task.
+- It needs a hub; one person on their own runs both on their computer.
+- It signs in and joins over the link (a name and a password, or a join code),
+  and pulls the tasks it may work on.
+- It does not say which projects it has. It works in its own workspace, a
+  folder its settings name, where it finds the repository a task names or
+  clones it, and works on a branch it pushes.
+- It asks on the task when it cannot find the project. When its computer
+  cannot reach the repository, it gives the task back and the hub offers it
+  to another runner; when none can, the task is **blocked**, and offered again
+  when a runner connects.
+- A task's report becomes a share of the task's account on the hub, and the
+  distiller decides what of it becomes notes.
+
+The hub offers a task to the account's own runners with the agent first, then
+to runners that work for others. Such a runner works others' tasks only with
+agents on `llm_backends`, never on a CLI's login, and only on repositories its
+computer can reach. How it says so in `runner.yaml` is settled with step 19.
+A run on another computer is a task too: the `node` adapter and its snapshots
+go.
+
+### Sharing LLM backends
+
+A hub may run on a small machine and need a strong model, and so may a
+runner. A runner may offer its model backends; the hub relays calls to them,
+so the hub and other runners use them. Runners never reach each other.
+
+The hub's admin lists the backends the hub uses, as with any backend, and
+names them where they are used (`knowledge.distill`, `recall.embed`,
+`sources`):
+
+```yaml
+# hub.yaml
+llm:
+  direct:                        # backends the hub calls itself
+    backends:
+      claude: { type: anthropic-api, base_url: https://api.anthropic.com, api_key_env: ANTHROPIC_API_KEY }
+  runners:                       # backends runners serve over their links
+    backends:
+      gpu-box: { runner: alice-workstation, backend: local-qwen }
+
+# runner.yaml
+llm:
+  direct:
+    backends:
+      local-qwen: { type: openai-compatible-api, base_url: http://127.0.0.1:8000/v1 }
+    shares: [local-qwen]         # what it offers through the hub; empty offers nothing
+  hub:                           # backends other runners serve, through the hub
+    backends:
+      team-gpu: { runner: alice-workstation, backend: local-qwen }
+```
+
+- A name is unique across the groups, so a `try` list or a team names a
+  backend by its name alone, and a backend moves between groups without
+  changing where it is used.
+- Choosing a runner's backend is the admin's trust decision: whoever runs the
+  serving machine sees what is sent to it. The hub's settings operations list
+  each runner's offered backends, their models and whether they are online, so
+  an admin picks from a list.
+- The hub never learns the address or key of a runner's backend; the runner
+  calls its own server.
+- Only `llm_backends` are offered, never an agent CLI. Who may use offered
+  backends is the hub's roles: `compute` to use, `host` to offer.
+- When the serving runner is offline or busy, the `try` list's next entry is
+  used. The runner says how many calls it takes at once; the hub queues the
+  rest.
+- Model calls go on a second WebSocket of the runner's, with the same sign-in,
+  so a long prompt or a busy stream never holds up tasks and heartbeats on the
+  link. Prompts go in chunks, answers stream back. The step starts by
+  measuring a call made directly and through the hub (time to the first token,
+  and in all) and goes on only if the difference is small.
+
+### Sources
+
+A source brings knowledge in from outside. It never replies: it is not chat.
+An admin connects one for the whole organization, with a connector per
+provider: **Microsoft 365** (Outlook mail and Teams, through one app
+registration on Microsoft Graph) and **Telegram** (a bot added to the
+organization's groups) first, others later. The admin chooses what each reads:
+mailboxes, folders, chats, channels. Credentials go in `.env`, like every
+secret.
+
+```text
+ messages ─► collect ─► filter ─► clean shares ─► the distiller ─► notes (hub)
+             the LLM keeps   confidential information removed,
+             what is worth   by the admin's prompt (one for all
+             knowing         sources, and one a source may add)
+```
+
+- One LLM serves every source, chosen from the hub's backends like the
+  distiller's.
+- Raw messages are dropped once processed: only the cleaned knowledge is kept.
+- What passes the filter is `hub`, for every account that may recall.
+- What a person or a task report shares was shared on purpose: it goes to the
+  distiller as today, without the filter.
+
+### Task tracker
+
+Issues come from a tracker with backends behind one interface: the markdown
+issues of today, Jira and others later.
+
+### Where the hub runs
+
+The hub is a service, not a computational resource: it has no helper team
+and runs no agents. (Decided 2026-11-17.) It is always `ensemble-hub`, with
 its files in `~/.config/ensemble/hub/`; one person runs it on their own
-computer, a team on a server. A node reaches it only over the link: its
-sessions' knowledge (`RemoteMemory`), its folders' tasks (`RemoteBoard`), and what it
-offers (`Worker`). A developer who wants access from elsewhere moves the hub's
-folder to a server.
+computer, a team on a server, and a developer who wants it from elsewhere
+moves the folder to a server. A runner names one hub. A person may belong to
+several hubs, a home hub with their own knowledge and one workplace hub per
+organization, each with its own identity, token and policy, and nothing passes
+between them except what the export rules below allow. (Decided 2026-11-10.)
 
-A node names one hub, as `hub:` in its `node.yaml` (decided 2026-11-17).
-A person may still belong to several hubs, a home hub with their own knowledge
-and one workplace hub per organization they work for, each with its own
-identity, token and policy, and nothing passes between them except what the
-export rules below allow (decided 2026-11-10); how one node serves several hubs
-is open (see the open questions).
-
-A hub server may face the public internet behind TLS, or run on a local network
-or behind a VPN; nothing in Ensemble assumes either. (Decided 2026-11-10.)
-
-### Private and shared nodes
-
-(Decided 2026-11-16; to be replaced by `shares`, decided 2026-11-18: see
-"What a node shares" under "Operations and interfaces".) The hub connects nodes; a node is there to provide
-computing power. A **private** node works only for its owner. A **shared** node,
-typically on a powerful machine, also works for other users of the hub. Its
-config says what it offers, one or both:
-
-- **models**: the models its machine serves (its GPUs), reached through the hub
-  as a backend, so other people's agents run on their own nodes and use it;
-- **runs**: agent runs for other users' tasks, on the shared machine.
-
-Who may use shared nodes is decided by hub roles, through a permission, like
-every other access in the hub. The helper team stays defined on its owner's
-node; a shared node lends power, not its owner's team.
-
-Limits that follow from the rules below: a shared node runs other users' work
-only on API keys or on models its machine serves, never on its owner's CLI
-subscription. A run on a shared node needs the code it works on, so the node's
-owner can see that code.
-
-How it was built (chosen by the assistant on 2026-11-16, when the owner asked
-for it all to be built; open to change), as part one describes under "Nodes":
-one `node.yaml` per node; `compute` and `host` as the permissions; a run as a
-snapshot of the files git tracks, worked on by the node owner's agent, with
-the changes coming back to the requester, who keeps gates, worktrees and
-commits; a shared node offering only agents on `llm_backends`; models through
-`/nodes/v1/`, from the least busy node, the user's own first.
+A hub may face the public internet behind TLS, or run on a local network or
+behind a VPN; nothing in Ensemble assumes either. (Decided 2026-11-10.)
 
 ### Rules that hold everywhere
 
-- An agent runs on its owner's node, or on a shared node its owner may use;
-  never on the hub, which runs no agents (decided 2026-11-17). Nodes share
-  only what a shared node offers through the hub (models, runs); private
-  nodes share nothing, and no node shares tools, files or subscriptions. (Sharing a node's model was dropped on
-  2026-11-10 and brought back, through shared nodes, on 2026-11-16.)
+- An agent runs on a runner: its owner's, or one that works for others and
+  that its owner may use; never on the hub. Runners share only what they offer
+  through the hub (tasks they work on, backends they serve); none shares
+  tools, files or subscriptions, and runners never reach each other.
 - An organization may run a central LLM server on its own GPUs. It is an
-  OpenAI-compatible backend like any other: a standalone node lists it in
-  `llm_backends`; through the hub it will also get quotas per user and a usage
+  OpenAI-compatible backend like any other, listed by the hub and the runners
+  that use it; through the hub it will also get quotas per user and a usage
   log.
 - Delegated scope: an agent acts with its owner's access or less, never more.
 - Static config, dynamic state. Agent definitions, policy, gates and backend
@@ -593,17 +704,17 @@ a home that exists anyway:
 
 | Job | Where it is |
 |---|---|
-| Knowing the person: decisions, setup, preferences | The vault. Recall serves the person's CLI, and the helper agents whose `recall` asks for notes. |
+| Knowing the person: decisions, setup, preferences | The vault. Recall serves the person's agent, and the hub puts related notes into every task. |
 | Identity, tokens, being accountable | The person's hub account. Issues are assigned to the person. |
-| Talking to the helper team | The person's own CLI through Ensemble's MCP tools; later the hub's chat API, whose `model` names a helper agent, and the web UI. |
+| Giving the helper team work | The person's own agent makes tasks through the hub's MCP; later a web UI. |
 | Turning an issue into work | The inbox: a `<label>:<agent>` label names the agent; without one the task waits in the backlog until someone assigns it. |
 | Planning and splitting work | A helper agent the person puts in their team for it, which hands parts on with `HAND OFF:`. A team design choice, not a concept of the system. |
-| Being reachable while the person's own node is off | A shared node the person may use runs the work; otherwise it waits. |
+| Being reachable while the person's own runner is off | A runner that works for others, which the person may use, takes the task; otherwise it waits. |
 
-So the system has three parts: the **hub** (people, knowledge, the inbox, and
-which node runs what), **nodes** (workers, private or shared), and each
-person's **helper team**, defined on their node. The person's CLI is the
-interface to all three, not one of them.
+So the system has three parts: the **hub** (people, knowledge, tasks, and
+which runner takes what), **runners** (workers), and each person's **helper
+team**, defined on their runner. The person's agent is the interface to all
+three, not one of them.
 
 ## Helper team
 
@@ -623,17 +734,17 @@ hub's chat API can share it.
 
 An agent loop of Ensemble's own is back, as the `builtin` adapter: harness-rs's
 `AgentLoop`, its file and shell tools, and its model clients, on the user's LLM
-backends, so a helper team (or a shared node) needs no agent CLI installed. It
+backends, so a helper team (or a runner that works for others) needs no agent CLI installed. It
 is pinned to one exact version because the library is young. (Decided
 2026-11-16.)
 
 Ensemble is async, on tokio: agent runs (CLI processes included), the task
-queue, the MCP session, the node, the link on both ends, and the knowledge a
-session asks for. harness-rs is async, and so is a node that runs many agents
+queue, the MCP server, the runner, the link on both ends, and the knowledge a
+session asks for. harness-rs is async, and so is a runner that runs many agents
 and serves models at once. (Decided 2026-11-16; Ensemble was synchronous on
 purpose until then.) What stays synchronous is the knowledge vault and its
 distilling, and the tracker inboxes: their loops run on threads of their own.
-Short HTTP requests use ureq; what streams for long (a node's model calls)
+Short HTTP requests use ureq; what streams for long (a runner's model calls)
 uses reqwest. The trade-off of running a session's calls in one task is in
 part one, under "How it runs at once".
 
@@ -652,11 +763,11 @@ Two kinds of work (decided 2026-11-17):
   for issues.
 - A **task** is an agent's: one agent, one goal, one check, such as "the
   camera calibration module in `calib/`; `cargo test` passes". Tasks are kept
-  on the hub, per account and project, so that a task outlives the node that
-  runs it: nodes **lease** them (see "A task" in part one), and when a node
-  stops or dies another of the person's nodes with the agent takes the task
-  up. Without a hub there are no tasks, only background delegations, as there
-  is no knowledge without one.
+  on the hub, per account and project, so that a task outlives the runner
+  that works on it: runners **lease** them (see "A task" in part one), and
+  when a runner stops or dies another runner with the agent takes the task
+  up. The helper teams work only on tasks; there is no delegation outside
+  them. (Decided 2026-11-19.)
 
 The helper team never calls a tracker itself. Each tracker implements one
 trait, `IssueTracker`: the issues assigned to this user that carry the
@@ -665,7 +776,7 @@ issue a task of the account it is assigned to and reports the task back on
 the issue. Behind it, tracker adapters do the tracker work: webhooks where the
 tracker has them, polling where it does not, account mapping, the signal,
 deduplication. The inbox runs on the hub, with one set of credentials, a
-reachable address for webhooks, and on while nodes are off. (Built: polling a
+reachable address for webhooks, and on while runners are off. (Built: polling a
 folder of markdown issues.)
 
 An issue carries an explicit signal that agents may take it: a label, such as
@@ -674,7 +785,8 @@ An issue carries an explicit signal that agents may take it: a label, such as
 
 1. The inbox sees an issue assigned to me with the signal and makes it a task
    for the helper agent its label names, or puts it in my backlog.
-2. The agent gets it with the vault's notes about it, if its `recall` asks.
+2. The agent gets it with the vault's notes about it, which the hub puts into
+   the task.
 3. If it is unclear, the agent asks; the question goes to a tracker comment and
    my answer comes back the same way.
 4. It works, checks gates, and may hand parts on to other agents of my team.
@@ -684,9 +796,9 @@ An issue carries an explicit signal that agents may take it: a label, such as
 
 Planning is a conversation, not an object (decided 2026-11-18). The person
 talks the work through with their own agent, with an issue of theirs or
-without one, and the agent then delegates parts directly to the helper team,
-makes tasks, both, or neither, as the work needs. Ensemble keeps no plan and
-offers no planning tool: a task's `after` is all the order it needs.
+without one, and the agent then makes tasks for the helper team, or none, as
+the work needs. Ensemble keeps no plan and offers no planning tool: a task's
+`after` is all the order it needs.
 
 Ensemble never merges on its own: a merge happens only when the user asks.
 
@@ -729,7 +841,10 @@ personal knowledge lives in the person's own hub, which is a different hub.
   hub's own chat API. (Built: task outcomes. When a task ends done, the hub
   shares what was asked, the questions answered on the way and the agent's
   report, as the task's account, with the client `task`.)
-- Recordings, started by a person, transcribed on the node. (Not built.)
+- Recordings, started by a person, transcribed on their computer. (Not built.)
+- Sources an admin connects (mail, Teams, Telegram), through their own
+  collect and filter steps before the distiller; see "Sources" under "Hub,
+  adapters and runners". (Decided 2026-11-19; not built.)
 
 ### The pipeline
 
@@ -794,23 +909,23 @@ alone. Sign-in through the organization's OIDC provider, or local accounts for a
 personal setup. On a hub server built so far, an account has a name and a
 password (PBKDF2-HMAC-SHA256); logging in gives a session, which lasts a set
 number of hours and is what a UI holds, and from a session a person makes
-access tokens for nodes and scripts, each named, with an optional expiry and
-optional scopes that narrow the account's role. Only a session may manage
-tokens or the password; failed logins lock a name for a while. (Decided
-2026-11-11.) CLIs and nodes enroll with `ensemble node login <hub> --user NAME`,
-which makes an access token for that computer (the OAuth device flow and
-OIDC later). A node keeps its token in a file only its user can read,
-under `~/.config/ensemble`, like an SSH key; the OS keyring may come later as
-an option. The hub stores tokens hashed. (Decided 2026-11-11.) Nodes,
-connectors and agents are identities too, and an agent acts on behalf of a
-person.
+access tokens for runners, client agents and scripts, each named, with an
+optional expiry and optional scopes that narrow the account's role. Only a
+session may manage tokens or the password; failed logins lock a name for a
+while. (Decided 2026-11-11.) A client agent uses a token as the API key of the
+hub's MCP. A runner signs in over its link, with a name and a password or a
+join code, which makes an access token for that computer (the OAuth device
+flow and OIDC later), and keeps it in a file only its user can read, under
+`~/.config/ensemble`, like an SSH key; the OS keyring may come later as an
+option. The hub stores tokens hashed. Runners, sources and agents are
+identities too, and an agent acts on behalf of a person.
 
 There are no teams of people in the hub, only roles. Ensemble defines a fixed
 set of permissions (such as managing users, managing the hub's backends,
 sharing, recalling, receiving tasks), and each hub's config names its own roles
 as sets of them, so an organization decides what roles it has. (Decided
 2026-11-10.) Built so far: `share`, `recall`, `tasks`, `admin`, which manages
-users, `compute` and `host`, for nodes.
+users, `compute` and `host`, for runners and their backends.
 
 People join a hub server by signing up through its REST API (`/api/v1/`, on
 the hub's own port, for a web UI and scripts) with a name and a password; the
@@ -822,14 +937,12 @@ first admin is made on the hub's computer with the CLI. (Decided 2026-11-11.)
 
 | Way | What happens |
 |---|---|
-| Local CLIs (Claude Code, Codex, OpenCode) | Their own login and model. Ensemble's MCP tools: the helper team, tasks, `share`, `recall`. Notes through session hooks. (Built.) |
-| OpenAI-compatible API | Any chat UI, IDE plugin or SDK, with an API key. The token is the key; `model` names the agent. (Built for a node's models, at `/nodes/v1/`; not yet for agents.) |
-| Remote MCP | Desktop and web agents, with OAuth. |
-| Web UI | Chat, knowledge, review queue, tasks, roster, node status, admin. |
+| Client agents (Claude Code, Codex, OpenCode, claude.ai) | Their own login and model. The hub's MCP over HTTP, with a token as the API key: `share`, `recall`, tasks. Nothing of Ensemble installed. |
+| REST API | Apps and scripts, and a web UI later: what MCP offers, and administration. |
+| Web UI | Later: knowledge, review queue, tasks, runners, admin. |
 | Obsidian over Git | Direct read of the vaults; a correction is shared like any knowledge. (Works today.) |
-| Task tracker | Assign a task to a person and add the delegation signal. (Built for markdown issues.) |
-| `ensemble` CLI | `share`, `recall`, `tasks`, `nodes`, and later `ask`, `record start`. |
-| Integrations (Telegram and others) | Hub services that bring messages in and send results out. (Not built.) |
+| Task tracker | Assign an issue to a person and add the signal. (Built for markdown issues.) |
+| `ensemble-hub` CLI | Administration on the hub's computer. |
 
 ## Operations and interfaces
 
@@ -842,13 +955,13 @@ re-implementing a feature. Some administration may stay with the CLI.
 
 ### Operations
 
-Everything a person can do to a hub or a node is an **operation**, defined
+Everything a person can do to a hub or a runner is an **operation**, defined
 once, in the core:
 
 - a name, such as `models.add`, `people.invite`, `computers.join-code`,
   `settings.set`;
 - its input and output, as Rust types with JSON Schemas made from them;
-- who may run it: a permission of the hub's roles, or the node's owner;
+- who may run it: a permission of the hub's roles, or the runner's owner;
 - its secret fields, written and never read back (keys go to `.env`);
 - errors as data, `{code, field, message, hint}`, so an interface shows each
   next to what it is about;
@@ -862,12 +975,12 @@ Schemas the files already have and the checks `config set` makes: a change
 is loaded before it is written, comments stay, and what Nix declares comes
 back read-only with why.
 
-An operation runs **where the state it changes lives**: a running hub or node
-applies it in memory, at once, then writes its file, so nothing needs a
-restart and no two processes write the same file. When the hub or the node is
-not running, the same operation runs in the process that asked, on the files.
-The running process is asked over its local socket, which only its OS user may
-open: the node's exists, and the hub gets one.
+An operation runs **where the state it changes lives**: a running hub or
+runner applies it in memory, at once, then writes its file, so nothing needs a
+restart and no two processes write the same file. When the hub or the runner
+is not running, the same operation runs in the process that asked, on the
+files. The running process is asked over its local socket, which only its OS
+user may open.
 
 Agents do not run operations: no configuration through MCP tools.
 
@@ -879,7 +992,7 @@ every operation, those to come too.
 
 - **The CLI** is made from the operations: each is a command, its input
   fields its options, with a short alias and positional arguments where the
-  operation gives them. It reaches a running hub or node over its socket.
+  operation gives them. It reaches a running hub or runner over its socket.
 - **The REST API** is one route per operation, `POST /api/v1/ops/<name>`,
   with an OpenAPI document made from the same schemas, signed in with the
   hub's sessions and tokens. It is RPC-shaped rather than one resource per
@@ -896,70 +1009,36 @@ interfaces:
   cli: {}                                # the socket `ensemble hub …` uses
   rest_api: { listen: 127.0.0.1:7710 }   # its own port; left out: no REST API
 
-# node.yaml
+# runner.yaml
 interfaces:
-  cli: {}
-  rest_api: { listen: 127.0.0.1:7701 }   # left out: no REST API
+  cli: {}                                # a runner serves no one: the CLI alone
 ```
 
-`hub init` and `node setup` write `cli: {}`. A file that turns on no
-interface is refused: a hub or node nobody can manage is a mistake. Without
-`cli`, the running process opens no socket, and `ensemble` refuses to change
-it while it runs rather than change its files behind it. The REST API has a
-port of its own on the hub too, apart from the link's, because it is
-optional; a node has none of its own to share, as it only dials out.
+`ensemble-hub init` and `ensemble-runner setup` write `cli: {}`. A file that
+turns on no interface is refused: a hub or runner nobody can manage is a
+mistake. Without `cli`, the running process opens no socket, and the CLI
+refuses to change it while it runs rather than change its files behind it.
+The REST API has a port of its own, apart from the link's, because it is
+optional.
 
-The node's own operations reach the hub as one more adapter, over the link,
-for the node's own account only: a person manages all their computers from
+A runner's own operations reach the hub as one more adapter, over the link,
+for the runner's own account only: a person manages all their computers from
 one place, and an admin never reconfigures someone else's.
 
-### The link is the only way between node and hub
+### The link is the only way between runner and hub
 
-A node and its hub speak over the WebSocket and nothing else:
+A runner and its hub speak over the WebSocket and nothing else:
 
 - **Signing in and joining** happen on it: a connection without a token may
   only ask `login` (a name and a password, with the lockout) or `join` (a code
-  an admin made with `computers.join-code`), and gets a token back. A node
+  an admin made with `computers.join-code`), and gets a token back. A runner
   makes no HTTP request to the hub, so a hub without its REST API serves
-  every node.
-- **What nodes share** goes through it both ways: the node that serves dials
-  out, so a server no one can reach may share; the node that uses it relays
-  its agents' calls over its own link. `/nodes/v1/` stays, in the REST API,
-  only for clients that are not nodes.
-
-### What a node shares
-
-(Replaces `access` and `offers`; see "Private and shared nodes".) There is no
-kind of node called shared: a node shares what its `shares` names, and a node
-that names nothing shares nothing. Each entry says who may use it, in the
-words knowledge uses:
-
-```yaml
-# node.yaml
-shares:
-  agents:
-    web/coder: hub           # everyone on the hub whose role has `compute`
-    web/reviewer: private    # only its owner's other computers
-  llm_backends:
-    web/local: hub           # <team>/<backend>: the models it serves
-```
-
-An agent that runs on an agent CLI's own login may only be `private`: no one's
-subscription works for someone else. Another node's team names what is shared
-by the node that shares it, an agent as the `node` adapter does now, and a
-backend the same way:
-
-```yaml
-# a team's config.yaml on another node
-llm_backends:
-  kims-gpu:
-    type: node
-    backend: web/local
-    nodes: [kim/gpu-box]     # tried in order
-```
-
-The node serves that backend to its agent CLIs on a local address and relays
-each call over its link; no config names a port or the hub.
+  every runner.
+- **Tasks** are pulled over it, and questions and reports go back on it.
+- **Shared backends** go over a second WebSocket of the same runner, as
+  "Sharing LLM backends" says: the runner that serves dials out, so a machine
+  no one can reach may serve, and the one that uses it sends its calls over its
+  own.
 
 ## Modules
 
@@ -980,12 +1059,14 @@ crate holds it today.
 | recall | context packages | vault | `ensemble-knowledge`, `src/hooks.rs` |
 | capture | recorder, quick capture, privacy gate | pipeline | not built |
 | connectors | chats, mail, CRM, tracker events, each its own | pipeline or tasks | not built |
-| wiring | MCP, hooks in the user's CLIs | — | `ensemble-mcp`, `src/setup.rs`, `src/hooks.rs` |
-| operations | every action on a hub or a node, once, for every interface | identity, config | `ensemble-ops`; the hub's in `ensemble-link` (`accounts.rs`), the node's in `src/cmd/node.rs` (accounts, tokens, settings, signing in so far) |
+| sources | connectors per provider (Microsoft 365, Telegram), collect and filter before the distiller | pipeline, backends | not built (decided 2026-11-19) |
+| relay | runners' offered backends, used by the hub and other runners over a second WebSocket | link, backends | not built (decided 2026-11-19) |
+| wiring | the hub's MCP over HTTP for client agents | api | `ensemble-mcp` (over stdio today), `src/setup.rs`, `src/hooks.rs` |
+| operations | every action on a hub or a runner, once, for every interface | identity, config | `ensemble-ops`; the hub's in `ensemble-link` (`accounts.rs`), the node's in `src/cmd/node.rs` (accounts, tokens, settings, signing in so far) |
 | interfaces | the CLI, the REST API, and later a web UI or a desktop app, as adapters over the operations | operations | the CLI made from the operations (`src/ops_cli.rs`), the rest by hand in `src/cmd/`; the REST routes in `ensemble-link` (`api.rs`) |
 | api | chat API, MCP endpoint, REST | identity | `ensemble-link` (REST only) |
 | web | the UI | api | not built |
-| link | hub-to-node connection | identity | `ensemble-link`, `ensemble-node` |
+| link | hub-to-runner connection | identity | `ensemble-link`, `ensemble-node` |
 
 ## Build order
 
@@ -1051,33 +1132,48 @@ crate holds it today.
     owner at once, and starts again in its process for the rest; the node
     starts again in its process, its sessions carrying on through their
     bridges.)
-17. Signing in and joining over the link, with join codes; no HTTP from a
-    node to the hub.
-18. The REST API as an interface: one route per operation, OpenAPI, its own
-    port, sign-up in it, `/nodes/v1/` in it for clients that are not nodes.
-19. `shares`, in place of `access` and `offers`; the `node` backend, relayed
-    over the link through a local endpoint.
-20. Goal operations: models, people, computers, teams from templates,
-    knowledge.
-21. A node's operations over the link, for the node's own account.
+17. The hub serves MCP over HTTP: `share`, `recall` and the tasks, signed in
+    with an account's token as the API key; the server's instructions in place
+    of session hooks; a token's answer gives the URL and a line to paste.
+    Clients install nothing.
+18. `ensemble-hub` and `ensemble-runner`, each its own crate, executable and
+    Nix package, with one crate for the link's messages; the node becomes the
+    runner, a pure worker: no MCP for clients, no hooks, no delegations;
+    signing in and joining over the link, with join codes, and no HTTP from a
+    runner to the hub; the protocol version checked on connecting.
+19. The runner's workspace: a task's repository found or cloned, worked on a
+    branch and pushed; a question when it is not found; a task given back,
+    and blocked when no runner can reach its repository; the related notes in
+    every task; a task's report as a share; runners that work for others, and
+    how `runner.yaml` says so; the `node` adapter removed.
+20. Sharing LLM backends: the `llm` block in `hub.yaml` and `runner.yaml`,
+    offered backends listed in the hub's settings operations, calls relayed
+    over a second WebSocket. It starts with measuring a call made directly
+    and through the hub.
+21. The REST API as an interface: one route per operation, the same as MCP
+    offers, OpenAPI, its own port, sign-up in it.
+22. The task tracker with backends behind one interface: the markdown issues
+    first, Jira later.
+23. Sources: the collect and filter steps with one LLM and the admin's
+    prompt, raw messages dropped; then Microsoft 365 (mail and Teams), then
+    Telegram.
+24. Later: a runner's operations from the hub, for its own account; goal
+    operations (models, people, computers, teams from templates, knowledge);
+    chat; a web UI.
 
 What remains besides is the "Not yet" of steps 4 and 5, and the modules
-marked not built above. A web UI and other interfaces come after step 18, as
+marked not built above. A web UI and other interfaces come after step 21, as
 adapters.
 
 ## Open questions
 
 1. Export from workplace to home: who approves.
 2. Recording from a browser without sending audio to the hub.
-3. Telegram, as a hub integration (decided 2026-11-17): what it does first:
-   talk to the helper team, feed the knowledge vault, or report on tasks.
-4. Shared nodes, as built (see "Private and shared nodes"): whether the
-   owner and the user should consent to each run, beyond roles; whether the
-   hub should pick the least busy node for runs too. (A node takes its
-   owner's tasks from the inbox: decided 2026-11-16.)
-5. Chat from anywhere: how the hub's chat API picks the node that runs the
-   helper agent a chat names, and what a chat gets when no such node is
-   connected.
-6. Several hubs for one person (a home hub and a workplace hub): a node now
-   names one hub; whether it may name several, and which one a session of
-   which folder uses.
+3. Runners that work for others: whether the runner's owner and the task's
+   account should consent to each task, beyond roles; whether the hub should
+   offer a task to the least busy runner. (Telegram, open here before, feeds
+   the vault as a source: decided 2026-11-19.)
+4. Chat: whether people talk to a helper agent through the hub at all, and
+   how. Left for later on 2026-11-19.
+5. Several hubs for one person (a home hub and a workplace hub): a runner
+   names one hub; whether it may name several.
