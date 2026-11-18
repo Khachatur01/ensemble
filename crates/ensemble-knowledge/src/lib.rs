@@ -33,6 +33,8 @@ pub use vault::{Note, Processed, Share, Vault};
 const POLL: Duration = Duration::from_secs(5);
 /// How long it waits before asking again when no model could be used.
 const RETRY: Duration = Duration::from_secs(60);
+/// Beside the vault's lock: a rebuild asked of the process that holds it.
+const REBUILD_ASKED: &str = "ensemble-rebuild";
 
 pub const SHARE: &str = "share";
 pub const RECALL: &str = "recall";
@@ -170,8 +172,31 @@ impl Memory {
     pub fn rebuild(&self) -> Result<Run, String> {
         let vault = self.vault();
         let _lock = self.lock()?;
+        self.rebuild_held(&vault)
+    }
+
+    /// Ask the process that distills this vault, a running hub, to rebuild
+    /// the notes, between two shares: its process, or none when no process
+    /// holds the vault, and [`rebuild`](Self::rebuild) may be used.
+    pub fn ask_rebuild(&self) -> Result<Option<u32>, String> {
+        let vault = self.vault();
+        let Some(pid) = ensemble_core::lock::holder(&vault.lock_dir()) else {
+            return Ok(None);
+        };
+        let asked = vault.lock_dir().join(REBUILD_ASKED);
+        std::fs::write(&asked, format!("{pid}\n"))
+            .map_err(|e| format!("cannot write {}: {e}", asked.display()))?;
+        Ok(Some(pid))
+    }
+
+    /// Whether a rebuild was asked and has not started yet.
+    pub fn rebuild_asked(&self) -> bool {
+        self.vault().lock_dir().join(REBUILD_ASKED).exists()
+    }
+
+    fn rebuild_held(&self, vault: &Vault) -> Result<Run, String> {
         vault.clear_products()?;
-        let run = self.distill_held(&vault, false)?;
+        let run = self.distill_held(vault, false)?;
         vault.commit(&format!(
             "rebuild the notes from {} shares, pipeline {PIPELINE_VERSION}",
             run.done.len()
@@ -195,13 +220,30 @@ impl Memory {
     /// Distill shares as they arrive, until `stop` is set. Another process
     /// that holds the vault does this already, and then this returns at once.
     /// `say` gets one line per share, and one when it starts waiting for a
-    /// model.
+    /// model. A rebuild asked with [`ask_rebuild`](Self::ask_rebuild) clears
+    /// the notes, which are then made again as shares are: one at a time, as
+    /// a model can be used, and on from there when the process starts again.
     pub fn work(&self, stop: &AtomicBool, say: &(dyn Fn(&str) + Sync)) {
         let vault = self.vault();
         let Ok(_lock) = self.lock() else { return };
         let mut said_waiting = false;
         while !stop.load(Ordering::Relaxed) {
             let mut pause = POLL;
+            let asked = vault.lock_dir().join(REBUILD_ASKED);
+            if asked.exists() {
+                let _ = std::fs::remove_file(&asked);
+                let shares = vault.shares().len();
+                match vault.clear_products().and_then(|()| {
+                    vault.commit(&format!(
+                        "rebuild the notes from {shares} shares, pipeline {PIPELINE_VERSION}: cleared"
+                    ))
+                }) {
+                    Ok(()) => say(&format!(
+                        "knowledge: rebuilding the notes from {shares} shares"
+                    )),
+                    Err(e) => say(&format!("knowledge: the rebuild failed: {e}")),
+                }
+            }
             for share in pipeline::pending(&vault) {
                 if stop.load(Ordering::Relaxed) {
                     return;

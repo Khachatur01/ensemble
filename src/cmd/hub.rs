@@ -295,6 +295,9 @@ fn knowledge(ctx: &Ctx, command: HubKnowledgeCommand) -> Result<ExitCode, String
     match command {
         HubKnowledgeCommand::Status => {
             println!("vault: {}", vault.root().display());
+            if memory.rebuild_asked() {
+                println!("a rebuild was asked: the running hub starts it in a few seconds");
+            }
             println!("shares: {}", vault.shares().len());
             println!(
                 "pending: {}",
@@ -315,6 +318,13 @@ fn knowledge(ctx: &Ctx, command: HubKnowledgeCommand) -> Result<ExitCode, String
                 yes,
             )? {
                 return Ok(ExitCode::FAILURE);
+            }
+            // A running hub holds the vault: it rebuilds them itself.
+            if let Some(pid) = memory.ask_rebuild()? {
+                println!(
+                    "The running hub (process {pid}) rebuilds the notes now, one share at a time; `ensemble hub knowledge status` shows how far it is."
+                );
+                return Ok(ExitCode::SUCCESS);
             }
             Ok(report(&memory.rebuild()?))
         }

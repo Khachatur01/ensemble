@@ -916,6 +916,36 @@ mod tests {
     }
 
     #[test]
+    fn a_rebuild_asked_of_the_running_worker_is_made_there() {
+        let tmp = TempDir::new();
+        let server = model_server(&["small"], &[TWO_ITEMS, TWO_ITEMS]);
+        let m = memory_on(&tmp, &server.url, "fail");
+        assert_eq!(m.ask_rebuild().unwrap(), None, "no process holds it");
+        m.share(None, "a", "x").unwrap();
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let wait = |done: &dyn Fn() -> bool| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !done() && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            done()
+        };
+        std::thread::scope(|s| {
+            s.spawn(|| m.work(&stop, &|_| {}));
+            assert!(wait(&|| m.vault().notes().len() == 2));
+            let stray = m.vault().root().join("notes/stray.md");
+            std::fs::write(&stray, "---\nnot a note\n").unwrap();
+            assert_eq!(m.ask_rebuild().unwrap(), Some(std::process::id()));
+            assert!(m.rebuild_asked());
+            assert!(wait(&|| !stray.exists() && m.vault().notes().len() == 2));
+            assert!(wait(&|| commits(&m.vault()).contains(": cleared\n")));
+            assert!(!m.rebuild_asked());
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        assert_eq!(server.requests.lock().unwrap().len(), 2, "the share twice");
+    }
+
+    #[test]
     fn only_the_process_that_holds_the_vault_distills_it() {
         let tmp = TempDir::new();
         let m = memory_on(&tmp, &nowhere(), "wait");

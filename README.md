@@ -1230,7 +1230,10 @@ vault/
 
 Because the notes are made from the shares, a better model or a new note format
 needs no migration: `ensemble hub knowledge rebuild` deletes the notes and makes
-them again from every share, in one commit. `ensemble hub knowledge status`
+them again from every share, in one commit. While the hub runs, it asks the hub
+instead, which clears the notes and makes them again one share at a time, as
+it distills, and goes on from there if it is stopped meanwhile; until it is
+done, `recall` finds only the notes made so far. `ensemble hub knowledge status`
 counts shares, pending shares, notes and what waits in `review/`.
 
 **Shared text is data, not instructions.** It may carry instructions meant for
