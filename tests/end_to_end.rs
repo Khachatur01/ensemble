@@ -2084,6 +2084,47 @@ fn a_hub_server_refuses_another_protocol_or_a_bad_token_and_stops_on_sigterm() {
 }
 
 #[test]
+fn a_runner_started_before_it_is_signed_in_waits_for_its_token() {
+    let s = Scratch::new("hub-wait");
+    s.local_backend(NOWHERE);
+    s.write("@team/config.yaml", &config_yaml("opencode"));
+    let (hub, address, token) = hub_server(&s);
+    let _hub = serve_hub(&s, &hub);
+    let url = format!("ws://{address}");
+    runner_names_hub(&s, &url);
+    // As a service started at boot, before anyone signed it in.
+    let mut runner = Served(
+        runner_command(&s)
+            .args(["serve"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut err = BufReader::new(runner.stderr.take().unwrap());
+    let mut until = |said: &str| {
+        let mut seen = String::new();
+        loop {
+            let mut line = String::new();
+            assert!(err.read_line(&mut line).unwrap() > 0, "it stopped: {seen}");
+            seen.push_str(&line);
+            if line.contains(said) {
+                return;
+            }
+        }
+    };
+    until("waiting for `ensemble-runner login");
+    // Signing in runs as with no runner, and the runner goes on from it.
+    let out = runner_command(&s)
+        .args(["login", &url, "--token", &token])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    until("connected to ws");
+}
+
+#[test]
 fn a_runner_signs_in_to_a_hub_server_and_takes_a_new_token_as_it_runs() {
     let s = Scratch::new("hub-remote");
     s.local_backend(NOWHERE);

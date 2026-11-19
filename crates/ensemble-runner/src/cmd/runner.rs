@@ -179,12 +179,16 @@ fn status() -> Result<ExitCode, String> {
 /// runner.yaml has it start again, in this process: running tasks start again
 /// from where their work was last pushed.
 fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
+    local::stop_on_signals();
+    if !signed_in(ctx)? {
+        eprintln!("ensemble: stopped");
+        return Ok(ExitCode::SUCCESS);
+    }
     let dir = state::runner_dir()?;
     let _lock = ensemble_core::lock::acquire(&dir).map_err(|pid| {
         let name = this_runner().map(|r| r.name).unwrap_or_default();
         format!("serve: process {pid} already runs the runner '{name}'")
     })?;
-    local::stop_on_signals();
     loop {
         serve_once(ctx, &dir)?;
         if !local::restarting() {
@@ -194,6 +198,38 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
     }
     eprintln!("ensemble: stopped");
     Ok(ExitCode::SUCCESS)
+}
+
+/// Wait until the hub runner.yaml names has a token, as a runner that starts
+/// before anyone signed it in does, such as a service at boot: true once it
+/// has, or when it names no hub; false when it is stopped first. It holds
+/// nothing meanwhile, so `ensemble-runner login` and `join` run as they would
+/// with no runner, and it goes on from the token they keep.
+fn signed_in(ctx: &Ctx) -> Result<bool, String> {
+    const LOOK_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+    let mut said = false;
+    loop {
+        let runner = ctx.runner().map_err(|e| format!("serve: {e}"))?;
+        let Some(url) = runner.hub else {
+            return Ok(true);
+        };
+        if ensemble_link::Tokens::load()?.get(&url).is_some() {
+            return Ok(true);
+        }
+        if !said {
+            eprintln!(
+                "ensemble: no token for the hub {url} yet: waiting for `ensemble-runner login {url} --user <name>` or `ensemble-runner join {url} <code>`"
+            );
+            said = true;
+        }
+        let since = std::time::Instant::now();
+        while since.elapsed() < LOOK_EVERY {
+            if local::STOP.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(false);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
 }
 
 /// The runner, as runner.yaml says now, until it stops or starts again.

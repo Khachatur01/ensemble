@@ -767,7 +767,9 @@ clones, asks about or gives back the tasks of projects it has no folder for.
 With a hub, it tells the hub it is connected, with every agent of its teams,
 and again when its teams are reloaded: `agents` and `ensemble-runner peers`
 list it. Without a
-hub it has no tasks, and says so. On a stop, running tasks are stopped and put
+hub it has no tasks, and says so. Started before it is signed in to the hub
+its `runner.yaml` names, as a service at boot may be, it waits, saying so,
+until `ensemble-runner login` or `join` keeps a token, and goes on from there. On a stop, running tasks are stopped and put
 back on the hub, for this runner or another to run again, and the rest stay
 queued. A computer runs one runner, so a second `ensemble-runner serve` refuses.
 One worker runs a repository's tasks: its lock is a file in the repository's
