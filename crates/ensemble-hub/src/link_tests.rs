@@ -164,11 +164,11 @@ mod tasks {
     impl TaskService for FakeTasks {
         fn handle(
             &self,
-            user: &str,
-            _: &[crate::board::Present],
+            asker: &crate::board::Asker<'_>,
             method: &str,
             params: &Value,
         ) -> Result<Value, String> {
+            let user = asker.user;
             self.heard
                 .lock()
                 .unwrap()

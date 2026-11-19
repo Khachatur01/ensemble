@@ -3,11 +3,11 @@
 //! it whenever its `runner.yaml` names a hub.
 //!
 //! It keeps one connection to the hub and says what the runner is
-//! (`runner`): its name, whom it works for, every agent of its teams, the
-//! agents it lends others (`offers.runs`) and the models it serves
+//! (`runner`): its name, whom it works for (`works_for`), every agent of its
+//! teams, the agents it lends other accounts and the models it serves
 //! (`offers.models`), and says it again when its teams are reloaded. So the
-//! hub knows which of an account's runners are connected, with which agents.
-//! Then it does what comes:
+//! hub knows which runners are connected, with which agents, and which may
+//! take an account's tasks. Then it does what comes:
 //!
 //! - a `model_call` event: the request goes to the model server in
 //!   `offers.models`, and its answer goes back in chunks as it comes.
@@ -15,11 +15,13 @@
 //! Each call goes on beside the connection, in its task. Only the connection
 //! uses the socket: the others hand it what to send.
 //!
-//! A shared runner works for other people, so an agent it lends must run on
-//! models from `llm_backends`: an agent CLI's own login is its owner's, and
-//! is never used for someone else's work.
+//! A runner that works for the hub works for other people, so the agents it
+//! lends are those of its teams that run on models from `llm_backends`
+//! ([`ensemble_config::AgentConfig::lendable`]), worked out from its teams
+//! each time it says what it is, never listed by hand: an agent CLI's own
+//! login is its owner's, and is never used for someone else's work.
 
-use ensemble_config::{Access, Adapter, Config, OpenCodeModel, Runner};
+use ensemble_config::{Config, Runner, WorksFor};
 use ensemble_core::runtime;
 use ensemble_link::client::{Connection, Failure, Token};
 use ensemble_link::protocol::{MODEL_CALL_EVENT, MODEL_REPLY, RUNNER};
@@ -43,27 +45,18 @@ const REPLACED: &str = "signed in again with a new token";
 /// What a model call hands the connection to send.
 type Outbox = UnboundedSender<(&'static str, Value)>;
 
-/// Every agent `runner` lends is in `config`, and a shared runner lends only
-/// agents on `llm_backends`.
-fn check_offers(runner: &Runner, config: &Config) -> Result<(), String> {
-    let Some(runs) = &runner.offers.runs else {
-        return Ok(());
-    };
-    for name in &runs.agents {
-        let Some(agent) = config.agent(name) else {
-            return Err(format!(
-                "offers.runs: no team of this runner has the agent '{name}'. Its agents: {}.",
-                config.agent_names().join(", ")
-            ));
-        };
-        if runner.access == Access::Shared && !on_llm_backends(&agent.adapter) {
-            return Err(format!(
-                "offers.runs: '{name}' runs on {}, which uses an agent CLI's own login or provider, and a shared runner never lends that; offer an agent of type opencode on llm_backends, builtin, or direct",
-                agent.runs_on()
-            ));
-        }
+/// The agents `runner` lends other accounts, of its teams `config`: those on
+/// `llm_backends` when it works for the hub, and none when it works for its
+/// owner.
+pub fn lends(runner: &Runner, config: &Config) -> Vec<String> {
+    match runner.works_for {
+        WorksFor::Hub => config
+            .lendable_agents()
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        WorksFor::Owner => Vec::new(),
     }
-    Ok(())
 }
 
 /// A runner's link to its hub, ready to connect.
@@ -81,27 +74,22 @@ pub struct Worker {
 impl Worker {
     /// A worker for `runner`, reaching the hub at `url` with `token`, and
     /// again with the new one when it is replaced. `team` is its teams,
-    /// loaded as one; each agent it lends must be in it, and on a shared
-    /// runner run on `llm_backends`.
-    pub fn new(url: &str, token: Token, runner: Runner, team: Config) -> Result<Worker, String> {
-        check_offers(&runner, &team)?;
-        Ok(Worker {
+    /// loaded as one.
+    pub fn new(url: &str, token: Token, runner: Runner, team: Config) -> Worker {
+        Worker {
             url: url.to_string(),
             token,
             runner,
             team: RwLock::new(team),
             reloaded: Notify::new(),
-        })
+        }
     }
 
     /// Use `config`, the runner's teams read again, and tell the hub what it
-    /// has now; refused, and nothing changes, when it no longer has an agent
-    /// the runner lends.
-    pub fn reload(&self, config: &Config) -> Result<(), String> {
-        check_offers(&self.runner, config)?;
+    /// has now.
+    pub fn reload(&self, config: &Config) {
         *self.team.write().unwrap_or_else(|e| e.into_inner()) = config.clone();
         self.reloaded.notify_one();
-        Ok(())
     }
 
     /// What this runner says it is when it connects, and when its teams
@@ -120,21 +108,20 @@ impl Worker {
                 json!({"name": agent.name, "about": about})
             })
             .collect();
-        let offers = self.runner.offers.runs.as_ref();
         let models = self.runner.offers.models.as_ref();
         json!({
             "name": self.runner.name,
-            "access": self.runner.access.as_str(),
+            "works_for": self.runner.works_for.as_str(),
             "agents": agents,
-            "offers": offers.map(|r| r.agents.clone()).unwrap_or_default(),
+            "lends": lends(&self.runner, &team),
             "models": models.map(|m| m.names.clone()).unwrap_or_default(),
             "model_timeout_seconds": models.map(|m| m.timeout_seconds),
         })
     }
 
     /// Serve the hub until `stop` is set, connecting again when the link
-    /// breaks. A hub that refuses the runner (a shared runner without `host`,
-    /// a name taken) makes it return, saying why.
+    /// breaks. A hub that refuses the runner (one that works for the hub
+    /// without `host`, a name taken) makes it return, saying why.
     pub async fn work(&self, stop: &AtomicBool, say: &(dyn Fn(&str) + Sync)) -> Result<(), String> {
         let mut backoff = Duration::from_secs(1);
         let mut said_down = false;
@@ -184,10 +171,10 @@ impl Worker {
             .map_err(Failure::Broken)?;
         let me = link.call(RUNNER, self.hello()).await?;
         say(&format!(
-            "connected to {} as the runner {} ({})",
+            "connected to {} as the runner {} (works for {})",
             self.url,
             me["runner"].as_str().unwrap_or("?"),
-            self.runner.access.as_str()
+            self.runner.works_for.as_str()
         ));
         let (outbox, mut sending) = unbounded_channel::<(&'static str, Value)>();
         let ended = AtomicBool::new(false);
@@ -307,12 +294,33 @@ impl Worker {
     }
 }
 
-/// Does an agent run only on models from `llm_backends`, never on a login of
-/// its CLI's own?
-fn on_llm_backends(adapter: &Adapter) -> bool {
-    match adapter {
-        Adapter::Direct(_) | Adapter::Builtin(_) => true,
-        Adapter::OpenCode(o) => matches!(o.model, OpenCodeModel::LlmBackend(_)),
-        Adapter::ClaudeCode(_) | Adapter::Codex(_) => false,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    #[test]
+    fn a_runner_lends_its_agents_on_llm_backends_only_when_it_works_for_the_hub() {
+        let team = ensemble_config::parse(
+            ensemble_config::SAMPLE,
+            Path::new("config.yaml"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let runner = |works_for: &str| {
+            ensemble_config::parse_runner(
+                &format!("version: 1\nname: box\nworks_for: {works_for}\nworkspace: /code\nhub: ws://hub\noffers: {{}}\n"),
+                Path::new("runner.yaml"),
+            )
+            .unwrap()
+        };
+        // Its agents on OpenCode with a provider, Codex and Claude Code use
+        // their CLI's own login: never lent.
+        assert_eq!(
+            lends(&runner("hub"), &team),
+            ["coder", "patcher", "summariser"]
+        );
+        assert!(lends(&runner("owner"), &team).is_empty());
     }
 }

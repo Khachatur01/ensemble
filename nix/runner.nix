@@ -28,7 +28,7 @@ in
         default = null;
         description = ''
           Settings of the runner's `runner.yaml`, as Nix: any of `version`,
-          `name`, `access`, `workspace`, `hub` and `offers`, down to one
+          `name`, `works_for`, `workspace`, `hub` and `offers`, down to one
           setting such as `offers.models.base_url`. They are merged into
           `~/.config/ensemble/runner/runner.yaml` whenever the runner starts;
           the settings not declared here are made and changed with
@@ -41,7 +41,7 @@ in
           {
             version = 1;
             name = "laptop";
-            access = "private";
+            works_for = "owner";
             hub = "wss://hub.example.com";
             offers = { };
           }
@@ -180,7 +180,7 @@ in
           ''
             # A runner to merge into: as `ensemble-runner setup` makes one.
             if [ ! -e "$dir/runner.yaml" ]; then
-              printf 'version: 1\nname: %s\naccess: private\nworkspace: ~/ensemble\noffers: {}\ninterfaces:\n  cli: {}\n' \
+              printf 'version: 1\nname: %s\nworks_for: owner\nworkspace: ~/ensemble\noffers: {}\ninterfaces:\n  cli: {}\n' \
                 "$(${pkgs.hostname}/bin/hostname -s)" > "$dir/runner.yaml"
             fi
             ${lib.getExe package} config merge ${files.runnerYaml}

@@ -649,6 +649,17 @@ fn a_named_env_file_that_is_missing_is_an_error() {
     .unwrap_err();
     assert!(err.to_string().contains("nope.env"), "{err}");
 }
+
+#[test]
+fn only_agents_on_llm_backends_may_work_for_other_accounts() {
+    let c = parse(SAMPLE, &p(), &env(&[])).unwrap();
+    // OpenCode on an LLM backend, `direct` and `builtin`; never OpenCode on a
+    // provider of its own, Codex or Claude Code, which use their CLI's login.
+    assert_eq!(c.lendable_agents(), ["coder", "patcher", "summariser"]);
+    assert!(!c.agents["explorer"].lendable());
+    assert!(!c.agents["fixer"].lendable() && !c.agents["reviewer"].lendable());
+}
+
 #[test]
 fn the_sample_loads_and_sets_every_setting_the_schema_has() {
     let c = parse(SAMPLE, &p(), &env(&[])).expect("the sample is a valid config");
@@ -1704,17 +1715,15 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_runner_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
+fn a_runner_says_whom_it_works_for_and_its_sample_and_schema_agree() {
     let runner = parse_runner(runner::RUNNER_SAMPLE, Path::new("runner.yaml")).unwrap();
     assert_eq!(runner.hub.as_deref(), Some("wss://hub.example.com"));
     assert_eq!(
-        (runner.name.as_str(), runner.access),
-        ("laptop", runner::Access::Private)
+        (runner.name.as_str(), runner.works_for),
+        ("laptop", WorksFor::Owner)
     );
     let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
     assert_eq!(runner.workspace, home.join("ensemble"), "~ is the home");
-    let runs = runner.offers.runs.as_ref().expect("the sample offers runs");
-    assert_eq!(runs.agents, vec!["web/coder"]);
     let models = runner
         .offers
         .models
@@ -1729,13 +1738,12 @@ fn a_runner_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
             .to_string()
     };
     let said = problems(
-        "version: 1\nname: a/b\naccess: shared\nworkspace: \"\"\nhub: http://hub\noffers:\n  runs: { agents: [] }\n  models: { base_url: localhost, timeout_seconds: 0, names: [] }\n",
+        "version: 1\nname: a/b\nworks_for: hub\nworkspace: \"\"\nhub: http://hub\noffers:\n  models: { base_url: localhost, timeout_seconds: 0, names: [] }\n",
     );
     for wanted in [
         "name: 'a/b'",
         "workspace: is empty",
         "hub: 'http://hub' must start with ws://",
-        "offers.runs.agents: name at least one",
         "offers.models.base_url",
         "timeout_seconds",
         "offers.models.names",
@@ -1743,12 +1751,20 @@ fn a_runner_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
         assert!(said.contains(wanted), "{wanted}: {said}");
     }
     let said = problems(
-        "version: 1\nname: box\naccess: shared\nworkspace: /code\noffers:\n  runs: { agents: [coder] }\n",
+        "version: 1\nname: box\nworks_for: hub\nworkspace: /code\noffers:\n  models: { base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5, names: [small] }\n",
     );
-    assert!(said.contains("as `<team>/<agent>`"), "{said}");
-    assert!(said.contains("there is no `hub`"), "{said}");
+    assert!(
+        said.contains("works_for: a runner works for the accounts of a hub, and there is no `hub`"),
+        "{said}"
+    );
+    assert!(said.contains("offers: a runner offers"), "{said}");
+    let said =
+        problems("version: 1\nname: box\nworks_for: everyone\nworkspace: /code\noffers: {}\n");
+    assert!(said.contains("owner") && said.contains("hub"), "{said}");
+    let said = problems("version: 1\nname: box\nworkspace: /code\noffers: {}\n");
+    assert!(said.contains("works_for"), "nothing has a default: {said}");
     let bare = parse_runner(
-        "version: 1\nname: box\naccess: shared\nworkspace: work\noffers: {}\n",
+        "version: 1\nname: box\nworks_for: owner\nworkspace: work\noffers: {}\n",
         Path::new("/home/ana/.config/ensemble/runner/runner.yaml"),
     )
     .unwrap();
@@ -1757,13 +1773,7 @@ fn a_runner_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
         Path::new("/home/ana/.config/ensemble/runner/work"),
         "a relative path is beside the file"
     );
-    assert_eq!(
-        bare.offers,
-        runner::Offers {
-            runs: None,
-            models: None
-        }
-    );
+    assert_eq!(bare.offers, runner::Offers { models: None });
     assert!(
         load_runner(Path::new("/nonexistent/runner.yaml"))
             .unwrap()
@@ -1784,12 +1794,8 @@ fn a_runner_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
         accepted_keys::<runner::RawOffers>()
     );
     assert_eq!(
-        schema_keys(&defs["runs"]),
-        accepted_keys::<runner::RawOfferedRuns>()
-    );
-    assert_eq!(
-        schema_required(&defs["runs"]),
-        accepted_keys::<runner::RawOfferedRuns>()
+        schema["properties"]["works_for"]["enum"],
+        serde_json::json!(["owner", "hub"])
     );
     let models_keys = accepted_keys::<runner::RawOfferedModels>();
     assert_eq!(schema_keys(&defs["models"]), models_keys);
@@ -1837,7 +1843,7 @@ fn the_command_line_is_on_unless_interfaces_says_otherwise_and_one_must_be() {
     let runner = |interfaces: &str| {
         parse_runner(
             &format!(
-                "version: 1\nname: laptop\naccess: private\nworkspace: /code\noffers: {{}}\n{interfaces}"
+                "version: 1\nname: laptop\nworks_for: owner\nworkspace: /code\noffers: {{}}\n{interfaces}"
             ),
             Path::new("runner.yaml"),
         )

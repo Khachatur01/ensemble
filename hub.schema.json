@@ -151,7 +151,7 @@
       }
     },
     "permission": {
-      "description": "share: keep knowledge in the organization vault. recall: read its notes. tasks: receive the tasks the hub's inbox finds assigned to you. admin: manage users, approve sign-ups, give roles, revoke tokens. compute: use other people's shared runners, the agents and models they offer. host: connect a shared runner, which works for those whose role has compute.",
+      "description": "share: keep knowledge in the organization vault. recall: read its notes. tasks: receive the tasks the hub's inbox finds assigned to you. admin: manage users, approve sign-ups, give roles, revoke tokens. compute: have your tasks worked on by other people's runners that work for the hub, with the agents they lend, and use their models. host: connect a runner that works for the hub, for those whose role has compute.",
       "enum": ["share", "recall", "tasks", "admin", "compute", "host"]
     },
     "tasks": {

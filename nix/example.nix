@@ -62,7 +62,7 @@
     settings = {
       version = 1;
       name = "laptop";
-      access = "private";
+      works_for = "owner";
       hub = "ws://127.0.0.1:7700";
       offers = { };
     };

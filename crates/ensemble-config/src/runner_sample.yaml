@@ -4,7 +4,7 @@
 # every team in its teams directory (`ensemble-runner team list` lists them).
 # With a hub server you signed in to (`ensemble-runner login`), it runs the
 # tasks the hub keeps for you in the git repositories of its workspace, and can
-# lend this computer's power. Written by `ensemble-runner setup` or
+# lend this computer's power to others. Written by `ensemble-runner setup` or
 # `ensemble-runner init` in ~/.config/ensemble/runner. A computer runs one runner.
 #
 # Nothing has a default value. Each block under `offers` may be left out, which
@@ -14,10 +14,13 @@ version: 1
 
 name: laptop                     # its name; a hub knows it as <you>/laptop
 
-# private: it works for you alone. shared: also for everyone whose role on the
-# hub has `compute`. A shared runner runs other people's work only on models
-# from llm_backends, never on your agent CLI's subscription.
-access: private
+# owner: it works for you alone. hub: also on the tasks of everyone whose role
+# on the hub has `compute`, when no runner of their own with the agent takes
+# them; your role needs `host`. It works others' tasks only with the agents of
+# its teams that run on models from llm_backends, never on your agent CLI's
+# own login or subscription, and in their own folder of the workspace,
+# .for/<account>/<project>. You can see the code it works on.
+works_for: owner
 
 # The folder it works in. Each git repository directly inside it is a project,
 # named for its folder: the runner runs the tasks the hub keeps for it, and
@@ -29,13 +32,9 @@ workspace: ~/ensemble
 hub: wss://hub.example.com       # the hub server it connects to (`ensemble-runner login` first); leave out for none
 
 offers:
-  # Agents of its teams it lends to others on the hub, listed to everyone
-  # who may use this runner.
-  runs:
-    agents: [web/coder]            # which agents others may use, as <team>/<agent>
-
   # Models an OpenAI-compatible server here serves, reached through the hub at
-  # https://<hub>/nodes/v1 with an access token as the API key.
+  # https://<hub>/nodes/v1 with an access token as the API key: by you, and
+  # with `works_for: hub` by everyone whose role has `compute`.
   models:
     base_url: http://127.0.0.1:11434/v1
     timeout_seconds: 600           # the most one request may take

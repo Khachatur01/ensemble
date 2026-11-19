@@ -14,7 +14,7 @@ use serde_json::Value;
 /// The version of what is said here. The runner sends it as the
 /// [`VERSION_HEADER`] of every link it opens, and a hub refuses one of
 /// another version, or of none, before anything else.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// The header of the upgrade that carries the runner's [`VERSION`].
 pub const VERSION_HEADER: &str = "ensemble-protocol";
 
@@ -55,6 +55,15 @@ pub const RECALL: &str = "recall";
 /// folder's name). Each of these takes `{project, ...}` and needs the `tasks`
 /// permission; `ensemble_tasks::board` says what each does.
 ///
+/// A runner that works for the hub acts on another account's task by naming
+/// it, `{account, project, ...}`, with [`TASKS`], [`TASK`], [`TASK_CLAIM`],
+/// [`TASK_RENEW`], [`TASK_RELEASE`], [`TASK_FINISH`] and [`TASK_GIVE_BACK`]
+/// alone, and naming itself as `<its account>/<its name>`. The hub lets it
+/// each time only when the runner is connected, works for the hub, and its
+/// account has `host`; the task's account has `compute`; and the runner lends
+/// the task's agent. It sees only the tasks of the project it may take, and
+/// those they come after.
+///
 /// Every task of the project: `{project}`, answered with `{tasks}`.
 pub const TASKS: &str = "tasks";
 /// One task, with its result, questions and hand-offs: `{project, id}`,
@@ -82,12 +91,15 @@ pub const TASK_ASSIGN: &str = "task_assign";
 pub const TASK_CANCEL: &str = "task_cancel";
 /// The account's tasks, in every project, that wait for one of the runner's
 /// agents and that it has not given back: `{runner, agents}`, answered with
-/// `{tasks: [{project, task}]}`. A runner looks for the projects it has no
-/// folder for.
+/// `{runner, tasks: [{account, project, task}]}`. For a runner that works for
+/// the hub, also the tasks of other accounts it may take, after the
+/// account's own. `runner` is its name on others' tasks, `<its
+/// account>/<its name>`. A runner looks for the projects it has no folder
+/// for.
 pub const TASKS_WAITING: &str = "tasks_waiting";
 /// Give a task back, for another runner: `{project, id, runner, why}`, such
 /// as when this computer cannot reach its repository. Answered with
-/// `{blocked}`: whether no connected runner with its agent is left to try.
+/// `{blocked}`: whether no connected runner that may take it is left to try.
 pub const TASK_GIVE_BACK: &str = "task_give_back";
 /// Every task method, for the server to pass on.
 pub const TASK_METHODS: [&str; 12] = [
@@ -106,14 +118,17 @@ pub const TASK_METHODS: [&str; 12] = [
 ];
 
 /// This connection is a runner, said once it connects and again when its
-/// teams change: `{name, access, agents: [{name, about}], offers: [agents],
-/// models: [names], model_timeout_seconds}`: every agent of its teams, those
-/// it offers others, and the models it serves. A shared runner needs the
-/// `host` permission. Answered with `{runner}`, its `<owner>/<name>`.
+/// teams change: `{name, works_for, agents: [{name, about}], lends: [agents],
+/// models: [names], model_timeout_seconds}`: whom it works for (`owner` or
+/// `hub`), every agent of its teams, those it lends other accounts (its
+/// agents on `llm_backends`, when it works for the hub), and the models it
+/// serves. One that works for the hub needs the `host` permission. Answered
+/// with `{runner}`, its `<owner>/<name>`.
 pub const RUNNER: &str = "runner";
-/// The runners connected now that this account may use: `{}`, answered with
-/// `{runners: [{runner, owner, access, agents, models}]}`: a runner of the
-/// account's own with every agent, another's shared one with what it offers.
+/// The runners connected now that work for this account: `{}`, answered with
+/// `{runners: [{runner, owner, works_for, agents, models}]}`: a runner of the
+/// account's own with every agent, another's that works for the hub, when the
+/// account has `compute`, with the agents it lends.
 pub const RUNNERS: &str = "runners";
 /// From a runner answering a model call: `{call, status, content_type}`
 /// first, then `{call, chunk}` (base64) as the server sends it, then `{call,

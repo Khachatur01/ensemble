@@ -105,9 +105,11 @@ pub enum Permission {
     Tasks,
     /// Manage users: approve sign-ups, give roles, revoke tokens.
     Admin,
-    /// Use other people's shared runners: run agents they offer, and their models.
+    /// Have your tasks worked on by other people's runners that work for the
+    /// hub, with the agents they lend, and use their models.
     Compute,
-    /// Connect a shared runner, which works for others whose role has `compute`.
+    /// Connect a runner that works for the hub: for others whose role has
+    /// `compute`.
     Host,
 }
 

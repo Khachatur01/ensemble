@@ -76,7 +76,7 @@ impl Scratch {
             std::fs::write(
                 &path,
                 format!(
-                    "version: 1\nname: desk\naccess: private\nworkspace: \"{}\"\noffers: {{}}\n",
+                    "version: 1\nname: desk\nworks_for: owner\nworkspace: \"{}\"\noffers: {{}}\n",
                     self.workspace().display()
                 ),
             )
@@ -1802,7 +1802,7 @@ fn runner_names_hub(scratch: &Scratch, url: &str) {
     std::fs::write(
         config.join("runner.yaml"),
         format!(
-            "version: 1\nname: desk\naccess: private\nworkspace: \"{}\"\nhub: \"{url}\"\noffers: {{}}\n",
+            "version: 1\nname: desk\nworks_for: owner\nworkspace: \"{}\"\nhub: \"{url}\"\noffers: {{}}\n",
             scratch.workspace().display()
         ),
     )
@@ -1992,9 +1992,9 @@ fn a_hub_server_refuses_another_protocol_or_a_bad_token_and_stops_on_sigterm() {
     };
     let status = upgrade("Authorization: Bearer ens_wrong\r\n");
     assert!(status.contains("426"), "no protocol named: {status}");
-    let status = upgrade("Ensemble-Protocol: 2\r\nAuthorization: Bearer ens_wrong\r\n");
+    let status = upgrade("Ensemble-Protocol: 3\r\nAuthorization: Bearer ens_wrong\r\n");
     assert!(status.contains("401"), "{status}");
-    let status = upgrade("Ensemble-Protocol: 2\r\n");
+    let status = upgrade("Ensemble-Protocol: 3\r\n");
     assert!(
         status.contains("101"),
         "no token: signing in only: {status}"
@@ -2408,7 +2408,7 @@ fn serve_runner(scratch: &Scratch, url: &str, machine: &str, runner_yaml: &str) 
 }
 
 #[test]
-fn a_runner_serves_its_models_through_the_hub_and_a_shared_runner_lends_no_login() {
+fn a_runner_serves_its_models_through_the_hub_and_only_a_host_works_for_the_hub() {
     let s = Scratch::new("runner-models");
     let (hub, address, token) = hub_server(&s);
     let _hub = serve_hub(&s, &hub);
@@ -2419,13 +2419,15 @@ fn a_runner_serves_its_models_through_the_hub_and_a_shared_runner_lends_no_login
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     let server = models_stub(r#"{"choices":[{"message":{"content":"hi from the node"}}]}"#);
-    let runner_yaml = |access: &str, offers: &str| {
-        format!("version: 1\nname: {access}-box\naccess: {access}\nhub: \"{url}\"\n{offers}")
+    let runner_yaml = |works_for: &str, offers: &str| {
+        format!(
+            "version: 1\nname: {works_for}-box\nworks_for: {works_for}\nhub: \"{url}\"\n{offers}"
+        )
     };
     let models = format!(
         "offers:\n  models: {{ base_url: \"{server}\", timeout_seconds: 5, names: [small] }}\n"
     );
-    let _runner = serve_runner(&s, &url, "private-box", &runner_yaml("private", &models));
+    let _runner = serve_runner(&s, &url, "owner-box", &runner_yaml("owner", &models));
     let mut answer = ureq::post(format!("http://{address}/nodes/v1/chat/completions"))
         .header("authorization", format!("Bearer {token}"))
         .send(r#"{"model": "small", "messages": [{"role": "user", "content": "hi"}]}"#)
@@ -2433,30 +2435,14 @@ fn a_runner_serves_its_models_through_the_hub_and_a_shared_runner_lends_no_login
     let body = answer.body_mut().read_to_string().unwrap();
     assert!(body.contains("hi from the node"), "{body}");
 
-    // A member may not host a shared runner.
-    let out = on_machine(&s, "shared-box", &runner_yaml("shared", &models))
+    // A member may not connect a runner that works for the hub.
+    let out = on_machine(&s, "hub-box", &runner_yaml("hub", &models))
         .args(["serve"])
         .output()
         .unwrap();
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("`host` permission"),
-        "{}",
-        stderr_of(&out)
-    );
-    // And a shared runner never offers an agent on its CLI's own login.
-    machine_team(&s, "shared-box", "work", &config_yaml("opencode", NOWHERE));
-    let out = on_machine(
-        &s,
-        "shared-box",
-        &runner_yaml("shared", "offers:\n  runs: { agents: [work/reviewer] }\n"),
-    )
-    .args(["serve"])
-    .output()
-    .unwrap();
-    assert!(!out.status.success());
-    assert!(
-        stderr_of(&out).contains("never lends"),
         "{}",
         stderr_of(&out)
     );
@@ -2501,7 +2487,7 @@ fn a_running_runner_reloads_its_teams() {
 /// `url`: started and waited for until it is ready.
 fn machine_runner(scratch: &Scratch, machine: &str, url: &str) -> Served {
     let yaml =
-        format!("version: 1\nname: {machine}\naccess: private\nhub: \"{url}\"\noffers: {{}}\n");
+        format!("version: 1\nname: {machine}\nworks_for: owner\nhub: \"{url}\"\noffers: {{}}\n");
     let mut runner = on_machine(scratch, machine, &yaml)
         .args(["serve"])
         .stdin(Stdio::null())
@@ -2678,7 +2664,7 @@ fn a_repository_added_after_the_runner_started_gets_a_worker_and_a_task_brings_i
     );
     let peers = stdout_of(&ensemble_runner(&s, &["peers"]));
     assert!(
-        peers.contains("ana/desk  (private)\n  agents: team/coder, team/reviewer"),
+        peers.contains("ana/desk  (works for owner)\n  agents: team/coder, team/reviewer"),
         "{peers}"
     );
 
@@ -2863,6 +2849,130 @@ fn a_task_whose_repository_its_only_runner_cannot_clone_is_given_back_and_blocke
     assert_eq!(outcome_of(&s, "shop", "0001-bar-it"), None);
 }
 
+/// bob's runner `gpu`, on its own computer, signed in to the scratch's hub
+/// at `url` as bob, an admin, whose role has `host`, and working for the hub
+/// with the helper team `team`: started and waited for until connected.
+fn bobs_runner(scratch: &Scratch, url: &str, team: &str) -> Served {
+    let out = hub_command(scratch)
+        .args(["user", "add", "bob", "--role", "admin"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let bob = stdout_of(&out).trim().to_string();
+    let yaml = format!("version: 1\nname: gpu\nworks_for: hub\nhub: \"{url}\"\noffers: {{}}\n");
+    let out = on_machine(scratch, "gpu", &yaml)
+        .args(["login", url, "--token", &bob])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    machine_team(scratch, "gpu", "team", team);
+    serve_runner(scratch, url, "gpu", &yaml)
+}
+
+/// The workspace of the computer `machine`.
+fn machine_workspace(scratch: &Scratch, machine: &str) -> PathBuf {
+    scratch
+        .0
+        .with_extension("machines")
+        .join(machine)
+        .join("workspace")
+}
+
+#[test]
+fn another_accounts_runner_that_works_for_the_hub_does_a_task_no_runner_of_its_own_takes() {
+    let s = Scratch::new("works-for-hub");
+    let origin = bare_origin(&s, "shop");
+    let cli = s.opencode("bar it is", "echo bar > a.txt");
+    // coder runs on an LLM backend, so bob's runner lends it.
+    let team = config_yaml(&cli, NOWHERE).replace("isolation: shared", "isolation: worktree");
+    let (hub, address, ana) = hub_server(&s);
+    let _hub = serve_hub(&s, &hub);
+    let url = format!("ws://{address}");
+    let _gpu = bobs_runner(&s, &url, &team);
+    // ana has no runner of her own: bob's takes her task, with what it lends.
+    let agents = mcp_tool(&address, &ana, "agents", serde_json::json!({}));
+    assert!(
+        agents.contains("- team/coder on bob/gpu (another's runner"),
+        "{agents}"
+    );
+    let said = mcp_tool(
+        &address,
+        &ana,
+        "submit",
+        serde_json::json!({
+            "project": "shop", "title": "Bar it", "task": "write bar into a.txt",
+            "agent": "team/coder", "repository": origin.to_string_lossy(),
+        }),
+    );
+    assert!(said.contains("0001-bar-it"), "{said}");
+    assert!(
+        wait_for(60, || outcome_of(&s, "shop", "0001-bar-it").is_some()),
+        "bob's runner did not take ana's task: {:?}",
+        task_of(&s, "shop", "0001-bar-it")
+    );
+    let outcome = outcome_of(&s, "shop", "0001-bar-it").unwrap();
+    assert_eq!(
+        outcome.status,
+        ensemble_tasks::tasks::Status::Done,
+        "{}",
+        outcome.text
+    );
+    // Cloned into a folder of ana's in bob's workspace, apart from his own
+    // projects, and pushed to ana's repository on its branch.
+    let gpu = machine_workspace(&s, "gpu");
+    assert!(gpu.join(".for/ana/shop/.git").exists());
+    assert!(!gpu.join("shop").exists());
+    assert_eq!(
+        git_in(&origin, &["show", "ensemble/0001-bar-it:a.txt"]),
+        "bar"
+    );
+    // What it reported is ana's knowledge, not bob's.
+    let shares = ensemble_knowledge::Vault::new(hub.join("vault")).shares();
+    assert!(
+        shares
+            .iter()
+            .any(|sh| sh.shared_by == "ana" && sh.title == "Bar it"),
+        "{shares:?}"
+    );
+    assert!(!shares.iter().any(|sh| sh.shared_by == "bob"));
+}
+
+#[test]
+fn a_runner_that_works_for_the_hub_never_lends_an_agent_on_its_clis_own_login() {
+    let s = Scratch::new("lends-no-login");
+    let cli = s.opencode("reviewed", "true");
+    // reviewer runs on a provider of OpenCode's own: its login, never lent.
+    let (hub, address, ana) = hub_server(&s);
+    let _hub = serve_hub(&s, &hub);
+    let url = format!("ws://{address}");
+    let _gpu = bobs_runner(&s, &url, &config_yaml(&cli, NOWHERE));
+    let agents = mcp_tool(&address, &ana, "agents", serde_json::json!({}));
+    assert!(agents.contains("team/coder on bob/gpu"), "{agents}");
+    assert!(!agents.contains("team/reviewer"), "{agents}");
+    mcp_tool(
+        &address,
+        &ana,
+        "submit",
+        serde_json::json!({
+            "project": "shop", "title": "Review it", "task": "review a.txt",
+            "agent": "team/reviewer", "repository": bare_origin(&s, "shop").to_string_lossy(),
+        }),
+    );
+    // bob's runner looks every second; it never takes, clones or gives back
+    // what it does not lend.
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    let task = task_of(&s, "shop", "0001-review-it");
+    assert_eq!(
+        (task.running_on, task.status, task.given_back.len()),
+        (None, None, 0)
+    );
+    assert!(!machine_workspace(&s, "gpu").join(".for").exists());
+    assert!(
+        !s.0.with_extension("bin").join("args").exists(),
+        "the reviewer never ran"
+    );
+}
+
 #[test]
 fn settings_are_changed_from_the_command_line_and_those_nix_declares_are_kept() {
     let s = Scratch::new("config");
@@ -2874,9 +2984,19 @@ fn settings_are_changed_from_the_command_line_and_those_nix_declares_are_kept() 
     };
     assert_eq!(get("name"), "desk");
 
-    let out = ensemble_runner(&s, &["config", "set", "access", "shared"]);
+    // Working for the hub needs a hub.
+    let out = ensemble_runner(&s, &["config", "set", "works_for", "hub"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("there is no `hub`"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = ensemble_runner(&s, &["config", "set", "hub", "ws://127.0.0.1:9"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(get("access"), "shared");
+    let out = ensemble_runner(&s, &["config", "set", "works_for", "hub"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(get("works_for"), "hub");
     // One that would not load is refused, and nothing changes.
     let out = ensemble_runner(&s, &["config", "set", "name", "a b/c"]);
     assert!(!out.status.success());
@@ -2894,14 +3014,14 @@ fn settings_are_changed_from_the_command_line_and_those_nix_declares_are_kept() 
     );
 
     // What Nix declares is merged in, kept, and refused here.
-    let declared = s.write("declared.yaml", "access: private\noffers: {}\n");
+    let declared = s.write("declared.yaml", "works_for: owner\noffers: {}\n");
     let out = ensemble_runner(&s, &["config", "merge", declared.to_str().unwrap()]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(get("access"), "private");
-    let out = ensemble_runner(&s, &["config", "set", "access", "shared"]);
+    assert_eq!(get("works_for"), "owner");
+    let out = ensemble_runner(&s, &["config", "set", "works_for", "hub"]);
     assert!(!out.status.success());
     assert!(
-        stderr_of(&out).contains("`access` is set in your Nix configuration"),
+        stderr_of(&out).contains("`works_for` is set in your Nix configuration"),
         "{}",
         stderr_of(&out)
     );
@@ -2976,11 +3096,11 @@ fn a_running_runner_makes_a_change_to_its_settings_itself() {
     let s = Scratch::new("config-running");
     s.runner_yaml();
     // Not running: the command makes it, and nothing needs saying.
-    let out = ensemble_runner(&s, &["config", "set", "access", "shared"]);
+    let out = ensemble_runner(&s, &["config", "set", "name", "desk-2"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(stderr_of(&out).is_empty(), "{}", stderr_of(&out));
     let mut runner = start_runner(&s);
-    let out = ensemble_runner(&s, &["config", "set", "access", "private"]);
+    let out = ensemble_runner(&s, &["config", "set", "name", "desk"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stderr_of(&out).contains("The running runner"),

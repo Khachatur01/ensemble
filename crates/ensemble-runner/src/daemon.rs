@@ -15,12 +15,18 @@
 //! takes the operations `ensemble-runner …` asks of it, and a reload of its
 //! teams.
 //!
+//! A runner that works for the hub does the same for the tasks of other
+//! accounts the hub offers it, in a folder of their own,
+//! `<workspace>/.for/<account>/<project>` ([`OTHERS`]), so that none is
+//! mistaken for a project of the owner's; their workers run only the agents
+//! it lends, and name the runner `<its account>/<its name>`.
+//!
 //! What it keeps for a repository lives as long as the runner, so it is
 //! leaked on purpose.
 
 use crate::cmd::runner::RunnerContext;
 use ensemble_agents::router::Ensemble;
-use ensemble_config::{Config, Runner};
+use ensemble_config::{Config, Runner, WorksFor};
 use ensemble_link::Link;
 use ensemble_link::Token;
 use ensemble_ops::local::{self, STOP, read_line};
@@ -46,6 +52,10 @@ const RESCAN: Duration = Duration::from_secs(30);
 const RESCAN_VARIABLE: &str = "ENSEMBLE_RUNNER_RESCAN_SECONDS";
 /// The most a clone of a task's repository may take.
 const CLONE_LIMIT: Duration = Duration::from_secs(600);
+/// The folder of the workspace that holds other accounts' projects, a folder
+/// per account: hidden, so it is never taken for a project, and no project
+/// is named for it (the hub refuses a project name that starts with a dot).
+const OTHERS: &str = ".for";
 
 /// What a runner keeps for one repository of its workspace.
 struct Repository {
@@ -76,6 +86,10 @@ pub struct Daemon<'a> {
     /// Whether the hub could not be asked at the last look, so that is said
     /// once, not at every look.
     hub_down: AtomicBool,
+    /// Its name on other accounts' tasks, `<its account>/<its name>`, as the
+    /// hub last said it: until it has, no other account's project gets a
+    /// worker.
+    known_as: Mutex<Option<String>>,
     say: &'a (dyn Fn(&str) + Sync),
 }
 
@@ -104,6 +118,7 @@ impl<'a> Daemon<'a> {
                 .as_ref()
                 .map(|(url, token)| Link::with_token(url, token.clone())),
             hub_down: AtomicBool::new(false),
+            known_as: Mutex::new(None),
             runner,
             hub,
             team: RwLock::new(team),
@@ -157,8 +172,8 @@ impl<'a> Daemon<'a> {
         let looking = async {
             let every = rescan_every();
             while !STOP.load(Ordering::Relaxed) {
-                self.scan();
                 self.find_projects().await;
+                self.scan();
                 tokio::select! {
                     () = tokio::time::sleep(every) => {}
                     () = ensemble_core::runtime::until_set(&STOP) => {}
@@ -237,27 +252,45 @@ impl<'a> Daemon<'a> {
     }
 
     /// Give each git repository of the workspace a worker, when it has none
-    /// yet, and stop the workers of those that went away. Without a hub there
-    /// are no tasks, and so no workers.
+    /// yet, and stop the workers of those that went away: the owner's
+    /// projects, and, for a runner that works for the hub, other accounts'
+    /// in [`OTHERS`]. Without a hub there are no tasks, and so no workers.
     fn scan(&self) {
         let Some((url, token)) = &self.hub else {
             return;
         };
-        let found = repositories(&self.runner.workspace);
+        let mut found: Vec<(PathBuf, Option<String>)> = repositories(&self.runner.workspace)
+            .into_iter()
+            .map(|dir| (dir, None))
+            .collect();
+        if self.runner.works_for == WorksFor::Hub {
+            found.extend(
+                others(&self.runner.workspace)
+                    .into_iter()
+                    .map(|(account, dir)| (dir, Some(account))),
+            );
+        }
         let mut open = self.open.lock().unwrap();
         open.retain(|dir, repository| {
-            let there = found.contains(dir);
+            let there = found.iter().any(|(d, _)| d == dir);
             if !there {
                 repository.queue.close();
                 (self.say)(&format!("{} went away: its worker stops", dir.display()));
             }
             there
         });
-        for dir in found {
+        let known_as = self.known_as.lock().unwrap().clone();
+        for (dir, account) in found {
             if open.contains_key(&dir) {
                 continue;
             }
-            match self.start(&dir, url, token) {
+            // Another account's: on its tasks the runner is `known_as`.
+            let account = match (account, &known_as) {
+                (None, _) => None,
+                (Some(account), Some(me)) => Some((account, me.as_str())),
+                (Some(_), None) => continue,
+            };
+            match self.start(&dir, url, token, account) {
                 Ok(repository) => {
                     open.insert(dir, repository);
                 }
@@ -266,13 +299,14 @@ impl<'a> Daemon<'a> {
         }
     }
 
-    /// Look on the hub for the account's tasks that wait for an agent of this
-    /// runner in a project it has no folder for, and get each such project:
-    /// clone the repository a task names into the workspace, where the next
-    /// scan gives it a worker; ask on the task where the project is when none
-    /// names one; and give the task back, saying why, when this computer
-    /// cannot clone it. A project whose task waits for an answer is left
-    /// until it has one.
+    /// Look on the hub for the tasks that wait for an agent of this runner in
+    /// a project it has no folder for, the account's own and, for a runner
+    /// that works for the hub, other accounts' it may take, and get each such
+    /// project: clone the repository a task names into the workspace (another
+    /// account's into [`OTHERS`]), where the next scan gives it a worker; ask
+    /// on the task where the project is when none names one; and give the
+    /// task back, saying why, when this computer cannot clone it. A project
+    /// whose task waits for an answer is left until it has one.
     async fn find_projects(&self) {
         let (Some((url, token)), Some(link)) = (&self.hub, &self.hub_link) else {
             return;
@@ -284,10 +318,16 @@ impl<'a> Daemon<'a> {
         if agents.is_empty() {
             return;
         }
-        let waiting = match ensemble_tasks::board::waiting(link, &self.runner.name, &agents).await {
-            Ok(waiting) => {
+        let (known_as, waiting) = match ensemble_tasks::board::waiting(
+            link,
+            &self.runner.name,
+            &agents,
+        )
+        .await
+        {
+            Ok(found) => {
                 self.hub_down.store(false, Ordering::Relaxed);
-                waiting
+                found
             }
             Err(e) => {
                 if !self.hub_down.swap(true, Ordering::Relaxed) {
@@ -298,25 +338,47 @@ impl<'a> Daemon<'a> {
                 return;
             }
         };
+        let own = known_as
+            .split_once('/')
+            .map_or(known_as.as_str(), |(account, _)| account)
+            .to_string();
+        *self.known_as.lock().unwrap() = Some(known_as.clone());
         let workspace = &self.runner.workspace;
-        let have = repositories(workspace);
-        let mut projects: BTreeMap<String, Vec<Waiting>> = BTreeMap::new();
+        // By account (none for the owner's), then project.
+        let mut projects: BTreeMap<(Option<String>, String), Vec<Waiting>> = BTreeMap::new();
         for w in waiting {
-            let here = have
-                .iter()
-                .any(|dir| dir.file_name().is_some_and(|n| *n == *w.project));
-            if !here && plain_name(&w.project) {
-                projects.entry(w.project.clone()).or_default().push(w);
+            let account = (w.account != own).then(|| w.account.clone());
+            if account.is_some() && self.runner.works_for != WorksFor::Hub {
+                continue;
+            }
+            let dir = project_dir(workspace, account.as_deref(), &w.project);
+            let named = plain_name(&w.project) && account.as_deref().is_none_or(plain_name);
+            if named && !dir.join(".git").exists() {
+                projects
+                    .entry((account, w.project.clone()))
+                    .or_default()
+                    .push(w);
             }
         }
-        let mut cloned = false;
-        for (project, tasks) in projects {
+        for ((account, project), tasks) in projects {
             // Asked already: its answer says where the project is.
             if tasks.iter().any(|w| w.task.question.is_some()) {
                 continue;
             }
-            let dir = workspace.join(&project);
-            let board = RemoteBoard::with_token(url, token.clone(), &project);
+            let dir = project_dir(workspace, account.as_deref(), &project);
+            let mut board = RemoteBoard::with_token(url, token.clone(), &project);
+            // On another account's tasks, the runner is the name the hub said.
+            let me = match &account {
+                Some(account) => {
+                    board = board.of_account(account, &known_as);
+                    known_as.as_str()
+                }
+                None => self.runner.name.as_str(),
+            };
+            let whose = match &account {
+                Some(account) => format!("{account}'s {project}"),
+                None => project.clone(),
+            };
             if dir.exists() {
                 let why = format!(
                     "{} is there on {}, and is not a git repository",
@@ -324,57 +386,50 @@ impl<'a> Daemon<'a> {
                     self.runner.name
                 );
                 for w in &tasks {
-                    self.give_back(&board, w, &why).await;
+                    self.give_back(&board, me, w, &why).await;
                 }
                 continue;
             }
             let Some(repository) = tasks.iter().find_map(|w| w.task.ticket.repository.clone())
             else {
-                self.ask_where(&board, &tasks[0]).await;
+                self.ask_where(&board, me, &tasks[0]).await;
                 continue;
             };
             (self.say)(&format!(
-                "cloning {repository} into {} for the tasks of {project}",
+                "cloning {repository} into {} for the tasks of {whose}",
                 dir.display()
             ));
-            match clone(&repository, &dir).await {
-                Ok(()) => cloned = true,
-                Err(why) => {
-                    let why = format!("{} cannot clone {repository}: {why}", self.runner.name);
-                    let named = tasks
-                        .iter()
-                        .filter(|w| w.task.ticket.repository.as_deref() == Some(&repository));
-                    for w in named {
-                        self.give_back(&board, w, &why).await;
-                    }
+            if let Err(why) = clone(&repository, &dir).await {
+                let why = format!("{} cannot clone {repository}: {why}", self.runner.name);
+                let named = tasks
+                    .iter()
+                    .filter(|w| w.task.ticket.repository.as_deref() == Some(&repository));
+                for w in named {
+                    self.give_back(&board, me, w, &why).await;
                 }
             }
         }
-        if cloned {
-            self.scan();
-        }
     }
 
-    /// Ask on task `w` where its project is: the runner has no copy of it,
-    /// and the task names no repository. The answer becomes the task's
-    /// `repository`.
-    async fn ask_where(&self, board: &RemoteBoard, w: &Waiting) {
+    /// Ask on task `w`, as the runner `me`, where its project is: the runner
+    /// has no copy of it, and the task names no repository. The answer
+    /// becomes the task's `repository`.
+    async fn ask_where(&self, board: &RemoteBoard, me: &str, w: &Waiting) {
         let (id, project) = (w.task.id(), &w.project);
         // Held only for asking: nothing of the task is done here yet.
-        match board.claim(id, &self.runner.name, LEASE, true).await {
+        match board.claim(id, me, LEASE, true).await {
             Ok(Claim::Taken) => {}
             _ => return,
         }
         let question = format!(
-            "The runner {} has no copy of the project {project}: which repository should it clone? Answer with its git URL or path, such as git@github.com:you/{project}.git.",
-            self.runner.name
+            "The runner {me} has no copy of the project {project}: which repository should it clone? Answer with its git URL or path, such as git@github.com:you/{project}.git."
         );
         let end = End::Ask {
             question,
             reply: String::new(),
             repository: true,
         };
-        match board.finish(id, &self.runner.name, end, None).await {
+        match board.finish(id, me, end, None).await {
             Ok(()) => (self.say)(&format!(
                 "task {id} of {project}: asked which repository to clone"
             )),
@@ -382,14 +437,15 @@ impl<'a> Daemon<'a> {
         }
     }
 
-    /// Give task `w` back, saying `why`, for another runner of the account.
-    async fn give_back(&self, board: &RemoteBoard, w: &Waiting, why: &str) {
+    /// Give task `w` back, as the runner `me`, saying `why`, for another
+    /// runner.
+    async fn give_back(&self, board: &RemoteBoard, me: &str, w: &Waiting, why: &str) {
         let (id, project) = (w.task.id(), &w.project);
-        match board.give_back(id, &self.runner.name, why).await {
+        match board.give_back(id, me, why).await {
             Ok(blocked) => (self.say)(&format!(
                 "gave task {id} of {project} back: {why}{}",
                 if blocked {
-                    "; no other runner of yours with its agent is connected, so it is blocked"
+                    "; no other runner connected that may take it is left, so it is blocked"
                 } else {
                     ""
                 }
@@ -399,8 +455,16 @@ impl<'a> Daemon<'a> {
     }
 
     /// A worker for the repository `dir`, which runs the tasks the hub at
-    /// `url` keeps for its project, the folder's name.
-    fn start(&self, dir: &Path, url: &str, token: &Token) -> Result<Repository, String> {
+    /// `url` keeps for its project, the folder's name: the owner's, or, with
+    /// `account`, that account's, on whose tasks the runner is named as it
+    /// says, run only by the agents it lends.
+    fn start(
+        &self,
+        dir: &Path,
+        url: &str,
+        token: &Token,
+        account: Option<(String, &str)>,
+    ) -> Result<Repository, String> {
         let project = dir
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -414,12 +478,17 @@ impl<'a> Daemon<'a> {
             runs = runs.with_usage_dir(usage);
         }
         let board = RemoteBoard::with_token(url, token.clone(), &project);
-        let queue: &'static Queue<'static> = Box::leak(Box::new(Queue::new(
-            ensemble,
-            runs,
-            board,
-            &self.runner.name,
-        )));
+        let queue = match &account {
+            Some((account, me)) => {
+                Queue::new(ensemble, runs, board.of_account(account, me), me).lending()
+            }
+            None => Queue::new(ensemble, runs, board, &self.runner.name),
+        };
+        let queue: &'static Queue<'static> = Box::leak(Box::new(queue));
+        let whose = match &account {
+            Some((account, _)) => format!("{account}'s {project}"),
+            None => project.clone(),
+        };
         // One worker per repository: another process that has it runs its
         // tasks.
         match ensemble_core::lock::acquire(&state) {
@@ -430,7 +499,7 @@ impl<'a> Daemon<'a> {
                 });
                 self.workers.lock().unwrap().push(worker);
                 (self.say)(&format!(
-                    "working on the tasks of {project} in {}",
+                    "working on the tasks of {whose} in {}",
                     dir.display()
                 ));
             }
@@ -488,19 +557,52 @@ async fn clone(repository: &str, into: &Path) -> Result<(), String> {
     Err(failed)
 }
 
-/// The git repositories directly inside `workspace`, by their whole path.
+/// The git repositories directly inside `workspace`, by their whole path:
+/// the owner's projects. A hidden folder is none, [`OTHERS`] among them.
 pub(crate) fn repositories(workspace: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(workspace) else {
         return Vec::new();
     };
     let mut found: Vec<PathBuf> = entries
         .filter_map(Result::ok)
+        .filter(|e| plain_name(&e.file_name().to_string_lossy()))
         .map(|e| e.path())
         .filter(|dir| dir.join(".git").exists())
         .filter_map(|dir| dir.canonicalize().ok())
         .collect();
     found.sort();
     found
+}
+
+/// Other accounts' projects in `workspace`, by account: the git repositories
+/// of each folder of [`OTHERS`].
+fn others(workspace: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(workspace.join(OTHERS)) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(String, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let account = e.file_name().to_string_lossy().into_owned();
+            plain_name(&account).then(|| (account, e.path()))
+        })
+        .flat_map(|(account, dir)| {
+            repositories(&dir)
+                .into_iter()
+                .map(move |repo| (account.clone(), repo))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Where `project` is in `workspace`: directly inside it for the owner's,
+/// and in [`OTHERS`] for `account`'s.
+fn project_dir(workspace: &Path, account: Option<&str>, project: &str) -> PathBuf {
+    match account {
+        Some(account) => workspace.join(OTHERS).join(account).join(project),
+        None => workspace.join(project),
+    }
 }
 
 /// Ask the runner on `socket` to reload its teams, and what it said.

@@ -80,7 +80,7 @@ pub enum Command {
     /// Say what is wrong with the runner's teams and the CLIs and models they
     /// need, and how to fix each thing.
     Doctor,
-    /// The other runners of your hub you may use, with their agents and models.
+    /// The runners of your hub that work for you, with their agents and models.
     Peers,
     /// The runner's helper teams.
     #[command(subcommand)]

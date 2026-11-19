@@ -82,6 +82,9 @@ pub struct Queue<'e> {
     board: Box<dyn Board + 'e>,
     /// This runner's name, which its claims on tasks carry.
     runner: String,
+    /// The tasks are another account's: only agents that may work for others
+    /// run them, those on `llm_backends`.
+    lending: bool,
     /// How long a claim lasts unless renewed.
     lease: Duration,
     /// What this runner keeps of its runs here: logs, worktrees, usage.
@@ -118,6 +121,7 @@ impl<'e> Queue<'e> {
             ensemble,
             board: Box::new(board),
             runner: runner.to_string(),
+            lending: false,
             lease: LEASE,
             runs,
             inner: Mutex::new(Inner {
@@ -126,6 +130,14 @@ impl<'e> Queue<'e> {
             }),
             changed: Notify::new(),
         }
+    }
+
+    /// The tasks of another account, run only by the agents a runner lends:
+    /// those on `llm_backends`, never one on a CLI's own login, whatever the
+    /// hub offers.
+    pub fn lending(mut self) -> Self {
+        self.lending = true;
+        self
     }
 
     /// Claims that last `lease` unless renewed, in place of [`LEASE`].
@@ -314,11 +326,15 @@ impl<'e> Queue<'e> {
     /// Whether `task` may start here: assigned to an agent of this runner's
     /// teams, not ended, not asking, not waiting for another task, not running
     /// on another runner, and not given back by this one. A task for an agent
-    /// this runner does not have is left for one of the account's runners that
-    /// does.
+    /// this runner does not have, or of another account for one it does not
+    /// lend, is left for a runner that does.
     fn may_start(&self, task: &Task, all: &[Task]) -> bool {
         task.status.is_none()
-            && self.ensemble.config().agent(&task.ticket.agent).is_some()
+            && self
+                .ensemble
+                .config()
+                .agent(&task.ticket.agent)
+                .is_some_and(|a| !self.lending || a.lendable())
             && task.question.is_none()
             && task.running_on.as_ref().is_none_or(|n| *n == self.runner)
             && !task.given_back.iter().any(|g| g.runner == self.runner)

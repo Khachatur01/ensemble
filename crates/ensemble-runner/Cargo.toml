@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Ensemble's runner and its executable, ensemble-runner: a worker that gives a computer's power to the people of a hub, by running its tasks with the helper teams and the agents and models it offers."
+description = "Ensemble's runner and its executable, ensemble-runner: a worker that gives a computer's power to the people of a hub, by running its tasks with the helper teams, and others' with the agents it lends, and serving the models it offers."
 
 [dependencies]
 ensemble-agents.workspace = true

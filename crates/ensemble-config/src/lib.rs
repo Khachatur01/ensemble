@@ -441,6 +441,13 @@ impl AgentConfig {
             _ => None,
         }
     }
+    /// Does it run only on models from `llm_backends`, never on a login or a
+    /// provider of its CLI's own? Only such an agent works for other accounts:
+    /// a CLI's login is its owner's alone.
+    pub fn lendable(&self) -> bool {
+        self.fallback().is_some()
+    }
+
     /// Where it runs: the adapter type, and the LLM backend when there is one.
     pub fn runs_on(&self) -> String {
         match self.llm_backend() {
@@ -525,6 +532,16 @@ impl Config {
     /// The agents' names.
     pub fn agent_names(&self) -> Vec<&str> {
         self.agents.keys().map(String::as_str).collect()
+    }
+
+    /// The names of the agents that may work for other accounts: those on
+    /// `llm_backends` ([`AgentConfig::lendable`]).
+    pub fn lendable_agents(&self) -> Vec<&str> {
+        self.agents
+            .iter()
+            .filter(|(_, a)| a.lendable())
+            .map(|(name, _)| name.as_str())
+            .collect()
     }
 
     /// The gate called `name`.
@@ -627,7 +644,7 @@ pub use hub::{
 pub use interfaces::{Interfaces, Mcp};
 pub(crate) use interfaces::{RawInterfaces, RawRunnerInterfaces, interfaces, runner_interfaces};
 pub use runner::{
-    Access, OfferedModels, OfferedRuns, Offers, RUNNER_FILENAME, Runner, load_runner, parse_runner,
+    OfferedModels, Offers, RUNNER_FILENAME, Runner, WorksFor, load_runner, parse_runner,
     runner_path,
 };
 pub use settings_file::{SettingsFile, WithSettings};

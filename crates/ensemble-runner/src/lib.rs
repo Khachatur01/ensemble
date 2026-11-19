@@ -1,7 +1,7 @@
 //! The runner, `ensemble-runner`: this computer's power for the people of a
 //! hub. It runs the tasks the hub keeps for its owner with the helper teams,
-//! in the git repositories of its workspace, and may offer its agents and
-//! model servers to others.
+//! in the git repositories of its workspace, and, when it works for the hub,
+//! others' tasks with its agents on model servers, and serves them its models.
 //!
 //! ```text
 //!   the hub (ensemble-hub)
@@ -12,17 +12,16 @@
 //!         v
 //!   the router: agent -> adapter, model    (ensemble-agents: router)
 //!         v
-//!   claude -p, opencode run, codex exec, builtin, direct, node
+//!   claude -p, opencode run, codex exec, builtin, direct
 //!                                          (ensemble-agents: external)
 //! ```
 //!
 //! Each agent is a CLI the user already has, started headless in the
-//! repository with the task, or `builtin` (a loop in this binary), `direct`
-//! (one chat request), or `node` (a run on another computer through a hub
-//! server). Ensemble reads what the agent does as it works and reports what
-//! it changed. The worker knows the router and nothing about the CLIs; the
-//! router knows agents, and the adapters in `external` know how each CLI is
-//! started and read. `ARCHITECTURE.md` is the map of the whole.
+//! repository with the task, or `builtin` (a loop in this binary) or `direct`
+//! (one chat request). Ensemble reads what the agent does as it works and
+//! reports what it changed. The worker knows the router and nothing about the
+//! CLIs; the router knows agents, and the adapters in `external` know how each
+//! CLI is started and read. `ARCHITECTURE.md` is the map of the whole.
 //!
 //! The command line (`cli`), and what each group of commands does (`cmd`), is
 //! for the person who runs this computer's runner; [`main`] is the

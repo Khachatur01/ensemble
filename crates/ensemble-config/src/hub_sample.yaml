@@ -6,8 +6,8 @@
 # over MCP (`interfaces.mcp`) to share to and recall from the knowledge vault
 # here and to make tasks; runners connect to it (each names it as `hub:` in its
 # runner.yaml) and run the tasks, those of the tracker's issues too, with their
-# helper teams; shared runners lend their power through it. It may serve
-# a team, or one person on their own computer. API keys never go here: they come
+# helper teams; runners that work for the hub lend their power through it. It
+# may serve a team, or one person on their own computer. API keys never go here: they come
 # from the environment, or from a file passed with --env-file. Accounts are not
 # here either: they are kept in database.db beside it (`ensemble-hub user`, or
 # the REST API under /api/v1/).
@@ -90,8 +90,9 @@ server:
     failures: 5                  # failed logins before a name is refused
     minutes: 15                  # and for how long
 roles:                           # names are yours; the first admin: `ensemble-hub user add`
-  # Permissions: share, recall, tasks, admin; compute (use shared runners) and
-  # host (connect a shared runner that works for those with compute).
+  # Permissions: share, recall, tasks, admin; compute (your tasks may be worked
+  # on by others' runners that work for the hub, and you use their models) and
+  # host (connect a runner that works for the hub, for those with compute).
   admin: [admin, share, recall, tasks, compute, host]
   member: [share, recall, tasks, compute]
   reader: [recall]

@@ -2,9 +2,9 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/runner.schema.json",
   "title": "Ensemble runner: runner.yaml",
-  "description": "This computer's runner: a worker that runs the tasks its hub keeps for the git repositories of its workspace with the helper teams in its teams directory, and, through the hub, lends this computer's power. In ~/.config/ensemble/runner/runner.yaml; a computer runs one runner. Nothing has a default value; `hub` and a block under `offers` that are left out are not used.",
+  "description": "This computer's runner: a worker that runs the tasks its hub keeps for the git repositories of its workspace with the helper teams in its teams directory, and, through the hub, may lend this computer's power to others. In ~/.config/ensemble/runner/runner.yaml; a computer runs one runner. Nothing has a default value; `hub` and a block under `offers` that are left out are not used.",
   "type": "object",
-  "required": ["version", "name", "access", "workspace", "offers"],
+  "required": ["version", "name", "works_for", "workspace", "offers"],
   "additionalProperties": false,
   "properties": {
     "version": {
@@ -16,9 +16,9 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9._-]+$"
     },
-    "access": {
-      "description": "private: it works for its owner alone. shared: also for everyone whose role has `compute`; connecting it needs `host`. A shared runner offers only agents that run on llm_backends, never on an agent CLI's subscription.",
-      "enum": ["private", "shared"]
+    "works_for": {
+      "description": "owner: it works for its owner alone. hub: also on the tasks of every account whose role has `compute`, when no runner of the account's own with the agent takes them, and serves them its models; connecting it needs `host`. It works others' tasks only with the agents of its teams that run on llm_backends, never on an agent CLI's own login or subscription, in <workspace>/.for/<account>/<project>.",
+      "enum": ["owner", "hub"]
     },
     "workspace": {
       "description": "The folder it works in, such as ~/ensemble. Each git repository directly inside it is a project, named for its folder: the runner runs the tasks the hub keeps for it, and finds a repository added later within half a minute; a task for a project it has no folder for, it clones here from the repository the task names. ~/ is the home directory; a relative path is beside runner.yaml.",
@@ -31,11 +31,10 @@
       "pattern": "^wss?://"
     },
     "offers": {
-      "description": "What it offers through a hub server. `{}` offers nothing.",
+      "description": "What else it offers through a hub server. `{}` offers nothing.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "runs": { "$ref": "#/definitions/runs" },
         "models": { "$ref": "#/definitions/models" }
       }
     },
@@ -55,22 +54,8 @@
         }
       }
     },
-    "runs": {
-      "description": "Agents of the runner's teams it lends to others on the hub, listed to everyone who may use the runner. A shared runner lends only agents that run on llm_backends.",
-      "type": "object",
-      "required": ["agents"],
-      "additionalProperties": false,
-      "properties": {
-        "agents": {
-          "description": "Which agents others may use, as <team>/<agent>.",
-          "type": "array",
-          "minItems": 1,
-          "items": { "type": "string", "pattern": "^[^/]+/[^/]+$" }
-        }
-      }
-    },
     "models": {
-      "description": "Models an OpenAI-compatible server on this computer serves, reached through the hub at https://<hub>/nodes/v1 with an access token as the API key.",
+      "description": "Models an OpenAI-compatible server on this computer serves, reached through the hub at https://<hub>/nodes/v1 with an access token as the API key: by its owner, and with `works_for: hub` by everyone whose role has `compute`.",
       "type": "object",
       "required": ["base_url", "timeout_seconds", "names"],
       "additionalProperties": false,

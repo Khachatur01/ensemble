@@ -341,16 +341,25 @@ fn pretty(value: &Value) -> Result<String, String> {
     serde_json::to_string_pretty(value).map_err(|e| e.to_string())
 }
 
-/// The agents of `user`'s own runners `listed`, one per line: those that take
-/// the user's tasks.
+/// The agents of the runners `listed` that take `user`'s tasks, one per
+/// line: the user's own, then others' that work for the hub, with the agents
+/// they lend, which take a task only when no runner of the user's with its
+/// agent does.
 fn agents_text(user: &str, listed: &Value) -> String {
     let mut lines = Vec::new();
-    let runners = listed["runners"].as_array().into_iter().flatten();
-    for runner in runners.filter(|r| r["owner"] == user) {
+    let runners: Vec<&Value> = listed["runners"].as_array().into_iter().flatten().collect();
+    let own = runners.iter().filter(|r| r["owner"] == user);
+    let others = runners.iter().filter(|r| r["owner"] != user);
+    for runner in own.chain(others) {
+        let lent = if runner["owner"] == user {
+            ""
+        } else {
+            " (another's runner that works for the hub: it takes a task when no runner of yours with the agent can)"
+        };
         for agent in runner["agents"].as_array().into_iter().flatten() {
             let about = agent["about"].as_str().unwrap_or("").trim();
             lines.push(format!(
-                "- {} on {}{}",
+                "- {} on {}{}{lent}",
                 agent["name"].as_str().unwrap_or("?"),
                 runner["runner"].as_str().unwrap_or("?"),
                 if about.is_empty() {
@@ -362,7 +371,7 @@ fn agents_text(user: &str, listed: &Value) -> String {
         }
     }
     if lines.is_empty() {
-        "No runner of yours is connected now. A task still waits for one.".into()
+        "No runner that works for you is connected now. A task still waits for one.".into()
     } else {
         lines.join("\n")
     }
@@ -718,11 +727,11 @@ mod tests {
     impl TaskService for Tasks {
         fn handle(
             &self,
-            user: &str,
-            _: &[crate::board::Present],
+            asker: &crate::board::Asker<'_>,
             method: &str,
             params: &Value,
         ) -> Result<Value, String> {
+            let user = asker.user;
             self.asked
                 .lock()
                 .unwrap()
@@ -851,30 +860,31 @@ mod tests {
         );
         assert_eq!(text, "Cancelled task t-1 before it started.");
         let (text, _) = tool(&hub, &hub.ana, "agents", json!({}));
-        assert!(text.starts_with("No runner of yours"), "{text}");
+        assert!(text.starts_with("No runner that works for you"), "{text}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn agents_lists_every_connected_runner_of_the_account_with_its_agents() {
+    async fn agents_lists_the_runners_that_work_for_the_account_with_their_agents() {
         use ensemble_link::client::Connection;
         use ensemble_link::protocol::RUNNER;
         let tasks: &'static Tasks = Box::leak(Box::default());
         let hub = start_with_tasks(tasks);
         let mut desk = Connection::open(&hub.url, &hub.ana).await.unwrap();
-        // It offers nothing to others; it is ana's runner all the same.
+        // It works for ana alone, with every agent.
         desk.call(
             RUNNER,
-            json!({"name": "desk", "access": "private",
+            json!({"name": "desk", "works_for": "owner",
                    "agents": [{"name": "web/coder", "about": "Writes code."}, {"name": "web/reviewer", "about": ""}]}),
         )
         .await
         .unwrap();
-        // root's shared runner takes none of ana's tasks yet.
+        // root's works for the hub, and ana has `compute`: what it lends.
         let mut gpu = Connection::open(&hub.url, &hub.root).await.unwrap();
         gpu.call(
             RUNNER,
-            json!({"name": "gpu", "access": "shared",
-                   "agents": [{"name": "lab/big", "about": ""}], "offers": ["lab/big"]}),
+            json!({"name": "gpu", "works_for": "hub",
+                   "agents": [{"name": "lab/big", "about": ""}, {"name": "lab/login", "about": ""}],
+                   "lends": ["lab/big"]}),
         )
         .await
         .unwrap();
@@ -883,7 +893,7 @@ mod tests {
         assert!(!failed, "{text}");
         assert_eq!(
             text,
-            "- web/coder on ana/desk: Writes code.\n- web/reviewer on ana/desk"
+            "- web/coder on ana/desk: Writes code.\n- web/reviewer on ana/desk\n- lab/big on root/gpu (another's runner that works for the hub: it takes a task when no runner of yours with the agent can)"
         );
     }
 }

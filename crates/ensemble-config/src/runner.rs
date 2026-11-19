@@ -1,14 +1,14 @@
 //! `runner.yaml`: one runner, a worker that gives this computer's power to its
-//! owner and, when shared, to the people of a hub server:
+//! owner and, when it works for the hub, to the people of a hub server:
 //! `~/.config/ensemble/runner/runner.yaml`. A computer runs one runner.
 //!
-//! A runner says who it works for (its owner alone, or also the others whose
-//! role has `compute`), where it works (its workspace, a folder of git
+//! A runner says who it works for (`works_for`: its owner alone, or also the
+//! accounts of its hub whose role has `compute`, with the agents of its teams
+//! that run on `llm_backends`), where it works (its workspace, a folder of git
 //! repositories, each a project named for its folder, where it clones the
-//! repository of a task whose project it has no copy of), and what it offers
-//! others: agents of its teams it lends, named `<team>/<agent>`, and the
-//! models a server here serves. Its teams are the folders of its teams
-//! directory (`teams`).
+//! repository of a task whose project it has no copy of), and what else it
+//! offers: the models a server here serves. Its teams are the folders of its
+//! teams directory (`teams`).
 
 use super::validate::explain;
 use super::*;
@@ -32,7 +32,7 @@ pub struct Runner {
     pub version: u32,
     /// Its name, which a hub knows as `<owner>/<name>`.
     pub name: String,
-    pub access: Access,
+    pub works_for: WorksFor,
     /// The folder it works in: each git repository directly inside it is a
     /// project, named for its folder, whose tasks the runner runs; it clones
     /// a task's repository here for a project it has none of.
@@ -49,36 +49,30 @@ pub struct Runner {
 /// Whom a runner works for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Access {
-    /// Its owner alone.
-    Private,
-    /// Its owner, and everyone whose role on the hub has `compute`.
-    Shared,
+pub enum WorksFor {
+    /// Its owner alone: the tasks of its owner's account.
+    Owner,
+    /// Its owner, and every account of its hub whose role has `compute`: their
+    /// tasks that no runner of their own takes, with the agents of its teams
+    /// on `llm_backends` alone (`AgentConfig::lendable`), and its models.
+    /// Connecting it needs `host`.
+    Hub,
 }
 
-impl Access {
+impl WorksFor {
     pub fn as_str(self) -> &'static str {
         match self {
-            Access::Private => "private",
-            Access::Shared => "shared",
+            WorksFor::Owner => "owner",
+            WorksFor::Hub => "hub",
         }
     }
 }
 
-/// What a runner offers through a hub. Each block is there or not: absent, it
-/// is not offered.
+/// What else a runner offers through a hub. Each block is there or not:
+/// absent, it is not offered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Offers {
-    pub runs: Option<OfferedRuns>,
     pub models: Option<OfferedModels>,
-}
-
-/// Agents of the runner's teams it lends to others on the hub, listed to
-/// everyone who may use the runner.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OfferedRuns {
-    /// Which agents of its teams others may use, as `<team>/<agent>`.
-    pub agents: Vec<String>,
 }
 
 /// Models an OpenAI-compatible server on this computer serves, reached
@@ -98,7 +92,7 @@ pub struct OfferedModels {
 pub(crate) struct RawRunner {
     pub(crate) version: u32,
     pub(crate) name: String,
-    pub(crate) access: Access,
+    pub(crate) works_for: WorksFor,
     pub(crate) workspace: String,
     pub(crate) hub: Option<String>,
     pub(crate) offers: RawOffers,
@@ -108,14 +102,7 @@ pub(crate) struct RawRunner {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawOffers {
-    pub(crate) runs: Option<RawOfferedRuns>,
     pub(crate) models: Option<RawOfferedModels>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawOfferedRuns {
-    pub(crate) agents: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,31 +164,16 @@ pub fn parse_runner(text: &str, path: &Path) -> Result<Runner, ConfigError> {
             "hub: '{h}' must start with ws:// or wss://, such as wss://hub.example.com"
         ));
     }
-    if hub.is_none() && (raw.offers.runs.is_some() || raw.offers.models.is_some()) {
+    if hub.is_none() && raw.works_for == WorksFor::Hub {
+        problems.push(
+            "works_for: a runner works for the accounts of a hub, and there is no `hub`; say `owner`, or name the hub".into(),
+        );
+    }
+    if hub.is_none() && raw.offers.models.is_some() {
         problems.push(
             "offers: a runner offers what it has through a hub, and there is no `hub`".into(),
         );
     }
-    let runs = raw.offers.runs.as_ref().map(|r| {
-        let agents: Vec<String> = r.agents.iter().map(|a| a.trim().to_string()).collect();
-        if agents.is_empty() {
-            problems.push("offers.runs.agents: name at least one agent of its teams".into());
-        }
-        for a in agents.iter().filter(|a| crate::teams::team_of(a).is_none()) {
-            problems.push(format!(
-                "offers.runs.agents: '{a}' needs its team, as `<team>/<agent>`, such as web/{a}"
-            ));
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        for a in &agents {
-            if a.is_empty() || !seen.insert(a) {
-                problems.push(format!(
-                    "offers.runs.agents: '{a}' is empty or listed twice"
-                ));
-            }
-        }
-        OfferedRuns { agents }
-    });
     let models = raw.offers.models.as_ref().map(|m| {
         let base_url = m.base_url.trim().trim_end_matches('/').to_string();
         if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
@@ -230,10 +202,10 @@ pub fn parse_runner(text: &str, path: &Path) -> Result<Runner, ConfigError> {
         Ok(Runner {
             version: raw.version,
             name,
-            access: raw.access,
+            works_for: raw.works_for,
             workspace,
             hub,
-            offers: Offers { runs, models },
+            offers: Offers { models },
             interfaces,
             source: path.to_path_buf(),
         })

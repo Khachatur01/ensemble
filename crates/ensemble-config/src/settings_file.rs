@@ -391,7 +391,7 @@ mod tests {
             (err.code, err.field.as_deref()),
             (Code::Invalid, Some("value"))
         );
-        let err = run("config.get", json!({ "key": "access" })).unwrap_err();
+        let err = run("config.get", json!({ "key": "works_for" })).unwrap_err();
         assert_eq!(err.code, Code::NotFound);
         std::fs::write(dir.join(MANAGED_FILE), r#"["hub"]"#).unwrap();
         let err = run("config.unset", json!({ "key": "hub" })).unwrap_err();

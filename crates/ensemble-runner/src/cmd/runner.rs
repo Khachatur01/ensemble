@@ -97,9 +97,9 @@ fn init(force: bool, stdout: bool) -> Result<ExitCode, String> {
 fn status() -> Result<ExitCode, String> {
     let runner = this_runner()?;
     println!(
-        "runner {} ({}): {}",
+        "runner {} (works for {}): {}",
         runner.name,
-        runner.access.as_str(),
+        runner.works_for.as_str(),
         if runner_running() {
             "running"
         } else {
@@ -234,17 +234,13 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
         &say,
     )
     .map_err(|e| format!("serve: {e}"))?;
-    let worker = match &hub {
-        Some((url, token)) => Some(
-            crate::worker::Worker::new(url, token.clone(), runner.clone(), team.clone())
-                .map_err(|e| format!("serve: {e}"))?,
-        ),
-        None => None,
-    };
+    let worker = hub.as_ref().map(|(url, token)| {
+        crate::worker::Worker::new(url, token.clone(), runner.clone(), team.clone())
+    });
     // What else holds the teams, given them again when they are reloaded.
     let reloaded = |config: &Config| -> Result<(), String> {
         if let Some(worker) = &worker {
-            worker.reload(config)?;
+            worker.reload(config);
         }
         Ok(())
     };
@@ -560,7 +556,8 @@ fn runner_running() -> bool {
     })
 }
 
-/// `ensemble-runner peers`: the runners of your runner's hub you may use now.
+/// `ensemble-runner peers`: the runners of your runner's hub that work for
+/// you now: yours, and others' that work for the hub with what they lend you.
 fn peers() -> Result<ExitCode, String> {
     let (url, token) = runner_hub("peers")?;
     let token = token.as_str();
@@ -597,9 +594,9 @@ fn peers() -> Result<ExitCode, String> {
             }
         };
         println!(
-            "{}  ({})\n  agents: {}\n  models: {}",
+            "{}  (works for {})\n  agents: {}\n  models: {}",
             n["runner"].as_str().unwrap_or("?"),
-            n["access"].as_str().unwrap_or("?"),
+            n["works_for"].as_str().unwrap_or("?"),
             names("agents", Some("name")),
             names("models", None)
         );

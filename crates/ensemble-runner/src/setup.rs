@@ -74,12 +74,12 @@ pub fn detect(probe: bool) -> Detected {
 /// The workspace `setup` offers: a folder in the home directory.
 pub const WORKSPACE: &str = "~/ensemble";
 
-/// The text of a runner file: the runner `name`, private, working in
+/// The text of a runner file: the runner `name`, working for its owner, in
 /// `workspace`, offering nothing. Checked by loading it.
 pub fn runner_file(name: &str, workspace: &str) -> Result<String, String> {
     let quoted = |s: &str| serde_json::Value::String(s.to_string()).to_string();
     let mut text = format!(
-        "{RUNNER_SCHEMA_URL_LINE}\n\n# This computer's runner, which `ensemble-runner serve` runs. `ensemble-runner\n# init --stdout` prints every setting.\n\nversion: {RUNNER_SUPPORTED_VERSION}\n\nname: {}\naccess: private\n\n# Each git repository directly inside it is a project the runner works on.\nworkspace: {}\n",
+        "{RUNNER_SCHEMA_URL_LINE}\n\n# This computer's runner, which `ensemble-runner serve` runs. `ensemble-runner\n# init --stdout` prints every setting.\n\nversion: {RUNNER_SUPPORTED_VERSION}\n\nname: {}\n\n# owner: it works for you alone. hub: also on the tasks of others on the hub\n# whose role has `compute`, with the agents of its teams on llm_backends.\nworks_for: owner\n\n# Each git repository directly inside it is a project the runner works on.\nworkspace: {}\n",
         quoted(name),
         quoted(workspace)
     );
@@ -306,9 +306,9 @@ mod tests {
         let text = runner_file("desk-2", "/code").unwrap();
         let runner = ensemble_config::parse_runner(&text, Path::new("runner.yaml")).unwrap();
         assert_eq!(runner.name, "desk-2");
-        assert_eq!(runner.access, ensemble_config::Access::Private);
+        assert_eq!(runner.works_for, ensemble_config::WorksFor::Owner);
         assert_eq!(runner.workspace, Path::new("/code"));
-        assert!(runner.offers.runs.is_none() && runner.offers.models.is_none());
+        assert!(runner.offers.models.is_none());
         assert!(runner_file("a/b", "/code").is_err(), "a name is checked");
         assert!(runner_file("desk", "").is_err(), "a workspace is needed");
     }

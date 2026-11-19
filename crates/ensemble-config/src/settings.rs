@@ -367,7 +367,7 @@ mod tests {
 # This computer's runner.
 version: 1
 name: laptop        # its name
-access: private
+works_for: owner
 offers:
   # what it lends
   runs:
@@ -490,7 +490,7 @@ offers:
         );
         assert!(out.contains("  runs: {}\n"), "{out}");
         assert!(out.ends_with("hub: \"ws://127.0.0.1:7700\"\n"), "{out}");
-        assert_eq!(get(&out, "access").unwrap().as_deref(), Some("private"));
+        assert_eq!(get(&out, "works_for").unwrap().as_deref(), Some("owner"));
         // Into nothing, it makes the file.
         let (made, _) = merge("", "version: 1\noffers: {}\n").unwrap();
         assert_eq!(made, "version: 1\noffers: {}\n");

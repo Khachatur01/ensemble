@@ -13,7 +13,7 @@
 //! can be reached directly.
 
 use crate::accounts::HubContext;
-use crate::board::TaskService;
+use crate::board::{Asker, TaskService};
 use crate::http::{self, Replay};
 use crate::runners::Routes;
 use crate::users::Users;
@@ -402,9 +402,10 @@ impl<'a> Server<'a> {
             }),
             method if TASK_METHODS.contains(&method) => {
                 may(Permission::Tasks).and_then(|()| match self.tasks {
-                    Some(tasks) => tasks.handle(
-                        &session.user,
-                        &self.routes.present(&session.user),
+                    Some(tasks) => self.ask_tasks(
+                        tasks,
+                        session,
+                        permissions.contains(&Permission::Host),
                         method,
                         &req.params,
                     ),
@@ -427,6 +428,58 @@ impl<'a> Server<'a> {
             Ok(value) => Reply::ok(req.id, value),
             Err(e) => Reply::err(req.id, e),
         }
+    }
+}
+
+impl Server<'_> {
+    /// Pass a task method to `tasks`, asked by `session`'s account, with who
+    /// is connected now: the runners that may take each account's tasks, and
+    /// the runner the request names (`runner`, by its name or as
+    /// `<account>/<name>`) as a lender, when it works for the hub and the
+    /// token `may_host`. Whether an account's role has `compute` is read
+    /// from the accounts as they are now.
+    fn ask_tasks(
+        &self,
+        tasks: &dyn TaskService,
+        session: &Session,
+        may_host: bool,
+        method: &str,
+        params: &Value,
+    ) -> Result<Value, String> {
+        // The accounts, read once and only when a runner of another works
+        // for the hub.
+        let accounts = std::sync::OnceLock::new();
+        let compute = |account: &str| {
+            let read = accounts.get_or_init(|| self.users().ok().map(|u| (u, self.roles())));
+            read.as_ref().is_some_and(|(users, roles)| {
+                users.get(account).is_some_and(|u| {
+                    u.status == crate::users::Status::Active
+                        && roles
+                            .get(&u.role)
+                            .is_some_and(|p| p.contains(&Permission::Compute))
+                })
+            })
+        };
+        let runners = |account: &str| self.routes.present(account, || compute(account));
+        let user = session.user.as_str();
+        let lender = params
+            .get("runner")
+            .and_then(Value::as_str)
+            .map(|r| {
+                let r = r.trim();
+                r.strip_prefix(user)
+                    .and_then(|rest| rest.strip_prefix('/'))
+                    .unwrap_or(r)
+            })
+            .filter(|_| may_host)
+            .and_then(|name| self.routes.lender(user, name));
+        let asker = Asker {
+            user,
+            lender,
+            runners: &runners,
+            compute: &compute,
+        };
+        tasks.handle(&asker, method, params)
     }
 }
 
@@ -476,8 +529,9 @@ pub mod testing {
     /// The password of every account of the test hub.
     pub const PASSWORD: &str = "correct horse battery";
 
-    /// A hub server on loopback, with `ana` a member, `rex` a reader and
-    /// `root` an admin, each with a token and [`PASSWORD`]. It locks a name
+    /// A hub server on loopback, with `ana` a member (with `tasks` and
+    /// `compute`), `rex` a reader and `root` an admin (with `tasks` and
+    /// `host`), each with a token and [`PASSWORD`]. It locks a name
     /// after 3 failed logins, takes 2 sign-ups at a time, and serves MCP.
     pub struct Running {
         pub tmp: TempDir,
@@ -508,7 +562,7 @@ pub mod testing {
     pub fn start_with(tasks: Option<&'static dyn TaskService>) -> Running {
         let tmp = TempDir::new();
         let yaml = format!(
-            "version: 1\nowner: Acme\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: approval, max_pending: 2 }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles:\n  admin: [admin, recall, host]\n  member: [share, recall, tasks, compute]\n  reader: [recall]\n",
+            "version: 1\nowner: Acme\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: approval, max_pending: 2 }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles:\n  admin: [admin, recall, tasks, host]\n  member: [share, recall, tasks, compute]\n  reader: [recall]\n",
             tmp.0.join("vault").display()
         );
         let hub =
