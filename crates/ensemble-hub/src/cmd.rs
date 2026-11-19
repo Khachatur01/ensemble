@@ -41,11 +41,13 @@ pub fn context(ctx: &Ctx) -> Result<crate::accounts::HubContext, String> {
     let dir = state::hub_config_dir()?;
     let env_file = ctx.hub_env()?;
     let path = config::hub_path(&dir);
-    Ok(crate::accounts::HubContext::new(&dir, move || {
+    let context = crate::accounts::HubContext::new(&dir, move || {
         config::load_hub(&path, env_file.as_deref(), &SystemEnv)
             .map(|h| (h.accounts.roles, h.accounts.rules))
             .map_err(|e| e.to_string())
-    }))
+    });
+    context.keys_from(ctx.env_file.clone());
+    Ok(context)
 }
 
 /// The hub this computer runs, loaded.
@@ -292,8 +294,13 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
         )
     });
     let server: &'static crate::server::Server<'static> = Box::leak(Box::new(server));
-    // A change to hub.yaml: used at once where it can be, else it starts again.
+    server.operations().1.keys_from(ctx.env_file.clone());
+    // A change to hub.yaml, or to a key it names: used at once where it can
+    // be, else it starts again. Its .env is read again, made since it started
+    // too.
+    let given = ctx.env_file.clone();
     server.operations().1.when_changed(move || {
+        let env_file = ensemble_ops::cli::env_file(given.as_deref(), &dir).or(env_file.clone());
         let now = match config::load_hub(&path, env_file.as_deref(), &SystemEnv) {
             Ok(now) => now,
             Err(e) => return Some(format!("The running hub could not read it: {e}")),

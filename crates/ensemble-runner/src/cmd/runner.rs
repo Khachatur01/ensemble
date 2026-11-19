@@ -5,6 +5,7 @@ use crate::cli::Command;
 use crate::{Ctx, daemon, host_name, runner_file, runner_hub, this_runner};
 use crate::{setup, teams};
 use ensemble_agents::router::Ensemble;
+use ensemble_backends::ops::{Backends, Side, WithBackends};
 use ensemble_config::settings_file::{self, SettingsFile, WithSettings};
 use ensemble_config::{self as config, Config, SystemEnv};
 use ensemble_core::state;
@@ -277,6 +278,7 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
     // What `ensemble-runner …` asks of it while it runs.
     let operations = operations();
     let daemon = daemon::Daemon::new(
+        ctx.env_file.clone(),
         runner.clone(),
         hub.clone(),
         team.clone(),
@@ -332,6 +334,9 @@ pub struct RunnerContext {
     settings: SettingsFile,
     /// In the running runner: read its hub's token again, and say what it did.
     relink: Option<Box<Relink>>,
+    /// The file its keys are read from when one is given (`--env-file`), in
+    /// place of its own `.env`, which Ensemble then does not write.
+    env_file: Option<std::path::PathBuf>,
 }
 
 type Relink = dyn Fn() -> Result<String, String> + Send + Sync;
@@ -358,19 +363,78 @@ impl WithSettings for RunnerContext {
     }
 }
 
+impl WithBackends for RunnerContext {
+    fn key_file(&self) -> Result<std::path::PathBuf, Error> {
+        let own = state::runner_config_dir()?.join(state::ENV_FILE);
+        match &self.env_file {
+            Some(given) if *given != own => Err(Error::new(
+                Code::Conflict,
+                format!(
+                    "the runner reads its keys from {}, which Ensemble does not write",
+                    given.display()
+                ),
+            )
+            .hint("put the key there, as a variable, and name it with `key_env`")),
+            _ => Ok(own),
+        }
+    }
+
+    fn backends(&self) -> Result<Backends, Error> {
+        let runner = self.runner()?;
+        Ok(Backends {
+            direct: runner.llm.direct,
+            relayed: runner.llm.hub,
+            shares: Some(runner.llm.shares),
+        })
+    }
+
+    /// The teams name the runner's backends: a change that would leave one
+    /// naming a backend that is not there is refused.
+    fn check_users(&self, text: &str) -> Result<(), Error> {
+        let runner = config::parse_runner_with(
+            text,
+            &self.settings.path,
+            self.keys().as_deref(),
+            &SystemEnv,
+        )
+        .map_err(|e| Error::invalid(e.to_string()))?;
+        teams::load_all(&runner.llm, None)
+            .map(|_| ())
+            .map_err(|e| Error::new(Code::Conflict, format!("nothing was changed: {e}")))
+    }
+}
+
 impl RunnerContext {
     /// This computer's runner, which does not run: runner.yaml, checked as a
     /// runner before it is written.
-    pub fn new() -> Result<Self, String> {
+    pub fn new(env_file: Option<std::path::PathBuf>) -> Result<Self, String> {
         Ok(RunnerContext {
             settings: runner_settings()?,
             relink: None,
+            env_file,
         })
+    }
+
+    /// The file its keys are read from now, if there is one.
+    fn keys(&self) -> Option<std::path::PathBuf> {
+        state::runner_config_dir()
+            .ok()
+            .and_then(|dir| ensemble_ops::cli::env_file(self.env_file.as_deref(), &dir))
+    }
+
+    /// runner.yaml as it is now, with the keys it names.
+    fn runner(&self) -> Result<config::Runner, Error> {
+        config::load_runner(&self.settings.path, self.keys().as_deref(), &SystemEnv)
+            .map_err(|e| Error::new(Code::Unavailable, e.to_string()))?
+            .ok_or_else(|| {
+                Error::not_found("there is no runner yet").hint("`ensemble-runner setup` makes one")
+            })
     }
 
     /// The runner, in the process that runs it, which reads its hub's token
     /// again with `relink`.
     pub fn running(
+        env_file: Option<std::path::PathBuf>,
         relink: impl Fn() -> Result<String, String> + Send + Sync + 'static,
     ) -> Result<Self, String> {
         let settings = runner_settings()?.on_change(|| {
@@ -380,6 +444,7 @@ impl RunnerContext {
         Ok(RunnerContext {
             settings,
             relink: Some(Box::new(relink)),
+            env_file,
         })
     }
 
@@ -434,6 +499,10 @@ const LOGOUT: &[Field] = &[URL];
 /// Every operation of the runner.
 pub fn operations() -> Registry<RunnerContext> {
     let mut all = settings_file::operations::<RunnerContext>(Access::Local);
+    all.extend(ensemble_backends::ops::operations::<RunnerContext>(
+        Side::Runner,
+        Access::Local,
+    ));
     all.push(operation(
         Spec {
             name: "login",

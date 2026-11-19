@@ -2023,3 +2023,56 @@ fn a_runner_has_no_interfaces_block_as_its_command_line_is_always_on() {
     .to_string();
     assert!(err.contains("interfaces: is gone"), "{err}");
 }
+
+#[test]
+fn a_key_is_kept_in_dotenv_with_the_other_lines_as_they_were() {
+    let dir = std::env::temp_dir().join(format!("ensemble-dotenv-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join(".env");
+    set_dotenv(&path, "ENSEMBLE_BACKEND_CENTRAL_KEY", Some("sk-1")).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "# mine\nOTHER=x\n{}",
+            std::fs::read_to_string(&path).unwrap()
+        ),
+    )
+    .unwrap();
+    let tricky = "a b#c\"d\\e";
+    set_dotenv(&path, "ENSEMBLE_BACKEND_CENTRAL_KEY", Some(tricky)).unwrap();
+    set_dotenv(&path, "NEW", Some("plain-1")).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("# mine\nOTHER=x\n"), "{text}");
+    let vars = parse_dotenv(&text, &path).unwrap();
+    assert_eq!(vars["ENSEMBLE_BACKEND_CENTRAL_KEY"], tricky);
+    assert_eq!(vars["NEW"], "plain-1");
+    set_dotenv(&path, "ENSEMBLE_BACKEND_CENTRAL_KEY", None).unwrap();
+    let vars = parse_dotenv(&std::fs::read_to_string(&path).unwrap(), &path).unwrap();
+    assert!(!vars.contains_key("ENSEMBLE_BACKEND_CENTRAL_KEY"));
+    assert_eq!(vars["OTHER"], "x");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "readable by its owner alone");
+    }
+    assert_eq!(
+        backend_key_variable("team-gpu.2"),
+        "ENSEMBLE_BACKEND_TEAM_GPU_2_KEY"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_mapping_is_written_inline_as_yaml_reads_it_back() {
+    let value = serde_json::json!({
+        "type": "local_markdown",
+        "dir": "my issues: \"x\"",
+        "poll_seconds": 30,
+        "on": true,
+        "list": ["a", "b"],
+    });
+    let line = settings::inline(&value);
+    let back: serde_json::Value = serde_norway::from_str(&line).unwrap();
+    assert_eq!(back, value);
+}

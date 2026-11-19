@@ -36,6 +36,43 @@ pub fn get(text: &str, key: &str) -> Result<Option<String>, String> {
     }))
 }
 
+/// `value` written as one line of YAML, a mapping or a list inline (`{type:
+/// local_markdown, dir: issues}`), for [`set`]: text in double quotes, which
+/// YAML reads as JSON does.
+pub fn inline(value: &serde_json::Value) -> String {
+    use serde_json::Value as J;
+    match value {
+        J::Null => "null".into(),
+        J::Bool(b) => b.to_string(),
+        J::Number(n) => n.to_string(),
+        J::String(s) => J::String(s.clone()).to_string(),
+        J::Array(items) => format!(
+            "[{}]",
+            items.iter().map(inline).collect::<Vec<_>>().join(", ")
+        ),
+        J::Object(map) => format!(
+            "{{{}}}",
+            map.iter()
+                .map(|(k, v)| format!("{k}: {}", inline(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// The mapping `fields` written as one line of YAML, as [`inline`] writes a
+/// value, its fields in the order given.
+pub fn inline_fields(fields: &[(&str, serde_json::Value)]) -> String {
+    format!(
+        "{{{}}}",
+        fields
+            .iter()
+            .map(|(k, v)| format!("{k}: {}", inline(v)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 /// `text` with the setting at `key` set to `value`, which is written as it is
 /// given when it reads as YAML (`laptop`, `8`, `true`, `[a, b]`, `{}`), and
 /// quoted otherwise. A setting that is not there is added under the nearest

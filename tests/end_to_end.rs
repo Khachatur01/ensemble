@@ -3388,3 +3388,210 @@ fn a_running_hub_uses_a_changed_hub_yaml_at_once_or_starts_again() {
         .status
         .success()));
 }
+
+/// `ensemble-hub` with `args`, given `stdin`: what it answers.
+fn hub_with_stdin(scratch: &Scratch, args: &[&str], stdin: &str) -> std::process::Output {
+    let mut child = hub_command(scratch)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    write!(child.stdin.take().unwrap(), "{stdin}").unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
+    let s = Scratch::new("hub-backends");
+    let hub = hub_server_of(&s);
+    let env = hub.join(".env");
+    let yaml = || std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    let vars = || {
+        std::fs::read_to_string(&env)
+            .map(|t| {
+                t.lines()
+                    .filter_map(|l| l.split_once('='))
+                    .map(|(n, v)| (n.to_string(), v.to_string()))
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            })
+            .unwrap_or_default()
+    };
+    let server = models_stub(r#"{"data":[{"id":"small"}]}"#);
+
+    // It answers without a key: added, with none.
+    let out = hub_with_stdin(
+        &s,
+        &[
+            "backend",
+            "add",
+            "local",
+            "--type",
+            "openai-compatible-api",
+            "--url",
+            &server,
+        ],
+        "",
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("added backend local, which serves small"),
+        "{}",
+        stdout_of(&out)
+    );
+    assert!(
+        yaml().contains("local: {type: \"openai-compatible-api\""),
+        "{}",
+        yaml()
+    );
+
+    // A key, given as a secret, is kept in .env under a name of Ensemble's.
+    let out = hub_with_stdin(&s, &["backend", "key", "local"], "sk-local\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(vars()["ENSEMBLE_BACKEND_LOCAL_KEY"], "sk-local");
+    assert!(
+        yaml().contains("api_key_env: \"ENSEMBLE_BACKEND_LOCAL_KEY\""),
+        "{}",
+        yaml()
+    );
+    assert!(!yaml().contains("sk-local"), "the key is never in hub.yaml");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&env).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let list = stdout_of(&hub_with_stdin(&s, &["backend", "list"], ""));
+    assert!(
+        list.contains("local  openai-compatible-api at") && list.contains("key kept"),
+        "{list}"
+    );
+
+    // One that does not answer is refused, unless asked not to check.
+    let add_down = |extra: &[&str]| {
+        let mut args = vec![
+            "backend",
+            "add",
+            "down",
+            "--type",
+            "openai-compatible-api",
+            "--url",
+            NOWHERE,
+        ];
+        args.extend_from_slice(extra);
+        hub_with_stdin(&s, &args, "")
+    };
+    let out = add_down(&[]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("could not ask it which models it serves"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(add_down(&["--no-check"]).status.success());
+
+    // Anthropic's API wants a key: it is asked for.
+    let out = hub_with_stdin(
+        &s,
+        &[
+            "backend",
+            "add",
+            "claude2",
+            "--type",
+            "anthropic-api",
+            "--url",
+            "https://api.anthropic.com",
+            "--no-check",
+        ],
+        "sk-ant\n",
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(vars()["ENSEMBLE_BACKEND_CLAUDE2_KEY"], "sk-ant");
+
+    // A backend something uses stays; another goes, with the key kept for it.
+    let out = hub_with_stdin(&s, &["backend", "remove", "central"], "");
+    assert!(!out.status.success(), "the distiller uses it");
+    let out = hub_with_stdin(&s, &["backend", "remove", "local"], "");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!vars().contains_key("ENSEMBLE_BACKEND_LOCAL_KEY"));
+    assert!(!yaml().contains("local: {"));
+
+    // Keys read from a file of their own are not written by Ensemble.
+    let other = s.path().join("secrets.env");
+    std::fs::write(&other, "").unwrap();
+    let out = hub_with_stdin(
+        &s,
+        &[
+            "--env-file",
+            other.to_str().unwrap(),
+            "backend",
+            "key",
+            "down",
+        ],
+        "sk-x\n",
+    );
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("which Ensemble does not write"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+#[test]
+fn a_runners_owner_adds_shares_and_removes_backends_its_teams_do_not_use() {
+    let s = Scratch::new("runner-backends");
+    let runner_yaml = s.local_backend(NOWHERE);
+    s.write("@team/config.yaml", &config_yaml("opencode"));
+    let run = |args: &[&str]| {
+        let mut child = runner_command(&s)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take());
+        child.wait_with_output().unwrap()
+    };
+    let yaml = || std::fs::read_to_string(&runner_yaml).unwrap();
+
+    // The team's coder runs on openai-local: it stays.
+    let out = run(&["backend", "remove", "openai-local"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("nothing was changed"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(yaml().contains("openai-local"));
+
+    // Shared through a hub, which it names.
+    assert!(run(&["config", "set", "hub", "ws://127.0.0.1:1"]).status.success());
+    let server = models_stub(r#"{"data":[{"id":"big"}]}"#);
+    let out = run(&[
+        "backend",
+        "add",
+        "gpu",
+        "--type",
+        "openai-compatible-api",
+        "--url",
+        &server,
+        "--share",
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(yaml().contains("shares: [\"gpu\"]"), "{}", yaml());
+    let out = run(&["backend", "unshare", "gpu"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(yaml().contains("shares: []"), "{}", yaml());
+    let out = run(&["backend", "test", "gpu"]);
+    assert!(
+        stdout_of(&out).contains("gpu: answers, serves big"),
+        "{}",
+        stdout_of(&out)
+    );
+    let out = run(&["backend", "remove", "gpu"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!yaml().contains("gpu"));
+}

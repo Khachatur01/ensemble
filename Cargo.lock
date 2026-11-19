@@ -683,7 +683,10 @@ version = "0.1.0"
 dependencies = [
  "ensemble-config",
  "ensemble-core",
+ "ensemble-ops",
+ "serde",
  "serde_json",
+ "serde_norway",
  "ureq",
 ]
 

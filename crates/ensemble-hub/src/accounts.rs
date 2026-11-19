@@ -20,6 +20,7 @@
 //! or by the account's session and spent once.
 
 use crate::users::{JOIN_HOURS, Kind, Roles, Token, User, Users, UsersError};
+use ensemble_backends::ops::{Backends, Side, WithBackends};
 use ensemble_config::settings_file::{self, SettingsFile, WithSettings};
 use ensemble_config::{Permission, Registration};
 use ensemble_ops::{
@@ -136,6 +137,9 @@ pub struct HubContext {
     /// The backends the connected runners share, as the running hub lists
     /// them ([`HubContext::when_serving`]); nothing otherwise.
     offered: OnceLock<Box<Offered>>,
+    /// The file its keys are read from when one is given (`--env-file`), in
+    /// place of its own `.env` ([`HubContext::keys_from`]).
+    env_file: OnceLock<PathBuf>,
 }
 
 type Offered = dyn Fn() -> Value + Send + Sync;
@@ -171,7 +175,34 @@ impl HubContext {
             settings,
             changed,
             offered: OnceLock::new(),
+            env_file: OnceLock::new(),
         }
+    }
+
+    /// Read its keys from `given` (`--env-file`) in place of its own `.env`,
+    /// which Ensemble then does not write.
+    pub fn keys_from(&self, given: Option<PathBuf>) {
+        if let Some(file) = given {
+            let _ = self.env_file.set(file);
+        }
+    }
+
+    /// The file its keys are read from now, if there is one.
+    fn keys_file(&self) -> Option<PathBuf> {
+        ensemble_ops::cli::env_file(self.env_file.get().map(PathBuf::as_path), &self.dir)
+    }
+
+    /// hub.yaml as it is now, with the keys it names.
+    pub(crate) fn hub(&self) -> Result<ensemble_config::Hub, Error> {
+        ensemble_config::load_hub(
+            &self.settings.path,
+            self.keys_file().as_deref(),
+            &ensemble_config::SystemEnv,
+        )
+        .map_err(|e| {
+            Error::new(Code::Unavailable, e.to_string())
+                .hint("fix hub.yaml with `ensemble-hub config`")
+        })
     }
 
     /// Have `runner.backends` list what `offered` returns: the backends the
@@ -208,12 +239,42 @@ impl WithSettings for HubContext {
     }
 }
 
+impl WithBackends for HubContext {
+    fn key_file(&self) -> Result<PathBuf, Error> {
+        let own = self.dir.join(ensemble_core::state::ENV_FILE);
+        match self.env_file.get() {
+            Some(given) if *given != own => Err(Error::new(
+                Code::Conflict,
+                format!(
+                    "the hub reads its keys from {}, which Ensemble does not write",
+                    given.display()
+                ),
+            )
+            .hint("put the key there, as a variable, and name it with `key_env`")),
+            _ => Ok(own),
+        }
+    }
+
+    fn backends(&self) -> Result<Backends, Error> {
+        let hub = self.hub()?;
+        Ok(Backends {
+            direct: hub.llm.direct,
+            relayed: hub.llm.runners,
+            shares: None,
+        })
+    }
+}
+
 /// Every operation of the hub.
 pub fn operations() -> Registry<HubContext> {
     let mut all = settings_file::operations::<HubContext>(Access::Permission("admin"));
     all.extend(user_operations());
     all.extend(own_operations());
     all.extend(runner_operations());
+    all.extend(ensemble_backends::ops::operations::<HubContext>(
+        Side::Hub,
+        Access::Permission("admin"),
+    ));
     Registry::new(all)
 }
 

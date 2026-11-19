@@ -93,8 +93,10 @@ pub struct Daemon<'a> {
 }
 
 impl<'a> Daemon<'a> {
-    /// A runner from `runner`, its teams loaded as `team`.
+    /// A runner from `runner`, its teams loaded as `team`, reading its keys
+    /// from `env_file` when one is given (`--env-file`).
     pub fn new(
+        env_file: Option<std::path::PathBuf>,
         runner: Runner,
         hub: Option<(String, Token)>,
         team: Config,
@@ -108,7 +110,7 @@ impl<'a> Daemon<'a> {
                 Some((url, token)) => read_token_again(url, token),
                 None => Err("the runner names no hub".to_string()),
             };
-            (operations, RunnerContext::running(relink)?)
+            (operations, RunnerContext::running(env_file, relink)?)
         };
         Ok(Daemon {
             hub_link: hub

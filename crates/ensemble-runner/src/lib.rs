@@ -78,7 +78,8 @@ fn dispatch(
     if matched(runner, matches).is_some() || is_config_extra(matches) {
         // The running runner runs it, else this process does.
         let socket = state::runner_socket(&state::runner_dir()?);
-        let route = ensemble_ops::local::Route::to(&socket, RunnerContext::new);
+        let route =
+            ensemble_ops::local::Route::to(&socket, || RunnerContext::new(ctx.env_file.clone()));
         let call = |name: &str, input| {
             route
                 .as_ref()
@@ -89,7 +90,7 @@ fn dispatch(
             return ensemble_ops::cli::run(runner, &call, name, leaf);
         }
         let merge = |from: &Path| {
-            let file = RunnerContext::new()?.into_settings();
+            let file = RunnerContext::new(ctx.env_file.clone())?.into_settings();
             file.merge(from).map_err(|e| e.to_string())
         };
         if let Some(done) = run_config_extra(matches, &call, merge) {

@@ -95,3 +95,100 @@ pub fn parse_dotenv(text: &str, path: &Path) -> Result<BTreeMap<String, String>,
         })
     }
 }
+
+/// The variable that holds the API key of the LLM backend `name` when Ensemble
+/// keeps the key itself, in the `.env` beside the settings file:
+/// `ENSEMBLE_BACKEND_<NAME>_KEY`, its letters upper case and anything else `_`.
+pub fn backend_key_variable(name: &str) -> String {
+    let name: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("ENSEMBLE_BACKEND_{name}_KEY")
+}
+
+/// Set `name` to `value` in the `.env` file at `path`, or take it out with
+/// `None`. Its other lines stay as they are; it is made when it is not there,
+/// and written readable by its owner alone, through a file beside it, so a
+/// reader never sees half of it.
+pub fn set_dotenv(path: &Path, name: &str, value: Option<&str>) -> Result<(), String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let names = |line: &str| {
+        let line = line.trim_start();
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        line.split_once('=').is_some_and(|(n, _)| n.trim() == name)
+    };
+    let line = value.map(|v| format!("{name}={}", dotenv_value(v)));
+    let mut lines: Vec<String> = Vec::new();
+    let mut placed = false;
+    for l in text.lines() {
+        if names(l) {
+            if let (false, Some(line)) = (placed, &line) {
+                lines.push(line.clone());
+            }
+            placed = true;
+        } else {
+            lines.push(l.to_string());
+        }
+    }
+    if let (false, Some(line)) = (placed, line) {
+        lines.push(line);
+    }
+    let mut out = lines.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    let tmp = path.with_extension("tmp");
+    let written = {
+        let mut open = std::fs::OpenOptions::new();
+        open.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open.mode(0o600);
+        }
+        open.open(&tmp).and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(out.as_bytes())
+        })
+    };
+    #[cfg(unix)]
+    let written = written.and_then(|()| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+    });
+    written
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// `value` as a `.env` value that [`parse_dotenv`] reads back as it is: as it
+/// is when it is plain, else in double quotes.
+fn dotenv_value(value: &str) -> String {
+    let plain = !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.:/+=@~,%".contains(c));
+    if plain {
+        return value.to_string();
+    }
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    format!("\"{escaped}\"")
+}

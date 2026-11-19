@@ -122,6 +122,39 @@ impl SettingsFile {
         Ok((self.changed)())
     }
 
+    /// The file's text with `edits` made in order, each a setting set to a
+    /// value (YAML) or, with none, taken out: refused when Nix declares one of
+    /// them, or when the text would not load. Nothing is written yet:
+    /// [`SettingsFile::commit`] writes it, so what goes with it, such as a key
+    /// in `.env`, can be written in between.
+    pub fn plan(&self, edits: &[(String, Option<String>)]) -> Result<String, Error> {
+        let mut text = self.read()?;
+        for (key, value) in edits {
+            self.not_managed(key)?;
+            text = match value {
+                Some(value) => settings::set(&text, key, value),
+                None => settings::unset(&text, key),
+            }
+            .map_err(Error::invalid)?;
+        }
+        self.check(&text)
+            .map_err(|e| Error::invalid(format!("nothing was changed: {e}")))?;
+        Ok(text)
+    }
+
+    /// Write `text`, as [`SettingsFile::plan`] made it, and say what the running
+    /// process did with it.
+    pub fn commit(&self, text: &str) -> Result<Option<String>, Error> {
+        write_atomically(&self.path, text).map_err(Error::failed)?;
+        Ok((self.changed)())
+    }
+
+    /// Tell the running process its settings changed though the file did not,
+    /// such as when a key one of them names did, and say what it did.
+    pub fn changed(&self) -> Option<String> {
+        (self.changed)()
+    }
+
     /// Write `text` in place of the file, as an edit of it: refused when it
     /// would not load or changes what Nix declares, and, given `before`, the
     /// text it was made from, when the file changed since. What to say of it.
