@@ -155,7 +155,7 @@
               };
             in
             pkgs.linkFarm "ensemble-nixos-module" {
-              "ensemble-hub.service" = system.config.systemd.units."ensemble-hub.service".unit;
+              "ensemble-hub.service" = system.config.systemd.user.units."ensemble-hub.service".unit;
               "ensemble-runner.service" = system.config.systemd.user.units."ensemble-runner.service".unit;
             };
         }

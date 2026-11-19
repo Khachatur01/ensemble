@@ -1,6 +1,8 @@
-# The NixOS module: a hub, `ensemble-hub serve`, as a system service, and this
-# computer's runner, `ensemble-runner serve`, as a user service. Each runs as the
-# person it is for, from their `~/.config/ensemble/`, so they manage it with
+# The NixOS module: a hub, `ensemble-hub serve`, and this computer's runner,
+# `ensemble-runner serve`, each a user service of the person it is for, the
+# hub's lingering so it runs from boot without a login. Each runs as the
+# person it is for, with their `XDG_RUNTIME_DIR`, where `ensemble-hub …` and
+# `ensemble-runner …` find its socket, from their `~/.config/ensemble/`, so they manage it with
 # `ensemble-hub` and `ensemble-runner` as on any platform. What should always
 # hold is written in Nix: the settings declared here are merged into
 # `hub.yaml` and `runner.yaml` when each starts, and teams are linked in. The
@@ -171,14 +173,19 @@ in
         lib.toInt (lib.last (lib.splitString ":" hub.settings.http.listen))
       );
 
-      systemd.services.ensemble-hub = {
+      # A user service, so it has its user's runtime directory, where
+      # `ensemble-hub …` finds its socket; lingering, so it starts at boot.
+      users.users.${hub.user}.linger = true;
+
+      systemd.user.services.ensemble-hub = {
         description = "Ensemble hub";
-        wantedBy = [ "multi-user.target" ];
-        after = [ "network-online.target" ];
-        wants = [ "network-online.target" ];
+        wantedBy = [ "default.target" ];
         restartTriggers = lib.optional (hubYaml != null) hubYaml;
+        unitConfig = {
+          ConditionUser = hub.user;
+        }
         # Without settings, it waits for `ensemble-hub init`.
-        unitConfig = lib.optionalAttrs (hubYaml == null) {
+        // lib.optionalAttrs (hubYaml == null) {
           ConditionPathExists = "${hubDir}/hub.yaml";
         };
         # The vault is a git repository.
@@ -205,10 +212,8 @@ in
               hub.environmentFile
             ]
           );
-          User = hub.user;
           Restart = "on-failure";
           NoNewPrivileges = true;
-          PrivateTmp = true;
         };
       };
     })

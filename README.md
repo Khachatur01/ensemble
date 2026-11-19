@@ -1769,8 +1769,10 @@ then with `systemctl --user start ensemble-runner`. `ensemble-runner` is put on
 the system's `PATH`, for managing it; `services.ensemble.runner.package` is the
 package it comes from.
 
-**A hub**, a system service that runs as `user`, from their
-`~/.config/ensemble/hub/`:
+**A hub**, a systemd user service of `user`, from their
+`~/.config/ensemble/hub/`. The module makes `user` linger, so the hub starts
+at boot without a login, and, as a user service, it has their
+`XDG_RUNTIME_DIR`, where `ensemble-hub …` finds its socket:
 
 ```nix
 {
@@ -1823,7 +1825,7 @@ from the sample, with its vault, when there is none). Accounts live in the
 hub's `database.db`, not in Nix: `ensemble-hub user add root --role admin`,
 `ensemble-hub config set …`, `ensemble-hub knowledge status` and the rest, run
 as `user`. Without `settings`, the hub waits until `ensemble-hub init` has
-written `hub.yaml`; start it then with `sudo systemctl start ensemble-hub`.
+written `hub.yaml`; start it then with `systemctl --user start ensemble-hub`.
 `ensemble-hub` is put on the system's `PATH`, from
 `services.ensemble.hub.package`. For a hub of an account of its own, make that
 user and run `ensemble-hub …` as it.
