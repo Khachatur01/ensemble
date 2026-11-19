@@ -1386,7 +1386,10 @@ crate holds it today.
     folder are refused.)
 24. Sources: the `Source` trait, and the collect and filter steps with one
     LLM and the admin's prompt, raw messages dropped; `source.try` to see what
-    a text would leave. No provider's adapter yet.
+    a text would leave. No provider's adapter yet. (Done:
+    `connectors.sources.filter`, `ensemble-knowledge`'s `sources.rs`, and the
+    `source filter` and `source try` operations. No adapter takes messages
+    yet, so no loop runs.)
 25. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
     and Teams, Telegram); a runner's operations from the hub, for its own
     account; the remaining goal operations (people, computers, teams from

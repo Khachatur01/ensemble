@@ -14,7 +14,7 @@
 
 use async_trait::async_trait;
 use ensemble_backends::resolve::Resolver;
-use ensemble_config::{Hub, Knowledge, LlmBackend, RelayAt};
+use ensemble_config::{Hub, Knowledge, LlmBackend, RelayAt, SourceFilter};
 use ensemble_core::runtime;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -26,6 +26,7 @@ mod meaning;
 pub mod pipeline;
 pub mod search;
 pub mod secrets;
+pub mod sources;
 pub mod vault;
 
 pub use pipeline::{PIPELINE_VERSION, Step};
@@ -109,6 +110,8 @@ pub struct Memory {
     /// its hub.yaml says now: replaced when that changes ([`Memory::apply`]).
     owner: RwLock<String>,
     knowledge: RwLock<Arc<Knowledge>>,
+    /// How what sources bring in is collected and filtered, when it is.
+    filter: RwLock<Option<Arc<SourceFilter>>>,
     /// The working folder's name, never its path.
     project: Option<String>,
     /// The agent CLI on the other end, once it has said its name.
@@ -136,6 +139,7 @@ impl Memory {
         Memory {
             owner: RwLock::new(hub.owner.clone()),
             knowledge: RwLock::new(Arc::new(hub.connectors.knowledge.clone())),
+            filter: RwLock::new(hub.connectors.sources.filter.clone().map(Arc::new)),
             project,
             client: Mutex::new(None),
             backends: RwLock::new(Arc::new(hub.llm.backends(None))),
@@ -151,6 +155,8 @@ impl Memory {
         *self.owner.write().unwrap_or_else(|e| e.into_inner()) = hub.owner.clone();
         *self.knowledge.write().unwrap_or_else(|e| e.into_inner()) =
             Arc::new(hub.connectors.knowledge.clone());
+        *self.filter.write().unwrap_or_else(|e| e.into_inner()) =
+            hub.connectors.sources.filter.clone().map(Arc::new);
         *self.backends.write().unwrap_or_else(|e| e.into_inner()) =
             Arc::new(hub.llm.backends(self.relay.as_ref()));
     }
@@ -177,6 +183,14 @@ impl Memory {
 
     pub(crate) fn meaning(&self) -> &meaning::Meaning {
         &self.meaning
+    }
+
+    /// The source filter, as hub.yaml says now.
+    pub(crate) fn filter(&self) -> Option<Arc<SourceFilter>> {
+        self.filter
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub(crate) fn resolver(&self) -> &Resolver {

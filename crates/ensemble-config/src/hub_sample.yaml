@@ -130,6 +130,20 @@ connectors:
         poll_seconds: 30
 
   # Sources: knowledge brought in from outside, such as a mailbox or a chat.
-  # No source adapter is built yet.
+  # One model collects what every source brings in, keeping what is worth
+  # knowing, then removes what `prompt` calls confidential; only that is
+  # shared, for the whole hub, and the raw messages are dropped. Leave
+  # `filter` out to connect no source. `ensemble-hub source try` shows what a
+  # text would leave. No source adapter is built yet.
   sources:
+    filter:
+      try:                       # in order; the first that works is used
+        - backend: central
+          model: qwen3.5-72b
+      when_none: wait            # or fail: what was brought in is dropped, saying why
+      max_tokens: 2000
+      prompt: >-
+        Salaries, contracts and prices agreed with clients; clients' and
+        candidates' names and contact details; anything about a person's
+        health or family.
     adapters: {}

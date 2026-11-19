@@ -1636,7 +1636,11 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
     let (head, tail) = text.split_once("\nllm:\n").unwrap();
     let (_, rest) = tail.split_once("# ---").unwrap();
     let (_, try_and_on) = rest.split_once("      try:").unwrap();
-    let after_try = try_and_on.split_once("      when_none:").unwrap().1;
+    let after_try = try_and_on
+        .split_once("      when_none:")
+        .unwrap()
+        .1
+        .replace("backend: central", "backend: up");
     // The sample's embedding model is on a backend this test takes out.
     let accounts_to_try = rest
         .split_once("      try:")
@@ -3713,6 +3717,28 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
     ok(&["registration", "set", "closed"]);
     assert!(
         yaml().contains("registration: {type: \"closed\"}"),
+        "{}",
+        yaml()
+    );
+
+    // What sources bring in: no filter, then one.
+    ok(&["source", "filter", "--off"]);
+    assert!(!yaml().contains("filter:"), "{}", yaml());
+    let out = run(&["source", "filter", "local:small"]);
+    assert!(
+        stderr_of(&out).contains("say what is confidential"),
+        "{}",
+        stderr_of(&out)
+    );
+    ok(&["source", "filter", "local:small", "--prompt", "Salaries."]);
+    assert!(
+        yaml().contains("filter: {try: [{backend: \"local\", model: \"small\"}], when_none: wait, max_tokens: 2000, prompt: \"Salaries.\"}"),
+        "{}",
+        yaml()
+    );
+    ok(&["source", "filter", "--when-none", "fail"]);
+    assert!(
+        yaml().contains("when_none: fail, max_tokens: 2000"),
         "{}",
         yaml()
     );

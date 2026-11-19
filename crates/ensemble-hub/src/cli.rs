@@ -37,6 +37,10 @@ pub fn command<H>(hub: &Registry<H>) -> clap::Command {
         ("tracker", "The trackers whose issues become tasks."),
         ("registration", "How people join the hub."),
         (
+            "source",
+            "How what sources bring in is collected and filtered.",
+        ),
+        (
             "config",
             "The hub's settings, hub.yaml, by their keys joined by dots, such as http.listen",
         ),

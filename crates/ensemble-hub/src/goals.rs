@@ -10,6 +10,8 @@
 //! | `tracker.list`, `tracker.add`, `tracker.remove` | the trackers whose issues become tasks |
 //! | `role.set`, `role.remove` | what each role may do |
 //! | `registration.set` | whether people sign up, and how many may wait |
+//! | `source.filter` | the model that collects and filters what sources bring in, and what is confidential, or none |
+//! | `source.try` | what the filter would leave of a text, shared nowhere |
 //!
 //! Each writes hub.yaml through its settings file, so a change is loaded
 //! before it is written, what Nix declares is refused, and the running hub
@@ -28,6 +30,7 @@ const ADMIN: Access = Access::Permission("admin");
 const KNOWLEDGE: &str = "connectors.knowledge";
 const TRACKERS: &str = "connectors.tasks.trackers";
 const ROLES: &str = "accounts.roles";
+const FILTER: &str = "connectors.sources.filter";
 const PERMISSIONS: &[&str] = &["share", "recall", "tasks", "admin", "compute", "host"];
 
 const NO_CHECK: Field = Field::new(
@@ -120,6 +123,40 @@ const ROLE_SET: &[Field] = &[
     .positional(),
 ];
 const NAMED_ROLE: &[Field] = &[ROLE_NAME];
+const SOURCE_FILTER: &[Field] = &[
+    Field::new(
+        "models",
+        Kind::List,
+        "The models that collect and filter, in order, each <backend>:<model>; unchanged when left out.",
+    )
+    .positional(),
+    Field::text(
+        "prompt",
+        "What is confidential, in your words, such as salaries and clients' names; needed the first time.",
+    ),
+    Field::new(
+        "when_none",
+        Kind::Choice(&["wait", "fail"]),
+        "When none can be used: wait and try again, or drop what came in; wait the first time when left out.",
+    ),
+    Field::new(
+        "max_tokens",
+        Kind::Number,
+        "Most tokens of one answer; 2000 the first time when left out.",
+    ),
+    Field::new(
+        "off",
+        Kind::Flag,
+        "No filter: no source may be connected.",
+    ),
+    NO_CHECK,
+];
+const SOURCE_TRY: &[Field] = &[Field::text(
+    "text",
+    "A text as a source might bring it, such as a few messages of a chat.",
+)
+.required()
+.positional()];
 const REGISTRATION: &[Field] = &[
     Field::new(
         "type",
@@ -190,6 +227,24 @@ struct Registration {
 
 #[derive(Deserialize)]
 struct Nothing {}
+
+#[derive(Deserialize)]
+struct SourceFilter {
+    #[serde(default)]
+    models: Vec<String>,
+    prompt: Option<String>,
+    when_none: Option<String>,
+    max_tokens: Option<u64>,
+    #[serde(default)]
+    off: bool,
+    #[serde(default)]
+    no_check: bool,
+}
+
+#[derive(Deserialize)]
+struct SourceTry {
+    text: String,
+}
 
 /// The goal operations of this module.
 pub fn operations() -> Vec<Operation<HubContext>> {
@@ -283,6 +338,24 @@ pub fn operations() -> Vec<Operation<HubContext>> {
             },
             |c: &HubContext, _: &Caller, input: Registration| registration(c, input),
         ),
+        operation(
+            Spec {
+                name: "source.filter",
+                summary: "Choose the model that collects and filters what sources bring in, and say what is confidential.",
+                access: ADMIN,
+                input: SOURCE_FILTER,
+            },
+            |c: &HubContext, _: &Caller, input: SourceFilter| source_filter(c, input),
+        ),
+        operation(
+            Spec {
+                name: "source.try",
+                summary: "Show what the source filter would leave of a text, without sharing it.",
+                access: ADMIN,
+                input: SOURCE_TRY,
+            },
+            |c: &HubContext, _: &Caller, input: SourceTry| source_try(c, input),
+        ),
     ]
 }
 
@@ -326,6 +399,95 @@ fn distill(c: &HubContext, input: Distill) -> Result<Value, Error> {
         "said": format!("shares are distilled by {}", input.models.join(", then ")),
         "note": note,
     }))
+}
+
+fn source_filter(c: &HubContext, input: SourceFilter) -> Result<Value, Error> {
+    if input.off {
+        if !input.models.is_empty() || input.prompt.is_some() {
+            return Err(Error::invalid("give models and a prompt, or `off`, not both").on("off"));
+        }
+        let note = commit(c, &[(FILTER.into(), None)])?;
+        return Ok(json!({ "said": "no source may be connected now", "note": note }));
+    }
+    let mut candidates = Vec::new();
+    for given in &input.models {
+        let (backend, model) = model_of(c, given, "models", input.no_check)?;
+        candidates.push(inline_fields(&[
+            ("backend", json!(backend)),
+            ("model", json!(model)),
+        ]));
+    }
+    let prompt = input.prompt.as_deref().map(str::trim);
+    if prompt.is_some_and(str::is_empty) {
+        return Err(Error::invalid("say what is confidential").on("prompt"));
+    }
+    if input.max_tokens == Some(0) {
+        return Err(Error::invalid("`max_tokens` must be greater than 0").on("max_tokens"));
+    }
+    // The whole block is written each time, with what is not given kept.
+    let now = c.hub()?.connectors.sources.filter;
+    if candidates.is_empty() {
+        let Some(now) = &now else {
+            return Err(Error::invalid("name at least one model").on("models"));
+        };
+        if prompt.is_none() && input.when_none.is_none() && input.max_tokens.is_none() {
+            return Err(Error::invalid(
+                "give models, a prompt, `when_none` or `max_tokens`",
+            ));
+        }
+        for candidate in &now.model.fallback.candidates {
+            candidates.push(inline_fields(&[
+                ("backend", json!(candidate.backend)),
+                ("model", json!(candidate.model)),
+            ]));
+        }
+    }
+    let Some(prompt) = prompt
+        .map(str::to_string)
+        .or_else(|| now.as_ref().map(|f| f.prompt.clone()))
+    else {
+        return Err(Error::invalid("say what is confidential").on("prompt"));
+    };
+    let when_none = match (&input.when_none, &now) {
+        (Some(when), _) => when.clone(),
+        (None, Some(f)) if f.model.fallback.when_none == ensemble_config::WhenNone::Fail => {
+            "fail".into()
+        }
+        _ => "wait".into(),
+    };
+    let max_tokens = input
+        .max_tokens
+        .or_else(|| now.as_ref().map(|f| u64::from(f.model.max_tokens)))
+        .unwrap_or(2000);
+    let block = format!(
+        "{{try: [{}], when_none: {when_none}, max_tokens: {max_tokens}, prompt: {}}}",
+        candidates.join(", "),
+        inline(&json!(prompt)),
+    );
+    let note = commit(c, &[(FILTER.to_string(), Some(block))])?;
+    Ok(json!({ "said": "what sources bring in is filtered so now", "note": note }))
+}
+
+fn source_try(c: &HubContext, input: SourceTry) -> Result<Value, Error> {
+    let memory = ensemble_knowledge::Memory::new(&c.hub()?, None);
+    let message = ensemble_knowledge::sources::Message {
+        id: "try".into(),
+        from: "someone".into(),
+        at: ensemble_core::time::utc(std::time::SystemTime::now()),
+        place: "a try".into(),
+        text: input.text,
+    };
+    let sifted = memory
+        .sift("try", None, &[message])
+        .map_err(|e| Error::new(Code::Unavailable, e))?;
+    let said = match (&sifted.collected, &sifted.clean) {
+        (None, _) => "Nothing in it is worth keeping.".to_string(),
+        (Some(_), None) => {
+            "What is worth keeping is all confidential: nothing would be shared.".to_string()
+        }
+        (Some(_), Some(clean)) => format!("This would be shared, for the whole hub:\n\n{clean}"),
+    };
+    Ok(json!({ "collected": sifted.collected, "clean": sifted.clean, "said": said }))
 }
 
 fn embed(c: &HubContext, input: Embed) -> Result<Value, Error> {

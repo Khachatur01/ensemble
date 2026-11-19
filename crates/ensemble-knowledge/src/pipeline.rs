@@ -145,9 +145,9 @@ pub fn pending(vault: &Vault) -> Vec<Share> {
 }
 
 /// A model request failed: why, and whether trying later may work.
-struct Failed {
-    why: String,
-    later: bool,
+pub(crate) struct Failed {
+    pub(crate) why: String,
+    pub(crate) later: bool,
 }
 
 impl Memory {
@@ -348,9 +348,18 @@ impl Memory {
 
     /// One chat request on the first distill model that can be used.
     fn ask(&self, system: &str, user: &str) -> Result<String, Failed> {
-        let (knowledge, backends) = (self.knowledge(), self.backends());
-        let distill = &knowledge.distill;
-        let candidates: Vec<(&ensemble_config::LlmBackend, &str)> = distill
+        self.ask_on(&self.knowledge().distill, system, user)
+    }
+
+    /// One chat request on the first of `adapter`'s models that can be used.
+    pub(crate) fn ask_on(
+        &self,
+        adapter: &ensemble_config::DirectAdapter,
+        system: &str,
+        user: &str,
+    ) -> Result<String, Failed> {
+        let backends = self.backends();
+        let candidates: Vec<(&ensemble_config::LlmBackend, &str)> = adapter
             .fallback
             .candidates
             .iter()
@@ -372,7 +381,7 @@ impl Memory {
             model,
             system: Some(system),
             user,
-            max_tokens: distill.max_tokens,
+            max_tokens: adapter.max_tokens,
         };
         let (path, body) = chat::request(backend, &ask);
         match chat::send(backend, path, &body) {
@@ -436,7 +445,7 @@ fn cite(note: &mut Note, share: &Share, now: String) {
 }
 
 /// Text between markers no shared text can close: `<<share-NONCE>>`.
-fn quoted(label: &str, text: &str) -> String {
+pub(crate) fn quoted(label: &str, text: &str) -> String {
     let nonce = random_hex(12);
     format!(
         "<<{label}-{nonce}>>\n{}\n<<end-{label}-{nonce}>>",

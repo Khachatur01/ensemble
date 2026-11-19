@@ -102,10 +102,39 @@
       "required": ["adapters"],
       "additionalProperties": false,
       "properties": {
+        "filter": { "$ref": "#/definitions/source_filter" },
         "adapters": {
           "description": "The sources the hub reads, by name. No source adapter is built yet: `{}`.",
           "type": "object",
           "maxProperties": 0
+        }
+      }
+    },
+    "source_filter": {
+      "description": "The one model that collects and filters what every source brings in: it keeps what is worth knowing, then removes what `prompt` calls confidential, and only that becomes a share the whole hub may recall. The raw messages are dropped. Left out, no source may be connected.",
+      "type": "object",
+      "required": ["try", "when_none", "max_tokens", "prompt"],
+      "additionalProperties": false,
+      "properties": {
+        "try": {
+          "description": "The models, in order: the first whose backend answers and serves it is used.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/direct_candidate" }
+        },
+        "when_none": {
+          "description": "What happens when none of the models in `try` can be used. fail: what was brought in is dropped, saying why. wait: it stays with the source and is tried again later.",
+          "enum": ["fail", "wait"]
+        },
+        "max_tokens": {
+          "description": "Most tokens of one answer.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "prompt": {
+          "description": "What is confidential, in the admin's words, such as salaries, clients' names and anything about a person's health.",
+          "type": "string",
+          "minLength": 1
         }
       }
     },

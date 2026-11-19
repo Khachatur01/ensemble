@@ -1462,6 +1462,36 @@ fn every_connector_is_written_and_none_can_be_left_out() {
 }
 
 #[test]
+fn the_source_filter_is_one_of_the_hubs_models_and_the_admins_prompt() {
+    let with = |filter: &str| {
+        HUB.replace(
+            "  sources: { adapters: {} }",
+            &format!("  sources:\n    filter: {filter}\n    adapters: {{}}"),
+        )
+    };
+    let hub = parse_hub(HUB, Path::new("/h/hub.yaml"), &env(&[])).unwrap();
+    assert_eq!(hub.connectors.sources.filter, None, "no source connected");
+    let doc = with(
+        "{ try: [{ backend: local, model: small }], when_none: fail, max_tokens: 50, prompt: \" Salaries. \" }",
+    );
+    let hub = parse_hub(&doc, Path::new("/h/hub.yaml"), &env(&[])).unwrap();
+    let filter = hub.connectors.sources.filter.unwrap();
+    assert_eq!(filter.prompt, "Salaries.");
+    assert_eq!(filter.model.backend(), "local");
+    assert_eq!(filter.model.fallback.when_none, WhenNone::Fail);
+    let said = hub_refusal(&with(
+        "{ try: [{ backend: nope, model: small }], when_none: wait, max_tokens: 50, prompt: \"\" }",
+    ));
+    for expected in [
+        "connectors.sources.filter.try",
+        "nope",
+        "connectors.sources.filter.prompt: is empty",
+    ] {
+        assert!(said.contains(expected), "{expected} in {said}");
+    }
+}
+
+#[test]
 fn a_hub_laid_out_the_old_way_is_told_where_each_block_went() {
     let old = "version: 1\nowner: Ana\nserver: { listen: \"127.0.0.1:7700\" }\nroles: { member: [share] }\ninterfaces: { cli: {} }\n";
     let said = hub_refusal(old);
@@ -1608,7 +1638,16 @@ fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
         ("http", accepted_keys::<hub::RawHttp>(), vec![]),
         ("accounts", accepted_keys::<hub::RawAccounts>(), vec![]),
         ("connectors", accepted_keys::<hub::RawConnectors>(), vec![]),
-        ("sources", accepted_keys::<hub::RawSources>(), vec![]),
+        (
+            "sources",
+            accepted_keys::<hub::RawSources>(),
+            vec!["filter"],
+        ),
+        (
+            "source_filter",
+            accepted_keys::<hub::RawSourceFilter>(),
+            vec![],
+        ),
         (
             "registration_approval",
             accepted_keys::<hub::RawApproval>(),
@@ -1707,6 +1746,7 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
         ("connectors", vec![connectors]),
         ("tasks", vec![tasks]),
         ("sources", vec![&connectors["sources"]]),
+        ("source_filter", vec![&connectors["sources"]["filter"]]),
         (
             "registration_approval",
             vec![&doc["accounts"]["registration"]],

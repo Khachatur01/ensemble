@@ -656,7 +656,8 @@ mod validate;
 pub use env::*;
 pub use hub::{
     AccountRules, Accounts, Connectors, Embed, HUB_FILENAME, Http, Hub, IssueTracker, Knowledge,
-    Permission, Recall, Registration, Tasks, Tracker, hub_path, load_hub, parse_hub,
+    Permission, Recall, Registration, SourceFilter, Sources, Tasks, Tracker, hub_path, load_hub,
+    parse_hub,
 };
 pub use llm::{HubLlm, RelayAt, Relayed, RunnerLlm};
 pub use runner::{

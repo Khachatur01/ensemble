@@ -75,6 +75,25 @@ pub struct AccountRules {
 pub struct Connectors {
     pub knowledge: Knowledge,
     pub tasks: Tasks,
+    pub sources: Sources,
+}
+
+/// Knowledge brought in from outside: how what a source brings is collected
+/// and filtered before the distiller. No source adapter is built yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sources {
+    /// Absent: no source may be connected.
+    pub filter: Option<SourceFilter>,
+}
+
+/// The one model that collects and filters what every source brings in,
+/// and what the admin counts as confidential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFilter {
+    pub model: DirectAdapter,
+    /// What is confidential, in the admin's words: it is removed before what
+    /// a source brought becomes a share the whole hub may recall.
+    pub prompt: String,
 }
 
 /// The knowledge vault, and how shares become notes.
@@ -245,8 +264,19 @@ pub(crate) struct RawNoSettings {}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawSources {
+    pub(crate) filter: Option<RawSourceFilter>,
     /// No source adapter is built yet, so the one value it takes is `{}`.
     pub(crate) adapters: BTreeMap<String, serde_norway::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawSourceFilter {
+    #[serde(rename = "try")]
+    pub(crate) candidates: Vec<raw::RawDirectCandidate>,
+    pub(crate) when_none: WhenNone,
+    pub(crate) max_tokens: u32,
+    pub(crate) prompt: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -564,14 +594,42 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             "connectors.sources.adapters.{name}: no source adapter is built yet; leave `adapters: {{}}`"
         ));
     }
+    let sources = Sources {
+        filter: raw.connectors.sources.filter.as_ref().map(|f| {
+            let at = "connectors.sources.filter";
+            let model = direct_adapter(
+                at,
+                &RawDirectAdapter {
+                    candidates: f.candidates.clone(),
+                    when_none: f.when_none,
+                    max_tokens: f.max_tokens,
+                },
+                &mut problems,
+            );
+            check_candidates(
+                &format!("{at}.try"),
+                &model.fallback.candidates,
+                false,
+                &kinds,
+                " in `llm`",
+                &mut problems,
+            );
+            if f.prompt.trim().is_empty() {
+                problems.push(format!(
+                    "{at}.prompt: is empty; say what is confidential, such as salaries and clients' names"
+                ));
+            }
+            SourceFilter {
+                model,
+                prompt: f.prompt.trim().to_string(),
+            }
+        }),
+    };
     for name in kinds.keys() {
-        let used = knowledge
-            .distill
-            .fallback
-            .candidates
-            .iter()
-            .any(|c| &c.backend == name)
-            || knowledge.embed.as_ref().is_some_and(|e| &e.backend == name);
+        let uses = |a: &DirectAdapter| a.fallback.candidates.iter().any(|c| &c.backend == name);
+        let used = uses(&knowledge.distill)
+            || knowledge.embed.as_ref().is_some_and(|e| &e.backend == name)
+            || sources.filter.as_ref().is_some_and(|f| uses(&f.model));
         if !used {
             eprintln!(
                 "ensemble: note: LLM backend '{name}' is defined but nothing in the hub uses it"
@@ -585,7 +643,11 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             http,
             llm,
             accounts,
-            connectors: Connectors { knowledge, tasks },
+            connectors: Connectors {
+                knowledge,
+                tasks,
+                sources,
+            },
             source: path.to_path_buf(),
         }),
         _ => Err(ConfigError::Invalid {

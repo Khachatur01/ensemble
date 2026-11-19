@@ -674,13 +674,29 @@ A source brings knowledge in from outside, such as a mailbox or a chat, so
 what a team decides there reaches the vault too. Each is an adapter of the
 `sources` connector, which an admin connects for the whole hub: Microsoft 365
 (Outlook mail and Teams) and Telegram (a bot in the team's groups) are to
-come. None is built yet, so `sources` is written with no adapters:
+come. None is built yet, so `sources` is written with no adapters.
+
+What a source brings goes through one model before the distiller, the
+`filter`. It first keeps what is worth knowing, then removes what your
+`prompt` calls confidential. Only what is left becomes a share, for everyone
+who may recall, and the raw messages are dropped. Leave `filter` out and no
+source may be connected.
 
 ```yaml
 connectors:
   sources:
+    filter:
+      try:
+        - { backend: central, model: qwen3.5-72b }
+      when_none: wait            # or fail: what came in is dropped, saying why
+      max_tokens: 2000
+      prompt: Salaries, contracts and prices agreed with clients; clients' names.
     adapters: {}
 ```
+
+`ensemble-hub source try "…"` shows what the filter would leave of a text
+without sharing it. `ensemble-hub source filter central:qwen3.5-72b --prompt
+"…"` chooses the model and the prompt.
 
 ## Runners
 
@@ -1627,6 +1643,8 @@ $ ensemble-hub knowledge recall --max-notes 8 --max-chars 6000
 $ ensemble-hub tracker add issues --type local_markdown --dir issues      # tracker list | remove
 $ ensemble-hub role set auditor recall,share                              # role remove
 $ ensemble-hub registration set approval --max-pending 20                 # or closed
+$ ensemble-hub source filter central:qwen3.5-72b --prompt "Salaries; clients' names."  # or --off
+$ ensemble-hub source try "Bob: deploys go out on Tuesdays now"
 $ ensemble-runner backend add local --type openai-compatible-api --url http://127.0.0.1:11434/v1 --share
 $ ensemble-runner backend share local | unshare local
 ```
