@@ -77,9 +77,9 @@ pub fn agent_block(name: &str, a: &NewAgent<'_>) -> Result<String, String> {
             ));
         }
         DIRECT_AGENT => {
-            let backend = a
-                .backend
-                .ok_or("a direct agent needs --backend, one of llm_backends")?;
+            let backend = a.backend.ok_or(
+                "a direct agent needs --backend, one of the LLM backends its runner defines",
+            )?;
             let model = a
                 .model
                 .ok_or("a direct agent needs --model, the name the server serves it under")?;
@@ -203,9 +203,9 @@ fn join(lines: Vec<String>, original: &str) -> String {
 mod tests {
     use super::*;
 
-    const TEAM: &str = "version: 1\nllm_backends: {}\nlimits: {}\ngates: {}\n# the agents\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model:\n        type: provider\n        name: opencode/m\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n  # keep this comment with the next agent\n";
+    const TEAM: &str = "version: 1\nlimits: {}\ngates: {}\n# the agents\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model:\n        type: provider\n        name: opencode/m\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n  # keep this comment with the next agent\n";
 
-    const EMPTY: &str = "version: 1\nllm_backends: {}\nlimits: {}\ngates: {}\nagents: {}\n";
+    const EMPTY: &str = "version: 1\nlimits: {}\ngates: {}\nagents: {}\n";
 
     fn reviewer() -> String {
         agent_block(
@@ -222,8 +222,7 @@ mod tests {
     }
 
     fn loads(text: &str) -> Config {
-        parse(text, Path::new("config.yaml"), &BTreeMap::new())
-            .unwrap_or_else(|e| panic!("{e}\n{text}"))
+        parse(text, Path::new("config.yaml")).unwrap_or_else(|e| panic!("{e}\n{text}"))
     }
 
     #[test]
@@ -288,9 +287,7 @@ mod tests {
                 },
             )
             .unwrap();
-            let text = format!(
-                "version: 1\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nlimits: {{}}\ngates: {{}}\nagents:\n{block}"
-            );
+            let text = format!("version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n{block}");
             loads(&text);
         }
         assert!(

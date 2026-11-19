@@ -14,7 +14,8 @@
 #
 # Nothing has a default value: every setting is written here, and one that is
 # missing is refused by name. Only these may be left out, because leaving them
-# out means "not used": `tasks`, and a backend's `api_key_env`.
+# out means "not used": `tasks`, `llm.runners`, `knowledge.recall.embed`,
+# `interfaces`, and a backend's `api_key_env`.
 # Check the file with `ensemble-hub check`.
 
 version: 1
@@ -23,19 +24,31 @@ version: 1
 owner: Acme
 
 # ---------------------------------------------------------------------------
-# LLM backends the hub itself uses, such as for distilling knowledge.
+# LLM backends the hub uses, such as for distilling knowledge. A name is unique
+# across both groups, and is all that `knowledge` names.
 # ---------------------------------------------------------------------------
-llm_backends:
-  central:
-    type: openai-compatible-api
-    base_url: http://127.0.0.1:8000/v1
-    api_key_env: CENTRAL_API_KEY   # left out when the server wants no key
-    timeout_seconds: 300
-  claude:
-    type: anthropic-api
-    base_url: https://api.anthropic.com
-    api_key_env: ANTHROPIC_API_KEY  # the variable that holds the key, never the key
-    timeout_seconds: 120
+llm:
+  direct:                        # backends the hub calls itself
+    backends:
+      central:
+        type: openai-compatible-api
+        base_url: http://127.0.0.1:8000/v1
+        api_key_env: CENTRAL_API_KEY   # left out when the server wants no key
+        timeout_seconds: 300
+      claude:
+        type: anthropic-api
+        base_url: https://api.anthropic.com
+        api_key_env: ANTHROPIC_API_KEY  # the variable that holds the key, never the key
+        timeout_seconds: 120
+  # Backends runners offer (`shares` in their runner.yaml), which the hub calls
+  # through their links; it never learns their address or key. Whoever runs
+  # that runner sees what is sent to it. `ensemble-hub runner backends` lists
+  # what runners offer now. Leave this block out for none.
+  runners:
+    backends:
+      gpu:
+        runner: ana/gpu-box        # <owner>/<name>, as the hub knows the runner
+        backend: local             # its name in that runner's llm.direct
 
 # ---------------------------------------------------------------------------
 # Knowledge: the hub's vault. What members share becomes notes here.
@@ -46,6 +59,8 @@ knowledge:
     try:                         # in order; a share uses the first that works
       - backend: central
         model: qwen3.5-72b
+      - backend: gpu
+        model: qwen3.5:9b
       - backend: claude
         model: claude-haiku-4-5
     when_none: wait              # or fail: the share goes to review/ with why
@@ -91,8 +106,9 @@ server:
     minutes: 15                  # and for how long
 roles:                           # names are yours; the first admin: `ensemble-hub user add`
   # Permissions: share, recall, tasks, admin; compute (your tasks may be worked
-  # on by others' runners that work for the hub, and you use their models) and
-  # host (connect a runner that works for the hub, for those with compute).
+  # on by others' runners that work for the hub, and your runners use the
+  # backends they share) and host (connect a runner that works for the hub, for
+  # those with compute).
   admin: [admin, share, recall, tasks, compute, host]
   member: [share, recall, tasks, compute]
   reader: [recall]

@@ -662,7 +662,7 @@ mod tests {
     /// The knowledge of a hub that distills on `url`, its vault in `tmp`.
     fn memory_on(tmp: &TempDir, url: &str, when_none: &str) -> Memory {
         let yaml = format!(
-            "version: 1\nowner: Ana\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: {when_none}\n    max_tokens: 500\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: closed }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles: {{ member: [share, recall] }}\n",
+            "version: 1\nowner: Ana\nllm:\n  direct:\n    backends:\n      local: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: {when_none}\n    max_tokens: 500\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: closed }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles: {{ member: [share, recall] }}\n",
             tmp.0.join("vault").display()
         );
         let hub = ensemble_config::parse_hub(

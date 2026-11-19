@@ -101,16 +101,14 @@ fn check(ctx: &Ctx) -> Result<ExitCode, String> {
     if !ensemble_knowledge::Vault::new(&knowledge.vault).exists() {
         println!("  it is not a git repository yet; `ensemble-hub serve` makes it");
     }
+    // Those of runners are reached only while the hub serves.
+    let backends = hub.llm.backends(None);
     let candidates: Vec<(&config::LlmBackend, &str)> = knowledge
         .distill
         .fallback
         .candidates
         .iter()
-        .filter_map(|c| {
-            hub.llm_backends
-                .get(&c.backend)
-                .map(|b| (b, c.model.as_str()))
-        })
+        .filter_map(|c| backends.get(&c.backend).map(|b| (b, c.model.as_str())))
         .collect();
     let distills = match ensemble_backends::resolve::Resolver::default().choose(&candidates) {
         Ok(i) => {
@@ -134,13 +132,19 @@ fn check(ctx: &Ctx) -> Result<ExitCode, String> {
     match &knowledge.recall.embed {
         None => println!("recall: by words"),
         Some(e) => {
-            let answered = match hub.llm_backends.get(&e.backend) {
+            let answered = match backends.get(&e.backend) {
                 Some(backend) => {
                     ensemble_backends::embed::embed(backend, &e.model, &["check".to_string()])
                         .map(|_| ())
                         .map_err(|e| e.to_string())
                 }
-                None => Err(format!("no backend '{}'", e.backend)),
+                None => Err(match hub.llm.runners.get(&e.backend) {
+                    Some(r) => format!(
+                        "it is runner {}'s, which the hub reaches only while it serves",
+                        r.runner
+                    ),
+                    None => format!("no backend '{}'", e.backend),
+                }),
             };
             match answered {
                 Ok(()) => println!(

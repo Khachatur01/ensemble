@@ -12,8 +12,10 @@
 //!   clone in the cache, checked and trusted per commit.
 //!
 //! The runner runs every team that is ready at once, as one [`Config`]: each
-//! name of a team (its agents, model servers, limits and gates) becomes
-//! `<team>/<name>`, so agents are named `web/coder`.
+//! name of a team (its agents, limits and gates) becomes `<team>/<name>`, so
+//! agents are named `web/coder`. A team names the LLM backends its agents run
+//! on by their names alone: the runner defines them, in runner.yaml's `llm`,
+//! so a team runs on any runner that defines the backends it names.
 
 use super::*;
 
@@ -152,12 +154,7 @@ pub fn check_new(dir: &Path, name: &str) -> Result<(), String> {
 pub fn create_pending(dir: &Path, name: &str, text: &str, by: &str) -> Result<PathBuf, String> {
     check_new(dir, name)?;
     let path = dir.join(name);
-    parse(
-        text,
-        &path.join(CONFIG_FILENAME),
-        &std::collections::BTreeMap::<String, String>::new(),
-    )
-    .map_err(|e| e.to_string())?;
+    parse(text, &path.join(CONFIG_FILENAME)).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&path).map_err(|e| format!("cannot create {}: {e}", path.display()))?;
     let written = std::fs::write(path.join(CONFIG_FILENAME), text).and_then(|()| {
         std::fs::write(
@@ -174,12 +171,19 @@ pub fn create_pending(dir: &Path, name: &str, text: &str, by: &str) -> Result<Pa
     Ok(path)
 }
 
-/// The teams `(name, config)` as one helper team: every name of a team
-/// becomes `<team>/<name>`. `source` is where they were read from.
-pub fn combine(teams: Vec<(String, Config)>, source: PathBuf) -> Config {
+/// The teams `(name, config)` as one helper team on `backends`, the runner's
+/// LLM backends, which each team was checked against
+/// ([`Config::with_backends`]): every name of a team becomes `<team>/<name>`,
+/// but for the backends, which are the runner's. `source` is where they were
+/// read from.
+pub fn combine(
+    teams: Vec<(String, Config)>,
+    backends: BTreeMap<String, LlmBackend>,
+    source: PathBuf,
+) -> Config {
     let mut out = Config {
         version: SUPPORTED_VERSION,
-        llm_backends: BTreeMap::new(),
+        llm_backends: backends,
         limits: BTreeMap::new(),
         gates: BTreeMap::new(),
         agents: BTreeMap::new(),
@@ -187,10 +191,6 @@ pub fn combine(teams: Vec<(String, Config)>, source: PathBuf) -> Config {
     };
     for (team, config) in teams {
         let named = |name: &str| format!("{team}/{name}");
-        for (name, mut backend) in config.llm_backends {
-            backend.name = named(&name);
-            out.llm_backends.insert(named(&name), backend);
-        }
         for (name, limit) in config.limits {
             out.limits.insert(named(&name), limit);
         }
@@ -200,20 +200,6 @@ pub fn combine(teams: Vec<(String, Config)>, source: PathBuf) -> Config {
         for (name, mut agent) in config.agents {
             agent.name = named(&name);
             agent.limit = agent.limit.map(|l| named(&l));
-            let fallback = match &mut agent.adapter {
-                Adapter::Direct(a) => Some(&mut a.fallback),
-                Adapter::Builtin(a) => Some(&mut a.fallback),
-                Adapter::OpenCode(OpenCodeAdapter {
-                    model: OpenCodeModel::LlmBackend(f),
-                    ..
-                }) => Some(f),
-                _ => None,
-            };
-            if let Some(fallback) = fallback {
-                for candidate in &mut fallback.candidates {
-                    candidate.backend = named(&candidate.backend);
-                }
-            }
             out.agents.insert(named(&name), agent);
         }
     }
@@ -231,21 +217,48 @@ mod tests {
     use super::*;
     use ensemble_core::workspace::testing::TempDir;
 
-    const TEAM: &str = "version: 1\nllm_backends:\n  local: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }\nlimits:\n  box: { max_concurrent: 1, budget: { type: unlimited } }\ngates:\n  test: { command: \"true\", timeout_seconds: 5 }\nagents:\n  coder:\n    prompt: Codes.\n    max_seconds: 60\n    limit: box\n    isolation: shared\n    adapter: { type: direct, try: [{ backend: local, model: small }], when_none: fail, max_tokens: 100 }\n";
+    const TEAM: &str = "version: 1\nlimits:\n  box: { max_concurrent: 1, budget: { type: unlimited } }\ngates:\n  test: { command: \"true\", timeout_seconds: 5 }\nagents:\n  coder:\n    prompt: Codes.\n    max_seconds: 60\n    limit: box\n    isolation: shared\n    adapter: { type: direct, try: [{ backend: local, model: small }], when_none: fail, max_tokens: 100 }\n";
 
     fn loads(text: &str) -> Config {
-        parse(
-            text,
-            Path::new("config.yaml"),
-            &std::collections::BTreeMap::<String, String>::new(),
-        )
-        .unwrap()
+        parse(text, Path::new("config.yaml")).unwrap()
+    }
+
+    /// The runner's backends: `local`, and `claude`, on Anthropic's API.
+    fn backends() -> BTreeMap<String, LlmBackend> {
+        let backend = |name: &str, settings| LlmBackend {
+            name: name.into(),
+            timeout_seconds: 5,
+            settings,
+        };
+        BTreeMap::from([
+            (
+                "local".to_string(),
+                backend(
+                    "local",
+                    BackendSettings::OpenAiCompatible {
+                        base_url: "http://127.0.0.1:1/v1".into(),
+                        api_key: None,
+                    },
+                ),
+            ),
+            (
+                "claude".to_string(),
+                backend(
+                    "claude",
+                    BackendSettings::Anthropic {
+                        base_url: "https://api.anthropic.com".into(),
+                        api_key: None,
+                    },
+                ),
+            ),
+        ])
     }
 
     #[test]
     fn combined_teams_name_everything_by_their_team() {
         let both = combine(
             vec![("web".into(), loads(TEAM)), ("pcb".into(), loads(TEAM))],
+            backends(),
             PathBuf::from("/teams"),
         );
         assert_eq!(both.agent_names(), vec!["pcb/coder", "web/coder"]);
@@ -255,8 +268,11 @@ mod tests {
         let Adapter::Direct(direct) = &coder.adapter else {
             panic!("a direct agent")
         };
-        assert_eq!(direct.fallback.candidates[0].backend, "web/local");
-        assert_eq!(both.llm_backends["web/local"].name, "web/local");
+        assert_eq!(
+            direct.fallback.candidates[0].backend, "local",
+            "a backend is the runner's, named alone"
+        );
+        assert_eq!(both.llm_backends["local"].name, "local");
         assert!(both.limits.contains_key("pcb/box") && both.gates.contains_key("pcb/test"));
         assert_eq!(team_of("web/coder"), Some("web"));
         assert_eq!(
@@ -265,6 +281,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_team_runs_on_the_backends_the_runner_defines() {
+        let team = loads(TEAM);
+        assert!(team.llm_backends.is_empty(), "a team defines none");
+        let on = team.clone().with_backends(backends()).unwrap();
+        assert_eq!(on.llm_backends.len(), 2);
+        let elsewhere = TEAM.replace("backend: local", "backend: gpu");
+        let err = loads(&elsewhere).with_backends(backends()).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "agents.coder.adapter.try[0]: LLM backend 'gpu' is not defined in runner.yaml's `llm`. Defined LLM backends: claude, local."
+            ),
+            "{err}"
+        );
+        let opencode = "version: 1\nlimits: {}\ngates: {}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: opencode\n      model: { type: llm_backend, try: [{ backend: claude, name: haiku, context_window: 8 }], when_none: fail }\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n";
+        let err = loads(opencode).with_backends(backends()).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "agents.coder.adapter.model.try[0]: LLM backend 'claude' is of type 'anthropic-api'"
+            ),
+            "{err}"
+        );
+    }
     #[test]
     fn the_directory_holds_teams_made_linked_pulled_and_waiting() {
         let tmp = TempDir::new();

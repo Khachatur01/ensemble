@@ -136,7 +136,7 @@ impl Memory {
             knowledge: RwLock::new(Arc::new(hub.knowledge.clone())),
             project,
             client: Mutex::new(None),
-            backends: RwLock::new(Arc::new(hub.llm_backends.clone())),
+            backends: RwLock::new(Arc::new(hub.llm.backends(None))),
             resolver: Resolver::default(),
             meaning: meaning::Meaning::default(),
         }
@@ -149,7 +149,7 @@ impl Memory {
         *self.knowledge.write().unwrap_or_else(|e| e.into_inner()) =
             Arc::new(hub.knowledge.clone());
         *self.backends.write().unwrap_or_else(|e| e.into_inner()) =
-            Arc::new(hub.llm_backends.clone());
+            Arc::new(hub.llm.backends(None));
     }
 
     pub(crate) fn backends(&self) -> Arc<BTreeMap<String, LlmBackend>> {
@@ -619,7 +619,7 @@ mod tests {
 
     pub(crate) fn memory(tmp: &TempDir) -> Memory {
         let yaml = format!(
-            "version: 1\nowner: Ana\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: closed }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles: {{ member: [share, recall] }}\n",
+            "version: 1\nowner: Ana\nllm:\n  direct:\n    backends:\n      local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: closed }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles: {{ member: [share, recall] }}\n",
             tmp.0.join("vault").display()
         );
         let hub = ensemble_config::parse_hub(

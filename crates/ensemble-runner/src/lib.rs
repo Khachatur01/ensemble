@@ -129,13 +129,29 @@ impl Ctx {
         ))
     }
 
-    /// The runner's teams, as one helper team, saying which wait for approval.
+    /// The runner's teams, as one helper team on its LLM backends, saying
+    /// which wait for approval. Those it reaches through the hub are there
+    /// only while `ensemble-runner serve` serves them; without a runner file,
+    /// there are none.
     fn teams(&self) -> Result<Config, String> {
-        let (config, waiting) = teams::load_all(self.runner_env()?.as_deref(), &SystemEnv)?;
+        let llm = self.runner_if_any()?.map(|r| r.llm).unwrap_or_default();
+        let (config, waiting) = teams::load_all(&llm, None)?;
         for line in &waiting {
             eprintln!("ensemble: {line}");
         }
         Ok(config)
+    }
+
+    /// This computer's runner, its keys read from [`Ctx::runner_env`].
+    fn runner(&self) -> Result<config::Runner, String> {
+        load_this_runner(self.runner_env()?.as_deref())
+    }
+
+    /// This computer's runner, as [`Ctx::runner`], or none without a runner
+    /// file.
+    fn runner_if_any(&self) -> Result<Option<config::Runner>, String> {
+        config::load_runner(&runner_file()?, self.runner_env()?.as_deref(), &SystemEnv)
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -145,10 +161,17 @@ fn runner_file() -> Result<PathBuf, String> {
     Ok(config::runner_path(&state::runner_config_dir()?))
 }
 
-/// This computer's runner, from its runner file.
+/// This computer's runner, from its runner file, its keys read from its
+/// `.env`.
 fn this_runner() -> Result<config::Runner, String> {
+    load_this_runner(ensemble_ops::cli::env_file(None, &state::runner_config_dir()?).as_deref())
+}
+
+/// This computer's runner, its keys read from `env_file` where the
+/// environment lacks them.
+fn load_this_runner(env_file: Option<&Path>) -> Result<config::Runner, String> {
     let path = runner_file()?;
-    config::load_runner(&path)
+    config::load_runner(&path, env_file, &SystemEnv)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| {
             format!(

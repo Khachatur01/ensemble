@@ -11,7 +11,7 @@
     settings = {
       version = 1;
       owner = "ana";
-      llm_backends.local = {
+      llm.direct.backends.local = {
         type = "openai-compatible-api";
         base_url = "http://127.0.0.1:11434/v1";
         timeout_seconds = 300;
@@ -64,15 +64,18 @@
       name = "laptop";
       works_for = "owner";
       hub = "ws://127.0.0.1:7700";
-      offers = { };
+      llm.direct = {
+        backends.local = {
+          type = "openai-compatible-api";
+          base_url = "http://127.0.0.1:11434/v1";
+          timeout_seconds = 600;
+        };
+        shares = [ ];
+        max_shared_calls = 1;
+      };
     };
     teams.web.settings = {
       version = 1;
-      llm_backends.local = {
-        type = "openai-compatible-api";
-        base_url = "http://127.0.0.1:11434/v1";
-        timeout_seconds = 600;
-      };
       limits = { };
       gates = { };
       agents.summariser = {

@@ -279,7 +279,7 @@ mod tests {
     /// one about lunch.
     fn memory_with(tmp: &TempDir, url: &str) -> Memory {
         let yaml = format!(
-            "version: 1\nowner: Ana\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall:\n    max_notes: 3\n    max_chars: 1000\n    embed: {{ backend: local, model: e, min_similarity: 0.5 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: closed }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles: {{ member: [share, recall] }}\n",
+            "version: 1\nowner: Ana\nllm:\n  direct:\n    backends:\n      local: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall:\n    max_notes: 3\n    max_chars: 1000\n    embed: {{ backend: local, model: e, min_similarity: 0.5 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: closed }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles: {{ member: [share, recall] }}\n",
             tmp.0.join("vault").display()
         );
         let hub = ensemble_config::parse_hub(

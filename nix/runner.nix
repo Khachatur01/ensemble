@@ -28,8 +28,8 @@ in
         default = null;
         description = ''
           Settings of the runner's `runner.yaml`, as Nix: any of `version`,
-          `name`, `works_for`, `workspace`, `hub` and `offers`, down to one
-          setting such as `offers.models.base_url`. They are merged into
+          `name`, `works_for`, `workspace`, `hub` and `llm`, down to one
+          setting such as `llm.direct.shares`. They are merged into
           `~/.config/ensemble/runner/runner.yaml` whenever the runner starts;
           the settings not declared here are made and changed with
           `ensemble-runner` (`ensemble-runner setup`, `ensemble-runner config
@@ -43,7 +43,11 @@ in
             name = "laptop";
             works_for = "owner";
             hub = "wss://hub.example.com";
-            offers = { };
+            llm.direct = {
+              backends = { };
+              shares = [ ];
+              max_shared_calls = 1;
+            };
           }
         '';
       };
@@ -98,7 +102,6 @@ in
             web.source = inputs.acme-web-team;
             docs.settings = {
               version = 1;
-              llm_backends = { };
               limits = { };
               gates = { };
               agents = { };
@@ -111,8 +114,8 @@ in
         type = types.nullOr types.str;
         default = null;
         description = ''
-          A file of NAME=value lines, the API keys the teams' backends name in
-          `api_key_env`, given to `ensemble-runner serve` as `--env-file`, such
+          A file of NAME=value lines, the API keys the runner's LLM backends name
+          in `api_key_env`, given to `ensemble-runner serve` as `--env-file`, such
           as a secret sops-nix or agenix puts in /run. A path as a string, so
           the keys never enter the Nix store. Null reads the runner's own
           `~/.config/ensemble/runner/.env`, when there is one.
@@ -180,7 +183,7 @@ in
           ''
             # A runner to merge into: as `ensemble-runner setup` makes one.
             if [ ! -e "$dir/runner.yaml" ]; then
-              printf 'version: 1\nname: %s\nworks_for: owner\nworkspace: ~/ensemble\noffers: {}\ninterfaces:\n  cli: {}\n' \
+              printf 'version: 1\nname: %s\nworks_for: owner\nworkspace: ~/ensemble\nllm:\n  direct:\n    backends: {}\n    shares: []\n    max_shared_calls: 1\ninterfaces:\n  cli: {}\n' \
                 "$(${pkgs.hostname}/bin/hostname -s)" > "$dir/runner.yaml"
             fi
             ${lib.getExe package} config merge ${files.runnerYaml}

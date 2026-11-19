@@ -30,17 +30,6 @@ fn claude(c: &Config, agent: &str) -> ClaudeCodeAdapter {
 /// setting is written, as it has to be.
 const REFERENCE: &str = r#"
 version: 1
-llm_backends:
-  openai-local:
-    type: openai-compatible-api
-    base_url: "http://127.0.0.1:8000/v1"
-    api_key_env: OPENAI_LOCAL_API_KEY
-    timeout_seconds: 600
-  openai-remote:
-    type: openai-compatible-api
-    base_url: "http://10.10.10.5:8000/v1"
-    api_key_env: OPENAI_REMOTE_API_KEY
-    timeout_seconds: 300
 limits: {}
 gates: {}
 agents:
@@ -93,6 +82,41 @@ agents:
       command: claude
 "#;
 
+/// The backends of the runner the teams of these tests run on: two
+/// OpenAI-compatible ones of REFERENCE's, two more and an Anthropic one of
+/// `with_fallback`'s, and Anthropic's API as `claude-api`.
+const RUNNER_BACKENDS: &str = r#"
+      openai-local: { type: openai-compatible-api, base_url: "http://127.0.0.1:8000/v1", api_key_env: OPENAI_LOCAL_API_KEY, timeout_seconds: 600 }
+      openai-remote: { type: openai-compatible-api, base_url: "http://10.10.10.5:8000/v1", api_key_env: OPENAI_REMOTE_API_KEY, timeout_seconds: 300 }
+      home: { type: openai-compatible-api, base_url: "http://127.0.0.1:1/v1", timeout_seconds: 5 }
+      central: { type: openai-compatible-api, base_url: "http://127.0.0.1:2/v1", timeout_seconds: 5 }
+      claude: { type: anthropic-api, base_url: "https://api.anthropic.com", timeout_seconds: 5 }
+      claude-api: { type: anthropic-api, base_url: "https://api.anthropic.com/", api_key_env: ANTHROPIC_API_KEY, timeout_seconds: 90 }
+"#;
+
+/// A runner without a hub whose `llm.direct.backends` are `backends`, the
+/// lines of a mapping indented six spaces, or `{}`, its keys read from `env`.
+fn runner_on(backends: &str, env: &dyn Env) -> Result<Runner, ConfigError> {
+    let backends = if backends.trim() == "{}" {
+        " {}\n".to_string()
+    } else {
+        format!("\n{}\n", backends.trim_matches('\n'))
+    };
+    parse_runner(
+        &format!(
+            "version: 1\nname: laptop\nworks_for: owner\nworkspace: /code\nllm:\n  direct:\n    backends:{backends}    shares: []\n    max_shared_calls: 1\n"
+        ),
+        Path::new("runner.yaml"),
+        env,
+    )
+}
+
+/// The team `doc` on the runner of RUNNER_BACKENDS.
+fn team(doc: &str) -> Result<Config, ConfigError> {
+    let runner = runner_on(RUNNER_BACKENDS, &env(&[])).expect("the test runner loads");
+    parse(doc, &p())?.with_backends(runner.llm.backends(None))
+}
+
 fn problems_of(err: ConfigError) -> Vec<String> {
     match err {
         ConfigError::Invalid { problems, .. } => problems,
@@ -101,12 +125,25 @@ fn problems_of(err: ConfigError) -> Vec<String> {
 }
 
 fn joined_problems(doc: &str) -> String {
-    problems_of(parse(doc, &p(), &env(&[])).unwrap_err()).join("\n")
+    problems_of(team(doc).unwrap_err()).join("\n")
 }
 
 /// The message of a document that serde refuses.
 fn refusal(doc: &str) -> String {
-    match parse(doc, &p(), &env(&[])).unwrap_err() {
+    match team(doc).unwrap_err() {
+        ConfigError::Syntax { detail, .. } => detail,
+        other => panic!("expected Syntax, got: {other}"),
+    }
+}
+
+/// The problems of the runner whose backends are `backends`.
+fn runner_problems(backends: &str) -> String {
+    problems_of(runner_on(backends, &env(&[])).unwrap_err()).join("\n")
+}
+
+/// The message of the runner whose backends serde refuses.
+fn runner_refusal(backends: &str) -> String {
+    match runner_on(backends, &env(&[])).unwrap_err() {
         ConfigError::Syntax { detail, .. } => detail,
         other => panic!("expected Syntax, got: {other}"),
     }
@@ -114,9 +151,11 @@ fn refusal(doc: &str) -> String {
 
 #[test]
 fn the_reference_config_loads() {
-    let c = parse(REFERENCE, &p(), &env(&[])).expect("reference config must load");
+    let c = parse(REFERENCE, &p()).expect("reference config must load");
+    assert!(c.llm_backends.is_empty(), "a team defines no backend");
+    let c = team(REFERENCE).unwrap();
     assert_eq!(c.version, 1);
-    assert_eq!(c.llm_backends.len(), 2);
+    assert_eq!(c.llm_backends.len(), 6, "the runner's, every one");
     assert_eq!(c.llm_backends["openai-remote"].timeout_seconds, 300);
     assert_eq!(c.agent_names(), vec!["coder", "planner", "reviewer"]);
     let coder = &c.agents["coder"];
@@ -147,16 +186,6 @@ fn a_missing_setting_is_refused_by_name_and_place() {
         ("      max_turns: 30\n", "agents.reviewer", "max_turns"),
         ("      command: claude\n", "agents.reviewer", "command"),
         (
-            "    timeout_seconds: 300\n",
-            "llm_backends",
-            "timeout_seconds",
-        ),
-        (
-            "    base_url: \"http://10.10.10.5:8000/v1\"\n",
-            "llm_backends",
-            "base_url",
-        ),
-        (
             "{ backend: openai-remote, name: qwen3-coder, context_window: 32768 }",
             "agents.coder",
             "context_window",
@@ -180,21 +209,36 @@ fn a_missing_setting_is_refused_by_name_and_place() {
 }
 
 #[test]
-fn a_config_without_its_agents_or_backends_is_refused() {
-    let detail = refusal("version: 1\ngates: {}\nagents: {}\n");
-    assert!(detail.contains("`llm_backends` is required"), "{detail}");
-    let detail = refusal("version: 1\nllm_backends: {}\nlimits: {}\ngates: {}\n");
+fn a_config_without_its_agents_is_refused_and_one_defining_backends_too() {
+    let detail = refusal("version: 1\nlimits: {}\ngates: {}\n");
     assert!(detail.contains("`agents` is required"), "{detail}");
-    let detail = refusal("version: 1\nllm_backends: {}\nlimits: {}\nagents: {}\n");
+    let detail = refusal("version: 1\nlimits: {}\nagents: {}\n");
     assert!(detail.contains("`gates` is required"), "{detail}");
-    assert!(
-        parse(
-            "version: 1\nllm_backends: {}\nlimits: {}\ngates: {}\nagents: {}\n",
-            &p(),
-            &env(&[])
-        )
-        .is_ok()
-    );
+    assert!(team("version: 1\nlimits: {}\ngates: {}\nagents: {}\n").is_ok());
+    // A team names backends; the runner defines them.
+    let detail = refusal("version: 1\nllm_backends: {}\nlimits: {}\ngates: {}\nagents: {}\n");
+    assert!(detail.contains("unknown field `llm_backends`"), "{detail}");
+}
+
+#[test]
+fn a_backend_missing_a_setting_is_refused_by_name_and_place() {
+    for (backend, key) in [
+        (
+            "      x: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\" }",
+            "timeout_seconds",
+        ),
+        (
+            "      x: { type: openai-compatible-api, timeout_seconds: 5 }",
+            "base_url",
+        ),
+    ] {
+        let detail = runner_refusal(backend);
+        assert!(
+            detail.contains("llm.direct.backends")
+                && detail.contains(&format!("`{key}` is required")),
+            "{key}: {detail}"
+        );
+    }
 }
 
 #[test]
@@ -215,7 +259,7 @@ fn a_setting_of_another_adapter_type_is_unknown_and_so_is_a_stray_context_window
 
     let provider = "model:\n        type: provider\n        name: opencode/big-pickle\n        context_window: 1\n";
     let doc = format!(
-        "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      {provider}      tools: []\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n"
+        "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      {provider}      tools: []\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n"
     );
     assert!(refusal(&doc).contains("context_window"));
 }
@@ -224,15 +268,10 @@ fn a_setting_of_another_adapter_type_is_unknown_and_so_is_a_stray_context_window
 fn an_opencode_model_is_a_provider_model_or_an_llm_backend_model() {
     let doc = |model: &str| {
         format!(
-            "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n"
+            "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n"
         )
     };
-    let c = parse(
-        &doc("{ type: provider, name: opencode/big-pickle }"),
-        &p(),
-        &env(&[]),
-    )
-    .unwrap();
+    let c = team(&doc("{ type: provider, name: opencode/big-pickle }")).unwrap();
     let oc = opencode(&c, "x");
     assert_eq!(oc.model_id(), "opencode/big-pickle");
     assert_eq!((oc.llm_backend(), oc.context_window()), (None, None));
@@ -252,7 +291,7 @@ fn an_opencode_model_is_a_provider_model_or_an_llm_backend_model() {
 /// kind that runs on a backend, with `try` and `when_none` as given.
 fn with_fallback(opencode_try: &str, direct_try: &str, when_none: &str) -> String {
     format!(
-        "version: 1\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:2/v1\", timeout_seconds: 5 }}\n  claude: {{ type: anthropic-api, base_url: \"https://api.anthropic.com\", timeout_seconds: 5 }}\nlimits: {{}}\ngates: {{}}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: opencode\n      model:\n        type: llm_backend\n        try: {opencode_try}\n        when_none: {when_none}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try: {direct_try}\n      when_none: {when_none}\n      max_tokens: 10\n"
+        "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: opencode\n      model:\n        type: llm_backend\n        try: {opencode_try}\n        when_none: {when_none}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try: {direct_try}\n      when_none: {when_none}\n      max_tokens: 10\n"
     )
 }
 
@@ -263,7 +302,7 @@ fn an_agent_lists_its_models_in_order_and_says_what_happens_when_none_works() {
         "[{ backend: home, model: small }, { backend: claude, model: haiku }]",
         "wait",
     );
-    let c = super::parse(&doc, &p(), &env(&[])).unwrap();
+    let c = team(&doc).unwrap();
     let coder = &c.agents["coder"];
     assert_eq!(
         coder.llm_backends(),
@@ -301,24 +340,26 @@ fn every_model_in_a_try_list_is_checked() {
         "{joined}"
     );
     assert!(
-        joined.contains("agents.summariser.adapter.try[1]: LLM backend 'nowhere' is not defined"),
-        "{joined}"
-    );
-    assert!(
         joined.contains("agents.summariser.adapter.try[1]: `model` is empty"),
         "{joined}"
     );
+    // Its backends are checked against the runner's once the team is valid.
+    let joined = joined_problems(&with_fallback(
+        "[{ backend: home, name: small, context_window: 8 }, { backend: claude, name: haiku, context_window: 8 }]",
+        "[{ backend: home, model: small }, { backend: nowhere, model: big }]",
+        "fail",
+    ));
+    for wanted in [
+        "agents.summariser.adapter.try[1]: LLM backend 'nowhere' is not defined in runner.yaml's `llm`",
+        "agents.coder.adapter.model.try[1]: LLM backend 'claude' is of type 'anthropic-api'",
+    ] {
+        assert!(joined.contains(wanted), "{wanted}: {joined}");
+    }
     let joined = joined_problems(&with_fallback(
         "[{ backend: home, name: small, context_window: 8 }, { backend: claude, name: haiku, context_window: 0 }]",
         "[{ backend: home, model: small }]",
         "fail",
     ));
-    assert!(
-        joined.contains(
-            "agents.coder.adapter.model.try[1]: LLM backend 'claude' is of type 'anthropic-api'"
-        ),
-        "{joined}"
-    );
     assert!(
         joined
             .contains("agents.coder.adapter.model.try[1]: `context_window` must be greater than 0"),
@@ -337,7 +378,7 @@ fn every_model_in_a_try_list_is_checked() {
 
 #[test]
 fn opencode_s_own_prompt_is_kept_or_replaced_and_only_a_prompt_replaces_it() {
-    let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
+    let c = team(REFERENCE).unwrap();
     assert_eq!(opencode(&c, "coder").system_prompt, SystemPrompt::Append);
 
     let replaced = REFERENCE.replacen("system_prompt: append", "system_prompt: replace", 1);
@@ -348,7 +389,7 @@ fn opencode_s_own_prompt_is_kept_or_replaced_and_only_a_prompt_replaces_it() {
         "{detail}"
     );
     let with_prompt = replaced.replacen("  planner:\n", "  planner:\n    prompt: You plan.\n", 1);
-    let c = parse(&with_prompt, &p(), &env(&[])).unwrap();
+    let c = team(&with_prompt).unwrap();
     assert_eq!(opencode(&c, "planner").system_prompt, SystemPrompt::Replace);
 
     let detail = refusal(&REFERENCE.replacen("system_prompt: append", "system_prompt: drop", 1));
@@ -378,7 +419,7 @@ fn an_agent_naming_an_undefined_backend_is_fatal_and_lists_the_real_ones() {
 #[test]
 fn a_backend_no_agent_uses_is_not_an_error() {
     let doc = REFERENCE.replace("backend: openai-remote", "backend: openai-local");
-    assert!(parse(&doc, &p(), &env(&[])).is_ok());
+    assert!(team(&doc).is_ok());
 }
 
 /// The keys serde accepts for `T`, read from its unknown-field error.
@@ -438,21 +479,11 @@ fn the_schema_names_exactly_the_keys_the_config_accepts() {
     );
     let defs = &schema["definitions"];
     for (def, keys, label) in [
-        (
-            "openai_compatible_api_backend",
-            accepted_keys::<RawOpenAiBackend>(),
-            "openai-compatible-api backend",
-        ),
         ("limit", accepted_keys::<RawLimit>(), "limits"),
         (
             "budget_per_hour_tokens",
             accepted_keys::<RawPerHourTokens>(),
             "per_hour_tokens budget",
-        ),
-        (
-            "anthropic_api_backend",
-            accepted_keys::<RawAnthropicBackend>(),
-            "anthropic-api backend",
         ),
         ("agent", accepted_keys::<RawAgent>(), "agents"),
         ("gate", accepted_keys::<RawGate>(), "gates"),
@@ -531,8 +562,6 @@ fn the_schema_requires_every_key_but_the_optional_two() {
         all
     };
     for (def, keys) in [
-        ("openai_compatible_api_backend", vec!["api_key_env"]),
-        ("anthropic_api_backend", vec!["api_key_env"]),
         ("agent", vec!["prompt", "max_concurrent", "budget", "limit"]),
         ("limit", vec![]),
         ("budget_per_hour_tokens", vec![]),
@@ -559,8 +588,6 @@ fn the_schemas_choices_are_the_codes() {
     let schema = schema();
     let defs = &schema["definitions"];
     let tag = |def: &str| defs[def]["properties"]["type"]["const"].clone();
-    assert_eq!(tag("openai_compatible_api_backend"), OPENAI_COMPATIBLE_API);
-    assert_eq!(tag("anthropic_api_backend"), ANTHROPIC_API);
     assert_eq!(tag("claude_code_adapter"), CLAUDE_CODE_AGENT);
     assert_eq!(tag("codex_adapter"), CODEX_AGENT);
     assert_eq!(tag("opencode_adapter"), OPENCODE_AGENT);
@@ -602,57 +629,60 @@ fn a_malformed_dotenv_line_is_reported_with_its_number() {
 #[test]
 fn an_env_file_fills_in_what_the_environment_lacks() {
     let tmp = ensemble_core::workspace::testing::TempDir::new();
-    let team = tmp.0.join("team");
-    std::fs::create_dir_all(&team).unwrap();
-    std::fs::write(team.join(CONFIG_FILENAME), REFERENCE).unwrap();
-    let vars = tmp.0.join("keys.env");
+    let path = runner_path(&tmp.0);
+    let text = format!(
+        "version: 1\nname: laptop\nworks_for: owner\nworkspace: /code\nllm:\n  direct:\n    backends:{RUNNER_BACKENDS}    shares: []\n    max_shared_calls: 1\n"
+    );
+    std::fs::write(&path, text).unwrap();
+    let vars = tmp.0.join(".env");
     std::fs::write(
         &vars,
         "OPENAI_LOCAL_API_KEY=from-file\nOPENAI_REMOTE_API_KEY=remote-file\n",
     )
     .unwrap();
-    let path = config_path(&team);
-    let key = |c: &Config, name: &str| c.llm_backends[name].settings.api_key().map(String::from);
+    let key = |r: &Runner, name: &str| r.llm.direct[name].settings.api_key().map(String::from);
 
-    let c = load(&path, Some(&vars), &env(&[])).unwrap();
-    assert_eq!(key(&c, "openai-local").as_deref(), Some("from-file"));
-    assert_eq!(key(&c, "openai-remote").as_deref(), Some("remote-file"));
+    let r = load_runner(&path, Some(&vars), &env(&[])).unwrap().unwrap();
+    assert_eq!(key(&r, "openai-local").as_deref(), Some("from-file"));
+    assert_eq!(key(&r, "openai-remote").as_deref(), Some("remote-file"));
 
     // A variable that is really set wins over the file.
-    let c = load(
+    let r = load_runner(
         &path,
         Some(&vars),
         &env(&[("OPENAI_LOCAL_API_KEY", "from-env")]),
     )
+    .unwrap()
     .unwrap();
-    assert_eq!(key(&c, "openai-local").as_deref(), Some("from-env"));
-}
+    assert_eq!(key(&r, "openai-local").as_deref(), Some("from-env"));
 
-#[test]
-fn a_dotenv_beside_the_config_is_not_read() {
-    let tmp = ensemble_core::workspace::testing::TempDir::new();
-    std::fs::write(tmp.0.join(CONFIG_FILENAME), REFERENCE).unwrap();
-    std::fs::write(tmp.0.join(".env"), "OPENAI_LOCAL_API_KEY=from-file\n").unwrap();
-    let c = load(&config_path(&tmp.0), None, &env(&[])).unwrap();
-    assert_eq!(c.llm_backends["openai-local"].settings.api_key(), None);
-}
-
-#[test]
-fn a_named_env_file_that_is_missing_is_an_error() {
-    let tmp = ensemble_core::workspace::testing::TempDir::new();
-    std::fs::write(tmp.0.join(CONFIG_FILENAME), REFERENCE).unwrap();
-    let err = load(
-        &config_path(&tmp.0),
-        Some(&tmp.0.join("nope.env")),
-        &env(&[]),
-    )
-    .unwrap_err();
+    // One named that is missing is an error.
+    let err = load_runner(&path, Some(&tmp.0.join("nope.env")), &env(&[])).unwrap_err();
     assert!(err.to_string().contains("nope.env"), "{err}");
 }
 
 #[test]
+fn a_team_reads_no_keys_even_from_a_dotenv_beside_it() {
+    let tmp = ensemble_core::workspace::testing::TempDir::new();
+    std::fs::write(tmp.0.join(CONFIG_FILENAME), REFERENCE).unwrap();
+    std::fs::write(tmp.0.join(".env"), "OPENAI_LOCAL_API_KEY=from-file\n").unwrap();
+    let c = load(&config_path(&tmp.0)).unwrap();
+    assert!(c.llm_backends.is_empty());
+}
+
+/// The sample team on the backends of the sample runner, as `ensemble-runner
+/// init --stdout` writes them.
+fn sample_team() -> Config {
+    let runner = parse_runner(runner::RUNNER_SAMPLE, Path::new("runner.yaml"), &env(&[]))
+        .expect("the sample runner loads");
+    parse(SAMPLE, &p())
+        .and_then(|c| c.with_backends(runner.llm.backends(None)))
+        .expect("the sample is a valid config on the sample runner")
+}
+
+#[test]
 fn only_agents_on_llm_backends_may_work_for_other_accounts() {
-    let c = parse(SAMPLE, &p(), &env(&[])).unwrap();
+    let c = sample_team();
     // OpenCode on an LLM backend, `direct` and `builtin`; never OpenCode on a
     // provider of its own, Codex or Claude Code, which use their CLI's login.
     assert_eq!(c.lendable_agents(), ["coder", "patcher", "summariser"]);
@@ -662,7 +692,7 @@ fn only_agents_on_llm_backends_may_work_for_other_accounts() {
 
 #[test]
 fn the_sample_loads_and_sets_every_setting_the_schema_has() {
-    let c = parse(SAMPLE, &p(), &env(&[])).expect("the sample is a valid config");
+    let c = sample_team();
     let kinds: Vec<&str> = c.agents.values().map(|a| a.kind()).collect();
     for kind in [
         CLAUDE_CODE_AGENT,
@@ -697,11 +727,6 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
             .filter(|k| !objects.iter().any(|o| o.get(k).is_some()))
             .collect()
     };
-    let backends: Vec<&serde_json::Value> =
-        doc["llm_backends"].as_object().unwrap().values().collect();
-    fn of_type<'a>(all: &[&'a serde_json::Value], kind: &str) -> Vec<&'a serde_json::Value> {
-        all.iter().copied().filter(|b| b["type"] == kind).collect()
-    }
     let agents: Vec<&serde_json::Value> = doc["agents"].as_object().unwrap().values().collect();
     let adapters = |kind: &str| -> Vec<&serde_json::Value> {
         agents
@@ -725,11 +750,6 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
             .collect()
     };
     for (def, objects) in [
-        (
-            "openai_compatible_api_backend",
-            of_type(&backends, OPENAI_COMPATIBLE_API),
-        ),
-        ("anthropic_api_backend", of_type(&backends, ANTHROPIC_API)),
         ("agent", agents.clone()),
         ("budget_unlimited", budgets("unlimited")),
         ("budget_per_hour", budgets("per_hour")),
@@ -780,7 +800,7 @@ fn a_claude_code_agent_is_what_its_adapter_says() {
             "      tools: [Read, Grep, Glob]\n      permission_mode: dontAsk\n      max_turns: 30\n      command: claude",
             "      tools: [Read, Edit, \"Bash(git diff:*)\"]\n      permission_mode: acceptEdits\n      max_turns: 9\n      command: /opt/claude",
         );
-    let c = parse(&doc, &p(), &env(&[])).unwrap();
+    let c = team(&doc).unwrap();
     let f = claude(&c, "reviewer");
     assert_eq!(f.tools, ["Read", "Edit", "Bash(git diff:*)"]);
     assert_eq!(
@@ -793,7 +813,7 @@ fn a_claude_code_agent_is_what_its_adapter_says() {
 
     // Read-only is what the config says, not something that is assumed.
     let r = REFERENCE.replace("tools: [Read, Grep, Glob]", "tools: []");
-    let c = parse(&r, &p(), &env(&[])).unwrap();
+    let c = team(&r).unwrap();
     assert!(!c.agents["reviewer"].has_tools());
 }
 
@@ -819,7 +839,6 @@ fn a_claude_code_agent_takes_one_tool_per_entry_and_a_positive_turn_count() {
 fn an_opencode_agent_checks_its_fields() {
     let doc = r#"
 version: 1
-llm_backends: {}
 limits: {}
 gates: {}
 agents:
@@ -837,7 +856,7 @@ agents:
       max_steps: 12
       command: /opt/opencode
 "#;
-    let c = parse(doc, &p(), &env(&[])).unwrap();
+    let c = team(doc).unwrap();
     let doer = opencode(&c, "doer");
     assert_eq!(doer.tools, ["read", "edit", "bash(git *)"]);
     assert_eq!(doer.max_steps, 12);
@@ -846,7 +865,6 @@ agents:
 
     let bad = r#"
 version: 1
-llm_backends: {}
 limits: {}
 gates: {}
 agents:
@@ -882,7 +900,7 @@ agents:
 #[test]
 fn on_an_llm_backend_the_model_is_the_endpoints_own_id() {
     // No provider prefix: Ensemble names the provider.
-    let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
+    let c = team(REFERENCE).unwrap();
     assert_eq!(opencode(&c, "planner").model_id(), "qwen3-coder");
 }
 
@@ -902,7 +920,7 @@ fn an_unknown_adapter_type_lists_the_known_ones() {
 #[test]
 fn isolation_is_shared_or_worktree() {
     let doc = REFERENCE.replacen("isolation: shared", "isolation: worktree", 1);
-    let c = parse(&doc, &p(), &env(&[])).unwrap();
+    let c = team(&doc).unwrap();
     assert_eq!(c.agents["planner"].isolation, Isolation::Worktree);
     let bad = REFERENCE.replacen("isolation: shared", "isolation: branch", 1);
     let detail = refusal(&bad);
@@ -914,14 +932,14 @@ fn isolation_is_shared_or_worktree() {
 
 #[test]
 fn a_budget_is_unlimited_or_a_number_of_runs_per_hour() {
-    let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
+    let c = team(REFERENCE).unwrap();
     assert_eq!(c.agents["coder"].budget, Budget::Unlimited);
     let doc = REFERENCE.replacen(
         "    budget:\n      type: unlimited\n",
         "    budget:\n      type: per_hour\n      delegations: 5\n",
         1,
     );
-    let c = parse(&doc, &p(), &env(&[])).unwrap();
+    let c = team(&doc).unwrap();
     assert_eq!(
         c.agents["planner"].budget,
         Budget::PerHour { delegations: 5 }
@@ -947,7 +965,7 @@ fn an_llm_agent_is_one_request_to_a_defined_backend() {
     let doc = format!(
         "{REFERENCE}  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: direct\n      try: [{{ backend: openai-local, model: small }}]\n      when_none: fail\n      max_tokens: 400\n"
     );
-    let c = parse(&doc, &p(), &env(&[])).unwrap();
+    let c = team(&doc).unwrap();
     let a = &c.agents["summariser"];
     assert_eq!(
         (a.kind(), a.model(), a.llm_backend()),
@@ -957,15 +975,20 @@ fn an_llm_agent_is_one_request_to_a_defined_backend() {
     assert!(!a.has_tools() && !a.can_change_files());
     let bad = doc.replace(
         "try: [{ backend: openai-local, model: small }]\n      when_none: fail\n      max_tokens: 400",
-        "try: [{ backend: nowhere, model: small }]\n      when_none: fail\n      max_tokens: 0",
+        "try: [{ backend: openai-local, model: small }]\n      when_none: fail\n      max_tokens: 0",
     );
     let joined = joined_problems(&bad);
     assert!(
-        joined.contains("LLM backend 'nowhere' is not defined"),
+        joined.contains("`max_tokens` must be greater than 0"),
         "{joined}"
     );
+    let nowhere = doc.replace(
+        "backend: openai-local, model: small",
+        "backend: nowhere, model: small",
+    );
+    let joined = joined_problems(&nowhere);
     assert!(
-        joined.contains("`max_tokens` must be greater than 0"),
+        joined.contains("LLM backend 'nowhere' is not defined"),
         "{joined}"
     );
     let tools = doc.replace(
@@ -985,70 +1008,46 @@ fn max_concurrent_must_be_positive() {
 fn max_seconds_must_be_positive() {
     let zero = REFERENCE.replace("max_seconds: 900", "max_seconds: 0");
     assert!(joined_problems(&zero).contains("`max_seconds` must be greater than 0"));
-    let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
+    let c = team(REFERENCE).unwrap();
     assert_eq!(c.agents["coder"].max_seconds, 900);
 }
 
 #[test]
-fn the_base_url_is_the_one_written_in_the_config() {
+fn the_base_url_is_the_one_written_in_the_runner() {
     // No variable overrides it: the file is the whole truth.
-    let c = parse(
-        REFERENCE,
-        &p(),
+    let r = runner_on(
+        RUNNER_BACKENDS,
         &env(&[("OPENAI_LOCAL_BASE_URL", "http://192.168.1.9:9000/v1")]),
     )
     .unwrap();
     assert_eq!(
-        c.llm_backends["openai-local"].settings.base_url(),
+        r.llm.direct["openai-local"].settings.base_url(),
         "http://127.0.0.1:8000/v1"
     );
 }
 
 #[test]
 fn api_keys_are_read_from_the_environment_never_the_file() {
-    let c = parse(
-        REFERENCE,
-        &p(),
+    let r = runner_on(
+        RUNNER_BACKENDS,
         &env(&[("OPENAI_LOCAL_API_KEY", "sk-secret")]),
     )
     .unwrap();
     assert_eq!(
-        c.llm_backends["openai-local"].settings.api_key(),
+        r.llm.direct["openai-local"].settings.api_key(),
         Some("sk-secret")
     );
     // And an unset one is simply absent, not an empty bearer token.
-    assert_eq!(c.llm_backends["openai-remote"].settings.api_key(), None);
-}
-
-#[test]
-fn a_backend_may_name_no_key_at_all() {
-    let yaml = r#"
-version: 1
-llm_backends:
-  x: { type: openai-compatible-api, base_url: "http://127.0.0.1:1/v1", timeout_seconds: 5 }
-limits: {}
-gates: {}
-agents: {}
-"#;
-    let c = parse(yaml, &p(), &env(&[])).unwrap();
-    assert_eq!(c.llm_backends["x"].settings.api_key(), None);
+    assert_eq!(r.llm.direct["openai-remote"].settings.api_key(), None);
+    // A backend may name no key at all.
+    assert_eq!(r.llm.direct["home"].settings.api_key(), None);
 }
 
 #[test]
 fn an_inline_api_key_is_refused_by_name() {
-    let yaml = r#"
-version: 1
-llm_backends:
-  x:
-    type: openai-compatible-api
-    base_url: "http://127.0.0.1:1/v1"
-    timeout_seconds: 5
-    api_key: "sk-oops"
-limits: {}
-gates: {}
-agents: {}
-"#;
-    let detail = refusal(yaml);
+    let detail = runner_refusal(
+        "      x: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5, api_key: sk-oops }",
+    );
     assert!(
         detail.contains("api_key"),
         "must name the offending key: {detail}"
@@ -1061,10 +1060,9 @@ fn the_removed_url_settings_are_unknown() {
         "base_url_env: U",
         "base_url_default: \"http://127.0.0.1:1/v1\"",
     ] {
-        let yaml = format!(
-            "version: 1\nllm_backends:\n  x:\n    type: openai-compatible-api\n    base_url: \"http://127.0.0.1:1/v1\"\n    timeout_seconds: 5\n    {key}\ngates: {{}}\nagents: {{}}\n"
-        );
-        let detail = refusal(&yaml);
+        let detail = runner_refusal(&format!(
+            "      x: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5, {key} }}"
+        ));
         assert!(detail.contains("unknown field"), "{detail}");
     }
 }
@@ -1081,53 +1079,41 @@ fn an_agent_with_an_empty_model_is_fatal() {
 
 #[test]
 fn an_unknown_backend_type_lists_the_known_ones() {
-    let yaml = r#"
-version: 1
-llm_backends:
-  x: { type: ollama }
-limits: {}
-gates: {}
-agents: {}
-"#;
-    let detail = refusal(yaml);
-    assert!(detail.contains("llm_backends.x"), "{detail}");
+    let detail = runner_refusal("      x: { type: ollama }");
+    assert!(detail.contains("llm.direct.backends.x"), "{detail}");
     assert!(detail.contains("ollama"), "{detail}");
     assert!(detail.contains(OPENAI_COMPATIBLE_API), "{detail}");
 }
 
 #[test]
-fn a_base_url_without_a_scheme_is_refused() {
-    let yaml = r#"
-version: 1
-llm_backends:
-  x: { type: openai-compatible-api, base_url: "127.0.0.1:8000/v1", timeout_seconds: 5 }
-limits: {}
-gates: {}
-agents: {}
-"#;
-    assert!(joined_problems(yaml).contains("http://"));
+fn a_base_url_without_a_scheme_or_a_zero_timeout_is_refused() {
+    let said = runner_problems(
+        "      x: { type: openai-compatible-api, base_url: \"127.0.0.1:8000/v1\", timeout_seconds: 0 }",
+    );
+    for wanted in [
+        "llm.direct.backends.x: `base_url` '127.0.0.1:8000/v1' must start with http://",
+        "llm.direct.backends.x: `timeout_seconds` must be greater than 0",
+    ] {
+        assert!(said.contains(wanted), "{wanted}: {said}");
+    }
 }
 
 #[test]
 fn trailing_slashes_are_normalised_away() {
-    let yaml = r#"
-version: 1
-llm_backends:
-  x: { type: openai-compatible-api, base_url: "http://127.0.0.1:8000/v1/", timeout_seconds: 5 }
-limits: {}
-gates: {}
-agents: {}
-"#;
-    let c = parse(yaml, &p(), &env(&[])).unwrap();
+    let r = runner_on(
+        "      x: { type: openai-compatible-api, base_url: \"http://127.0.0.1:8000/v1/\", timeout_seconds: 5 }",
+        &env(&[]),
+    )
+    .unwrap();
     assert_eq!(
-        c.llm_backends["x"].settings.base_url(),
+        r.llm.direct["x"].settings.base_url(),
         "http://127.0.0.1:8000/v1"
     );
 }
 
 #[test]
 fn an_unsupported_version_is_refused() {
-    let yaml = "version: 9\nllm_backends: {}\nlimits: {}\ngates: {}\nagents: {}\n";
+    let yaml = "version: 9\nlimits: {}\ngates: {}\nagents: {}\n";
     assert!(joined_problems(yaml).contains("version"));
 }
 
@@ -1142,8 +1128,6 @@ fn a_typo_in_an_adapter_key_is_an_error_not_a_default() {
 fn every_independent_problem_is_reported_in_one_pass() {
     let yaml = r#"
 version: 9
-llm_backends:
-  x: { type: openai-compatible-api, base_url: "nope", timeout_seconds: 0 }
 limits: {}
 gates: {}
 agents:
@@ -1161,40 +1145,27 @@ agents:
       max_steps: 1
       command: opencode
 "#;
-    let problems = problems_of(parse(yaml, &p(), &env(&[])).unwrap_err());
-    assert!(problems.len() >= 6, "expected several, got: {problems:#?}");
-}
-
-#[test]
-fn zero_timeout_is_refused() {
-    let yaml = r#"
-version: 1
-llm_backends:
-  x: { type: openai-compatible-api, base_url: "http://127.0.0.1:1/v1", timeout_seconds: 0 }
-limits: {}
-gates: {}
-agents: {}
-"#;
-    assert!(joined_problems(yaml).contains("timeout_seconds"));
+    let problems = problems_of(team(yaml).unwrap_err());
+    assert!(problems.len() >= 4, "expected several, got: {problems:#?}");
 }
 
 #[test]
 fn agents_are_found_by_name() {
-    let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
+    let c = team(REFERENCE).unwrap();
     assert_eq!(c.agent("coder").unwrap().name, "coder");
     assert!(c.agent("nope").is_none());
 }
 
 #[test]
 fn a_prompt_is_optional_and_absent_means_none() {
-    let c = parse(REFERENCE, &p(), &env(&[])).unwrap();
+    let c = team(REFERENCE).unwrap();
     assert_eq!(c.agents["coder"].prompt, None);
     let with = REFERENCE.replacen(
             "  coder:\n    max_seconds: 900\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n",
             "  coder:\n    prompt: Writes code.\n    max_seconds: 900\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n",
             1,
         );
-    let c = parse(&with, &p(), &env(&[])).unwrap();
+    let c = team(&with).unwrap();
     assert_eq!(c.agents["coder"].prompt.as_deref(), Some("Writes code."));
 }
 
@@ -1202,13 +1173,13 @@ fn a_prompt_is_optional_and_absent_means_none() {
 fn flat_team() -> String {
     let agent = "    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: { type: provider, name: opencode/m }\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n";
     format!(
-        "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates:\n  test: {{ command: make test, timeout_seconds: 5 }}\nagents:\n  coder:\n{agent}  planner:\n{agent}"
+        "version: 1\nlimits: {{}}\ngates:\n  test: {{ command: make test, timeout_seconds: 5 }}\nagents:\n  coder:\n{agent}  planner:\n{agent}"
     )
 }
 
 #[test]
 fn agents_and_gates_are_found_by_their_plain_names() {
-    let c = parse(&flat_team(), &p(), &env(&[])).unwrap();
+    let c = team(&flat_team()).unwrap();
     assert_eq!(c.agent_names(), vec!["coder", "planner"]);
     assert_eq!(c.agent("planner").unwrap().name, "planner");
     assert!(c.agent("software/planner").is_none());
@@ -1228,7 +1199,7 @@ fn agent_and_gate_names_must_not_contain_a_slash() {
 #[test]
 fn another_version_is_refused() {
     let doc = flat_team().replacen("version: 1", "version: 2", 1);
-    let joined = super::parse(&doc, &p(), &env(&[])).unwrap_err().to_string();
+    let joined = team(&doc).unwrap_err().to_string();
     assert!(joined.contains("version: 2 is not supported"), "{joined}");
 }
 
@@ -1236,7 +1207,7 @@ fn another_version_is_refused() {
 fn with_limits(agent_a: &str, agent_b: &str) -> String {
     let adapter = "    isolation: shared\n    adapter: { type: opencode, model: { type: provider, name: opencode/m }, tools: [read], system_prompt: append, max_steps: 3, command: opencode }\n";
     format!(
-        "version: 1\nllm_backends: {{}}\nlimits:\n  server:\n    max_concurrent: 1\n    budget: {{ type: per_hour_tokens, tokens: 5000 }}\ngates: {{}}\nagents:\n  a:\n    max_seconds: 60\n{agent_a}{adapter}  b:\n    max_seconds: 60\n{agent_b}{adapter}"
+        "version: 1\nlimits:\n  server:\n    max_concurrent: 1\n    budget: {{ type: per_hour_tokens, tokens: 5000 }}\ngates: {{}}\nagents:\n  a:\n    max_seconds: 60\n{agent_a}{adapter}  b:\n    max_seconds: 60\n{agent_b}{adapter}"
     )
 }
 
@@ -1244,7 +1215,7 @@ fn with_limits(agent_a: &str, agent_b: &str) -> String {
 fn agents_can_share_a_named_limit_or_write_their_own_but_not_mix() {
     let shared = "    limit: server\n";
     let own = "    max_concurrent: 3\n    budget: { type: per_hour, delegations: 4 }\n";
-    let c = parse(&with_limits(shared, own), &p(), &env(&[])).unwrap();
+    let c = team(&with_limits(shared, own)).unwrap();
     let a = &c.agents["a"];
     assert_eq!(a.limit.as_deref(), Some("server"));
     assert_eq!(a.max_concurrent, 1);
@@ -1301,7 +1272,7 @@ fn a_codex_agent_is_what_its_adapter_says_and_its_sandbox_is_one_codex_has() {
         "      type: claude-code\n      model: sonnet\n      tools: [Read, Grep, Glob]\n      permission_mode: dontAsk\n      max_turns: 30\n      command: claude",
         "      type: codex\n      model: gpt-5-codex\n      sandbox: workspace-write\n      command: /opt/codex",
     );
-    let c = parse(&doc, &p(), &env(&[])).unwrap();
+    let c = team(&doc).unwrap();
     let r = &c.agents["reviewer"];
     assert_eq!((r.kind(), r.model()), (CODEX_AGENT, "gpt-5-codex"));
     assert!(r.can_change_files() && r.has_tools());
@@ -1313,12 +1284,7 @@ fn a_codex_agent_is_what_its_adapter_says_and_its_sandbox_is_one_codex_has() {
         ),
         other => panic!("{other:?}"),
     }
-    let ro = parse(
-        &doc.replace("workspace-write", "read-only"),
-        &p(),
-        &env(&[]),
-    )
-    .unwrap();
+    let ro = team(&doc.replace("workspace-write", "read-only")).unwrap();
     assert!(!ro.agents["reviewer"].can_change_files());
 
     let bad = joined_problems(&doc.replace("workspace-write", "anything"));
@@ -1334,31 +1300,23 @@ fn a_codex_agent_is_what_its_adapter_says_and_its_sandbox_is_one_codex_has() {
 
 #[test]
 fn an_anthropic_backend_loads_and_only_an_llm_agent_may_run_on_it() {
-    let doc = format!(
-        "{}\n",
-        REFERENCE.replacen(
-            "llm_backends:\n",
-            "llm_backends:\n  claude-api:\n    type: anthropic-api\n    base_url: \"https://api.anthropic.com/\"\n    api_key_env: ANTHROPIC_API_KEY\n    timeout_seconds: 90\n",
-            1
-        )
-    );
-    let c = parse(&doc, &p(), &env(&[("ANTHROPIC_API_KEY", "sk-ant")])).unwrap();
-    let b = &c.llm_backends["claude-api"];
+    let r = runner_on(RUNNER_BACKENDS, &env(&[("ANTHROPIC_API_KEY", "sk-ant")])).unwrap();
+    let b = &r.llm.direct["claude-api"];
     assert_eq!(b.type_id(), ANTHROPIC_API);
     assert_eq!(b.settings.base_url(), "https://api.anthropic.com");
     assert_eq!(b.settings.api_key(), Some("sk-ant"));
     assert_eq!(b.timeout_seconds, 90);
 
     // An llm agent may name it.
-    let llm = doc.replace(
+    let llm = REFERENCE.replace(
         "      type: opencode\n      model:\n        type: llm_backend\n        try:\n          - { backend: openai-remote, name: qwen3-coder, context_window: 32768 }\n        when_none: fail\n      tools: [read, edit, bash]\n      system_prompt: append\n      max_steps: 30\n      command: opencode",
         "      type: direct\n      try: [{ backend: claude-api, model: claude-haiku-4-5 }]\n      when_none: fail\n      max_tokens: 500",
     );
-    let c = parse(&llm, &p(), &env(&[])).unwrap();
+    let c = team(&llm).unwrap();
     assert_eq!(c.agents["coder"].llm_backend(), Some("claude-api"));
 
     // An OpenCode agent may not: it needs an openai-compatible one.
-    let oc = doc.replace(
+    let oc = REFERENCE.replace(
         "{ backend: openai-remote, name: qwen3-coder,",
         "{ backend: claude-api, name: claude-haiku-4-5,",
     );
@@ -1377,7 +1335,7 @@ fn hub_schema() -> serde_json::Value {
     serde_json::from_str(hub::HUB_SCHEMA).expect("the hub schema is JSON")
 }
 
-const HUB: &str = "version: 1\nowner: Ana\nllm_backends:\n  local: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }\nknowledge:\n  vault: vault\n  distill:\n    try:\n      - { backend: local, model: small }\n    when_none: wait\n    max_tokens: 100\n  recall: { max_notes: 3, max_chars: 1000 }\nserver: { listen: \"127.0.0.1:7700\", registration: { type: approval, max_pending: 2 }, sessions: { hours: 1 }, lockout: { failures: 3, minutes: 1 } }\nroles:\n  member: [share, recall]\n  reader: [recall]\n";
+const HUB: &str = "version: 1\nowner: Ana\nllm:\n  direct:\n    backends:\n      local: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }\nknowledge:\n  vault: vault\n  distill:\n    try:\n      - { backend: local, model: small }\n    when_none: wait\n    max_tokens: 100\n  recall: { max_notes: 3, max_chars: 1000 }\nserver: { listen: \"127.0.0.1:7700\", registration: { type: approval, max_pending: 2 }, sessions: { hours: 1 }, lockout: { failures: 3, minutes: 1 } }\nroles:\n  member: [share, recall]\n  reader: [recall]\n";
 
 fn hub_refusal(doc: &str) -> String {
     parse_hub(doc, Path::new("/hubs/ana/hub.yaml"), &env(&[]))
@@ -1418,14 +1376,14 @@ fn an_embedding_model_is_an_openai_compatible_backend_and_a_similarity_from_0_to
         "{ backend: elsewhere, model: e, min_similarity: 0.5 }",
     ));
     assert!(
-        err.contains("'elsewhere' is not one of llm_backends"),
+        err.contains("'elsewhere' is not one of the backends of `llm`"),
         "{err}"
     );
     let err = hub_refusal(&with("{ backend: local, model: e, min_similarity: 2 }"));
     assert!(err.contains("must be from 0 to 1"), "{err}");
     let anthropic = with("{ backend: claude, model: e, min_similarity: 0.5 }").replace(
-        "llm_backends:\n",
-        "llm_backends:\n  claude: { type: anthropic-api, base_url: \"https://api.anthropic.com\", timeout_seconds: 5 }\n",
+        "    backends:\n",
+        "    backends:\n      claude: { type: anthropic-api, base_url: \"https://api.anthropic.com\", timeout_seconds: 5 }\n",
     );
     let err = hub_refusal(&anthropic);
     assert!(
@@ -1615,6 +1573,14 @@ fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
             vec!["cli", "mcp"],
         ),
         ("embed", accepted_keys::<hub::RawEmbed>(), vec![]),
+        ("llm", accepted_keys::<llm::RawHubLlm>(), vec!["runners"]),
+        ("direct", accepted_keys::<llm::RawDirect>(), vec![]),
+        (
+            "relayed_group",
+            accepted_keys::<llm::RawRelayedGroup>(),
+            vec![],
+        ),
+        ("relayed", accepted_keys::<llm::RawRelayed>(), vec![]),
         (
             "direct_candidate",
             accepted_keys::<RawDirectCandidate>(),
@@ -1657,8 +1623,11 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
     let doc: serde_json::Value = serde_norway::from_str(hub::HUB_SAMPLE).unwrap();
     let schema = hub_schema();
     let defs = &schema["definitions"];
-    let backends: Vec<&serde_json::Value> =
-        doc["llm_backends"].as_object().unwrap().values().collect();
+    let backends: Vec<&serde_json::Value> = doc["llm"]["direct"]["backends"]
+        .as_object()
+        .unwrap()
+        .values()
+        .collect();
     let of_type = |kind: &str| -> Vec<&serde_json::Value> {
         backends
             .iter()
@@ -1684,6 +1653,17 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
         ("recall", vec![&knowledge["recall"]]),
         ("embed", vec![&knowledge["recall"]["embed"]]),
         ("interfaces", vec![&doc["interfaces"]]),
+        ("llm", vec![&doc["llm"]]),
+        ("direct", vec![&doc["llm"]["direct"]]),
+        ("relayed_group", vec![&doc["llm"]["runners"]]),
+        (
+            "relayed",
+            doc["llm"]["runners"]["backends"]
+                .as_object()
+                .unwrap()
+                .values()
+                .collect(),
+        ),
         (
             "direct_candidate",
             knowledge["distill"]["try"]
@@ -1716,7 +1696,7 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
 
 #[test]
 fn a_runner_says_whom_it_works_for_and_its_sample_and_schema_agree() {
-    let runner = parse_runner(runner::RUNNER_SAMPLE, Path::new("runner.yaml")).unwrap();
+    let runner = parse_runner(runner::RUNNER_SAMPLE, Path::new("runner.yaml"), &env(&[])).unwrap();
     assert_eq!(runner.hub.as_deref(), Some("wss://hub.example.com"));
     assert_eq!(
         (runner.name.as_str(), runner.works_for),
@@ -1724,48 +1704,53 @@ fn a_runner_says_whom_it_works_for_and_its_sample_and_schema_agree() {
     );
     let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
     assert_eq!(runner.workspace, home.join("ensemble"), "~ is the home");
-    let models = runner
-        .offers
-        .models
-        .as_ref()
-        .expect("the sample offers models");
-    assert_eq!(models.names, vec!["qwen3.5:9b"]);
-    assert_eq!(models.api_key_env, None);
+    assert_eq!(runner.llm.shares, ["local"]);
+    assert_eq!(runner.llm.max_shared_calls, 1);
+    assert_eq!(
+        runner.llm.hub["team-gpu"],
+        Relayed {
+            runner: "ana/gpu-box".into(),
+            backend: "local".into()
+        }
+    );
 
     let problems = |yaml: &str| {
-        parse_runner(yaml, Path::new("runner.yaml"))
+        parse_runner(yaml, Path::new("runner.yaml"), &env(&[]))
             .unwrap_err()
             .to_string()
     };
-    let said = problems(
-        "version: 1\nname: a/b\nworks_for: hub\nworkspace: \"\"\nhub: http://hub\noffers:\n  models: { base_url: localhost, timeout_seconds: 0, names: [] }\n",
-    );
+    const NO_LLM: &str = "llm: { direct: { backends: {}, shares: [], max_shared_calls: 1 } }\n";
+    let said = problems(&format!(
+        "version: 1\nname: a/b\nworks_for: hub\nworkspace: \"\"\nhub: http://hub\n{NO_LLM}"
+    ));
     for wanted in [
         "name: 'a/b'",
         "workspace: is empty",
         "hub: 'http://hub' must start with ws://",
-        "offers.models.base_url",
-        "timeout_seconds",
-        "offers.models.names",
     ] {
         assert!(said.contains(wanted), "{wanted}: {said}");
     }
-    let said = problems(
-        "version: 1\nname: box\nworks_for: hub\nworkspace: /code\noffers:\n  models: { base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5, names: [small] }\n",
-    );
+    let said = problems(&format!(
+        "version: 1\nname: box\nworks_for: hub\nworkspace: /code\n{NO_LLM}"
+    ));
     assert!(
         said.contains("works_for: a runner works for the accounts of a hub, and there is no `hub`"),
         "{said}"
     );
-    assert!(said.contains("offers: a runner offers"), "{said}");
-    let said =
-        problems("version: 1\nname: box\nworks_for: everyone\nworkspace: /code\noffers: {}\n");
+    let said = problems(&format!(
+        "version: 1\nname: box\nworks_for: everyone\nworkspace: /code\n{NO_LLM}"
+    ));
     assert!(said.contains("owner") && said.contains("hub"), "{said}");
-    let said = problems("version: 1\nname: box\nworkspace: /code\noffers: {}\n");
+    let said = problems(&format!(
+        "version: 1\nname: box\nworkspace: /code\n{NO_LLM}"
+    ));
     assert!(said.contains("works_for"), "nothing has a default: {said}");
+    let said = problems("version: 1\nname: box\nworks_for: owner\nworkspace: /code\n");
+    assert!(said.contains("`llm` is required"), "{said}");
     let bare = parse_runner(
-        "version: 1\nname: box\nworks_for: owner\nworkspace: work\noffers: {}\n",
+        &format!("version: 1\nname: box\nworks_for: owner\nworkspace: work\n{NO_LLM}"),
         Path::new("/home/ana/.config/ensemble/runner/runner.yaml"),
+        &env(&[]),
     )
     .unwrap();
     assert_eq!(
@@ -1773,9 +1758,9 @@ fn a_runner_says_whom_it_works_for_and_its_sample_and_schema_agree() {
         Path::new("/home/ana/.config/ensemble/runner/work"),
         "a relative path is beside the file"
     );
-    assert_eq!(bare.offers, runner::Offers { models: None });
+    assert!(bare.llm.direct.is_empty() && bare.llm.hub.is_empty() && bare.llm.shares.is_empty());
     assert!(
-        load_runner(Path::new("/nonexistent/runner.yaml"))
+        load_runner(Path::new("/nonexistent/runner.yaml"), None, &env(&[]))
             .unwrap()
             .is_none()
     );
@@ -1790,20 +1775,152 @@ fn a_runner_says_whom_it_works_for_and_its_sample_and_schema_agree() {
         accepted_keys::<interfaces::RawRunnerInterfaces>()
     );
     assert_eq!(
-        schema_keys(&schema["properties"]["offers"]),
-        accepted_keys::<runner::RawOffers>()
-    );
-    assert_eq!(
         schema["properties"]["works_for"]["enum"],
         serde_json::json!(["owner", "hub"])
     );
-    let models_keys = accepted_keys::<runner::RawOfferedModels>();
-    assert_eq!(schema_keys(&defs["models"]), models_keys);
-    let mut required = models_keys.clone();
-    required.retain(|k| k != "api_key_env");
-    assert_eq!(schema_required(&defs["models"]), required);
+    for (def, keys, optional) in [
+        ("llm", accepted_keys::<llm::RawRunnerLlm>(), vec!["hub"]),
+        ("direct", accepted_keys::<llm::RawRunnerDirect>(), vec![]),
+        (
+            "relayed_group",
+            accepted_keys::<llm::RawRelayedGroup>(),
+            vec![],
+        ),
+        ("relayed", accepted_keys::<llm::RawRelayed>(), vec![]),
+        (
+            "openai_compatible_api_backend",
+            accepted_keys::<RawOpenAiBackend>(),
+            vec!["api_key_env"],
+        ),
+        (
+            "anthropic_api_backend",
+            accepted_keys::<RawAnthropicBackend>(),
+            vec!["api_key_env"],
+        ),
+    ] {
+        assert_eq!(schema_keys(&defs[def]), keys, "{def}");
+        let mut required = keys.clone();
+        required.retain(|k| !optional.contains(&k.as_str()));
+        assert_eq!(schema_required(&defs[def]), required, "{def} required");
+    }
+    let tag = |def: &str| defs[def]["properties"]["type"]["const"].clone();
+    assert_eq!(tag("openai_compatible_api_backend"), OPENAI_COMPATIBLE_API);
+    assert_eq!(tag("anthropic_api_backend"), ANTHROPIC_API);
+    // The sample sets every setting of a backend.
+    let doc: serde_json::Value = serde_norway::from_str(runner::RUNNER_SAMPLE).unwrap();
+    let backends: Vec<&serde_json::Value> = doc["llm"]["direct"]["backends"]
+        .as_object()
+        .unwrap()
+        .values()
+        .collect();
+    for (def, kind) in [
+        ("openai_compatible_api_backend", OPENAI_COMPATIBLE_API),
+        ("anthropic_api_backend", ANTHROPIC_API),
+    ] {
+        let of_type: Vec<_> = backends.iter().filter(|b| b["type"] == kind).collect();
+        let missing: Vec<String> = schema_keys(&defs[def])
+            .into_iter()
+            .filter(|k| !of_type.iter().any(|o| o.get(k).is_some()))
+            .collect();
+        assert_eq!(missing, Vec::<String>::new(), "{def}");
+    }
     let id = schema["$id"].as_str().unwrap();
     assert!(runner::RUNNER_SAMPLE.starts_with(&format!("# yaml-language-server: $schema={id}")));
+}
+
+/// A runner of `hub` with the `llm` block `llm`.
+fn runner_llm(llm: &str, hub: bool) -> Result<Runner, ConfigError> {
+    let hub = if hub {
+        "hub: wss://hub.example.com\n"
+    } else {
+        ""
+    };
+    parse_runner(
+        &format!("version: 1\nname: box\nworks_for: owner\nworkspace: /code\n{hub}llm:\n{llm}"),
+        Path::new("runner.yaml"),
+        &env(&[]),
+    )
+}
+
+#[test]
+fn a_runner_shares_its_openai_compatible_backends_and_reaches_others_through_its_hub() {
+    let llm = "  direct:\n    backends:\n      local: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }\n      claude: { type: anthropic-api, base_url: \"https://api.anthropic.com\", timeout_seconds: 5 }\n    shares: [local]\n    max_shared_calls: 2\n  hub:\n    backends:\n      gpu: { runner: ana/gpu-box, backend: local }\n";
+    let r = runner_llm(llm, true).unwrap();
+    assert_eq!(r.llm.shared().len(), 1);
+    assert_eq!(r.llm.shared()[0].name, "local");
+    // Without a relay to serve them at, the hub's backends are not there yet.
+    assert_eq!(
+        r.llm.backends(None).keys().collect::<Vec<_>>(),
+        ["claude", "local"]
+    );
+    let at = RelayAt {
+        base_url: "http://127.0.0.1:4000".into(),
+        key: "k".into(),
+    };
+    let all = r.llm.backends(Some(&at));
+    let gpu = &all["gpu"];
+    assert_eq!(gpu.type_id(), OPENAI_COMPATIBLE_API);
+    assert_eq!(gpu.settings.base_url(), "http://127.0.0.1:4000/gpu");
+    assert_eq!(gpu.settings.api_key(), Some("k"));
+
+    let said = runner_llm(llm, false).unwrap_err().to_string();
+    assert!(
+        said.contains("llm.direct.shares: a runner offers its backends through a hub"),
+        "{said}"
+    );
+    assert!(
+        said.contains("llm.hub: these backends are reached through a hub"),
+        "{said}"
+    );
+
+    let said = runner_llm(
+        &llm.replace("shares: [local]", "shares: [claude, nowhere, local, local]")
+            .replace("max_shared_calls: 2", "max_shared_calls: 0")
+            .replace("gpu: { runner: ana/gpu-box", "local: { runner: gpu-box"),
+        true,
+    )
+    .unwrap_err()
+    .to_string();
+    for wanted in [
+        "llm.direct.shares: 'claude' is not an openai-compatible-api backend",
+        "llm.direct.shares: 'nowhere' is not one of llm.direct.backends",
+        "llm.direct.shares: 'local' is listed twice",
+        "llm.direct: `max_shared_calls` must be greater than 0",
+        "llm.hub.backends.local: llm.direct has a backend 'local' too",
+        "llm.hub.backends.local.runner: 'gpu-box' must be a runner as the hub knows it",
+    ] {
+        assert!(said.contains(wanted), "{wanted}: {said}");
+    }
+}
+
+#[test]
+fn a_hub_reaches_backends_runners_share_and_names_them_alone() {
+    let doc = HUB
+        .replace(
+            "knowledge:\n",
+            "  runners:\n    backends:\n      gpu: { runner: ana/gpu-box, backend: local }\nknowledge:\n",
+        )
+        .replace(
+            "      - { backend: local, model: small }\n",
+            "      - { backend: gpu, model: big }\n      - { backend: local, model: small }\n",
+        )
+        .replace(
+            "  recall: { max_notes: 3, max_chars: 1000 }\n",
+            "  recall: { max_notes: 3, max_chars: 1000, embed: { backend: gpu, model: e, min_similarity: 0.5 } }\n",
+        );
+    let hub = parse_hub(&doc, Path::new("hub.yaml"), &env(&[])).unwrap();
+    assert_eq!(hub.llm.runners["gpu"].runner, "ana/gpu-box");
+    assert_eq!(hub.knowledge.distill.backend(), "gpu");
+    assert_eq!(
+        hub.llm.backends(None).len(),
+        1,
+        "its own alone, until it serves the rest"
+    );
+    let said = hub_refusal(&doc.replace("gpu: { runner", "local: { runner"));
+    assert!(
+        said.contains("llm.runners.backends.local: llm.direct has a backend 'local' too"),
+        "{said}"
+    );
 }
 
 #[test]
@@ -1811,7 +1928,7 @@ fn a_builtin_agent_runs_on_llm_backends_with_tools_it_has() {
     let doc = format!(
         "{REFERENCE}  fixer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: builtin\n      try:\n        - backend: openai-local\n          model: small\n          context_window: 32768\n      when_none: fail\n      tools: [read, grep]\n      max_steps: 10\n      max_tokens: 400\n"
     );
-    let c = parse(&doc, &p(), &env(&[])).unwrap();
+    let c = team(&doc).unwrap();
     let a = &c.agents["fixer"];
     assert_eq!(
         (a.kind(), a.model(), a.llm_backend()),
@@ -1821,7 +1938,7 @@ fn a_builtin_agent_runs_on_llm_backends_with_tools_it_has() {
     assert_eq!(a.context_window(), Some(32768));
     assert!(a.has_tools() && !a.can_change_files());
     let writes = doc.replace("tools: [read, grep]", "tools: [read, edit]");
-    assert!(parse(&writes, &p(), &env(&[])).unwrap().agents["fixer"].can_change_files());
+    assert!(team(&writes).unwrap().agents["fixer"].can_change_files());
 
     let bad = doc
         .replace("tools: [read, grep]", "tools: [read, read, browse]")
@@ -1843,9 +1960,10 @@ fn the_command_line_is_on_unless_interfaces_says_otherwise_and_one_must_be() {
     let runner = |interfaces: &str| {
         parse_runner(
             &format!(
-                "version: 1\nname: laptop\nworks_for: owner\nworkspace: /code\noffers: {{}}\n{interfaces}"
+                "version: 1\nname: laptop\nworks_for: owner\nworkspace: /code\nllm: {{ direct: {{ backends: {{}}, shares: [], max_shared_calls: 1 }} }}\n{interfaces}"
             ),
             Path::new("runner.yaml"),
+            &env(&[]),
         )
     };
     assert!(runner("").unwrap().interfaces.cli, "left out: on");

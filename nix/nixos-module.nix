@@ -68,7 +68,7 @@ in
         default = null;
         description = ''
           Settings of the hub's `hub.yaml`, as Nix: any of `version`, `owner`,
-          `llm_backends`, `knowledge`, `server`, `roles` and `tasks`, down to
+          `llm`, `knowledge`, `server`, `roles` and `tasks`, down to
           one setting such as `server.listen`. They are merged into the hub's
           `hub.yaml` whenever it starts; the rest is made and changed with
           `ensemble-hub init` and `ensemble-hub config set`, which refuse to
@@ -80,7 +80,7 @@ in
           {
             version = 1;
             owner = "acme";
-            llm_backends.central = {
+            llm.direct.backends.central = {
               type = "openai-compatible-api";
               base_url = "http://127.0.0.1:8000/v1";
               timeout_seconds = 300;

@@ -142,17 +142,20 @@ impl Ensemble {
         }
     }
 
-    /// The backends and models of `agent`'s `try` list, in order. A backend
-    /// the config does not define is left out; validation refuses one anyway.
+    /// The backends and models of `agent`'s `try` list, in order, and the
+    /// place of each in the list. A backend the config does not have is left
+    /// out: one of the runner's reached through the hub, while nothing serves
+    /// it.
     fn candidates<'a>(
         config: &'a Config,
         agent: &'a AgentConfig,
-    ) -> Vec<(&'a LlmBackend, &'a str)> {
+    ) -> (Vec<(&'a LlmBackend, &'a str)>, Vec<usize>) {
         agent
             .llm_backends()
             .into_iter()
-            .filter_map(|(b, m)| config.llm_backends.get(b).map(|b| (b, m)))
-            .collect()
+            .enumerate()
+            .filter_map(|(i, (b, m))| config.llm_backends.get(b).map(|b| ((b, m), i)))
+            .unzip()
     }
 
     /// `agent` bound to the model a run uses now, and a note when that is not
@@ -165,12 +168,16 @@ impl Ensemble {
         let Some(fallback) = agent.fallback() else {
             return Ok((Cow::Borrowed(agent), None));
         };
-        let candidates = Self::candidates(config, agent);
-        match self.resolver.choose(&candidates) {
+        let (candidates, places) = Self::candidates(config, agent);
+        match self.resolver.choose(&candidates).map(|i| places[i]) {
             Ok(0) => Ok((Cow::Owned(agent.bound_to(0)), None)),
             Ok(i) => Ok((
                 Cow::Owned(agent.bound_to(i)),
-                Some(format!("fallback {} of {}", i + 1, candidates.len())),
+                Some(format!(
+                    "fallback {} of {}",
+                    i + 1,
+                    fallback.candidates.len()
+                )),
             )),
             Err(refusals) => Err(RouteError::NoBackend {
                 agent: agent.name.clone(),
@@ -206,7 +213,8 @@ impl Ensemble {
         let config = self.config();
         let agent = config.agent(name)?;
         agent.fallback().filter(|f| f.candidates.len() > 1)?;
-        match self.resolver.known(&Self::candidates(&config, agent))? {
+        let (candidates, places) = Self::candidates(&config, agent);
+        match self.resolver.known(&candidates)?.map(|i| places[i]) {
             Ok(0) => None,
             Ok(_) => Some("on a fallback model"),
             Err(()) => Some("no model reachable"),
@@ -218,8 +226,10 @@ impl Ensemble {
     pub fn probe(&self, name: &str) -> Result<usize, RouteError> {
         let config = self.config();
         let agent = Self::resolve(&config, name)?;
+        let (candidates, places) = Self::candidates(&config, agent);
         self.resolver
-            .choose(&Self::candidates(&config, agent))
+            .choose(&candidates)
+            .map(|i| places[i])
             .map_err(|refusals| RouteError::NoBackend {
                 agent: agent.name.clone(),
                 refusals,
@@ -620,11 +630,6 @@ mod tests {
         let yaml = format!(
             r#"
 version: 1
-llm_backends:
-  local:
-    type: openai-compatible-api
-    base_url: "http://127.0.0.1:9/v1"
-    timeout_seconds: 600
 limits: {{}}
 gates: {{}}
 agents:
@@ -669,8 +674,14 @@ agents:
       command: "{program}"
 "#
         );
-        let cfg =
-            config::parse(&yaml, std::path::Path::new("config.yaml"), &BTreeMap::new()).unwrap();
+        let cfg = config::parse(&yaml, std::path::Path::new("config.yaml"))
+            .and_then(|c| {
+                c.with_backends(BTreeMap::from([(
+                    "local".to_string(),
+                    LlmBackend::openai("local", "http://127.0.0.1:9/v1", 600),
+                )]))
+            })
+            .unwrap();
         Ensemble::new(cfg, workdir)
     }
 
@@ -685,10 +696,19 @@ agents:
     /// A `direct` agent that tries `home`, then `central`, in a fresh folder.
     fn with_fallback(home: &str, central: &str, when_none: &str) -> (Ensemble, TempDir) {
         let yaml = format!(
-            "version: 1\nllm_backends:\n  home: {{ type: openai-compatible-api, base_url: \"{home}\", timeout_seconds: 5 }}\n  central: {{ type: openai-compatible-api, base_url: \"{central}\", timeout_seconds: 5 }}\nlimits: {{}}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ backend: home, model: small }}\n        - {{ backend: central, model: big }}\n      when_none: {when_none}\n      max_tokens: 10\n"
+            "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ backend: home, model: small }}\n        - {{ backend: central, model: big }}\n      when_none: {when_none}\n      max_tokens: 10\n"
         );
-        let cfg =
-            config::parse(&yaml, std::path::Path::new("config.yaml"), &BTreeMap::new()).unwrap();
+        let cfg = config::parse(&yaml, std::path::Path::new("config.yaml"))
+            .and_then(|c| {
+                c.with_backends(BTreeMap::from([
+                    ("home".to_string(), LlmBackend::openai("home", home, 5)),
+                    (
+                        "central".to_string(),
+                        LlmBackend::openai("central", central, 5),
+                    ),
+                ]))
+            })
+            .unwrap();
         let tmp = TempDir::new();
         let e = Ensemble::new(cfg, Some(tmp.0.clone())).with_state(tmp.0.join("state"));
         (e, tmp)

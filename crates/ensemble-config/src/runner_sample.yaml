@@ -7,8 +7,9 @@
 # lend this computer's power to others. Written by `ensemble-runner setup` or
 # `ensemble-runner init` in ~/.config/ensemble/runner. A computer runs one runner.
 #
-# Nothing has a default value. Each block under `offers` may be left out, which
-# means it is not used; `offers: {}` offers nothing.
+# Nothing has a default value. Only these may be left out, because leaving
+# them out means "not used": `hub`, `llm.hub`, `interfaces`, and a backend's
+# `api_key_env`.
 
 version: 1
 
@@ -17,7 +18,7 @@ name: laptop                     # its name; a hub knows it as <you>/laptop
 # owner: it works for you alone. hub: also on the tasks of everyone whose role
 # on the hub has `compute`, when no runner of their own with the agent takes
 # them; your role needs `host`. It works others' tasks only with the agents of
-# its teams that run on models from llm_backends, never on your agent CLI's
+# its teams that run on models of LLM backends, never on your agent CLI's
 # own login or subscription, and in their own folder of the workspace,
 # .for/<account>/<project>. You can see the code it works on.
 works_for: owner
@@ -31,14 +32,52 @@ workspace: ~/ensemble
 
 hub: wss://hub.example.com       # the hub server it connects to (`ensemble-runner login` first); leave out for none
 
-offers:
-  # Models an OpenAI-compatible server here serves, reached through the hub at
-  # https://<hub>/nodes/v1 with an access token as the API key: by you, and
-  # with `works_for: hub` by everyone whose role has `compute`.
-  models:
-    base_url: http://127.0.0.1:11434/v1
-    timeout_seconds: 600           # the most one request may take
-    names: [qwen3.5:9b]            # the models offered, as the server names them
+# The LLM backends your teams' agents run on. A team names a backend by its
+# name alone, so a team runs on any runner that defines the backends it names:
+# the endpoints and keys are this computer's, never the team's. A name is unique
+# across both groups.
+llm:
+  direct:                          # backends this computer calls itself
+    backends:
+      local:
+        # Any POST /chat/completions endpoint: llama-server, vLLM, Ollama,
+        # Unsloth, a hosted API. This is Ollama's.
+        type: openai-compatible-api
+        base_url: "http://127.0.0.1:11434/v1"
+        # The NAME of the variable holding the API key, in the environment or
+        # ~/.config/ensemble/runner/.env. Keys never go in here. Leave it out
+        # when the endpoint wants none.
+        api_key_env: OPENAI_LOCAL_API_KEY
+        timeout_seconds: 600         # the most one request may take
+      # A bigger model server your company runs.
+      central:
+        type: openai-compatible-api
+        base_url: "https://llm.example.com/v1"
+        api_key_env: CENTRAL_LLM_API_KEY
+        timeout_seconds: 600
+      # Anthropic's own API, without /v1. Only a `direct` agent can run on it.
+      claude-api:
+        type: anthropic-api
+        base_url: "https://api.anthropic.com"
+        api_key_env: ANTHROPIC_API_KEY
+        timeout_seconds: 120
+    # The backends it offers through the hub, to the hub and to other runners:
+    # OpenAI-compatible ones only. With `works_for: owner`, to your other
+    # runners and the hub; with `works_for: hub`, also to everyone whose role
+    # has `compute`. They never learn its address or key, but whoever uses it
+    # sends it their prompts. [] offers nothing.
+    shares: [local]
+    # The most calls of others to them at once; the hub keeps the rest waiting
+    # for up to 10 seconds, then says it is busy, and they try the next model
+    # of their list.
+    max_shared_calls: 1
+  # Backends other runners offer, reached through the hub: each looks like any
+  # OpenAI-compatible backend to your agents. Leave this block out for none.
+  hub:
+    backends:
+      team-gpu:
+        runner: ana/gpu-box          # <owner>/<name>, as the hub knows the runner
+        backend: local               # its name in that runner's llm.direct
 
 # How the runner is managed. Left out, the command line is on.
 interfaces:

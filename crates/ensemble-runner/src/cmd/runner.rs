@@ -198,17 +198,8 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
 
 /// The runner, as runner.yaml says now, until it stops or starts again.
 fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
-    let path = runner_file()?;
-    let runner = config::load_runner(&path)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| {
-            format!(
-                "serve: no runner file at {}; `ensemble-runner init` writes one",
-                path.display()
-            )
-        })?;
-    let (team, waiting) = teams::load_all(ctx.runner_env()?.as_deref(), &SystemEnv)
-        .map_err(|e| format!("serve: {e}"))?;
+    let runner = ctx.runner().map_err(|e| format!("serve: {e}"))?;
+    let (team, waiting) = teams::load_all(&runner.llm, None).map_err(|e| format!("serve: {e}"))?;
     let say = |line: &str| eprintln!("ensemble: {line}");
     for line in &waiting {
         say(line);
@@ -225,15 +216,8 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
     };
     // What `ensemble-runner …` asks of it while it runs.
     let operations = operations();
-    let daemon = daemon::Daemon::new(
-        runner.clone(),
-        hub.clone(),
-        team.clone(),
-        ctx.runner_env()?,
-        &operations,
-        &say,
-    )
-    .map_err(|e| format!("serve: {e}"))?;
+    let daemon = daemon::Daemon::new(runner.clone(), hub.clone(), team.clone(), &operations, &say)
+        .map_err(|e| format!("serve: {e}"))?;
     let worker = hub.as_ref().map(|(url, token)| {
         crate::worker::Worker::new(url, token.clone(), runner.clone(), team.clone())
     });
@@ -280,12 +264,13 @@ type Relink = dyn Fn() -> Result<String, String> + Send + Sync;
 /// runner.yaml, checked as a runner before it is written.
 fn runner_settings() -> Result<SettingsFile, String> {
     let path = runner_file()?;
+    let env_file = ensemble_ops::cli::env_file(None, &state::runner_config_dir()?);
     let checked = path.clone();
     Ok(SettingsFile::new(
         path,
         "`ensemble-runner setup`",
         move |text| {
-            config::parse_runner(text, &checked)
+            config::parse_runner_with(text, &checked, env_file.as_deref(), &SystemEnv)
                 .map(|_| ())
                 .map_err(|e| e.to_string())
         },
@@ -672,10 +657,8 @@ fn setup(
         );
     }
     println!();
-    let runner = config::load_runner(&path)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("setup: {} went away", path.display()))?;
-    let (team, waiting) = teams::load_all(ctx.runner_env()?.as_deref(), &SystemEnv)?;
+    let runner = ctx.runner().map_err(|e| format!("setup: {e}"))?;
+    let (team, waiting) = teams::load_all(&runner.llm, None)?;
     for line in &waiting {
         println!("{line}");
     }

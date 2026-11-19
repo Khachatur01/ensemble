@@ -268,7 +268,7 @@ fn add(agent: &str, new: &config::edit::NewAgent) -> Result<ExitCode, String> {
     let block = config::edit::agent_block(name, new).map_err(|e| format!("agent add: {e}"))?;
     let edited =
         config::edit::add_agent(&text, name, &block).map_err(|e| format!("agent add: {e}"))?;
-    config::parse(&edited, &path, &std::collections::BTreeMap::new()).map_err(|e| {
+    config::parse(&edited, &path).map_err(|e| {
         format!("agent add: the result would not load, so nothing was written: {e}")
     })?;
     std::fs::write(&path, edited).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
@@ -284,7 +284,7 @@ fn remove(agent: &str) -> Result<ExitCode, String> {
         .map_err(|e| format!("agent remove: cannot read {}: {e}", path.display()))?;
     let edited =
         config::edit::remove_agent(&text, name).map_err(|e| format!("agent remove: {e}"))?;
-    config::parse(&edited, &path, &std::collections::BTreeMap::new()).map_err(|e| {
+    config::parse(&edited, &path).map_err(|e| {
         format!("agent remove: the result would not load, so nothing was written: {e}")
     })?;
     std::fs::write(&path, edited).map_err(|e| format!("cannot write {}: {e}", path.display()))?;

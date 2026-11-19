@@ -3,10 +3,10 @@
 use super::raw::*;
 use super::*;
 
-/// Load the helper team config at `path`. Variables the environment does not
-/// set may come from `env_file`, a file of `NAME=value` lines the caller names;
-/// nothing is read beside the config, because it can live in a shared repo.
-pub fn load(path: &Path, env_file: Option<&Path>, env: &dyn Env) -> Result<Config, ConfigError> {
+/// Load the helper team config at `path`. It names the LLM backends its
+/// agents run on, which the runner defines ([`Config::with_backends`]), and
+/// reads nothing from the environment: it may live in a shared repository.
+pub fn load(path: &Path) -> Result<Config, ConfigError> {
     if !path.exists() {
         return Err(ConfigError::NotFound {
             path: path.to_path_buf(),
@@ -16,15 +16,7 @@ pub fn load(path: &Path, env_file: Option<&Path>, env: &dyn Env) -> Result<Confi
         path: path.to_path_buf(),
         detail: e.to_string(),
     })?;
-    let file_vars = read_env_file(env_file)?;
-    parse(
-        &text,
-        path,
-        &Layered {
-            first: env,
-            then: &file_vars,
-        },
-    )
+    parse(&text, path)
 }
 
 /// The variables of the `--env-file` the caller named, or none.
@@ -43,12 +35,12 @@ pub(super) fn read_env_file(
     }
 }
 
-pub fn parse(text: &str, path: &Path, env: &dyn Env) -> Result<Config, ConfigError> {
+pub fn parse(text: &str, path: &Path) -> Result<Config, ConfigError> {
     let raw: RawConfig = serde_norway::from_str(text).map_err(|e| ConfigError::Syntax {
         path: path.to_path_buf(),
         detail: explain(&e),
     })?;
-    validate(raw, path, env)
+    validate(raw, path)
 }
 
 /// What serde said, which already says where in the document, with a missing
@@ -84,7 +76,7 @@ pub(super) fn explain(e: &serde_norway::Error) -> String {
     detail
 }
 
-pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Config, ConfigError> {
+pub(super) fn validate(raw: RawConfig, path: &Path) -> Result<Config, ConfigError> {
     let mut problems: Vec<String> = Vec::new();
 
     if raw.version != SUPPORTED_VERSION {
@@ -92,17 +84,6 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
             "version: {} is not supported; this build understands version {SUPPORTED_VERSION}",
             raw.version
         ));
-    }
-
-    // --- backends ---
-    let mut backends: BTreeMap<String, LlmBackend> = BTreeMap::new();
-    for (name, rb) in &raw.llm_backends {
-        match resolve_backend(name, rb, env) {
-            Ok(b) => {
-                backends.insert(name.clone(), b);
-            }
-            Err(mut errs) => problems.append(&mut errs),
-        }
     }
 
     // --- shared limits ---
@@ -208,16 +189,11 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
                 &at,
                 o,
                 ra.prompt.as_deref(),
-                &raw.llm_backends,
                 &mut problems,
             )),
             RawAdapter::Codex(c) => Adapter::Codex(codex_adapter(&at, c, &mut problems)),
-            RawAdapter::Direct(d) => {
-                Adapter::Direct(direct_adapter(&at, d, &raw.llm_backends, &mut problems))
-            }
-            RawAdapter::Builtin(b) => {
-                Adapter::Builtin(builtin_adapter(&at, b, &raw.llm_backends, &mut problems))
-            }
+            RawAdapter::Direct(d) => Adapter::Direct(direct_adapter(&at, d, &mut problems)),
+            RawAdapter::Builtin(b) => Adapter::Builtin(builtin_adapter(&at, b, &mut problems)),
         };
         agents.insert(
             name.clone(),
@@ -234,22 +210,10 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
         );
     }
 
-    // A backend nothing uses is not an error — it is a spare, and deleting it
-    // from a shared config is how you break someone else's setup. Say so once
-    // and carry on.
-    for name in backends.keys() {
-        let used = agents
-            .values()
-            .any(|a| a.llm_backends().iter().any(|(b, _)| b == name));
-        if !used {
-            eprintln!("ensemble: note: LLM backend '{name}' is defined but no agent uses it");
-        }
-    }
-
     if problems.is_empty() {
         Ok(Config {
             version: raw.version,
-            llm_backends: backends,
+            llm_backends: BTreeMap::new(),
             limits,
             gates,
             agents,
@@ -266,7 +230,6 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
 pub(super) fn direct_adapter(
     at: &str,
     ad: &RawDirectAdapter,
-    declared: &BTreeMap<String, RawLlmBackend>,
     problems: &mut Vec<String>,
 ) -> DirectAdapter {
     if ad.candidates.is_empty() {
@@ -277,9 +240,6 @@ pub(super) fn direct_adapter(
     let mut candidates = Vec::new();
     for (i, c) in ad.candidates.iter().enumerate() {
         let here = format!("{at}.try[{i}]");
-        if !declared.contains_key(&c.backend) {
-            problems.push(undefined_backend(&here, &c.backend, declared));
-        }
         if c.model.trim().is_empty() {
             problems.push(format!("{here}: `model` is empty"));
         }
@@ -304,7 +264,6 @@ pub(super) fn direct_adapter(
 pub(super) fn builtin_adapter(
     at: &str,
     ad: &RawBuiltinAdapter,
-    declared: &BTreeMap<String, RawLlmBackend>,
     problems: &mut Vec<String>,
 ) -> BuiltinAdapter {
     if ad.candidates.is_empty() {
@@ -315,9 +274,6 @@ pub(super) fn builtin_adapter(
     let mut candidates = Vec::new();
     for (i, c) in ad.candidates.iter().enumerate() {
         let here = format!("{at}.try[{i}]");
-        if !declared.contains_key(&c.backend) {
-            problems.push(undefined_backend(&here, &c.backend, declared));
-        }
         if c.model.trim().is_empty() {
             problems.push(format!("{here}: `model` is empty"));
         }
@@ -358,15 +314,40 @@ pub(super) fn builtin_adapter(
         max_tokens: ad.max_tokens,
     }
 }
-/// An adapter names a backend `llm_backends` does not have.
-pub(super) fn undefined_backend(
+/// Check that each model of a `try` list at `at` names a backend of `kinds`
+/// (each name with its type), defined `where_`, and, for OpenCode, an
+/// OpenAI-compatible one.
+pub(super) fn check_candidates(
+    at: &str,
+    candidates: &[Candidate],
+    opencode: bool,
+    kinds: &BTreeMap<String, &str>,
+    where_: &str,
+    problems: &mut Vec<String>,
+) {
+    for (i, c) in candidates.iter().enumerate() {
+        let here = format!("{at}[{i}]");
+        match kinds.get(&c.backend) {
+            None => problems.push(undefined_backend(&here, &c.backend, kinds, where_)),
+            Some(&ANTHROPIC_API) if opencode => problems.push(format!(
+                "{here}: LLM backend '{}' is of type '{ANTHROPIC_API}', which OpenCode cannot use: it needs an '{OPENAI_COMPATIBLE_API}' one. Use a model of type '{PROVIDER_MODEL}', a `claude-code` agent, or a `direct` agent",
+                c.backend
+            )),
+            Some(_) => {}
+        }
+    }
+}
+
+/// A model names a backend `kinds` does not have, which are defined `where_`.
+fn undefined_backend(
     at: &str,
     backend: &str,
-    declared: &BTreeMap<String, RawLlmBackend>,
+    kinds: &BTreeMap<String, &str>,
+    where_: &str,
 ) -> String {
-    let known: Vec<&str> = declared.keys().map(String::as_str).collect();
+    let known: Vec<&str> = kinds.keys().map(String::as_str).collect();
     format!(
-        "{at}: LLM backend '{backend}' is not defined. Defined LLM backends: {}.",
+        "{at}: LLM backend '{backend}' is not defined{where_}. Defined LLM backends: {}.",
         if known.is_empty() {
             "(none)".to_string()
         } else {
@@ -379,7 +360,6 @@ pub(super) fn opencode_adapter(
     at: &str,
     ad: &RawOpenCodeAdapter,
     prompt: Option<&str>,
-    declared: &BTreeMap<String, RawLlmBackend>,
     problems: &mut Vec<String>,
 ) -> OpenCodeAdapter {
     for tool in &ad.tools {
@@ -428,15 +408,6 @@ pub(super) fn opencode_adapter(
             let mut candidates = Vec::new();
             for (i, b) in m.candidates.iter().enumerate() {
                 let here = format!("{at}.model.try[{i}]");
-                if !declared.contains_key(&b.backend) {
-                    problems.push(undefined_backend(&here, &b.backend, declared));
-                }
-                if let Some(RawLlmBackend::AnthropicApi(_)) = declared.get(&b.backend) {
-                    problems.push(format!(
-                        "{here}: LLM backend '{}' is of type '{ANTHROPIC_API}', which OpenCode cannot use: it needs an '{OPENAI_COMPATIBLE_API}' one. Use a model of type '{PROVIDER_MODEL}', a `claude-code` agent, or a `direct` agent",
-                        b.backend
-                    ));
-                }
                 // On a backend the model is the id the endpoint serves; Ensemble
                 // names the provider.
                 if b.name.trim().is_empty() {
@@ -530,12 +501,13 @@ pub(super) fn codex_adapter(
 }
 
 pub(super) fn resolve_backend(
+    at: &str,
     name: &str,
     rb: &RawLlmBackend,
     env: &dyn Env,
 ) -> Result<LlmBackend, Vec<String>> {
     match rb {
-        RawLlmBackend::OpenAiCompatibleApi(b) => resolve_openai(name, b, env),
+        RawLlmBackend::OpenAiCompatibleApi(b) => resolve_openai(at, name, b, env),
         RawLlmBackend::AnthropicApi(b) => {
             // The same checks: a URL, a timeout and an optional key.
             let as_openai = RawOpenAiBackend {
@@ -543,7 +515,7 @@ pub(super) fn resolve_backend(
                 api_key_env: b.api_key_env.clone(),
                 timeout_seconds: b.timeout_seconds,
             };
-            resolve_openai(name, &as_openai, env).map(|mut done| {
+            resolve_openai(at, name, &as_openai, env).map(|mut done| {
                 if let BackendSettings::OpenAiCompatible { base_url, api_key } = done.settings {
                     done.settings = BackendSettings::Anthropic { base_url, api_key };
                 }
@@ -555,20 +527,19 @@ pub(super) fn resolve_backend(
 
 /// Check the URL and timeout, and read the optional key from the environment.
 pub(super) fn resolve_openai(
+    at: &str,
     name: &str,
     b: &RawOpenAiBackend,
     env: &dyn Env,
 ) -> Result<LlmBackend, Vec<String>> {
     let mut problems = Vec::new();
     if b.timeout_seconds == 0 {
-        problems.push(format!(
-            "llm_backends.{name}: `timeout_seconds` must be greater than 0"
-        ));
+        problems.push(format!("{at}: `timeout_seconds` must be greater than 0"));
     }
     let base_url = b.base_url.trim();
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
         problems.push(format!(
-            "llm_backends.{name}: `base_url` '{base_url}' must start with http:// or https://"
+            "{at}: `base_url` '{base_url}' must start with http:// or https://"
         ));
     }
 
@@ -582,7 +553,7 @@ pub(super) fn resolve_openai(
             Some(k) => Some(k),
             None => {
                 eprintln!(
-                    "ensemble: note: llm_backends.{name} names ${key_var} for its API key, \
+                    "ensemble: note: {at} names ${key_var} for its API key, \
                      but it is unset; requests will be sent unauthenticated"
                 );
                 None
@@ -601,5 +572,72 @@ pub(super) fn resolve_openai(
         })
     } else {
         Err(problems)
+    }
+}
+
+impl Config {
+    /// This team on `backends`, the LLM backends of the runner that runs it,
+    /// once every model its agents name is one of them.
+    pub fn with_backends(
+        mut self,
+        backends: BTreeMap<String, LlmBackend>,
+    ) -> Result<Config, ConfigError> {
+        let kinds: BTreeMap<String, &str> = backends
+            .iter()
+            .map(|(name, b)| (name.clone(), b.type_id()))
+            .collect();
+        self.check_backends(&kinds)?;
+        self.llm_backends = backends;
+        Ok(self)
+    }
+
+    /// This team on the LLM backends of the runner whose `llm` is `llm`,
+    /// once every model its agents name is one of them: its own, and those
+    /// it reaches through the hub when it serves them at `relay`. Without a
+    /// relay those are named but not there, and a run tries the next model.
+    pub fn with_llm(
+        mut self,
+        llm: &RunnerLlm,
+        relay: Option<&RelayAt>,
+    ) -> Result<Config, ConfigError> {
+        let kinds: BTreeMap<String, &str> = crate::llm::kinds(&llm.direct, &llm.hub)
+            .into_iter()
+            .collect();
+        self.check_backends(&kinds)?;
+        self.llm_backends = llm.backends(relay);
+        Ok(self)
+    }
+
+    /// Does every model of its agents name a backend of `kinds`, each name
+    /// with its type?
+    fn check_backends(&self, kinds: &BTreeMap<String, &str>) -> Result<(), ConfigError> {
+        let mut problems = Vec::new();
+        for (name, agent) in &self.agents {
+            let Some(fallback) = agent.fallback() else {
+                continue;
+            };
+            let opencode = matches!(agent.adapter, Adapter::OpenCode(_));
+            let at = if opencode {
+                format!("agents.{name}.adapter.model.try")
+            } else {
+                format!("agents.{name}.adapter.try")
+            };
+            check_candidates(
+                &at,
+                &fallback.candidates,
+                opencode,
+                kinds,
+                " in runner.yaml's `llm`",
+                &mut problems,
+            );
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(ConfigError::Invalid {
+                path: self.source.clone(),
+                problems,
+            })
+        }
     }
 }

@@ -3,9 +3,9 @@
 //! agent and approved.
 
 use crate::cli::TeamCommand;
-use crate::{Ctx, absolute, boards, reload_runner};
+use crate::{Ctx, absolute, boards, reload_runner, this_runner};
 use crate::{remote, setup, teams};
-use ensemble_config::{self as config, Config, SystemEnv};
+use ensemble_config::{self as config, Config};
 use ensemble_ops::cli::confirm;
 use ensemble_tasks::board::Board;
 use ensemble_tasks::tasks;
@@ -21,7 +21,7 @@ pub fn run(ctx: &Ctx, command: TeamCommand) -> Result<ExitCode, String> {
         TeamCommand::Update { name, git_ref, yes } => update(&name, git_ref, yes),
         TeamCommand::Approve { name, yes } => approve(ctx, &name, yes),
         TeamCommand::Remove { name, yes } => remove(&name, yes),
-        TeamCommand::Check => check(ctx.teams()?),
+        TeamCommand::Check => check(ctx.runner_if_any()?.as_ref(), ctx.teams()?),
         TeamCommand::Schema => {
             print!("{}", config::SCHEMA);
             Ok(ExitCode::SUCCESS)
@@ -30,7 +30,7 @@ pub fn run(ctx: &Ctx, command: TeamCommand) -> Result<ExitCode, String> {
             let path = config::config_path(&teams::editable(&name)?);
             let checked = path.clone();
             let file = config::SettingsFile::new(path, "`ensemble-runner team new`", move |text| {
-                config::parse(text, &checked, &std::collections::BTreeMap::new())
+                config::parse(text, &checked)
                     .map(|_| ())
                     .map_err(|e| e.to_string())
             })
@@ -45,7 +45,7 @@ pub fn run(ctx: &Ctx, command: TeamCommand) -> Result<ExitCode, String> {
 
 /// `ensemble-runner team list`: the runner's teams, where each comes from, and
 /// its agents.
-fn list(ctx: &Ctx) -> Result<ExitCode, String> {
+fn list(_ctx: &Ctx) -> Result<ExitCode, String> {
     let list = teams::list()?;
     if list.is_empty() {
         println!(
@@ -55,14 +55,8 @@ fn list(ctx: &Ctx) -> Result<ExitCode, String> {
     }
     for team in &list {
         println!("{}  ({})", team.name, team.describe());
-        let loaded = teams::config_dir(team).and_then(|dir| {
-            config::load(
-                &config::config_path(&dir),
-                ctx.runner_env()?.as_deref(),
-                &SystemEnv,
-            )
-            .map_err(|e| e.to_string())
-        });
+        let loaded = teams::config_dir(team)
+            .and_then(|dir| config::load(&config::config_path(&dir)).map_err(|e| e.to_string()));
         match loaded {
             Ok(config) => {
                 for agent in config.agents.values() {
@@ -162,12 +156,10 @@ fn approve(ctx: &Ctx, name: &str, yes: bool) -> Result<ExitCode, String> {
         println!("'{name}' does not wait for approval.");
         return Ok(ExitCode::SUCCESS);
     }
-    let config = config::load(
-        &config::config_path(&team.path),
-        ctx.runner_env()?.as_deref(),
-        &SystemEnv,
-    )
-    .map_err(|e| format!("team approve: {e}"))?;
+    let runner = ctx.runner()?;
+    let config = config::load(&config::config_path(&team.path))
+        .and_then(|c| c.with_llm(&runner.llm, None))
+        .map_err(|e| format!("team approve: {e}"))?;
     println!(
         "{} (written by an agent)\n",
         config::config_path(&team.path).display()
@@ -200,12 +192,13 @@ fn remove(name: &str, yes: bool) -> Result<ExitCode, String> {
 /// approves, record that they trust exactly this commit.
 fn trust(url: &str, sha: &str, yes: bool) -> Result<(), String> {
     let dir = remote::fetch(url, sha)?;
-    let config = config::load(
-        &config::config_path(&dir),
-        None,
-        &std::collections::BTreeMap::<String, String>::new(),
-    )
-    .map_err(|e| format!("{url} at {sha} has no usable config: {e}"))?;
+    // On this computer's backends, when it has a runner yet.
+    let config = config::load(&config::config_path(&dir))
+        .and_then(|c| match this_runner() {
+            Ok(runner) => c.with_llm(&runner.llm, None),
+            Err(_) => Ok(c),
+        })
+        .map_err(|e| format!("{url} at {sha} has no usable config: {e}"))?;
     println!("{url} at {sha}\n");
     print!("{}", remote::describe(&config));
     println!();
@@ -226,7 +219,7 @@ fn trust(url: &str, sha: &str, yes: bool) -> Result<(), String> {
 
 /// `ensemble-runner team check`: every team, loaded and validated, reported as
 /// one helper team, with the tasks on the hub this runner cannot run.
-fn check(config: Config) -> Result<ExitCode, String> {
+fn check(runner: Option<&config::Runner>, config: Config) -> Result<ExitCode, String> {
     // Reaching here means every team already loaded and validated; loading
     // returns an error that names the team otherwise.
     if config.agents.is_empty() {
@@ -239,7 +232,7 @@ fn check(config: Config) -> Result<ExitCode, String> {
         println!("{}: ok ({})", team.name, team.describe());
     }
     println!();
-    println!("llm_backends:");
+    println!("LLM backends, of runner.yaml:");
     for (name, b) in &config.llm_backends {
         let detail = format!(
             "{}{}",
@@ -254,6 +247,12 @@ fn check(config: Config) -> Result<ExitCode, String> {
             "  {name}  [{}]  {detail}  timeout {}s",
             b.type_id(),
             b.timeout_seconds
+        );
+    }
+    for (name, r) in runner.iter().flat_map(|r| &r.llm.hub) {
+        println!(
+            "  {name}  [through the hub]  {}'s {}, while `ensemble-runner serve` runs",
+            r.runner, r.backend
         );
     }
     println!();

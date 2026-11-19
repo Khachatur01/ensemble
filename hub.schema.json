@@ -2,9 +2,9 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/hub.schema.json",
   "title": "Ensemble hub: hub.yaml",
-  "description": "A hub, in ~/.config/ensemble/hub/hub.yaml: it provides services and connects runners, and has no helper team. Always a server (`ensemble-hub serve`): accounts with roles, a knowledge vault and the models that distill it, and the issues of a tracker handed to the runners of the people they are assigned to. Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (`tasks`, and a backend's `api_key_env`).",
+  "description": "A hub, in ~/.config/ensemble/hub/hub.yaml: it provides services and connects runners, and has no helper team. Always a server (`ensemble-hub serve`): accounts with roles, a knowledge vault and the models that distill it, and the issues of a tracker handed to the runners of the people they are assigned to. Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (`tasks`, `llm.runners`, `knowledge.recall.embed`, `interfaces`, and a backend's `api_key_env`).",
   "type": "object",
-  "required": ["version", "owner", "llm_backends", "knowledge", "server", "roles"],
+  "required": ["version", "owner", "llm", "knowledge", "server", "roles"],
   "additionalProperties": false,
   "properties": {
     "version": {
@@ -16,13 +16,7 @@
       "type": "string",
       "minLength": 1
     },
-    "llm_backends": {
-      "description": "Model endpoints the hub itself uses, such as for distilling knowledge. The key is the backend's name. Separate from the helper team's, which a company may share. `{}` when there are none.",
-      "type": "object",
-      "additionalProperties": {
-        "$ref": "#/definitions/llm_backend"
-      }
-    },
+    "llm": { "$ref": "#/definitions/llm" },
     "knowledge": {
       "description": "The knowledge vault, and how shares become notes.",
       "$ref": "#/definitions/knowledge"
@@ -254,7 +248,7 @@
       "additionalProperties": false,
       "properties": {
         "backend": {
-          "description": "One of llm_backends, of type openai-compatible-api: it serves /embeddings.",
+          "description": "One of the backends of `llm`, OpenAI-compatible (of type openai-compatible-api, or reached through the hub): it serves /embeddings.",
           "type": "string",
           "minLength": 1
         },
@@ -268,6 +262,64 @@
           "type": "number",
           "minimum": 0,
           "maximum": 1
+        }
+      }
+    },
+    "llm": {
+      "description": "The LLM backends the hub uses, such as for distilling knowledge. A name is unique across both groups, and is all that `knowledge` names.",
+      "type": "object",
+      "required": ["direct"],
+      "additionalProperties": false,
+      "properties": {
+        "direct": { "$ref": "#/definitions/direct" },
+        "runners": {
+          "description": "Backends runners offer (`shares` in their runner.yaml), which the hub calls through their links; it never learns their address or key. `ensemble-hub runner backends` lists what runners offer now. Left out: none.",
+          "$ref": "#/definitions/relayed_group"
+        }
+      }
+    },
+    "direct": {
+      "description": "Backends the hub calls itself.",
+      "type": "object",
+      "required": ["backends"],
+      "additionalProperties": false,
+      "properties": {
+        "backends": {
+          "description": "The key is the backend's name: letters, digits, '-', '_' or '.'. `{}` when there are none.",
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z0-9._-]+$" },
+          "additionalProperties": { "$ref": "#/definitions/llm_backend" }
+        }
+      }
+    },
+    "relayed_group": {
+      "type": "object",
+      "required": ["backends"],
+      "additionalProperties": false,
+      "properties": {
+        "backends": {
+          "description": "The key is the backend's name here: letters, digits, '-', '_' or '.'.",
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z0-9._-]+$" },
+          "additionalProperties": { "$ref": "#/definitions/relayed" }
+        }
+      }
+    },
+    "relayed": {
+      "description": "A backend a runner offers, reached through the hub: OpenAI-compatible, as a runner offers no other kind.",
+      "type": "object",
+      "required": ["runner", "backend"],
+      "additionalProperties": false,
+      "properties": {
+        "runner": {
+          "description": "The runner that offers it, as the hub knows it: <owner>/<name>, such as ana/gpu-box.",
+          "type": "string",
+          "pattern": "^[^/\\s]+/[A-Za-z0-9._-]+$"
+        },
+        "backend": {
+          "description": "Its name in that runner's llm.direct.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$"
         }
       }
     },
@@ -349,7 +401,7 @@
       "additionalProperties": false,
       "properties": {
         "backend": {
-          "description": "Name of a backend under `llm_backends`.",
+          "description": "The name of a backend of `llm`.",
           "type": "string",
           "minLength": 1
         },

@@ -79,12 +79,17 @@ pub const WORKSPACE: &str = "~/ensemble";
 pub fn runner_file(name: &str, workspace: &str) -> Result<String, String> {
     let quoted = |s: &str| serde_json::Value::String(s.to_string()).to_string();
     let mut text = format!(
-        "{RUNNER_SCHEMA_URL_LINE}\n\n# This computer's runner, which `ensemble-runner serve` runs. `ensemble-runner\n# init --stdout` prints every setting.\n\nversion: {RUNNER_SUPPORTED_VERSION}\n\nname: {}\n\n# owner: it works for you alone. hub: also on the tasks of others on the hub\n# whose role has `compute`, with the agents of its teams on llm_backends.\nworks_for: owner\n\n# Each git repository directly inside it is a project the runner works on.\nworkspace: {}\n",
+        "{RUNNER_SCHEMA_URL_LINE}\n\n# This computer's runner, which `ensemble-runner serve` runs. `ensemble-runner\n# init --stdout` prints every setting.\n\nversion: {RUNNER_SUPPORTED_VERSION}\n\nname: {}\n\n# owner: it works for you alone. hub: also on the tasks of others on the hub\n# whose role has `compute`, with the agents of its teams on LLM backends.\nworks_for: owner\n\n# Each git repository directly inside it is a project the runner works on.\nworkspace: {}\n",
         quoted(name),
         quoted(workspace)
     );
-    text.push_str("offers: {}\n\n# How the runner is managed: `ensemble-runner …` on this computer.\ninterfaces:\n  cli: {}\n");
-    ensemble_config::parse_runner(&text, Path::new(RUNNER_FILENAME)).map_err(|e| e.to_string())?;
+    text.push_str("\n# The LLM backends its teams' agents run on, which a team names by name.\n# `ensemble-runner init --stdout` shows how each is written.\nllm:\n  direct:\n    backends: {}\n    shares: []             # those it offers through the hub\n    max_shared_calls: 1    # the most calls of others to them at once\n\n# How the runner is managed: `ensemble-runner …` on this computer.\ninterfaces:\n  cli: {}\n");
+    ensemble_config::parse_runner(
+        &text,
+        Path::new(RUNNER_FILENAME),
+        &ensemble_config::SystemEnv,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(text)
 }
 
@@ -245,7 +250,7 @@ pub fn health_finding(
                 )
             } else {
                 format!(
-                    "start the model server, or correct `base_url` and the model names in config.yaml, or drop the agents that use it: {remove}"
+                    "start the model server, or correct `base_url` in runner.yaml and the model names in config.yaml, or drop the agents that use it: {remove}"
                 )
             };
             Finding::bad(what, fix)
@@ -272,15 +277,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn loads(text: &str) -> Config {
-        parse(text, Path::new("config.yaml"), &BTreeMap::new())
-            .unwrap_or_else(|e| panic!("{e}\n{text}"))
+        parse(text, Path::new("config.yaml")).unwrap_or_else(|e| panic!("{e}\n{text}"))
     }
 
     /// A team of a coder on OpenCode and a reviewer on Claude Code.
     fn team() -> String {
         use ensemble_config::edit::{NewAgent, add_agent, agent_block};
-        let mut text =
-            String::from("version: 1\nllm_backends: {}\nlimits: {}\ngates: {}\nagents: {}\n");
+        let mut text = String::from("version: 1\nlimits: {}\ngates: {}\nagents: {}\n");
         for (name, adapter, writes) in [
             ("coder", OPENCODE_AGENT, true),
             ("reviewer", CLAUDE_CODE_AGENT, false),
@@ -304,11 +307,13 @@ mod tests {
     #[test]
     fn a_runner_file_is_written_complete_and_loads() {
         let text = runner_file("desk-2", "/code").unwrap();
-        let runner = ensemble_config::parse_runner(&text, Path::new("runner.yaml")).unwrap();
+        let runner =
+            ensemble_config::parse_runner(&text, Path::new("runner.yaml"), &BTreeMap::new())
+                .unwrap();
         assert_eq!(runner.name, "desk-2");
         assert_eq!(runner.works_for, ensemble_config::WorksFor::Owner);
         assert_eq!(runner.workspace, Path::new("/code"));
-        assert!(runner.offers.models.is_none());
+        assert!(runner.llm.direct.is_empty() && runner.llm.shares.is_empty());
         assert!(runner_file("a/b", "/code").is_err(), "a name is checked");
         assert!(runner_file("desk", "").is_err(), "a workspace is needed");
     }
@@ -317,6 +322,7 @@ mod tests {
     fn a_failed_health_check_names_the_agents_to_drop_by_their_team() {
         let c = ensemble_config::teams::combine(
             vec![("web".into(), loads(&team()))],
+            BTreeMap::new(),
             PathBuf::from("/teams"),
         );
         let failed = Err(ensemble_core::port::Error::Spawn {

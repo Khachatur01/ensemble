@@ -461,11 +461,22 @@ pub fn describe(config: &Config) -> String {
     if config.gates.is_empty() {
         out.push_str("  (none)\n");
     }
-    out.push_str("\nModel servers it sends your prompts to:\n");
-    for (name, b) in &config.llm_backends {
-        out.push_str(&format!("  {name}: {}\n", b.settings.base_url()));
+    // The team names them; the runner defines where each is.
+    let mut named: Vec<&str> = config
+        .agents
+        .values()
+        .flat_map(|a| a.llm_backends().into_iter().map(|(b, _)| b))
+        .collect();
+    named.sort_unstable();
+    named.dedup();
+    out.push_str("\nLLM backends of runner.yaml it sends your prompts to:\n");
+    for name in &named {
+        match config.llm_backends.get(*name) {
+            Some(b) => out.push_str(&format!("  {name}: {}\n", b.settings.base_url())),
+            None => out.push_str(&format!("  {name}: through the hub\n")),
+        }
     }
-    if config.llm_backends.is_empty() {
+    if named.is_empty() {
         out.push_str("  (none)\n");
     }
     if !risks.is_empty() {
@@ -536,10 +547,8 @@ mod tests {
 
     #[test]
     fn describing_a_team_lists_what_runs_and_warns_about_the_risky() {
-        let doc = "version: 1\nllm_backends: {}\nlimits: {}\ngates:\n  test: { command: \"rm -rf build && make\", timeout_seconds: 5 }\nagents:\n  doer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter: { type: claude-code, model: sonnet, tools: [Read, \"Bash(*)\"], permission_mode: bypassPermissions, max_turns: 3, command: claude }\n";
-        let config =
-            ensemble_config::parse(doc, Path::new("c.yaml"), &std::collections::BTreeMap::new())
-                .unwrap();
+        let doc = "version: 1\nlimits: {}\ngates:\n  test: { command: \"rm -rf build && make\", timeout_seconds: 5 }\nagents:\n  doer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter: { type: claude-code, model: sonnet, tools: [Read, \"Bash(*)\"], permission_mode: bypassPermissions, max_turns: 3, command: claude }\n";
+        let config = ensemble_config::parse(doc, Path::new("c.yaml")).unwrap();
         let text = describe(&config);
         assert!(text.contains("doer: runs `claude`"), "{text}");
         assert!(text.contains("test: rm -rf build && make"), "{text}");

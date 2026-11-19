@@ -5,8 +5,7 @@
 //!
 //! - The runner asks: `{"id": 1, "method": "share", "params": {...}}`.
 //! - The hub answers: `{"id": 1, "result": {...}}` or `{"id": 1, "error": "..."}`.
-//! - The hub may also tell: `{"event": "...", "data": {...}}`, unasked: a
-//!   model call for a runner that serves models.
+//! - The hub may also tell: `{"event": "...", "data": {...}}`, unasked.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -118,26 +117,17 @@ pub const TASK_METHODS: [&str; 12] = [
 ];
 
 /// This connection is a runner, said once it connects and again when its
-/// teams change: `{name, works_for, agents: [{name, about}], lends: [agents],
-/// models: [names], model_timeout_seconds}`: whom it works for (`owner` or
-/// `hub`), every agent of its teams, those it lends other accounts (its
-/// agents on `llm_backends`, when it works for the hub), and the models it
-/// serves. One that works for the hub needs the `host` permission. Answered
+/// teams change: `{name, works_for, agents: [{name, about}], lends: [agents]}`:
+/// whom it works for (`owner` or `hub`), every agent of its teams, and those
+/// it lends other accounts (its agents on LLM backends, when it works for the
+/// hub). One that works for the hub needs the `host` permission. Answered
 /// with `{runner}`, its `<owner>/<name>`.
 pub const RUNNER: &str = "runner";
 /// The runners connected now that work for this account: `{}`, answered with
-/// `{runners: [{runner, owner, works_for, agents, models}]}`: a runner of the
+/// `{runners: [{runner, owner, works_for, agents}]}`: a runner of the
 /// account's own with every agent, another's that works for the hub, when the
 /// account has `compute`, with the agents it lends.
 pub const RUNNERS: &str = "runners";
-/// From a runner answering a model call: `{call, status, content_type}`
-/// first, then `{call, chunk}` (base64) as the server sends it, then `{call,
-/// done}`; or `{call, error}`.
-pub const MODEL_REPLY: &str = "model_reply";
-
-/// Event: a request for one of the runner's models, `{call, from, path,
-/// body}`.
-pub const MODEL_CALL_EVENT: &str = "model_call";
 
 /// The most a WebSocket message may be: a model call's request, and some
 /// room.

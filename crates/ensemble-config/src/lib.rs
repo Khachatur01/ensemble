@@ -105,6 +105,19 @@ pub struct LlmBackend {
 }
 
 impl LlmBackend {
+    /// An OpenAI-compatible backend called `name` at `base_url`, without a
+    /// key.
+    pub fn openai(name: &str, base_url: &str, timeout_seconds: u64) -> LlmBackend {
+        LlmBackend {
+            name: name.to_string(),
+            timeout_seconds,
+            settings: BackendSettings::OpenAiCompatible {
+                base_url: base_url.trim_end_matches('/').to_string(),
+                api_key: None,
+            },
+        }
+    }
+
     pub fn type_id(&self) -> &'static str {
         match self.settings {
             BackendSettings::OpenAiCompatible { .. } => OPENAI_COMPATIBLE_API,
@@ -330,7 +343,8 @@ pub enum OpenCodeModel {
     /// `provider/model`, as OpenCode names it, on a provider it is already
     /// set up for.
     Provider { model: String },
-    /// Models served by [`Config::llm_backends`], in the order they are tried.
+    /// Models served by the runner's LLM backends ([`Config::llm_backends`]),
+    /// in the order they are tried.
     LlmBackend(Fallback),
 }
 
@@ -441,7 +455,7 @@ impl AgentConfig {
             _ => None,
         }
     }
-    /// Does it run only on models from `llm_backends`, never on a login or a
+    /// Does it run only on models of LLM backends, never on a login or a
     /// provider of its CLI's own? Only such an agent works for other accounts:
     /// a CLI's login is its owner's alone.
     pub fn lendable(&self) -> bool {
@@ -504,6 +518,9 @@ pub fn claude_tool_writes(tool: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub version: u32,
+    /// The LLM backends its agents may run on: those of the runner that runs
+    /// it, from runner.yaml's `llm` ([`Config::with_backends`]); none as the
+    /// team is read.
     pub llm_backends: BTreeMap<String, LlmBackend>,
     /// Shared limits, by name.
     pub limits: BTreeMap<String, Limit>,
@@ -534,8 +551,8 @@ impl Config {
         self.agents.keys().map(String::as_str).collect()
     }
 
-    /// The names of the agents that may work for other accounts: those on
-    /// `llm_backends` ([`AgentConfig::lendable`]).
+    /// The names of the agents that may work for other accounts: those on LLM
+    /// backends ([`AgentConfig::lendable`]).
     pub fn lendable_agents(&self) -> Vec<&str> {
         self.agents
             .iter()
@@ -629,6 +646,7 @@ pub mod edit;
 mod env;
 pub mod hub;
 mod interfaces;
+pub mod llm;
 mod raw;
 pub mod runner;
 pub mod settings;
@@ -643,9 +661,9 @@ pub use hub::{
 };
 pub use interfaces::{Interfaces, Mcp};
 pub(crate) use interfaces::{RawInterfaces, RawRunnerInterfaces, interfaces, runner_interfaces};
+pub use llm::{HubLlm, RelayAt, Relayed, RunnerLlm};
 pub use runner::{
-    OfferedModels, Offers, RUNNER_FILENAME, Runner, WorksFor, load_runner, parse_runner,
-    runner_path,
+    RUNNER_FILENAME, Runner, WorksFor, load_runner, parse_runner, parse_runner_with, runner_path,
 };
 pub use settings_file::{SettingsFile, WithSettings};
 pub use validate::{load, parse};

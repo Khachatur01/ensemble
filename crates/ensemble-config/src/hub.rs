@@ -7,8 +7,9 @@
 //! The same rules as `config.yaml`: no default values, unknown keys refused,
 //! secrets named by the variable that holds them.
 
-use super::raw::{RawDirectAdapter, RawLlmBackend};
-use super::validate::{direct_adapter, explain, read_env_file, resolve_backend};
+use super::llm::{RawHubLlm, hub_llm, kinds};
+use super::raw::RawDirectAdapter;
+use super::validate::{check_candidates, direct_adapter, explain, read_env_file};
 use super::*;
 use serde::Deserialize;
 
@@ -28,8 +29,9 @@ pub struct Hub {
     pub version: u32,
     /// The hub's name, for its log and its listings.
     pub owner: String,
-    /// Model endpoints the hub itself uses.
-    pub llm_backends: BTreeMap<String, LlmBackend>,
+    /// The LLM backends the hub uses: its own, and runners' it reaches over
+    /// their links.
+    pub llm: HubLlm,
     pub knowledge: Knowledge,
     /// Absent: no task inbox.
     pub tasks: Option<Tasks>,
@@ -143,7 +145,8 @@ pub struct Recall {
 /// their words.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Embed {
-    /// One of `llm_backends`, OpenAI-compatible: it serves `/embeddings`.
+    /// One of the hub's LLM backends, OpenAI-compatible: it serves
+    /// `/embeddings`.
     pub backend: String,
     pub model: String,
     /// How alike a note must be to the query to be found by its meaning, in
@@ -168,7 +171,7 @@ pub fn hub_path(hub: &Path) -> PathBuf {
 pub(crate) struct RawHub {
     pub(crate) version: u32,
     pub(crate) owner: String,
-    pub(crate) llm_backends: BTreeMap<String, RawLlmBackend>,
+    pub(crate) llm: RawHubLlm,
     pub(crate) knowledge: RawKnowledge,
     pub(crate) tasks: Option<RawTasks>,
     pub(crate) server: RawServer,
@@ -323,15 +326,8 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
     if raw.owner.trim().is_empty() {
         problems.push("owner: is empty; name the hub, such as acme or ana".into());
     }
-    let mut backends = BTreeMap::new();
-    for (name, rb) in &raw.llm_backends {
-        match resolve_backend(name, rb, env) {
-            Ok(b) => {
-                backends.insert(name.clone(), b);
-            }
-            Err(mut errs) => problems.append(&mut errs),
-        }
-    }
+    let llm = hub_llm(&raw.llm, env, &mut problems);
+    let kinds = kinds(&llm.direct, &llm.runners);
     let knowledge = {
         let k = &raw.knowledge;
         if k.vault.trim().is_empty() {
@@ -345,7 +341,14 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
                 when_none: k.distill.when_none,
                 max_tokens: k.distill.max_tokens,
             },
-            &raw.llm_backends,
+            &mut problems,
+        );
+        check_candidates(
+            "knowledge.distill.try",
+            &distill.fallback.candidates,
+            false,
+            &kinds,
+            " in `llm`",
             &mut problems,
         );
         if k.recall.max_notes == 0 {
@@ -355,12 +358,12 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             problems.push("knowledge.recall: `max_chars` must be greater than 0".into());
         }
         let embed = k.recall.embed.as_ref().map(|e| {
-            match raw.llm_backends.get(&e.backend) {
+            match kinds.get(&e.backend) {
                 None => problems.push(format!(
-                    "knowledge.recall.embed.backend: '{}' is not one of llm_backends",
+                    "knowledge.recall.embed.backend: '{}' is not one of the backends of `llm`",
                     e.backend
                 )),
-                Some(raw::RawLlmBackend::OpenAiCompatibleApi(_)) => {}
+                Some(&OPENAI_COMPATIBLE_API) => {}
                 Some(_) => problems.push(format!(
                     "knowledge.recall.embed.backend: '{}' is not an openai-compatible-api backend, which is what serves /embeddings",
                     e.backend
@@ -465,13 +468,18 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             problems.push(format!("roles: the role name '{name}' must be one word"));
         }
     }
-    for name in backends.keys() {
+    for name in kinds.keys() {
         let used = knowledge
             .distill
             .fallback
             .candidates
             .iter()
-            .any(|c| &c.backend == name);
+            .any(|c| &c.backend == name)
+            || knowledge
+                .recall
+                .embed
+                .as_ref()
+                .is_some_and(|e| &e.backend == name);
         if !used {
             eprintln!(
                 "ensemble: note: LLM backend '{name}' is defined but nothing in the hub uses it"
@@ -483,7 +491,7 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
         (true, Some(server)) => Ok(Hub {
             version: raw.version,
             owner: raw.owner.trim().to_string(),
-            llm_backends: backends,
+            llm,
             knowledge,
             tasks,
             server,

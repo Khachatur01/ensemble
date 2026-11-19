@@ -71,9 +71,6 @@ pub struct Daemon<'a> {
     /// Its teams, as one helper team: `<team>/<agent>`. Replaced when they are
     /// reloaded.
     team: RwLock<Config>,
-    /// Where the keys its teams name are read from, as `ensemble-runner serve` was
-    /// given.
-    env_file: Option<PathBuf>,
     /// The runner's operations, and what they are given here; none when its
     /// `interfaces.cli` is off.
     operations: Option<(&'a Registry<RunnerContext>, RunnerContext)>,
@@ -99,7 +96,6 @@ impl<'a> Daemon<'a> {
         runner: Runner,
         hub: Option<(String, Token)>,
         team: Config,
-        env_file: Option<PathBuf>,
         operations: &'a Registry<RunnerContext>,
         say: &'a (dyn Fn(&str) + Sync),
     ) -> Result<Self, String> {
@@ -122,7 +118,6 @@ impl<'a> Daemon<'a> {
             runner,
             hub,
             team: RwLock::new(team),
-            env_file,
             operations,
             open: Mutex::new(HashMap::new()),
             workers: Mutex::new(Vec::new()),
@@ -235,8 +230,7 @@ impl<'a> Daemon<'a> {
         &self,
         reloaded: &(dyn Fn(&Config) -> Result<(), String> + Sync),
     ) -> Result<String, String> {
-        let (team, waiting) =
-            crate::teams::load_all(self.env_file.as_deref(), &ensemble_config::SystemEnv)?;
+        let (team, waiting) = crate::teams::load_all(&self.runner.llm, None)?;
         reloaded(&team)?;
         for repository in self.open.lock().unwrap().values() {
             repository.ensemble.set_config(team.clone());

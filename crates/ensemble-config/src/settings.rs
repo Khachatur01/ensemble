@@ -368,13 +368,13 @@ mod tests {
 version: 1
 name: laptop        # its name
 works_for: owner
-offers:
-  # what it lends
-  runs:
-    agents: [web/coder]
-  models:
+llm:
+  # what it uses
+  hub:
+    backends: [gpu]
+  direct:
     base_url: http://127.0.0.1:11434/v1
-    serve: [qwen]
+    shares: [qwen]
 
 # the end
 ";
@@ -384,12 +384,12 @@ offers:
         assert_eq!(get(RUNNER, "name").unwrap().as_deref(), Some("laptop"));
         assert_eq!(get(RUNNER, "version").unwrap().as_deref(), Some("1"));
         assert_eq!(
-            get(RUNNER, "offers.models.base_url").unwrap().as_deref(),
+            get(RUNNER, "llm.direct.base_url").unwrap().as_deref(),
             Some("http://127.0.0.1:11434/v1")
         );
         assert_eq!(
-            get(RUNNER, "offers.runs").unwrap().as_deref(),
-            Some("agents:\n- web/coder")
+            get(RUNNER, "llm.hub").unwrap().as_deref(),
+            Some("backends:\n- gpu")
         );
         assert_eq!(get(RUNNER, "hub").unwrap(), None);
         assert_eq!(get(RUNNER, "name.first").unwrap(), None);
@@ -406,9 +406,9 @@ offers:
                 "name: gpu-box  # its name"
             )
         );
-        let out = set(RUNNER, "offers.models.base_url", "http://10.0.0.2:8888/v1").unwrap();
+        let out = set(RUNNER, "llm.direct.base_url", "http://10.0.0.2:8888/v1").unwrap();
         assert!(
-            out.contains("    base_url: http://10.0.0.2:8888/v1\n    serve: [qwen]\n"),
+            out.contains("    base_url: http://10.0.0.2:8888/v1\n    shares: [qwen]\n"),
             "{out}"
         );
         assert!(out.starts_with("# This computer's runner.\n") && out.ends_with("# the end\n"));
@@ -416,8 +416,8 @@ offers:
 
     #[test]
     fn a_block_set_whole_loses_what_it_held() {
-        let out = set(RUNNER, "offers.runs", "{}").unwrap();
-        assert!(out.contains("  runs: {}\n  models:\n"), "{out}");
+        let out = set(RUNNER, "llm.hub", "{}").unwrap();
+        assert!(out.contains("  hub: {}\n  direct:\n"), "{out}");
         assert!(!out.contains("web/coder"), "{out}");
     }
 
@@ -433,24 +433,19 @@ offers:
             Some("ws://127.0.0.1:7700")
         );
 
-        let out = set(RUNNER, "offers.models.max_concurrent", "2").unwrap();
+        let out = set(RUNNER, "llm.direct.max_shared_calls", "2").unwrap();
         assert!(
-            out.contains("    serve: [qwen]\n    max_concurrent: 2\n\n# the end"),
+            out.contains("    shares: [qwen]\n    max_shared_calls: 2\n\n# the end"),
             "{out}"
         );
 
-        let out = set(
-            "version: 1\noffers: {}  # none\n",
-            "offers.runs.agents",
-            "[web/coder]",
-        )
-        .unwrap();
+        let out = set("version: 1\nllm: {}  # none\n", "llm.hub.backends", "[gpu]").unwrap();
         assert_eq!(
             out,
-            "version: 1\noffers:  # none\n  runs:\n    agents: [web/coder]\n"
+            "version: 1\nllm:  # none\n  hub:\n    backends: [gpu]\n"
         );
 
-        let err = set("offers: { runs: {} }\n", "offers.models", "{}").unwrap_err();
+        let err = set("llm: { hub: {} }\n", "llm.direct", "{}").unwrap_err();
         assert!(err.contains("written inline"), "{err}");
     }
 
@@ -466,36 +461,36 @@ offers:
 
     #[test]
     fn a_setting_is_taken_out_and_an_empty_mapping_says_so() {
-        let out = unset(RUNNER, "offers.models").unwrap();
+        let out = unset(RUNNER, "llm.direct").unwrap();
         assert!(
-            out.contains("  runs:\n    agents: [web/coder]\n\n# the end"),
+            out.contains("  hub:\n    backends: [gpu]\n\n# the end"),
             "{out}"
         );
-        let out = unset(&out, "offers.runs").unwrap();
-        assert!(out.contains("offers: {}\n  # what it lends\n"), "{out}");
+        let out = unset(&out, "llm.hub").unwrap();
+        assert!(out.contains("llm: {}\n  # what it uses\n"), "{out}");
         assert!(unset(RUNNER, "hub").unwrap_err().contains("no `hub`"));
     }
 
     #[test]
     fn settings_are_merged_one_by_one_and_what_is_beside_them_stays() {
-        let doc = "name: rogstrix\noffers:\n  models:\n    serve: [qwen, llama]\n  runs: {}\nhub: \"ws://127.0.0.1:7700\"\n";
+        let doc = "name: rogstrix\nllm:\n  direct:\n    shares: [qwen, llama]\n  hub: {}\nhub: \"ws://127.0.0.1:7700\"\n";
         let (out, paths) = merge(RUNNER, doc).unwrap();
-        assert_eq!(paths, ["name", "offers.models.serve", "offers.runs", "hub"]);
+        assert_eq!(paths, ["name", "llm.direct.shares", "llm.hub", "hub"]);
         assert!(out.contains("name: \"rogstrix\"  # its name\n"), "{out}");
         assert!(
             out.contains(
-                "    base_url: http://127.0.0.1:11434/v1\n    serve: [\"qwen\",\"llama\"]\n"
+                "    base_url: http://127.0.0.1:11434/v1\n    shares: [\"qwen\",\"llama\"]\n"
             ),
             "{out}"
         );
-        assert!(out.contains("  runs: {}\n"), "{out}");
+        assert!(out.contains("  hub: {}\n"), "{out}");
         assert!(out.ends_with("hub: \"ws://127.0.0.1:7700\"\n"), "{out}");
         assert_eq!(get(&out, "works_for").unwrap().as_deref(), Some("owner"));
         // Into nothing, it makes the file.
-        let (made, _) = merge("", "version: 1\noffers: {}\n").unwrap();
-        assert_eq!(made, "version: 1\noffers: {}\n");
-        assert!(overlaps("offers", "offers.runs") && overlaps("offers.runs.agents", "offers.runs"));
-        assert!(!overlaps("offers.models", "offers.runs") && !overlaps("name", "names"));
+        let (made, _) = merge("", "version: 1\nllm: {}\n").unwrap();
+        assert_eq!(made, "version: 1\nllm: {}\n");
+        assert!(overlaps("llm", "llm.hub") && overlaps("llm.hub.backends", "llm.hub"));
+        assert!(!overlaps("llm.direct", "llm.hub") && !overlaps("name", "names"));
     }
 
     #[test]

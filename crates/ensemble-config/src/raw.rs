@@ -12,10 +12,6 @@ use std::collections::BTreeMap;
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawConfig {
     pub(crate) version: u32,
-    /// Model endpoints. An agent names one with `llm_backend`, and Ensemble
-    /// hands its harness the endpoint, so it is defined once, here, for the
-    /// whole helper team.
-    pub(crate) llm_backends: BTreeMap<String, RawLlmBackend>,
     /// Named limits that agents share, such as one model server's concurrency
     /// or one subscription's budget. `{}` when there are none.
     pub(crate) limits: BTreeMap<String, RawLimit>,
@@ -192,7 +188,7 @@ pub(crate) struct RawBuiltinAdapter {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawBuiltinCandidate {
-    /// Which of `llm_backends` serves the model.
+    /// Which of the runner's LLM backends serves the model.
     pub(crate) backend: String,
     /// The id the endpoint serves the model under.
     pub(crate) model: String,
@@ -204,7 +200,8 @@ pub(crate) struct RawBuiltinCandidate {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawDirectCandidate {
-    /// Which of `llm_backends` serves the model.
+    /// Which LLM backend serves the model: a name of the runner's, or of the
+    /// hub's for its distiller.
     pub(crate) backend: String,
     /// The id the endpoint serves the model under.
     pub(crate) model: String,
@@ -276,8 +273,8 @@ pub(crate) struct RawBackendModel {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawBackendCandidate {
-    /// Which of `llm_backends` serves the model. Ensemble gives OpenCode the
-    /// endpoint and key for the run.
+    /// Which of the runner's LLM backends serves the model. Ensemble gives
+    /// OpenCode the endpoint and key for the run.
     pub(crate) backend: String,
     /// The id the endpoint serves the model under, as its /models lists it.
     pub(crate) name: String,

@@ -21,8 +21,8 @@ use ensemble_config::Permission;
 use ensemble_core::runtime::{self, blocking};
 use ensemble_knowledge::Memory;
 use ensemble_link::protocol::{
-    Event, HELLO, JOIN, LOGIN, MODEL_REPLY, RECALL, RUNNER, RUNNERS, Reply, Request, SHARE,
-    TASK_METHODS, VERSION, VERSION_HEADER,
+    Event, HELLO, JOIN, LOGIN, RECALL, RUNNER, RUNNERS, Reply, Request, SHARE, TASK_METHODS,
+    VERSION, VERSION_HEADER,
 };
 use ensemble_ops::Caller;
 use futures_util::SinkExt;
@@ -57,7 +57,7 @@ pub struct Server<'a> {
     pub(crate) tasks: Option<&'a dyn TaskService>,
     /// Whether it serves MCP at `/mcp`.
     mcp: bool,
-    /// The connected runners, and the model calls between them.
+    /// The connected runners.
     pub(crate) routes: Routes,
 }
 
@@ -162,9 +162,6 @@ impl<'a> Server<'a> {
             .await
             .map_err(|_| "no request came in time".to_string())??;
         if !head.is_upgrade() {
-            if head.path.starts_with("/nodes/v1/") {
-                return self.model_request(stream, &head, &read[end..], say).await;
-            }
             if self.mcp && head.path == crate::mcp::PATH {
                 return self.mcp(stream, &head, &read[end..], say).await;
             }
@@ -237,7 +234,7 @@ impl<'a> Server<'a> {
         loop {
             let message = tokio::select! {
                 () = runtime::until_set(stop) => return Ok(()),
-                // What other connections have for this one: model calls.
+                // What other connections have for this one.
                 Some(event) = outbox.recv() => {
                     push(sender, &event).await?;
                     continue;
@@ -261,9 +258,9 @@ impl<'a> Server<'a> {
             };
             let reply = match serde_json::from_str::<Request>(&text) {
                 Ok(req) => {
-                    // A model's chunks and the tasks a runner looks at every
-                    // few seconds would drown the rest.
-                    if req.method != MODEL_REPLY && !TASK_METHODS.contains(&req.method.as_str()) {
+                    // The tasks a runner looks at every few seconds would
+                    // drown the rest.
+                    if !TASK_METHODS.contains(&req.method.as_str()) {
                         let who = session.map_or("a runner signing in", |s| s.user.as_str());
                         say(&format!("{who}: {}", req.method));
                     }
@@ -421,7 +418,6 @@ impl<'a> Server<'a> {
             RUNNERS => Ok(self
                 .routes
                 .listed(&session.user, permissions.contains(&Permission::Compute))),
-            MODEL_REPLY => self.routes.model_reply(conn, &req.params),
             other => Err(format!("no method `{other}`")),
         };
         match result {
@@ -562,7 +558,7 @@ pub mod testing {
     pub fn start_with(tasks: Option<&'static dyn TaskService>) -> Running {
         let tmp = TempDir::new();
         let yaml = format!(
-            "version: 1\nowner: Acme\nllm_backends:\n  local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: approval, max_pending: 2 }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles:\n  admin: [admin, recall, tasks, host]\n  member: [share, recall, tasks, compute]\n  reader: [recall]\n",
+            "version: 1\nowner: Acme\nllm:\n  direct:\n    backends:\n      local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: approval, max_pending: 2 }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles:\n  admin: [admin, recall, tasks, host]\n  member: [share, recall, tasks, compute]\n  reader: [recall]\n",
             tmp.0.join("vault").display()
         );
         let hub =
