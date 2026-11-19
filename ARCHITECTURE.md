@@ -1115,7 +1115,7 @@ first admin is made on the hub's computer with the CLI. (Decided 2026-11-11.)
 
 ## Operations and interfaces
 
-(Decided 2026-11-18; not built yet: see the build order.) People do not edit
+(Decided 2026-11-18; partly built: see the build order.) People do not edit
 Ensemble's files: Ensemble writes them, and every setting has a way to be set
 without opening one. Many people will use a web UI, but none is built yet; what
 is built now is the ground any interface stands on, so that adding one, a CLI,
@@ -1127,8 +1127,8 @@ re-implementing a feature. Some administration may stay with the CLI.
 Everything a person can do to a hub or a runner is an **operation**, defined
 once, in the core:
 
-- a name, such as `models.add`, `people.invite`, `user.join-code`,
-  `settings.set`;
+- a name, such as `backend.add`, `knowledge.models`, `user.join-code`,
+  `config.set`;
 - its input and output, as Rust types with JSON Schemas made from them;
 - who may run it: a permission of the hub's roles, or the runner's owner;
 - its secret fields, written and never read back (keys go to `.env`);
@@ -1136,9 +1136,17 @@ once, in the core:
   next to what it is about;
 - for long work (a rebuild, testing a model), the events it goes through.
 
-There are two kinds. **Goal operations** do what a person means: add a model,
-which tests that it answers; invite someone; let a computer join; add a team
-from a template; rebuild the knowledge. **Settings operations**
+There are two kinds. **Goal operations** do what a person means: add a
+backend, which is asked which models it serves first, its key kept in
+`.env` under a variable Ensemble names after it (`ENSEMBLE_BACKEND_<NAME>_KEY`)
+so nobody needs to know a variable's name; choose the distiller's and the
+embedding models, each checked; add a tracker; set a role; invite someone;
+let a computer join; add a team from a template; rebuild the knowledge.
+(Built: `backend.*` on the hub and the runner, in `ensemble-backends`'
+`ops.rs`; `knowledge.models`, `knowledge.embedding`, `knowledge.recall`,
+`tracker.*`, `role.set`, `role.remove`, `registration.set` in
+`ensemble-hub`'s `goals.rs`. A key given while the keys come from an
+`--env-file` is refused, as Ensemble does not write that file.) **Settings operations**
 (`settings.describe`, `settings.set`) reach every setting, from the JSON
 Schemas the files already have and the checks `config set` makes: a change
 is loaded before it is written, comments stay, and what Nix declares comes
@@ -1365,7 +1373,11 @@ crate holds it today.
     line always on; no MCP `url`, a token's hints naming the address the
     request reached; the link at its own path. (Done; the link's protocol 5.)
 22. The REST API as an interface: one route per operation, the same as MCP
-    offers, OpenAPI, sign-up in it, on the hub's port.
+    offers, OpenAPI, sign-up in it, on the hub's port. (Partly done: every
+    operation by its name at `POST /api/v1/ops/<name>`, and those a token may
+    run, with the JSON Schema of their input, at `GET /api/v1/ops`; the goal
+    operations for backends and their keys, knowledge, trackers, roles and
+    sign-up. Not yet: OpenAPI.)
 23. The task tracker with backends behind one interface, the markdown issues
     its one backend; more than one tracker at once.
 24. Sources: the `Source` trait, and the collect and filter steps with one
@@ -1373,8 +1385,8 @@ crate holds it today.
     a text would leave. No provider's adapter yet.
 25. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
     and Teams, Telegram); a runner's operations from the hub, for its own
-    account; goal operations (models, people, computers, teams from
-    templates, knowledge); chat; a web UI.
+    account; the remaining goal operations (people, computers, teams from
+    templates); chat; a web UI.
 
 What remains besides is the "Not yet" of steps 4 and 5, and the modules
 marked not built above. A web UI and other interfaces come after step 22, as

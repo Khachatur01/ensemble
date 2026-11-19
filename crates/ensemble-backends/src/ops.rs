@@ -93,7 +93,7 @@ const NAME: Field = Field::text(
 )
 .required()
 .positional();
-const KEY: Field = Field::secret("key", "The backend's API key; asked for when it wants one");
+const KEY: Field = Field::secret("key", "The backend's API key (empty for none)");
 const KEY_ENV: Field = Field::text(
     "key_env",
     "A variable that holds the key already, such as one a secrets manager sets, in place of a key Ensemble keeps.",
@@ -135,7 +135,7 @@ const NAMED: &[Field] = &[NAME];
 const TEST: &[Field] = &[Field::text("name", "One backend; every one when left out.").positional()];
 const KEY_FIELDS: &[Field] = &[
     NAME,
-    Field::secret("key", "The backend's new API key; empty takes its key out"),
+    Field::secret("key", "The backend's new API key (empty takes its key out)"),
     KEY_ENV,
     NO_CHECK,
 ];

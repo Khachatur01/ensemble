@@ -312,7 +312,8 @@ reached it at (through a proxy, from its `X-Forwarded-Proto` and
 knowledge: its own (`llm.direct`), with keys from its `.env`, and those runners
 share through it (`llm.runners`, see
 [Sharing LLM backends](#sharing-llm-backends)). A connector names one by its
-name alone.
+name alone. `ensemble-hub backend add` adds one and keeps its key for you
+(see [Changing settings](#changing-settings)).
 
 **Permissions.** The permissions are `share` (keep knowledge in the vault),
 `recall` (read its notes), `tasks` (make and follow tasks, have your runners
@@ -393,6 +394,9 @@ come and for scripts. JSON in and out.
 | `POST /api/v1/users/{name}/join-codes` | admin | a join code for one of their runners, shown once |
 | `DELETE /api/v1/users/{name}/tokens` | admin | revokes every token |
 | `DELETE /api/v1/users/{name}` | admin | removes an account, or turns a sign-up down |
+
+| `GET /api/v1/ops` | any token | the operations it may run, each with the JSON Schema of its input (secrets `writeOnly`), for a UI to make its forms from |
+| `POST /api/v1/ops/{name}` `{…its input}` | as the operation says | runs any operation by its name, such as `backend.add`, `knowledge.models` or `tracker.add` |
 
 Errors are `{"error": "..."}` with 400, 401, 403, 404, 405, 409 or 429.
 
@@ -1522,7 +1526,9 @@ as always.
 
 API keys are named by the **variable** that holds them (`api_key_env`), never
 written in `runner.yaml` or `hub.yaml`: there is no `api_key` field, and a config that tries
-one is rejected by name, before it reaches a commit.
+one is rejected by name, before it reaches a commit. `backend add` and
+`backend key` write both for you: the key in `.env`, and its variable in the
+file (see [Changing settings](#changing-settings)).
 
 The values come from the environment, or from the runner's hidden file of
 secrets, `~/.config/ensemble/runner/.env`, beside `runner.yaml`:
@@ -1594,7 +1600,55 @@ ensemble: team 'web': ~/.config/ensemble/runner/teams/web/config.yaml is invalid
 A typo'd key is an error, never a silent default, and a missing key is an
 error too: ``agents.coder: `max_seconds` is required at line 12 column 5``.
 
-## Changing settings from the command line
+## Changing settings
+
+Nobody needs to open a settings file, nor know the name of a variable. What
+you mean to change is an operation, the same from the command line, the REST
+API (`POST /api/v1/ops/<name>`) and a web UI to come, each checked as it is
+made; and every other setting is changed by its keys.
+
+### By what you mean
+
+```console
+$ ensemble-hub backend add central --type openai-compatible-api --url http://127.0.0.1:8888/v1
+The backend's API key (empty for none): ••••••       # asked when it wants one, without echo
+added backend central, which serves unsloth/Qwen3.5-9B-GGUF, unsloth/embeddinggemma-2-GGUF
+$ ensemble-hub backend key central                   # a new key, or empty to take it out
+$ ensemble-hub backend list | test [name] | remove <name>
+$ ensemble-hub knowledge models central:unsloth/Qwen3.5-9B-GGUF claude:claude-haiku-4-5
+$ ensemble-hub knowledge embedding central:unsloth/embeddinggemma-2-GGUF   # or --off
+$ ensemble-hub knowledge recall --max-notes 8 --max-chars 6000
+$ ensemble-hub tracker add issues --type local_markdown --dir issues      # tracker list | remove
+$ ensemble-hub role set auditor recall,share                              # role remove
+$ ensemble-hub registration set approval --max-pending 20                 # or closed
+$ ensemble-runner backend add local --type openai-compatible-api --url http://127.0.0.1:11434/v1 --share
+$ ensemble-runner backend share local | unshare local
+```
+
+- **A backend is asked first.** `backend add` asks it which models it serves
+  before anything is written, so a wrong address or key is said at once;
+  `--no-check` adds it anyway. One that answers that it wants a key has the
+  key asked for. `--type runner` names one a runner shares through the hub
+  (`--runner <owner>/<name>`), which the hub or the runner reaches only while
+  it runs.
+- **Keys are kept for you.** A key you give goes into the `.env` beside the
+  settings file, readable by you alone, under a variable Ensemble names after
+  the backend (`ENSEMBLE_BACKEND_CENTRAL_KEY`), and the backend names that
+  variable; `backend remove` takes it out too. A key you keep elsewhere
+  already, such as one a secrets manager sets, is named instead with
+  `--key-env NAME`. With `--env-file` (`environmentFile` in Nix), keys come
+  from that file, which Ensemble never writes: giving a key is refused, with
+  what to do instead.
+- **Models are checked too.** `knowledge models` asks each backend whether it
+  serves its model, and `knowledge embedding` asks the model to embed once.
+- **What something uses stays.** A backend the distiller, the embedding model
+  or a runner's team uses is not removed, nor a role an account has.
+
+Each is written through the settings file, as below: loaded before it is
+written, refused when Nix declares it, and used by the running hub or runner
+at once.
+
+### Setting by setting
 
 Every settings file can be changed without opening it: runner.yaml with
 `ensemble-runner config`, hub.yaml with `ensemble-hub config`, and a team's
