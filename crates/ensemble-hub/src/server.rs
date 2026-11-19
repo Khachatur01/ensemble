@@ -57,8 +57,6 @@ pub struct Server<'a> {
     pub(crate) operations: ensemble_ops::Registry<HubContext>,
     /// The tasks it keeps for its accounts.
     pub(crate) tasks: Option<&'a dyn TaskService>,
-    /// Whether it serves MCP at `/mcp`.
-    mcp: bool,
     /// The connected runners.
     pub(crate) routes: Routes,
     /// The runners' relay sockets, and the model calls between them.
@@ -75,7 +73,7 @@ impl<'a> Server<'a> {
     pub fn new(
         memory: &'a Memory,
         roles: &'a BTreeMap<String, Vec<Permission>>,
-        settings: ensemble_config::Server,
+        settings: ensemble_config::AccountRules,
         users: PathBuf,
     ) -> Self {
         Server {
@@ -86,7 +84,6 @@ impl<'a> Server<'a> {
             },
             operations: crate::accounts::operations(),
             tasks: None,
-            mcp: false,
             routes: Routes::default(),
             calls: Arc::default(),
         }
@@ -102,12 +99,6 @@ impl<'a> Server<'a> {
     /// Keep its accounts' tasks in `tasks`.
     pub fn with_tasks(mut self, tasks: &'a dyn TaskService) -> Self {
         self.tasks = Some(tasks);
-        self
-    }
-
-    /// Serve MCP to client agents at `/mcp`.
-    pub fn with_mcp(mut self) -> Self {
-        self.mcp = true;
         self
     }
 
@@ -174,7 +165,7 @@ impl<'a> Server<'a> {
             .await
             .map_err(|_| "no request came in time".to_string())??;
         if !head.is_upgrade() {
-            if self.mcp && head.path == crate::mcp::PATH {
+            if head.path == crate::mcp::PATH {
                 return self.mcp(stream, &head, &read[end..], say).await;
             }
             return self.rest(stream, &head, &read[end..], say).await;
@@ -670,7 +661,7 @@ pub mod testing {
     pub fn start_with(tasks: Option<&'static dyn TaskService>) -> Running {
         let tmp = TempDir::new();
         let yaml = format!(
-            "version: 1\nowner: Acme\nllm:\n  direct:\n    backends:\n      local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\nknowledge:\n  vault: \"{}\"\n  distill:\n    try:\n      - {{ backend: local, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall: {{ max_notes: 3, max_chars: 1000 }}\nserver: {{ listen: \"127.0.0.1:0\", registration: {{ type: approval, max_pending: 2 }}, sessions: {{ hours: 1 }}, lockout: {{ failures: 3, minutes: 1 }} }}\nroles:\n  admin: [admin, recall, tasks, host]\n  member: [share, recall, tasks, compute]\n  reader: [recall]\n",
+            "version: 1\nowner: Acme\nhttp: {{ listen: \"127.0.0.1:0\" }}\nllm:\n  direct:\n    backends:\n      local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\naccounts:\n  registration: {{ type: approval, max_pending: 2 }}\n  sessions: {{ hours: 1 }}\n  lockout: {{ failures: 3, minutes: 1 }}\n  roles:\n    admin: [admin, recall, tasks, host]\n    member: [share, recall, tasks, compute]\n    reader: [recall]\nconnectors:\n  rest: {{}}\n  mcp: {{}}\n  runners: {{}}\n  knowledge:\n    vault: \"{}\"\n    distill:\n      try:\n        - {{ backend: local, model: small }}\n      when_none: wait\n      max_tokens: 100\n    recall: {{ max_notes: 3, max_chars: 1000 }}\n  tasks: {{ trackers: {{}} }}\n  sources: {{ adapters: {{}} }}\n",
             tmp.0.join("vault").display()
         );
         let hub =
@@ -695,9 +686,9 @@ pub mod testing {
             })
             .unwrap();
         let mut users = Users::load(&tmp.0.join("state")).unwrap();
-        let ana = users.add("ana", "member", &hub.roles).unwrap();
-        let rex = users.add("rex", "reader", &hub.roles).unwrap();
-        let root = users.add("root", "admin", &hub.roles).unwrap();
+        let ana = users.add("ana", "member", &hub.accounts.roles).unwrap();
+        let rex = users.add("rex", "reader", &hub.accounts.roles).unwrap();
+        let root = users.add("root", "admin", &hub.accounts.roles).unwrap();
         for name in ["ana", "rex", "root"] {
             users.set_password(name, PASSWORD).unwrap();
         }
@@ -707,8 +698,12 @@ pub mod testing {
         let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
         let memory: &'static Memory = Box::leak(Box::new(memory));
         let hub: &'static ensemble_config::Hub = Box::leak(Box::new(hub));
-        let mut server =
-            Server::new(memory, &hub.roles, hub.server, tmp.0.join("state")).with_mcp();
+        let mut server = Server::new(
+            memory,
+            &hub.accounts.roles,
+            hub.accounts.rules,
+            tmp.0.join("state"),
+        );
         if let Some(tasks) = tasks {
             server = server.with_tasks(tasks);
         }

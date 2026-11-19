@@ -68,8 +68,8 @@ in
         default = null;
         description = ''
           Settings of the hub's `hub.yaml`, as Nix: any of `version`, `owner`,
-          `llm`, `knowledge`, `server`, `roles` and `tasks`, down to
-          one setting such as `server.listen`. They are merged into the hub's
+          `http`, `llm`, `accounts` and `connectors`, down to one setting
+          such as `http.listen`. They are merged into the hub's
           `hub.yaml` whenever it starts; the rest is made and changed with
           `ensemble-hub init` and `ensemble-hub config set`, which refuse to
           change those declared here. `ensemble-hub init --stdout` prints every
@@ -85,24 +85,31 @@ in
               base_url = "http://127.0.0.1:8000/v1";
               timeout_seconds = 300;
             };
-            knowledge = {
-              vault = "vault";
-              distill = {
-                try = [ { backend = "central"; model = "qwen3.5-72b"; } ];
-                when_none = "wait";
-                max_tokens = 4000;
-              };
-              recall = { max_notes = 8; max_chars = 6000; };
-            };
-            server = {
-              listen = "127.0.0.1:7700";
+            http.listen = "127.0.0.1:7700";
+            accounts = {
               registration = { type = "approval"; max_pending = 20; };
               sessions.hours = 12;
               lockout = { failures = 5; minutes = 15; };
+              roles = {
+                admin = [ "admin" "share" "recall" "tasks" "compute" "host" ];
+                member = [ "share" "recall" "tasks" "compute" ];
+              };
             };
-            roles = {
-              admin = [ "admin" "share" "recall" "tasks" "compute" "host" ];
-              member = [ "share" "recall" "tasks" "compute" ];
+            connectors = {
+              rest = { };
+              mcp = { };
+              runners = { };
+              knowledge = {
+                vault = "vault";
+                distill = {
+                  try = [ { backend = "central"; model = "qwen3.5-72b"; } ];
+                  when_none = "wait";
+                  max_tokens = 4000;
+                };
+                recall = { max_notes = 8; max_chars = 6000; };
+              };
+              tasks.trackers = { };
+              sources.adapters = { };
             };
           }
         '';
@@ -124,8 +131,8 @@ in
         type = types.bool;
         default = false;
         description = ''
-          Open the port `settings.server.listen` names. Without a TLS proxy in
-          front, only on a network you trust. Needs `settings.server.listen`.
+          Open the port `settings.http.listen` names. Without a TLS proxy in
+          front, only on a network you trust. Needs `settings.http.listen`.
         '';
       };
     };
@@ -155,13 +162,13 @@ in
     (mkIf hub.enable {
       assertions = [
         {
-          assertion = hub.openFirewall -> (hub.settings.server.listen or null) != null;
-          message = "services.ensemble.hub.openFirewall needs services.ensemble.hub.settings.server.listen, which names the port";
+          assertion = hub.openFirewall -> (hub.settings.http.listen or null) != null;
+          message = "services.ensemble.hub.openFirewall needs services.ensemble.hub.settings.http.listen, which names the port";
         }
       ];
 
       networking.firewall.allowedTCPPorts = lib.optional hub.openFirewall (
-        lib.toInt (lib.last (lib.splitString ":" hub.settings.server.listen))
+        lib.toInt (lib.last (lib.splitString ":" hub.settings.http.listen))
       );
 
       systemd.services.ensemble-hub = {

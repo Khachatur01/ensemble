@@ -44,8 +44,6 @@ pub struct Runner {
     pub hub: Option<String>,
     /// The LLM backends its agents run on, and those it offers.
     pub llm: RunnerLlm,
-    /// How it may be managed.
-    pub interfaces: Interfaces,
     pub source: PathBuf,
 }
 
@@ -81,7 +79,6 @@ pub(crate) struct RawRunner {
     pub(crate) workspace: String,
     pub(crate) hub: Option<String>,
     pub(crate) llm: RawRunnerLlm,
-    pub(crate) interfaces: Option<RawRunnerInterfaces>,
 }
 
 /// The runner file in `dir`, usually `~/.config/ensemble/runner`.
@@ -127,6 +124,17 @@ pub fn parse_runner_with(
 }
 
 pub fn parse_runner(text: &str, path: &Path, env: &dyn Env) -> Result<Runner, ConfigError> {
+    // Say what changed rather than which key is unknown.
+    if let Ok(v) = serde_norway::from_str::<serde_norway::Value>(text)
+        && v.get("interfaces").is_some()
+    {
+        return Err(ConfigError::Invalid {
+            path: path.to_path_buf(),
+            problems: vec![
+                "interfaces: is gone: the command line is always on and has no settings; remove the block".into(),
+            ],
+        });
+    }
     let raw: RawRunner = serde_norway::from_str(text).map_err(|e| ConfigError::Syntax {
         path: path.to_path_buf(),
         detail: explain(&e),
@@ -162,7 +170,6 @@ pub fn parse_runner(text: &str, path: &Path, env: &dyn Env) -> Result<Runner, Co
         );
     }
     let llm = runner_llm(&raw.llm, hub.is_some(), env, &mut problems);
-    let interfaces = runner_interfaces(raw.interfaces.as_ref(), &mut problems);
     if problems.is_empty() {
         Ok(Runner {
             version: raw.version,
@@ -171,7 +178,6 @@ pub fn parse_runner(text: &str, path: &Path, env: &dyn Env) -> Result<Runner, Co
             workspace,
             hub,
             llm,
-            interfaces,
             source: path.to_path_buf(),
         })
     } else {

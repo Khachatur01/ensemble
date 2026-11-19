@@ -2,7 +2,7 @@
 //! its order and everything else in it stay as they were: what `ensemble-runner
 //! config`, `ensemble-hub config` and `ensemble-runner team config` do. A
 //! setting is named by its path, its keys joined by dots, such as
-//! `server.listen`. The caller checks the result by loading it before it is
+//! `http.listen`. The caller checks the result by loading it before it is
 //! written anywhere.
 //!
 //! Only block mappings are walked: a setting inside a list, or inside a
@@ -142,7 +142,7 @@ pub fn unset(text: &str, key: &str) -> Result<String, String> {
 /// `text` with every setting of `doc`, a YAML mapping, set in it: a mapping
 /// setting by setting, so what `text` has beside them stays, and anything
 /// else whole. Returns the result and the paths it set, such as
-/// `server.listen`: what the Nix modules use to keep the settings declared in
+/// `http.listen`: what the Nix modules use to keep the settings declared in
 /// Nix, and nothing more.
 pub fn merge(text: &str, doc: &str) -> Result<(String, Vec<String>), String> {
     let doc: Value = serde_norway::from_str(doc).map_err(|e| e.to_string())?;
@@ -198,7 +198,7 @@ fn path(key: &str) -> Result<Vec<&str>, String> {
     let parts: Vec<&str> = key.split('.').collect();
     if parts.iter().any(|p| p.trim().is_empty() || *p != p.trim()) {
         return Err(format!(
-            "'{key}' is not a setting: name it by its keys joined by dots, such as server.listen"
+            "'{key}' is not a setting: name it by its keys joined by dots, such as http.listen"
         ));
     }
     Ok(parts)

@@ -83,7 +83,7 @@ pub fn runner_file(name: &str, workspace: &str) -> Result<String, String> {
         quoted(name),
         quoted(workspace)
     );
-    text.push_str("\n# The LLM backends its teams' agents run on, which a team names by name.\n# `ensemble-runner init --stdout` shows how each is written.\nllm:\n  direct:\n    backends: {}\n    shares: []             # those it offers through the hub\n    max_shared_calls: 1    # the most calls of others to them at once\n\n# How the runner is managed: `ensemble-runner …` on this computer.\ninterfaces:\n  cli: {}\n");
+    text.push_str("\n# The LLM backends its teams' agents run on, which a team names by name.\n# `ensemble-runner init --stdout` shows how each is written.\nllm:\n  direct:\n    backends: {}\n    shares: []             # those it offers through the hub\n    max_shared_calls: 1    # the most calls of others to them at once\n");
     ensemble_config::parse_runner(
         &text,
         Path::new(RUNNER_FILENAME),

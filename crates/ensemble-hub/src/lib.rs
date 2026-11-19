@@ -80,7 +80,7 @@ fn dispatch(matches: &clap::ArgMatches, hub: &Registry<HubContext>) -> Result<Ex
         let route = ensemble_ops::local::Route::to(&state::hub_socket(&hub_dir), || {
             if let Some(pid) = ensemble_core::lock::holder(&hub_dir) {
                 return Err(format!(
-                    "the running hub (process {pid}) takes no commands: its `interfaces.cli` is off. Turn it on in hub.yaml, or in your Nix configuration where that sets it, and start the hub again"
+                    "the running hub (process {pid}) does not answer on its socket; stop it and start it again"
                 ));
             }
             cmd::context(&ctx)

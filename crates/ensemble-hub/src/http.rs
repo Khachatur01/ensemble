@@ -38,6 +38,22 @@ impl Head {
             .is_some_and(|u| u.eq_ignore_ascii_case("websocket"))
     }
 
+    /// The address the client reached the hub at, such as
+    /// `https://hub.example.com`: from a reverse proxy's `X-Forwarded-Proto`
+    /// and `X-Forwarded-Host` when it sends them, else from `Host`.
+    pub fn reached_at(&self) -> Option<String> {
+        let first = |name: &str| Some(self.header(name)?.split(',').next()?.trim());
+        let host = first("x-forwarded-host").or_else(|| first("host"))?;
+        if host.is_empty() || host.contains(['/', ' ', '@']) {
+            return None;
+        }
+        let scheme = match first("x-forwarded-proto") {
+            Some(p) if p.eq_ignore_ascii_case("https") => "https",
+            _ => "http",
+        };
+        Some(format!("{scheme}://{host}"))
+    }
+
     /// The token after `Bearer `, when there is one.
     pub fn bearer(&self) -> Option<&str> {
         self.header("authorization")?
@@ -270,6 +286,34 @@ mod tests {
         assert!(!head.is_upgrade());
         let body = block_on(read_body(&mut stream, &head, &read[end..])).unwrap();
         assert_eq!(body, b"{\"name\":\"a\"}!");
+    }
+
+    #[test]
+    fn the_address_a_client_reached_is_the_proxys_when_it_says_it() {
+        let head = |headers: &[(&str, &str)]| Head {
+            method: "POST".into(),
+            path: "/api/v1/me/tokens".into(),
+            headers: headers
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect(),
+        };
+        assert_eq!(
+            head(&[("host", "127.0.0.1:7700")]).reached_at().as_deref(),
+            Some("http://127.0.0.1:7700")
+        );
+        assert_eq!(
+            head(&[
+                ("host", "127.0.0.1:7700"),
+                ("x-forwarded-host", "hub.example.com, inner"),
+                ("x-forwarded-proto", "https"),
+            ])
+            .reached_at()
+            .as_deref(),
+            Some("https://hub.example.com")
+        );
+        assert_eq!(head(&[]).reached_at(), None);
+        assert_eq!(head(&[("host", "a/b")]).reached_at(), None);
     }
 
     #[test]

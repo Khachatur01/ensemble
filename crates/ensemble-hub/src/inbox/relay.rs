@@ -25,7 +25,7 @@ use super::tracker::{Issue, IssueTracker, Status};
 use super::work::{self, AUTHOR, Update, reply_after};
 use crate::board::{DbBoard, Recall, recall_query};
 use crate::users::Users;
-use ensemble_config::{Permission, Tasks};
+use ensemble_config::{Permission, Tracker};
 use ensemble_store as store;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -86,7 +86,8 @@ fn load(dir: &std::path::Path) -> Result<BTreeMap<String, Delivery>, String> {
 
 /// A hub server's task inbox.
 pub struct ServerInbox {
-    tasks: Tasks,
+    /// The tracker's settings: its label, and how often it is looked at.
+    settings: Tracker,
     tracker: Box<dyn IssueTracker + Send>,
     roles: BTreeMap<String, Vec<Permission>>,
     /// The hub's state directory, with its database: its users, their tasks,
@@ -101,14 +102,14 @@ pub struct ServerInbox {
 
 impl ServerInbox {
     pub fn new(
-        tasks: &Tasks,
+        settings: &Tracker,
         roles: &BTreeMap<String, Vec<Permission>>,
         dir: PathBuf,
     ) -> Result<Self, String> {
         let deliveries = load(&dir)?;
         Ok(ServerInbox {
-            tracker: super::tracker_for(tasks),
-            tasks: tasks.clone(),
+            tracker: super::tracker_for(settings),
+            settings: settings.clone(),
             roles: roles.clone(),
             dir,
             deliveries: Mutex::new(deliveries),
@@ -170,7 +171,7 @@ impl ServerInbox {
         let users = Users::load(&self.dir).map_err(String::from)?;
         let mut deliveries = self.deliveries.lock().unwrap_or_else(|e| e.into_inner());
         let mut said = Vec::new();
-        let issues = self.tracker.labelled(&self.tasks.label);
+        let issues = self.tracker.labelled(&self.settings.label);
         for issue in &issues {
             if issue.status == Status::Done {
                 continue;
@@ -256,7 +257,7 @@ impl ServerInbox {
         };
         d.account = account.clone();
         d.project = project.to_string();
-        let mut ticket = work::ticket_for(issue, &self.tasks.label);
+        let mut ticket = work::ticket_for(issue, &self.settings.label);
         ticket.notes = self
             .notes
             .as_ref()
@@ -364,7 +365,7 @@ impl ServerInbox {
 
     /// Look at the tracker every `poll_seconds` until `stop` is set.
     pub fn work(&self, stop: &AtomicBool, say: &(dyn Fn(&str) + Sync)) {
-        let every = Duration::from_secs(u64::from(self.tasks.poll_seconds));
+        let every = Duration::from_secs(u64::from(self.settings.poll_seconds));
         while !stop.load(Ordering::Relaxed) {
             match self.pass() {
                 Ok(lines) => lines.iter().for_each(|l| say(&format!("inbox: {l}"))),
@@ -406,14 +407,14 @@ mod tests {
         users.set_tracker_user("ana", Some("ana.p")).unwrap();
         users.add("rex", "reader", &roles).unwrap();
         users.save().unwrap();
-        let tasks = Tasks {
-            tracker: Kind::LocalMarkdown {
+        let tracker = Tracker {
+            kind: Kind::LocalMarkdown {
                 dir: tmp.0.join("issues"),
             },
             label: "ensemble".into(),
             poll_seconds: 1,
         };
-        let inbox = ServerInbox::new(&tasks, &roles, tmp.0.join("state")).unwrap();
+        let inbox = ServerInbox::new(&tracker, &roles, tmp.0.join("state")).unwrap();
         World { tmp, inbox }
     }
 
@@ -582,7 +583,7 @@ mod tests {
         w.issue("1", "ana.p", "shop");
         w.inbox.pass().unwrap();
         let roles = w.inbox.roles.clone();
-        let again = ServerInbox::new(&w.inbox.tasks, &roles, w.tmp.0.join("state")).unwrap();
+        let again = ServerInbox::new(&w.inbox.settings, &roles, w.tmp.0.join("state")).unwrap();
         assert_eq!(again.deliveries(), w.inbox.deliveries());
         assert_eq!(again.deliveries()["1"].stage, Stage::Queued);
     }

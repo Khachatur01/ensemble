@@ -34,7 +34,7 @@ pub fn command<H>(hub: &Registry<H>) -> clap::Command {
         ("role", "The hub's roles."),
         (
             "config",
-            "The hub's settings, hub.yaml, by their keys joined by dots, such as server.listen",
+            "The hub's settings, hub.yaml, by their keys joined by dots, such as http.listen",
         ),
     ];
     config_extras(mount(Cli::command(), hub, &groups))

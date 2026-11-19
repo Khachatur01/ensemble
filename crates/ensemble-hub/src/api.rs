@@ -61,7 +61,9 @@ impl Server<'_> {
     ) -> Result<(), String> {
         let mut unread = false;
         let answer = match http::read_body(&mut stream, head, already).await {
-            Ok(body) => blocking(|| self.route(head, &body)),
+            Ok(body) => blocking(|| {
+                crate::accounts::reached_at(head.reached_at(), || self.route(head, &body))
+            }),
             Err(e) => {
                 unread = true;
                 Err(Error::invalid(e))

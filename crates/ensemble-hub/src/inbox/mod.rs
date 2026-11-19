@@ -21,9 +21,9 @@ pub use local_markdown::LocalMarkdown;
 pub use relay::ServerInbox;
 pub use tracker::{Comment, Issue, IssueTracker, Status};
 
-/// The tracker a hub's `tasks` block names.
-pub fn tracker_for(tasks: &ensemble_config::Tasks) -> Box<dyn IssueTracker + Send> {
-    match &tasks.tracker {
+/// The tracker a tracker adapter of the hub's `tasks` connector names.
+pub fn tracker_for(tracker: &ensemble_config::Tracker) -> Box<dyn IssueTracker + Send> {
+    match &tracker.kind {
         ensemble_config::IssueTracker::LocalMarkdown { dir } => Box::new(LocalMarkdown::new(dir)),
     }
 }

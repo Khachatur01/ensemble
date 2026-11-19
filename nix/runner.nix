@@ -183,7 +183,7 @@ in
           ''
             # A runner to merge into: as `ensemble-runner setup` makes one.
             if [ ! -e "$dir/runner.yaml" ]; then
-              printf 'version: 1\nname: %s\nworks_for: owner\nworkspace: ~/ensemble\nllm:\n  direct:\n    backends: {}\n    shares: []\n    max_shared_calls: 1\ninterfaces:\n  cli: {}\n' \
+              printf 'version: 1\nname: %s\nworks_for: owner\nworkspace: ~/ensemble\nllm:\n  direct:\n    backends: {}\n    shares: []\n    max_shared_calls: 1\n' \
                 "$(${pkgs.hostname}/bin/hostname -s)" > "$dir/runner.yaml"
             fi
             ${lib.getExe package} config merge ${files.runnerYaml}

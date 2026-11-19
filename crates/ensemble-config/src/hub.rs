@@ -1,8 +1,11 @@
-//! `hub.yaml`: a hub's settings, in `~/.config/ensemble/hub/`. A hub provides
-//! services and connects runners: it has no helper team and runs no agents. It is
-//! always a server (`ensemble-hub serve`), for a team or for one person on
-//! their own computer: its `server`, the `roles` of its accounts, its
-//! `knowledge`, and, optionally, the `tasks` it hands out from a tracker.
+//! `hub.yaml`: a hub's settings, in `~/.config/ensemble/hub/`. A hub is always
+//! a server (`ensemble-hub serve`), for a team or for one person on their own
+//! computer. Its core is its accounts, their roles and what each may do, the
+//! port it listens on (`http`) and the LLM backends it uses (`llm`).
+//! Everything else reaches it through a **connector**, each always on and
+//! each written in `connectors`: the REST API, MCP, the runners' link,
+//! knowledge, tasks and sources. A connector may hold **adapters** the admin
+//! picks, such as the trackers of `tasks`; a map of them may be empty.
 //!
 //! The same rules as `config.yaml`: no default values, unknown keys refused,
 //! secrets named by the variable that holds them.
@@ -29,19 +32,49 @@ pub struct Hub {
     pub version: u32,
     /// The hub's name, for its log and its listings.
     pub owner: String,
+    pub http: Http,
     /// The LLM backends the hub uses: its own, and runners' it reaches over
     /// their links.
     pub llm: HubLlm,
-    pub knowledge: Knowledge,
-    /// Absent: no task inbox.
-    pub tasks: Option<Tasks>,
-    pub server: Server,
-    /// What each role may do, by the role's name.
-    pub roles: BTreeMap<String, Vec<Permission>>,
-    /// How it may be managed.
-    pub interfaces: Interfaces,
+    pub accounts: Accounts,
+    pub connectors: Connectors,
     /// Where it was loaded from, for error messages.
     pub source: PathBuf,
+}
+
+/// The port every connector over HTTP is served on: the REST API at
+/// `/api/v1/`, MCP at `/mcp`, and the runners' link at `/link` and `/relay`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Http {
+    pub listen: std::net::SocketAddr,
+}
+
+/// The hub's accounts: what each role may do, and how people join and sign
+/// in. The accounts themselves are in its database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Accounts {
+    pub rules: AccountRules,
+    /// What each role may do, by the role's name.
+    pub roles: BTreeMap<String, Vec<Permission>>,
+}
+
+/// How people join, how long a login lasts and when failed logins lock a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountRules {
+    pub registration: Registration,
+    /// Hours a login lasts.
+    pub session_hours: u32,
+    /// Failed logins before a name is refused, and for how many minutes.
+    pub lockout_failures: u32,
+    pub lockout_minutes: u32,
+}
+
+/// The connectors with settings. The REST API, MCP and the runners' link have
+/// none: they are written as `{}`, and are always on all the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Connectors {
+    pub knowledge: Knowledge,
+    pub tasks: Tasks,
 }
 
 /// The knowledge vault, and how shares become notes.
@@ -54,11 +87,18 @@ pub struct Knowledge {
     pub recall: Recall,
 }
 
-/// The task inbox: issues in a tracker that carry the label become tasks for
-/// the helper team of the person they are assigned to.
+/// The tasks the hub keeps, and the trackers whose issues become tasks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tasks {
-    pub tracker: IssueTracker,
+    /// By the name the admin gives each; empty for no inbox.
+    pub trackers: BTreeMap<String, Tracker>,
+}
+
+/// A tracker: issues in it that carry the label become tasks for the helper
+/// team of the person they are assigned to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tracker {
+    pub kind: IssueTracker,
     /// The signal: an issue with this label is for a helper team;
     /// `<label>:<agent>` gives it to that agent.
     pub label: String,
@@ -70,18 +110,6 @@ pub struct Tasks {
 pub enum IssueTracker {
     /// A folder of `<id>.md` issues, made absolute against the hub's directory.
     LocalMarkdown { dir: PathBuf },
-}
-
-/// A hub server: where it listens for runners, and how people join.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Server {
-    pub listen: std::net::SocketAddr,
-    pub registration: Registration,
-    /// Hours a login lasts.
-    pub session_hours: u32,
-    /// Failed logins before a name is refused, and for how many minutes.
-    pub lockout_failures: u32,
-    pub lockout_minutes: u32,
 }
 
 /// How people join a hub server.
@@ -171,21 +199,52 @@ pub fn hub_path(hub: &Path) -> PathBuf {
 pub(crate) struct RawHub {
     pub(crate) version: u32,
     pub(crate) owner: String,
+    pub(crate) http: RawHttp,
     pub(crate) llm: RawHubLlm,
-    pub(crate) knowledge: RawKnowledge,
-    pub(crate) tasks: Option<RawTasks>,
-    pub(crate) server: RawServer,
-    pub(crate) roles: BTreeMap<String, Vec<Permission>>,
-    pub(crate) interfaces: Option<RawInterfaces>,
+    pub(crate) accounts: RawAccounts,
+    pub(crate) connectors: RawConnectors,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawServer {
+pub(crate) struct RawHttp {
     pub(crate) listen: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawAccounts {
     pub(crate) registration: RawRegistration,
     pub(crate) sessions: RawSessions,
     pub(crate) lockout: RawLockout,
+    pub(crate) roles: BTreeMap<String, Vec<Permission>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawConnectors {
+    // Never read: parsed so that each is written, and holds nothing.
+    #[allow(dead_code)]
+    pub(crate) rest: RawNoSettings,
+    #[allow(dead_code)]
+    pub(crate) mcp: RawNoSettings,
+    #[allow(dead_code)]
+    pub(crate) runners: RawNoSettings,
+    pub(crate) knowledge: RawKnowledge,
+    pub(crate) tasks: RawTasks,
+    pub(crate) sources: RawSources,
+}
+
+/// A connector with no settings: `{}`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawNoSettings {}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawSources {
+    /// No source adapter is built yet, so the one value it takes is `{}`.
+    pub(crate) adapters: BTreeMap<String, serde_norway::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -223,9 +282,7 @@ pub(crate) struct RawClosed {}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawTasks {
-    pub(crate) tracker: RawIssueTracker,
-    pub(crate) label: String,
-    pub(crate) poll_seconds: u32,
+    pub(crate) trackers: BTreeMap<String, RawIssueTracker>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -239,6 +296,8 @@ pub(crate) enum RawIssueTracker {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawLocalMarkdownIssues {
     pub(crate) dir: String,
+    pub(crate) label: String,
+    pub(crate) poll_seconds: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,17 +359,21 @@ pub fn load_hub(path: &Path, env_file: Option<&Path>, env: &dyn Env) -> Result<H
 }
 
 pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigError> {
-    // Say what changed rather than which key is missing.
-    if let Ok(v) = serde_norway::from_str::<serde_norway::Value>(text)
-        && v.get("server").is_none()
-    {
-        return Err(ConfigError::Invalid {
-            path: path.to_path_buf(),
-            problems: vec![
-                "server: a hub is always a server now, never part of a runner: add `server` and `roles` (`ensemble-hub init --stdout` prints them), and remove `tasks.user` and `tasks.projects`. One person runs it on their own computer, and their runner names it as `hub:` in runner.yaml"
-                    .into(),
-            ],
-        });
+    // Say what moved rather than which key is unknown.
+    if let Ok(v) = serde_norway::from_str::<serde_norway::Value>(text) {
+        let old: Vec<&str> = ["server", "roles", "interfaces", "knowledge", "tasks"]
+            .into_iter()
+            .filter(|k| v.get(k).is_some())
+            .collect();
+        if !old.is_empty() {
+            return Err(ConfigError::Invalid {
+                path: path.to_path_buf(),
+                problems: vec![format!(
+                    "{}: hub.yaml is laid out anew: `server.listen` is `http.listen`; `server.registration`, `server.sessions`, `server.lockout` and `roles` go under `accounts`; `knowledge` and `tasks` go under `connectors`, with `rest: {{}}`, `mcp: {{}}`, `runners: {{}}` and `sources: {{ adapters: {{}} }}`; a tracker is named under `connectors.tasks.trackers`, with its `label` and `poll_seconds`; `interfaces` is gone, and MCP needs no `url`. `ensemble-hub init --stdout` prints the whole file",
+                    old.join(", ")
+                )],
+            });
+        }
     }
     let raw: RawHub = serde_norway::from_str(text).map_err(|e| ConfigError::Syntax {
         path: path.to_path_buf(),
@@ -326,16 +389,69 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
     if raw.owner.trim().is_empty() {
         problems.push("owner: is empty; name the hub, such as acme or ana".into());
     }
+    let http = match raw.http.listen.trim().parse() {
+        Ok(listen) => Some(Http { listen }),
+        Err(_) => {
+            problems.push(format!(
+                "http.listen: '{}' must be an address and a port, such as 127.0.0.1:7700",
+                raw.http.listen
+            ));
+            None
+        }
+    };
     let llm = hub_llm(&raw.llm, env, &mut problems);
     let kinds = kinds(&llm.direct, &llm.runners);
-    let knowledge = {
-        let k = &raw.knowledge;
-        if k.vault.trim().is_empty() {
-            problems.push("knowledge.vault: is empty".into());
+    let accounts = {
+        let a = &raw.accounts;
+        let registration = match &a.registration {
+            RawRegistration::Approval(r) => {
+                if r.max_pending == 0 {
+                    problems
+                        .push("accounts.registration: `max_pending` must be greater than 0".into());
+                }
+                Registration::Approval {
+                    max_pending: r.max_pending,
+                }
+            }
+            RawRegistration::Closed(_) => Registration::Closed,
+        };
+        if a.sessions.hours == 0 {
+            problems.push("accounts.sessions: `hours` must be greater than 0".into());
         }
-        let base = path.parent().unwrap_or(Path::new("."));
+        if a.lockout.failures == 0 || a.lockout.minutes == 0 {
+            problems
+                .push("accounts.lockout: `failures` and `minutes` must be greater than 0".into());
+        }
+        if a.roles.is_empty() {
+            problems.push(
+                "accounts.roles: name at least one role, such as member: [share, recall]".into(),
+            );
+        }
+        for name in a.roles.keys() {
+            if name.trim().is_empty() || name.contains(char::is_whitespace) {
+                problems.push(format!(
+                    "accounts.roles: the role name '{name}' must be one word"
+                ));
+            }
+        }
+        Accounts {
+            rules: AccountRules {
+                registration,
+                session_hours: a.sessions.hours,
+                lockout_failures: a.lockout.failures,
+                lockout_minutes: a.lockout.minutes,
+            },
+            roles: a.roles.clone(),
+        }
+    };
+    let base = path.parent().unwrap_or(Path::new("."));
+    let knowledge = {
+        let k = &raw.connectors.knowledge;
+        if k.vault.trim().is_empty() {
+            problems.push("connectors.knowledge.vault: is empty".into());
+        }
         let distill = direct_adapter(
-            "knowledge.distill",
+            "connectors.knowledge.distill",
             &RawDirectAdapter {
                 candidates: k.distill.candidates.clone(),
                 when_none: k.distill.when_none,
@@ -344,7 +460,7 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             &mut problems,
         );
         check_candidates(
-            "knowledge.distill.try",
+            "connectors.knowledge.distill.try",
             &distill.fallback.candidates,
             false,
             &kinds,
@@ -352,29 +468,29 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             &mut problems,
         );
         if k.recall.max_notes == 0 {
-            problems.push("knowledge.recall: `max_notes` must be greater than 0".into());
+            problems.push("connectors.knowledge.recall: `max_notes` must be greater than 0".into());
         }
         if k.recall.max_chars == 0 {
-            problems.push("knowledge.recall: `max_chars` must be greater than 0".into());
+            problems.push("connectors.knowledge.recall: `max_chars` must be greater than 0".into());
         }
         let embed = k.recall.embed.as_ref().map(|e| {
             match kinds.get(&e.backend) {
                 None => problems.push(format!(
-                    "knowledge.recall.embed.backend: '{}' is not one of the backends of `llm`",
+                    "connectors.knowledge.recall.embed.backend: '{}' is not one of the backends of `llm`",
                     e.backend
                 )),
                 Some(&OPENAI_COMPATIBLE_API) => {}
                 Some(_) => problems.push(format!(
-                    "knowledge.recall.embed.backend: '{}' is not an openai-compatible-api backend, which is what serves /embeddings",
+                    "connectors.knowledge.recall.embed.backend: '{}' is not an openai-compatible-api backend, which is what serves /embeddings",
                     e.backend
                 )),
             }
             if e.model.trim().is_empty() {
-                problems.push("knowledge.recall.embed.model: is empty".into());
+                problems.push("connectors.knowledge.recall.embed.model: is empty".into());
             }
             if !(0.0..=1.0).contains(&e.min_similarity) {
                 problems.push(
-                    "knowledge.recall.embed.min_similarity: must be from 0 to 1, such as 0.5"
+                    "connectors.knowledge.recall.embed.min_similarity: must be from 0 to 1, such as 0.5"
                         .into(),
                 );
             }
@@ -395,78 +511,53 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             },
         }
     };
-    let base = path.parent().unwrap_or(Path::new("."));
-    let tasks = raw.tasks.as_ref().map(|t| {
-        let tracker = match &t.tracker {
-            RawIssueTracker::LocalMarkdown(m) => {
-                if m.dir.trim().is_empty() {
-                    problems.push("tasks.tracker.dir: is empty".into());
-                }
-                IssueTracker::LocalMarkdown {
-                    dir: base.join(m.dir.trim()),
-                }
-            }
-        };
-        let label = t.label.trim();
-        if label.is_empty() || label.contains(char::is_whitespace) || label.contains(':') {
-            problems.push(format!(
-                "tasks.label: '{label}' must be one word with no ':', such as ensemble"
-            ));
-        }
-        if t.poll_seconds == 0 {
-            problems.push("tasks: `poll_seconds` must be greater than 0".into());
-        }
-        Tasks {
-            tracker,
-            label: label.to_string(),
-            poll_seconds: t.poll_seconds,
-        }
-    });
-    let server = {
-        let s = &raw.server;
-        let registration = match &s.registration {
-            RawRegistration::Approval(a) => {
-                if a.max_pending == 0 {
-                    problems
-                        .push("server.registration: `max_pending` must be greater than 0".into());
-                }
-                Registration::Approval {
-                    max_pending: a.max_pending,
-                }
-            }
-            RawRegistration::Closed(_) => Registration::Closed,
-        };
-        if s.sessions.hours == 0 {
-            problems.push("server.sessions: `hours` must be greater than 0".into());
-        }
-        if s.lockout.failures == 0 || s.lockout.minutes == 0 {
-            problems.push("server.lockout: `failures` and `minutes` must be greater than 0".into());
-        }
-        match s.listen.trim().parse() {
-            Ok(listen) => Some(Server {
-                listen,
-                registration,
-                session_hours: s.sessions.hours,
-                lockout_failures: s.lockout.failures,
-                lockout_minutes: s.lockout.minutes,
-            }),
-            Err(_) => {
-                problems.push(format!(
-                    "server.listen: '{}' must be an address and a port, such as 127.0.0.1:7700",
-                    s.listen
-                ));
-                None
-            }
-        }
-    };
-    let roles = raw.roles.clone();
-    if roles.is_empty() {
-        problems.push("roles: name at least one role, such as member: [share, recall]".into());
+    let trackers = &raw.connectors.tasks.trackers;
+    // Which issue became which task is kept by the issue's id alone, so two
+    // trackers would mix theirs up.
+    if trackers.len() > 1 {
+        problems.push(format!(
+            "connectors.tasks.trackers: names {} trackers; a hub watches one for now",
+            trackers.len()
+        ));
     }
-    for name in roles.keys() {
-        if name.trim().is_empty() || name.contains(char::is_whitespace) {
-            problems.push(format!("roles: the role name '{name}' must be one word"));
-        }
+    let tasks = Tasks {
+        trackers: trackers
+            .iter()
+            .map(|(name, t)| {
+                let at = format!("connectors.tasks.trackers.{name}");
+                if !super::runner::valid_name(name) {
+                    problems.push(format!(
+                        "{at}: the name must be letters, digits, '-', '_' or '.'"
+                    ));
+                }
+                let RawIssueTracker::LocalMarkdown(m) = t;
+                if m.dir.trim().is_empty() {
+                    problems.push(format!("{at}.dir: is empty"));
+                }
+                let label = m.label.trim();
+                if label.is_empty() || label.contains(char::is_whitespace) || label.contains(':') {
+                    problems.push(format!(
+                        "{at}.label: '{label}' must be one word with no ':', such as ensemble"
+                    ));
+                }
+                if m.poll_seconds == 0 {
+                    problems.push(format!("{at}: `poll_seconds` must be greater than 0"));
+                }
+                let tracker = Tracker {
+                    kind: IssueTracker::LocalMarkdown {
+                        dir: base.join(m.dir.trim()),
+                    },
+                    label: label.to_string(),
+                    poll_seconds: m.poll_seconds,
+                };
+                (name.clone(), tracker)
+            })
+            .collect(),
+    };
+    for name in raw.connectors.sources.adapters.keys() {
+        problems.push(format!(
+            "connectors.sources.adapters.{name}: no source adapter is built yet; leave `adapters: {{}}`"
+        ));
     }
     for name in kinds.keys() {
         let used = knowledge
@@ -486,17 +577,14 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             );
         }
     }
-    let interfaces = interfaces(raw.interfaces.as_ref(), &mut problems);
-    match (problems.is_empty(), server) {
-        (true, Some(server)) => Ok(Hub {
+    match (problems.is_empty(), http) {
+        (true, Some(http)) => Ok(Hub {
             version: raw.version,
             owner: raw.owner.trim().to_string(),
+            http,
             llm,
-            knowledge,
-            tasks,
-            server,
-            roles,
-            interfaces,
+            accounts,
+            connectors: Connectors { knowledge, tasks },
             source: path.to_path_buf(),
         }),
         _ => Err(ConfigError::Invalid {

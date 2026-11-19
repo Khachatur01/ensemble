@@ -226,7 +226,7 @@ struct Replace {
     before: Option<String>,
 }
 
-const KEY: &str = "The setting: its keys joined by dots, such as `server.listen`.";
+const KEY: &str = "The setting: its keys joined by dots, such as `http.listen`.";
 const GET: &[Field] = &[Field::text("key", KEY).positional()];
 const SET: &[Field] = &[
     Field::text("key", KEY).required().positional(),

@@ -16,40 +16,47 @@
         base_url = "http://127.0.0.1:11434/v1";
         timeout_seconds = 300;
       };
-      knowledge = {
-        vault = "vault";
-        distill = {
-          try = [
-            {
-              backend = "local";
-              model = "qwen3.5:9b";
-            }
-          ];
-          when_none = "wait";
-          max_tokens = 4000;
-        };
-        recall = {
-          max_notes = 8;
-          max_chars = 6000;
-        };
-      };
-      server = {
-        listen = "127.0.0.1:7700";
+      http.listen = "127.0.0.1:7700";
+      accounts = {
         registration.type = "closed";
         sessions.hours = 12;
         lockout = {
           failures = 5;
           minutes = 15;
         };
+        roles.admin = [
+          "admin"
+          "share"
+          "recall"
+          "tasks"
+          "compute"
+          "host"
+        ];
       };
-      roles.admin = [
-        "admin"
-        "share"
-        "recall"
-        "tasks"
-        "compute"
-        "host"
-      ];
+      connectors = {
+        rest = { };
+        mcp = { };
+        runners = { };
+        knowledge = {
+          vault = "vault";
+          distill = {
+            try = [
+              {
+                backend = "local";
+                model = "qwen3.5:9b";
+              }
+            ];
+            when_none = "wait";
+            max_tokens = 4000;
+          };
+          recall = {
+            max_notes = 8;
+            max_chars = 6000;
+          };
+        };
+        tasks.trackers = { };
+        sources.adapters = { };
+      };
     };
   };
 

@@ -8,8 +8,7 @@
 # `ensemble-runner init` in ~/.config/ensemble/runner. A computer runs one runner.
 #
 # Nothing has a default value. Only these may be left out, because leaving
-# them out means "not used": `hub`, `llm.hub`, `interfaces`, and a backend's
-# `api_key_env`.
+# them out means "not used": `hub`, `llm.hub`, and a backend's `api_key_env`.
 
 version: 1
 
@@ -79,6 +78,3 @@ llm:
         runner: ana/gpu-box          # <owner>/<name>, as the hub knows the runner
         backend: local               # its name in that runner's llm.direct
 
-# How the runner is managed. Left out, the command line is on.
-interfaces:
-  cli: {}                          # `ensemble-runner …` on this computer, run by the running runner

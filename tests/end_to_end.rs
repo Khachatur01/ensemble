@@ -1635,17 +1635,18 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
     let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
     let (head, tail) = text.split_once("\nllm:\n").unwrap();
     let (_, rest) = tail.split_once("# ---").unwrap();
-    let rest = rest.split_once("knowledge:").unwrap().1;
+    let (_, try_and_on) = rest.split_once("      try:").unwrap();
     // The sample's embedding model is on a backend this test takes out.
-    let rest = rest
-        .split_once("  recall:")
+    let after_try = try_and_on
+        .split_once("      when_none:")
         .unwrap()
         .1
         .replace("backend: central", "backend: up");
+    let accounts_to_try = rest.split_once("      try:").unwrap().0;
     std::fs::write(
         hub.join("hub.yaml"),
         format!(
-            "{head}\nllm:\n  direct:\n    backends:\n      down: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}\n      up: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\n\nknowledge:\n  vault: vault\n  distill:\n    try:\n      - {{ backend: down, model: small }}\n      - {{ backend: up, model: small }}\n    when_none: wait\n    max_tokens: 100\n  recall:{rest}"
+            "{head}\nllm:\n  direct:\n    backends:\n      down: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}\n      up: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\n\n# ---{accounts_to_try}      try:\n        - {{ backend: down, model: small }}\n        - {{ backend: up, model: small }}\n      when_none:{after_try}"
         ),
     )
     .unwrap();
@@ -1804,7 +1805,7 @@ fn a_hub_servers_admin_adds_users_whose_tokens_are_shown_once() {
     let token = stdout_of(&out).trim().to_string();
     assert!(token.starts_with("ens_"), "{token}");
     assert!(stderr_of(&out).contains("shown once"));
-    // The sample serves MCP, so the answer says how an agent adds the hub.
+    // MCP is always on, so the answer says how an agent adds the hub.
     assert!(
         stderr_of(&out).contains(&format!(
             "claude mcp add --transport http ensemble http://127.0.0.1:7700/mcp --header \"Authorization: Bearer {token}\""
@@ -1850,10 +1851,10 @@ fn hub_server_of(scratch: &Scratch) -> PathBuf {
     let text = cut(&text, "  # Backends runners offer", "\n\n");
     let text = text
         .replace(
-            "      - backend: claude\n        model: claude-haiku-4-5\n",
+            "        - backend: claude\n          model: claude-haiku-4-5\n",
             "",
         )
-        .replace("      - backend: gpu\n        model: qwen3.5:9b\n", "");
+        .replace("        - backend: gpu\n          model: qwen3.5:9b\n", "");
     std::fs::write(hub.join("hub.yaml"), text).unwrap();
     hub
 }
@@ -2514,8 +2515,8 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
         &text[end_of_llm..]
     )
     .replace(
-        "      - backend: central\n        model: qwen3.5-72b\n",
-        "      - backend: gpu\n        model: small\n",
+        "        - backend: central\n          model: qwen3.5-72b\n",
+        "        - backend: gpu\n          model: small\n",
     );
     std::fs::write(hub.join("hub.yaml"), text).unwrap();
     let _hub = serve_hub(&s, &hub);
@@ -3311,7 +3312,10 @@ fn a_running_hub_uses_a_changed_hub_yaml_at_once_or_starts_again() {
     let (hub, _address, _token) = hub_server(&s);
     let _served = serve_hub(&s, &hub);
     // Roles: used at once.
-    let out = ensemble_hub(&s, &["config", "set", "roles.reader", "[recall, share]"]);
+    let out = ensemble_hub(
+        &s,
+        &["config", "set", "accounts.roles.reader", "[recall, share]"],
+    );
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stderr_of(&out).contains("uses it now"),
@@ -3323,7 +3327,7 @@ fn a_running_hub_uses_a_changed_hub_yaml_at_once_or_starts_again() {
     // Where it listens: it starts again, there.
     let port = free_port();
     let listen = format!("127.0.0.1:{port}");
-    let out = ensemble_hub(&s, &["config", "set", "server.listen", &listen]);
+    let out = ensemble_hub(&s, &["config", "set", "http.listen", &listen]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stderr_of(&out).contains("starts again"),

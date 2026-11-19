@@ -645,7 +645,6 @@ impl std::error::Error for ConfigError {}
 pub mod edit;
 mod env;
 pub mod hub;
-mod interfaces;
 pub mod llm;
 mod raw;
 pub mod runner;
@@ -656,11 +655,9 @@ mod validate;
 
 pub use env::*;
 pub use hub::{
-    Embed, HUB_FILENAME, Hub, IssueTracker, Knowledge, Permission, Recall, Registration, Server,
-    Tasks, hub_path, load_hub, parse_hub,
+    AccountRules, Accounts, Connectors, Embed, HUB_FILENAME, Http, Hub, IssueTracker, Knowledge,
+    Permission, Recall, Registration, Tasks, Tracker, hub_path, load_hub, parse_hub,
 };
-pub use interfaces::{Interfaces, Mcp};
-pub(crate) use interfaces::{RawInterfaces, RawRunnerInterfaces, interfaces, runner_interfaces};
 pub use llm::{HubLlm, RelayAt, Relayed, RunnerLlm};
 pub use runner::{
     RUNNER_FILENAME, Runner, WorksFor, load_runner, parse_runner, parse_runner_with, runner_path,

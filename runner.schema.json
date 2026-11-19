@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/runner.schema.json",
   "title": "Ensemble runner: runner.yaml",
-  "description": "This computer's runner: a worker that runs the tasks its hub keeps for the git repositories of its workspace with the helper teams in its teams directory, and, through the hub, may lend this computer's power to others. In ~/.config/ensemble/runner/runner.yaml; a computer runs one runner. Nothing has a default value; `hub`, `llm.hub`, `interfaces` and a backend's `api_key_env` may be left out, which means they are not used.",
+  "description": "This computer's runner: a worker that runs the tasks its hub keeps for the git repositories of its workspace with the helper teams in its teams directory, and, through the hub, may lend this computer's power to others. In ~/.config/ensemble/runner/runner.yaml; a computer runs one runner. Nothing has a default value; `hub`, `llm.hub` and a backend's `api_key_env` may be left out, which means they are not used.",
   "type": "object",
   "required": ["version", "name", "works_for", "workspace", "llm"],
   "additionalProperties": false,
@@ -30,23 +30,9 @@
       "type": "string",
       "pattern": "^wss?://"
     },
-    "llm": { "$ref": "#/definitions/llm" },
-    "interfaces": { "$ref": "#/definitions/interfaces" }
+    "llm": { "$ref": "#/definitions/llm" }
   },
   "definitions": {
-    "interfaces": {
-      "description": "How it is managed: each interface it turns on. Left out, the command line is on; at least one must be.",
-      "type": "object",
-      "required": [],
-      "additionalProperties": false,
-      "properties": {
-        "cli": {
-          "description": "`ensemble-hub …` or `ensemble-runner …` on its computer, run by the running process over its socket when it runs.",
-          "type": "object",
-          "additionalProperties": false
-        }
-      }
-    },
     "llm": {
       "description": "The LLM backends its teams' agents run on. A team names a backend by its name alone, so a team runs on any runner that defines the backends it names. A name is unique across both groups.",
       "type": "object",

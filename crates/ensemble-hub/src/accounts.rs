@@ -28,6 +28,7 @@ use ensemble_ops::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -40,7 +41,7 @@ pub struct Accounts {
     /// The roles, and how people join, how long a login lasts and when failed
     /// logins lock a name: as hub.yaml says now ([`Accounts::apply`]).
     roles: RwLock<Roles>,
-    server: RwLock<ensemble_config::Server>,
+    rules: RwLock<ensemble_config::AccountRules>,
     /// Held while the accounts are read, changed and written, so two requests
     /// at once cannot lose a change.
     changing: Mutex<()>,
@@ -49,28 +50,28 @@ pub struct Accounts {
 }
 
 impl Accounts {
-    pub fn new(dir: &Path, roles: Roles, server: ensemble_config::Server) -> Self {
+    pub fn new(dir: &Path, roles: Roles, rules: ensemble_config::AccountRules) -> Self {
         Accounts {
             dir: dir.to_path_buf(),
             roles: RwLock::new(roles),
-            server: RwLock::new(server),
+            rules: RwLock::new(rules),
             changing: Mutex::new(()),
             failures: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Use `roles` and `server`, as hub.yaml says them now.
-    pub fn apply(&self, roles: Roles, server: ensemble_config::Server) {
+    /// Use `roles` and `rules`, as hub.yaml says them now.
+    pub fn apply(&self, roles: Roles, rules: ensemble_config::AccountRules) {
         *self.roles.write().unwrap_or_else(|e| e.into_inner()) = roles;
-        *self.server.write().unwrap_or_else(|e| e.into_inner()) = server;
+        *self.rules.write().unwrap_or_else(|e| e.into_inner()) = rules;
     }
 
     pub fn roles(&self) -> Roles {
         self.roles.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    fn server(&self) -> ensemble_config::Server {
-        *self.server.read().unwrap_or_else(|e| e.into_inner())
+    fn rules(&self) -> ensemble_config::AccountRules {
+        *self.rules.read().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn users(&self) -> Result<Users, Error> {
@@ -126,7 +127,7 @@ pub struct HubContext {
     dir: PathBuf,
     /// Its accounts, made the first time an operation asks for them.
     accounts: OnceLock<Result<Accounts, String>>,
-    /// hub.yaml, loaded: its roles and server settings, or why not.
+    /// hub.yaml, loaded: its roles and account rules, or why not.
     load: Box<Load>,
     settings: SettingsFile,
     /// What the running hub does once its hub.yaml changed, and says of it:
@@ -138,7 +139,7 @@ pub struct HubContext {
 }
 
 type Offered = dyn Fn() -> Value + Send + Sync;
-type Load = dyn Fn() -> Result<(Roles, ensemble_config::Server), String> + Send + Sync;
+type Load = dyn Fn() -> Result<(Roles, ensemble_config::AccountRules), String> + Send + Sync;
 type Changed = dyn Fn() -> Option<String> + Send + Sync;
 
 impl HubContext {
@@ -146,7 +147,10 @@ impl HubContext {
     /// an operation first needs them, and its settings file, hub.yaml.
     pub fn new(
         dir: &Path,
-        load: impl Fn() -> Result<(Roles, ensemble_config::Server), String> + Send + Sync + 'static,
+        load: impl Fn() -> Result<(Roles, ensemble_config::AccountRules), String>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         let path = ensemble_config::hub_path(dir);
         let checked = path.clone();
@@ -189,7 +193,7 @@ impl HubContext {
 
     pub fn accounts(&self) -> Result<&Accounts, Error> {
         let made = self.accounts.get_or_init(|| {
-            (self.load)().map(|(roles, server)| Accounts::new(&self.dir, roles, server))
+            (self.load)().map(|(roles, rules)| Accounts::new(&self.dir, roles, rules))
         });
         made.as_ref().map_err(|why| {
             Error::new(Code::Unavailable, format!("the hub's accounts: {why}"))
@@ -280,11 +284,10 @@ fn token_note(c: &HubContext, name: &str, token: &str) -> String {
         "This is {name}'s token, shown once. On their computer: ensemble-runner login {} --token <token>",
         hub_url(c)
     );
-    if let Some(add) = mcp_line(c, token) {
-        note.push_str(&format!(
-            ". For their agent, as its API key for the hub's MCP: {add}"
-        ));
-    }
+    note.push_str(&format!(
+        ". For their agent, as its API key for the hub's MCP: {}",
+        mcp_line(c, token)
+    ));
     note
 }
 
@@ -307,33 +310,51 @@ fn hub_file(c: &HubContext) -> Option<ensemble_config::Hub> {
     .ok()
 }
 
-/// The address a runner reaches the hub's link at: the one clients reach its
-/// MCP at, as a WebSocket's, or where it listens when that is one address;
-/// else a stand-in for the person to fill.
-fn hub_url(c: &HubContext) -> String {
-    let Some(hub) = hub_file(c) else {
-        return "<hub-url>".into();
-    };
-    match hub.interfaces.mcp {
-        Some(mcp) => mcp
-            .url
-            .replacen("https://", "wss://", 1)
-            .replacen("http://", "ws://", 1),
-        None if !hub.server.listen.ip().is_unspecified() => {
-            format!("ws://{}", hub.server.listen)
+thread_local! {
+    /// The address the request being answered reached the hub at.
+    static REACHED_AT: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Run `f` for a request that reached the hub at `base`, such as
+/// `https://hub.example.com`: the hints a new token or join code comes with
+/// name it.
+pub(crate) fn reached_at<T>(base: Option<String>, f: impl FnOnce() -> T) -> T {
+    let before = REACHED_AT.replace(base);
+    let out = f();
+    REACHED_AT.set(before);
+    out
+}
+
+/// The address clients reach the hub at: the one the request being answered
+/// reached it at; else where it listens, when that is one address; else a
+/// stand-in for the person to fill.
+fn hub_base(c: &HubContext) -> String {
+    if let Some(base) = REACHED_AT.with_borrow(Clone::clone) {
+        return base;
+    }
+    match hub_file(c) {
+        Some(hub) if !hub.http.listen.ip().is_unspecified() => {
+            format!("http://{}", hub.http.listen)
         }
-        None => "<hub-url>".into(),
+        _ => "<hub-url>".into(),
     }
 }
 
-/// The line that adds the hub's MCP to an agent with `token`, when the hub
-/// serves MCP: what a person pastes, or asks their agent to run.
-fn mcp_line(c: &HubContext, token: &str) -> Option<String> {
-    let mcp = hub_file(c)?.interfaces.mcp?;
-    Some(format!(
-        "claude mcp add --transport http ensemble {} --header \"Authorization: Bearer {token}\"",
-        mcp.endpoint()
-    ))
+/// The address a runner names its hub by: the hub's, as a WebSocket's.
+fn hub_url(c: &HubContext) -> String {
+    hub_base(c)
+        .replacen("https://", "wss://", 1)
+        .replacen("http://", "ws://", 1)
+}
+
+/// The line that adds the hub's MCP to an agent with `token`: what a person
+/// pastes, or asks their agent to run.
+fn mcp_line(c: &HubContext, token: &str) -> String {
+    format!(
+        "claude mcp add --transport http ensemble {}{} --header \"Authorization: Bearer {token}\"",
+        hub_base(c),
+        crate::mcp::PATH
+    )
 }
 
 fn user_operations() -> Vec<Operation<HubContext>> {
@@ -633,7 +654,7 @@ fn own_operations() -> Vec<Operation<HubContext>> {
             },
             |c: &HubContext, _: &Caller, input: Login| {
                 let accounts = c.accounts()?;
-                let Registration::Approval { max_pending } = accounts.server().registration else {
+                let Registration::Approval { max_pending } = accounts.rules().registration else {
                     return Err(Error::new(
                         Code::Forbidden,
                         "this hub does not take sign-ups; ask its admin to add you",
@@ -788,10 +809,10 @@ fn own_operations() -> Vec<Operation<HubContext>> {
                     "token": token,
                     "scopes": scopes.as_deref().map(names),
                     "expires": expires,
-                    "note": match mcp_line(c, &token) {
-                        Some(add) => format!("Keep this token: it is shown once. For your agent, as its API key for the hub's MCP: {add}"),
-                        None => "Keep this token: it is shown once.".into(),
-                    },
+                    "note": format!(
+                        "Keep this token: it is shown once. For your agent, as its API key for the hub's MCP: {}",
+                        mcp_line(c, &token)
+                    ),
                 }))
             },
         ),
@@ -962,7 +983,7 @@ fn join_code(c: &HubContext, name: &str) -> Result<Value, Error> {
 
 /// Check a name and password, minding the lockout, and start a session.
 fn login(accounts: &Accounts, input: &Login) -> Result<Value, Error> {
-    let hours = accounts.server().session_hours;
+    let hours = accounts.rules().session_hours;
     let (token, expires) = guarded(accounts, &input.name, |users| {
         users.login(&input.name, &input.password, hours)
     })?;
@@ -1001,8 +1022,8 @@ fn guarded<T>(
             let mut failures = accounts.failures.lock().unwrap_or_else(|e| e.into_inner());
             let entry = failures.entry(name.to_string()).or_insert((0, None));
             entry.0 += 1;
-            if entry.0 >= accounts.server().lockout_failures {
-                let minutes = u64::from(accounts.server().lockout_minutes);
+            if entry.0 >= accounts.rules().lockout_failures {
+                let minutes = u64::from(accounts.rules().lockout_minutes);
                 *entry = (0, Some(Instant::now() + Duration::from_secs(minutes * 60)));
             }
             Err(e)

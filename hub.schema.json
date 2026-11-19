@@ -2,9 +2,9 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/hub.schema.json",
   "title": "Ensemble hub: hub.yaml",
-  "description": "A hub, in ~/.config/ensemble/hub/hub.yaml: it provides services and connects runners, and has no helper team. Always a server (`ensemble-hub serve`): accounts with roles, a knowledge vault and the models that distill it, and the issues of a tracker handed to the runners of the people they are assigned to. Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (`tasks`, `llm.runners`, `knowledge.recall.embed`, `interfaces`, and a backend's `api_key_env`).",
+  "description": "A hub, in ~/.config/ensemble/hub/hub.yaml, run by `ensemble-hub serve`. Its core is its accounts, their roles and what each may do, the port it listens on (`http`) and the LLM backends it uses (`llm`); everything else reaches it through a connector, each always on and each written in `connectors`: the REST API, MCP, the runners' link, knowledge, tasks and sources. A connector may hold adapters the admin picks, in a map that may be empty. Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (`llm.runners`, `connectors.knowledge.recall.embed`, and a backend's `api_key_env`).",
   "type": "object",
-  "required": ["version", "owner", "llm", "knowledge", "server", "roles"],
+  "required": ["version", "owner", "http", "llm", "accounts", "connectors"],
   "additionalProperties": false,
   "properties": {
     "version": {
@@ -16,67 +16,31 @@
       "type": "string",
       "minLength": 1
     },
+    "http": { "$ref": "#/definitions/http" },
     "llm": { "$ref": "#/definitions/llm" },
-    "knowledge": {
-      "description": "The knowledge vault, and how shares become notes.",
-      "$ref": "#/definitions/knowledge"
-    },
-    "tasks": {
-      "description": "The task inbox: issues in a tracker, with the label, go to the runners of the accounts they are assigned to, and their progress, questions and results are written back. Leave it out for no inbox.",
-      "$ref": "#/definitions/tasks"
-    },
-    "server": {
-      "description": "Where `ensemble-hub serve` listens for runners and the REST API, and how people join.",
-      "$ref": "#/definitions/server"
-    },
-    "interfaces": { "$ref": "#/definitions/interfaces" },
-    "roles": {
-      "description": "The hub's roles, named as you like, each a list of what its users may do. Users and their tokens are kept in database.db beside this file, not here: `ensemble-hub user add NAME --role R`.",
-      "type": "object",
-      "minProperties": 1,
-      "additionalProperties": {
-        "type": "array",
-        "items": { "$ref": "#/definitions/permission" }
-      }
-    }
+    "accounts": { "$ref": "#/definitions/accounts" },
+    "connectors": { "$ref": "#/definitions/connectors" }
   },
   "definitions": {
-    "interfaces": {
-      "description": "How it is reached: each interface it turns on. Left out, the command line alone is on; it must be on.",
+    "http": {
+      "description": "The port every connector over HTTP is served on.",
       "type": "object",
-      "required": [],
-      "additionalProperties": false,
-      "properties": {
-        "cli": {
-          "description": "`ensemble-hub …` on its computer, run by the running process over its socket when it runs.",
-          "type": "object",
-          "additionalProperties": false
-        },
-        "mcp": {
-          "description": "MCP over HTTP at `/mcp` on the hub's port, for client agents, signed in with an account's token as the API key: share, recall and tasks. Left out: no MCP.",
-          "type": "object",
-          "required": ["url"],
-          "additionalProperties": false,
-          "properties": {
-            "url": {
-              "description": "The address clients reach the hub at, such as https://hub.example.com, with no path: a new token's answer tells them to add `<url>/mcp` to their agent.",
-              "type": "string",
-              "pattern": "^https?://[^/?# ]+$"
-            }
-          }
-        }
-      }
-    },
-    "server": {
-      "type": "object",
-      "required": ["listen", "registration", "sessions", "lockout"],
+      "required": ["listen"],
       "additionalProperties": false,
       "properties": {
         "listen": {
-          "description": "The address and port to listen on, for runners (WebSocket), the REST API and MCP under /api/v1/. Put a TLS reverse proxy such as Caddy in front for the internet, or listen on a LAN or VPN address.",
+          "description": "The address and port to listen on: the REST API at /api/v1/, MCP at /mcp, and the runners' link at /link and /relay. Put a TLS reverse proxy such as Caddy in front for the internet, or listen on a LAN or VPN address.",
           "type": "string",
           "examples": ["127.0.0.1:7700", "0.0.0.0:7700"]
-        },
+        }
+      }
+    },
+    "accounts": {
+      "description": "How people join and sign in, and what each role may do. Users and their tokens are kept in database.db beside this file, not here: `ensemble-hub user add NAME --role R`.",
+      "type": "object",
+      "required": ["registration", "sessions", "lockout", "roles"],
+      "additionalProperties": false,
+      "properties": {
         "registration": {
           "description": "How people join. `type` decides which other settings there are.",
           "oneOf": [
@@ -85,7 +49,64 @@
           ]
         },
         "sessions": { "$ref": "#/definitions/sessions" },
-        "lockout": { "$ref": "#/definitions/lockout" }
+        "lockout": { "$ref": "#/definitions/lockout" },
+        "roles": {
+          "description": "The hub's roles, named as you like, each a list of what its users may do.",
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/permission" }
+          }
+        }
+      }
+    },
+    "connectors": {
+      "description": "Everything that reaches the hub. Each is always on, and each is written.",
+      "type": "object",
+      "required": ["rest", "mcp", "runners", "knowledge", "tasks", "sources"],
+      "additionalProperties": false,
+      "properties": {
+        "rest": {
+          "description": "The REST API at /api/v1/ on the hub's port, for scripts and a web UI. No settings: `{}`.",
+          "$ref": "#/definitions/no_settings"
+        },
+        "mcp": {
+          "description": "MCP over HTTP at /mcp on the hub's port, for client agents, signed in with an account's token as the API key: share, recall and tasks. No settings: `{}`.",
+          "$ref": "#/definitions/no_settings"
+        },
+        "runners": {
+          "description": "The runners' link, WebSockets at /link and /relay on the hub's port: the tasks runners run, and the backends they share. No settings: `{}`.",
+          "$ref": "#/definitions/no_settings"
+        },
+        "knowledge": {
+          "description": "The knowledge vault, and how shares become notes.",
+          "$ref": "#/definitions/knowledge"
+        },
+        "tasks": {
+          "description": "The tasks the hub keeps, and the trackers whose issues become tasks.",
+          "$ref": "#/definitions/tasks"
+        },
+        "sources": {
+          "description": "Knowledge brought in from outside, such as a mailbox or a chat.",
+          "$ref": "#/definitions/sources"
+        }
+      }
+    },
+    "no_settings": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "sources": {
+      "type": "object",
+      "required": ["adapters"],
+      "additionalProperties": false,
+      "properties": {
+        "adapters": {
+          "description": "The sources the hub reads, by name. No source adapter is built yet: `{}`.",
+          "type": "object",
+          "maxProperties": 0
+        }
       }
     },
     "sessions": {
@@ -150,30 +171,26 @@
     },
     "tasks": {
       "type": "object",
-      "required": ["tracker", "label", "poll_seconds"],
+      "required": ["trackers"],
       "additionalProperties": false,
       "properties": {
-        "tracker": {
-          "description": "Where the issues are kept. `type` decides which other settings there are.",
-          "oneOf": [
-            { "$ref": "#/definitions/tracker_local_markdown" }
-          ]
-        },
-        "label": {
-          "description": "The signal: an issue with this label is for the helper teams of the person it is assigned to. A second label `<label>:<team>/<agent>` gives it to that agent; without one it goes to the backlog.",
-          "type": "string",
-          "pattern": "^[^\\s:]+$"
-        },
-        "poll_seconds": {
-          "description": "Seconds between two looks at the tracker.",
-          "type": "integer",
-          "minimum": 1
+        "trackers": {
+          "description": "The trackers whose issues, with the label, go to the runners of the accounts they are assigned to, with their progress, questions and results written back. The key is the tracker's name: letters, digits, '-', '_' or '.'. One for now; `{}` for no inbox.",
+          "type": "object",
+          "maxProperties": 1,
+          "propertyNames": { "pattern": "^[A-Za-z0-9._-]+$" },
+          "additionalProperties": {
+            "description": "Where the issues are kept. `type` decides which other settings there are.",
+            "oneOf": [
+              { "$ref": "#/definitions/tracker_local_markdown" }
+            ]
+          }
         }
       }
     },
     "tracker_local_markdown": {
       "type": "object",
-      "required": ["type", "dir"],
+      "required": ["type", "dir", "label", "poll_seconds"],
       "additionalProperties": false,
       "properties": {
         "type": {
@@ -184,6 +201,16 @@
           "description": "The folder, relative to the hub's directory or absolute. Often a git repository a team shares.",
           "type": "string",
           "minLength": 1
+        },
+        "label": {
+          "description": "The signal: an issue with this label is for the helper teams of the person it is assigned to. A second label `<label>:<team>/<agent>` gives it to that agent; without one it goes to the backlog.",
+          "type": "string",
+          "pattern": "^[^\\s:]+$"
+        },
+        "poll_seconds": {
+          "description": "Seconds between two looks at the tracker.",
+          "type": "integer",
+          "minimum": 1
         }
       }
     },

@@ -43,7 +43,7 @@ pub fn context(ctx: &Ctx) -> Result<crate::accounts::HubContext, String> {
     let path = config::hub_path(&dir);
     Ok(crate::accounts::HubContext::new(&dir, move || {
         config::load_hub(&path, env_file.as_deref(), &SystemEnv)
-            .map(|h| (h.roles, h.server))
+            .map(|h| (h.accounts.roles, h.accounts.rules))
             .map_err(|e| e.to_string())
     }))
 }
@@ -76,10 +76,10 @@ fn init(force: bool, stdout: bool) -> Result<ExitCode, String> {
     std::fs::write(&path, sample).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     println!("wrote {}: {what}, with every setting", path.display());
     let hub = config::parse_hub(sample, &path, &SystemEnv).map_err(|e| e.to_string())?;
-    ensemble_knowledge::Vault::new(&hub.knowledge.vault).init()?;
+    ensemble_knowledge::Vault::new(&hub.connectors.knowledge.vault).init()?;
     println!(
         "made the knowledge vault, a git repository: {}",
-        hub.knowledge.vault.display()
+        hub.connectors.knowledge.vault.display()
     );
     println!(
         "Name the hub as `owner`, choose the models that distill and the roles, then run `ensemble-hub check`, add the first admin with `ensemble-hub user add`, and `ensemble-hub serve`."
@@ -96,7 +96,7 @@ fn check(ctx: &Ctx) -> Result<ExitCode, String> {
     )
     .map_err(|e| e.to_string())?;
     println!("{}: valid, for {}", hub.source.display(), hub.owner);
-    let knowledge = &hub.knowledge;
+    let knowledge = &hub.connectors.knowledge;
     println!("knowledge vault: {}", knowledge.vault.display());
     if !ensemble_knowledge::Vault::new(&knowledge.vault).exists() {
         println!("  it is not a git repository yet; `ensemble-hub serve` makes it");
@@ -192,7 +192,7 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
     let path = config::hub_path(&dir);
     let hub =
         config::load_hub(&path, env_file.as_deref(), &SystemEnv).map_err(|e| e.to_string())?;
-    let server = hub.server;
+    let listen = hub.http.listen;
     // The backends of runners the hub uses, served on loopback, each call
     // relayed to its runner.
     let calls: std::sync::Arc<crate::calls::Calls> = std::sync::Arc::default();
@@ -214,24 +214,19 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
         .init()
         .map_err(|e| format!("serve: the knowledge vault: {e}"))?;
     let users = dir.clone();
-    let listener = std::net::TcpListener::bind(server.listen)
-        .map_err(|e| format!("serve: cannot listen on {}: {e}", server.listen))?;
+    let listener = std::net::TcpListener::bind(listen)
+        .map_err(|e| format!("serve: cannot listen on {listen}: {e}"))?;
     // `ensemble-hub …` reaches it on its socket, open before it says it
     // listens, so a command right after finds it.
-    let commands_at = hub.interfaces.cli.then(|| state::hub_socket(hub_dir));
-    let commands_listener = match &commands_at {
-        Some(socket) => Some(
-            ensemble_core::runtime::shared()
-                .block_on(async { local::listen(socket) })
-                .map_err(|e| format!("serve: {e}"))?,
-        ),
-        None => None,
-    };
+    let commands_at = state::hub_socket(hub_dir);
+    let commands_listener = ensemble_core::runtime::shared()
+        .block_on(async { local::listen(&commands_at) })
+        .map_err(|e| format!("serve: {e}"))?;
     let say = |line: &str| eprintln!("ensemble: {line}");
     say(&format!(
         "hub {} listening on {}",
         hub.owner,
-        listener.local_addr().unwrap_or(server.listen)
+        listener.local_addr().unwrap_or(listen)
     ));
     // The server and what it borrows live until the process ends: each
     // connection is a task of its own.
@@ -245,14 +240,16 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
             .starts_with(ensemble_knowledge::RECALL_HEADER)
             .then_some(found)
     };
-    let inbox: Option<&'static crate::inbox::ServerInbox> = match &hub.tasks {
-        Some(tasks) => Some(Box::leak(Box::new(
-            crate::inbox::ServerInbox::new(tasks, &hub.roles, users.clone())
-                .map_err(|e| format!("serve: {e}"))?
-                .with_notes(notes),
-        ))),
-        None => None,
-    };
+    // A hub watches one tracker for now: hub.yaml names at most one.
+    let inbox: Option<&'static crate::inbox::ServerInbox> =
+        match hub.connectors.tasks.trackers.values().next() {
+            Some(tracker) => Some(Box::leak(Box::new(
+                crate::inbox::ServerInbox::new(tracker, &hub.accounts.roles, users.clone())
+                    .map_err(|e| format!("serve: {e}"))?
+                    .with_notes(notes),
+            ))),
+            None => None,
+        };
     // What a task's agent reported when it was done is shared, so the vault
     // learns from the work as from what people share.
     let tasks = crate::board::Service::new(&users)
@@ -273,7 +270,7 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
             }
         });
     let tasks: &'static crate::board::Service = Box::leak(Box::new(tasks));
-    let mut server = crate::server::Server::new(memory, &hub.roles, server, users)
+    let server = crate::server::Server::new(memory, &hub.accounts.roles, hub.accounts.rules, users)
         .with_tasks(tasks)
         .with_calls(calls.clone());
     // `runner.backends` lists what the connected runners share.
@@ -294,10 +291,6 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
                 .collect(),
         )
     });
-    if let Some(mcp) = &hub.interfaces.mcp {
-        server = server.with_mcp();
-        say(&format!("MCP for client agents at {}", mcp.endpoint()));
-    }
     let server: &'static crate::server::Server<'static> = Box::leak(Box::new(server));
     // A change to hub.yaml: used at once where it can be, else it starts again.
     server.operations().1.when_changed(move || {
@@ -305,10 +298,9 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
             Ok(now) => now,
             Err(e) => return Some(format!("The running hub could not read it: {e}")),
         };
-        if now.server.listen != hub.server.listen
-            || now.knowledge.vault != hub.knowledge.vault
-            || now.tasks != hub.tasks
-            || now.interfaces != hub.interfaces
+        if now.http != hub.http
+            || now.connectors.knowledge.vault != hub.connectors.knowledge.vault
+            || now.connectors.tasks != hub.connectors.tasks
         {
             local::restart();
             return Some(
@@ -317,7 +309,7 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
             );
         }
         if let Ok(accounts) = server.operations().1.accounts() {
-            accounts.apply(now.roles.clone(), now.server);
+            accounts.apply(now.accounts.roles.clone(), now.accounts.rules);
         }
         loopback.set_names(ensemble_config::llm::routes(&now.llm.runners));
         memory.apply(&now);
@@ -329,11 +321,7 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
             scope.spawn(|| inbox.work(&STOP, &say));
         }
         ensemble_core::runtime::shared().block_on(async {
-            let commands = async {
-                if let (Some(listener), Some(socket)) = (commands_listener, &commands_at) {
-                    commands(listener, socket, server).await;
-                }
-            };
+            let commands = commands(commands_listener, &commands_at, server);
             tokio::join!(
                 server.run(listener, &STOP, &|line| eprintln!("ensemble: {line}")),
                 commands

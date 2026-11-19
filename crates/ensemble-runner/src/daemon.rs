@@ -30,7 +30,7 @@ use ensemble_config::{Config, RelayAt, Runner, WorksFor};
 use ensemble_link::Link;
 use ensemble_link::Token;
 use ensemble_ops::local::{self, STOP, read_line};
-use ensemble_ops::{Code, Error, Registry};
+use ensemble_ops::{Error, Registry};
 use ensemble_tasks::board::{Board, Claim, End, LEASE, RemoteBoard, Waiting};
 use ensemble_tasks::queue::Queue;
 use ensemble_tasks::runs::Runs;
@@ -74,9 +74,8 @@ pub struct Daemon<'a> {
     /// Where it serves the backends it reaches through the hub, when it
     /// does.
     relay: Option<RelayAt>,
-    /// The runner's operations, and what they are given here; none when its
-    /// `interfaces.cli` is off.
-    operations: Option<(&'a Registry<RunnerContext>, RunnerContext)>,
+    /// The runner's operations, and what they are given here.
+    operations: (&'a Registry<RunnerContext>, RunnerContext),
     /// The repositories with a worker, by their folder.
     open: Mutex<HashMap<PathBuf, Repository>>,
     /// The repositories' workers, which stopping waits for.
@@ -103,15 +102,13 @@ impl<'a> Daemon<'a> {
         operations: &'a Registry<RunnerContext>,
         say: &'a (dyn Fn(&str) + Sync),
     ) -> Result<Self, String> {
-        let operations = if runner.interfaces.cli {
+        let operations = {
             let hub = hub.clone();
             let relink = move || match &hub {
                 Some((url, token)) => read_token_again(url, token),
                 None => Err("the runner names no hub".to_string()),
             };
-            Some((operations, RunnerContext::running(relink)?))
-        } else {
-            None
+            (operations, RunnerContext::running(relink)?)
         };
         Ok(Daemon {
             hub_link: hub
@@ -206,14 +203,10 @@ impl<'a> Daemon<'a> {
         let line = read_line(&mut stream).await?;
         let asked = serde_json::from_str::<serde_json::Value>(&line).unwrap_or_default();
         let reply = if asked.get("op").is_some() {
-            match &self.operations {
-                Some((registry, context)) => local::answer(registry, context, &asked)
-                    .unwrap_or_else(|| serde_json::json!({ "error": Error::invalid("`op` must name an operation") })),
-                None => serde_json::json!({ "error": Error::new(
-                    Code::Forbidden,
-                    "this runner takes no commands: its `interfaces.cli` is off",
-                ) }),
-            }
+            let (registry, context) = &self.operations;
+            local::answer(registry, context, &asked).unwrap_or_else(
+                || serde_json::json!({ "error": Error::invalid("`op` must name an operation") }),
+            )
         } else if asked["reload"] == true {
             match self.reload(reloaded) {
                 Ok(said) => serde_json::json!({"ok": true, "said": said}),
