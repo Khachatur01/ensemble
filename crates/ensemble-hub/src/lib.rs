@@ -31,6 +31,7 @@ pub mod board;
 pub mod calls;
 mod cli;
 mod cmd;
+mod goals;
 mod http;
 pub mod inbox;
 #[cfg(test)]

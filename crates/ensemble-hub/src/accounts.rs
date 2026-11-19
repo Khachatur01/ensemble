@@ -275,6 +275,7 @@ pub fn operations() -> Registry<HubContext> {
         Side::Hub,
         Access::Permission("admin"),
     ));
+    all.extend(crate::goals::operations());
     Registry::new(all)
 }
 

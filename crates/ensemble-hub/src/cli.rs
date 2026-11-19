@@ -32,6 +32,10 @@ pub fn command<H>(hub: &Registry<H>) -> clap::Command {
     let groups = [
         ("user", "The hub's accounts."),
         ("role", "The hub's roles."),
+        ("runner", "The runners connected to the hub."),
+        ("backend", "The LLM backends the hub uses, and their keys."),
+        ("tracker", "The trackers whose issues become tasks."),
+        ("registration", "How people join the hub."),
         (
             "config",
             "The hub's settings, hub.yaml, by their keys joined by dots, such as http.listen",

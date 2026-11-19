@@ -36,10 +36,16 @@ pub struct Cli {
 /// The whole command line: the commands below, with those made from the
 /// runner's operations (`ensemble_ops::cli`).
 pub fn command<R>(runner: &Registry<R>) -> clap::Command {
-    let groups = [(
-        "config",
-        "The runner's settings, runner.yaml, by their keys joined by dots, such as hub",
-    )];
+    let groups = [
+        (
+            "config",
+            "The runner's settings, runner.yaml, by their keys joined by dots, such as hub",
+        ),
+        (
+            "backend",
+            "The LLM backends the runner's teams run on, their keys, and which it shares.",
+        ),
+    ];
     config_extras(mount(Cli::command(), runner, &groups))
 }
 

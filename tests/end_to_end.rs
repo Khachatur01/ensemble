@@ -3568,7 +3568,11 @@ fn a_runners_owner_adds_shares_and_removes_backends_its_teams_do_not_use() {
     assert!(yaml().contains("openai-local"));
 
     // Shared through a hub, which it names.
-    assert!(run(&["config", "set", "hub", "ws://127.0.0.1:1"]).status.success());
+    assert!(
+        run(&["config", "set", "hub", "ws://127.0.0.1:1"])
+            .status
+            .success()
+    );
     let server = models_stub(r#"{"data":[{"id":"big"}]}"#);
     let out = run(&[
         "backend",
@@ -3594,4 +3598,117 @@ fn a_runners_owner_adds_shares_and_removes_backends_its_teams_do_not_use() {
     let out = run(&["backend", "remove", "gpu"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!yaml().contains("gpu"));
+}
+
+#[test]
+fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean() {
+    let s = Scratch::new("hub-goals");
+    let hub = hub_server_of(&s);
+    let yaml = || std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    let run = |args: &[&str]| hub_with_stdin(&s, args, "");
+    // One server for every model: it lists `small`, and embeds.
+    let server = models_stub(r#"{"data":[{"id":"small","embedding":[0.1,0.2]}]}"#);
+    let ok = |args: &[&str]| {
+        let out = run(args);
+        assert!(out.status.success(), "{args:?}: {}", stderr_of(&out));
+        stdout_of(&out)
+    };
+    ok(&[
+        "backend",
+        "add",
+        "local",
+        "--type",
+        "openai-compatible-api",
+        "--url",
+        &server,
+    ]);
+
+    // Models are asked for by what they are, and checked.
+    let said = ok(&["knowledge", "models", "local:small", "--when-none", "fail"]);
+    assert!(
+        said.contains("shares are distilled by local:small"),
+        "{said}"
+    );
+    assert!(
+        yaml().contains("try: [{backend: \"local\", model: \"small\"}]"),
+        "{}",
+        yaml()
+    );
+    let out = run(&["knowledge", "models", "local:nope"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("local does not serve 'nope'; it serves small"),
+        "{}",
+        stderr_of(&out)
+    );
+    ok(&[
+        "knowledge",
+        "embedding",
+        "local:small",
+        "--min-similarity",
+        "0.4",
+    ]);
+    assert!(
+        yaml().contains("embed: {backend: \"local\", model: \"small\", min_similarity: 0.4}"),
+        "{}",
+        yaml()
+    );
+    ok(&["knowledge", "embedding", "--off"]);
+    ok(&["knowledge", "recall", "--max-notes", "5"]);
+    assert!(yaml().contains("max_notes: 5"));
+
+    // Trackers: one at a time for now.
+    let out = run(&[
+        "tracker",
+        "add",
+        "work",
+        "--type",
+        "local_markdown",
+        "--dir",
+        "work",
+    ]);
+    assert!(!out.status.success(), "the sample watches one already");
+    ok(&["tracker", "remove", "issues"]);
+    ok(&[
+        "tracker",
+        "add",
+        "work",
+        "--type",
+        "local_markdown",
+        "--dir",
+        "work",
+    ]);
+    let list = ok(&["tracker", "list"]);
+    assert!(
+        list.contains("work  local_markdown in") && list.contains("label ensemble"),
+        "{list}"
+    );
+
+    // Roles, and who may sign up.
+    ok(&["role", "set", "auditor", "recall,share"]);
+    assert!(
+        yaml().contains("auditor: [\"recall\", \"share\"]"),
+        "{}",
+        yaml()
+    );
+    let out = run(&["role", "set", "x", "fly"]);
+    assert!(
+        stderr_of(&out).contains("'fly' is not a permission"),
+        "{}",
+        stderr_of(&out)
+    );
+    ok(&["role", "remove", "auditor"]);
+    ok(&["user", "add", "ana", "--role", "member"]);
+    let out = run(&["role", "remove", "member"]);
+    assert!(
+        stderr_of(&out).contains("ana has the role member"),
+        "{}",
+        stderr_of(&out)
+    );
+    ok(&["registration", "set", "closed"]);
+    assert!(
+        yaml().contains("registration: {type: \"closed\"}"),
+        "{}",
+        yaml()
+    );
 }
