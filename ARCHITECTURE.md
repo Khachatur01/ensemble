@@ -11,8 +11,10 @@ is a pure worker, clients reach the hub alone, each is an executable of its
 own, a runner signs in and joins over its link alone, it finds or clones the
 project a task names in its workspace, asks when it cannot, and gives a task
 back when its computer cannot reach the repository, and a runner that works
-for the hub takes other accounts' tasks that none of their own runners take;
-shared LLM backends are still to come.
+for the hub takes other accounts' tasks that none of their own runners take,
+and runners share LLM backends through it. "The hub's core and its
+connectors" (decided 2026-11-19) is built: `hub.yaml` is the core (accounts,
+the port, the LLM backends) and the connectors, every one always on.
 
 `README.md` is the user's guide: every setting, command and tool. This document
 is the map behind it.
@@ -21,17 +23,20 @@ is the map behind it.
 
 ## The pieces
 
-Ensemble is an agentic development system, not an MCP server: a **hub** that
-provides services, and **runners** that provide computing power, with work
-spread across them. It is two executables, `ensemble-hub` and
-`ensemble-runner`, in these roles:
+Ensemble is an agentic development system, not an MCP server: a **hub** at
+the center, which everything else reaches through its connectors, and
+**runners**, one of those connectors, that provide computing power. It is two
+executables, `ensemble-hub` and `ensemble-runner`, in these roles:
 
-- **The hub**: the services: task tracking (issues from a tracker become tasks
-  for the right person), knowledge, accounts and tokens, the connected
-  runners and model calls between them, and MCP over HTTP for client agents.
-  It has no team and runs no agents. It is always its own process,
-  `ensemble-hub serve`, on a server for a team or on one person's computer,
-  and each runner names it as `hub:` in its `runner.yaml`.
+- **The hub**: its core is the accounts, their roles and what each may do, the
+  port it listens on and the LLM backends it uses. Everything else is a
+  **connector**, each always on: the REST API, MCP over HTTP for client
+  agents, the link for runners, knowledge, tasks (and the trackers whose
+  issues become tasks for the right person) and sources. A connector may hold
+  **adapters** the admin picks, such as the trackers of `tasks`. The hub has
+  no team and runs no agents. It is always its own process, `ensemble-hub
+  serve`, on a server for a team or on one person's computer, and each runner
+  names it as `hub:` in its `runner.yaml`.
 - **The runner**: a computational resource and a pure worker. It holds the
   helper teams, runs their agents (agent CLIs, Ensemble's own loop) on the
   tasks the hub keeps for its owner, like a member of a team handed work: in
@@ -46,10 +51,11 @@ spread across them. It is two executables, `ensemble-hub` and
   its agents named `<team>/<agent>`, each run by an adapter (an agent CLI
   started headless, an agent loop of Ensemble's own, or one chat request to a
   model).
-- **The ways in**: the agent CLI a person already uses, which reaches the hub
-  over MCP with an account's token as the API key and installs nothing of
-  Ensemble: it shares, recalls and makes tasks; the hub's tracker, whose issues
-  become tasks; and, to come, the hub's REST API, sources and web UI.
+- **The ways in**, all connectors of the hub: the agent CLI a person already
+  uses, which reaches the hub over MCP with an account's token as the API key
+  and installs nothing of Ensemble: it shares, recalls and makes tasks; the
+  hub's trackers, whose issues become tasks; the REST API, for scripts and a
+  web UI to come; and, to come, sources.
 
 ```text
   client agents (Claude Code, Codex, OpenCode, claude.ai)
@@ -57,7 +63,7 @@ spread across them. It is two executables, `ensemble-hub` and
         ▼
   ensemble-hub serve          accounts, tokens, knowledge, the tasks,
         ▲                     the tracker inbox, the connected runners
-        │  the link: a WebSocket each runner opens, signed in with a token
+        │  the link: a WebSocket at /link each runner opens, signed in with a token
         │
   ensemble-runner serve       one per computer: a worker per git repository
         │                     of its workspace, which leases its tasks; the
@@ -95,7 +101,7 @@ Each process is one of the two executables. What runs in each:
 | command | what it runs | ends |
 | --- | --- | --- |
 | `ensemble-runner serve` | the runner, one per computer: a worker per git repository directly inside its workspace, each running the tasks the hub keeps for the repository's project, and, for a runner that works for the hub, one per repository of another account's in `<workspace>/.for/<account>/`; every 30 seconds, the workspace looked at again and the hub asked for the tasks of its agents in projects it has no folder for, whose repositories it clones, asks about or gives back; a socket for the operations `ensemble-runner …` asks of it and for reloading its teams; and with the hub its `runner.yaml` names, a link that says it is connected, with its agents (`Worker`), and, when it shares backends or reaches others', a relay socket for model calls (`Relay`) | on SIGINT or SIGTERM; a change to `runner.yaml` has it start again in the same process |
-| `ensemble-hub serve` | the hub, from `~/.config/ensemble/hub/`: one port for the link, runners' relay sockets, the REST API and, with `interfaces.mcp`, MCP for client agents at `/mcp`; a socket for the operations `ensemble-hub …` asks of it; the tasks; the vault's distiller; the tracker inbox | on SIGINT or SIGTERM; a change to `hub.yaml` it cannot use as it runs has it start again in the same process |
+| `ensemble-hub serve` | the hub, from `~/.config/ensemble/hub/`: one port (`http.listen`) for the runners' link at `/link` and their relay sockets at `/relay`, the REST API under `/api/v1/` and MCP for client agents at `/mcp`; a socket for the operations `ensemble-hub …` asks of it; the tasks; the vault's distiller; the tracker inbox | on SIGINT or SIGTERM; a change to `hub.yaml` it cannot use as it runs has it start again in the same process |
 | everything else | one command: read the config and the state, or ask the running process over its socket, do one thing, print | at once |
 
 A repository's tasks are run by one worker of the computer at a time: whoever
@@ -116,7 +122,7 @@ and the runner on none of the hub's alone: `ensemble-store`,
 | --- | --- | --- |
 | `ensemble-core` | what everything shares | the error vocabulary (`port.rs`); the per-user state, cache and config directories (`state.rs`); the working folder, a `repo` inside it and what a run changed (`workspace.rs`); the record of runs behind `ensemble-runner agent stats` (`records.rs`); the one-worker lock (`lock.rs`); dates in UTC (`time.rs`); the async runtime and its bridges to code that blocks (`runtime.rs`) |
 | `ensemble-ops` | operations, defined once for every interface, and what both command lines share | the operation, its spec (name, summary, who may run it, input fields), errors as data, the caller, and the registry that checks both before it runs one (`lib.rs`); the commands made from the operations, `config edit` and `config merge`, and asking at the terminal (`cli.rs`); operations run by the running process over its socket, or here, and stopping or starting again on a signal or a change (`local.rs`) |
-| `ensemble-config` | the three files a person writes | `config.yaml`: the document as written (`raw.rs`), the environment, `.env` files and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), adding and removing an agent as text, comments kept (`edit.rs`); one setting read, set or merged as text (`settings.rs`); a settings file, with the Nix-declared settings kept, and its `config.*` operations (`settings_file.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); `hub.yaml` (`hub.rs`); `runner.yaml` (`runner.rs`); the `interfaces` of each (`interfaces.rs`) |
+| `ensemble-config` | the three files a person writes | `config.yaml`: the document as written (`raw.rs`), the environment, `.env` files and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), adding and removing an agent as text, comments kept (`edit.rs`); one setting read, set or merged as text (`settings.rs`); a settings file, with the Nix-declared settings kept, and its `config.*` operations (`settings_file.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); `hub.yaml` (`hub.rs`); `runner.yaml` (`runner.rs`) |
 | `ensemble-backends` | talking to model servers | one chat request in the server's own format (`chat.rs`); which models a server serves (`models.rs`); the first usable model of a `try` list (`resolve.rs`); texts as vectors (`embed.rs`); a stand-in server for tests (`testing.rs`) |
 | `ensemble-store` | Turso files, the hub's alone | the hub's `database.db`, opened for each read or change, and any other Turso file, such as the vault's cache of vectors (`lib.rs`) |
 | `ensemble-knowledge` | the hub's knowledge, the hub's alone | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); notes by meaning, with their vectors in `.ensemble/embeddings.db` (`meaning.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait (`lib.rs`) |
@@ -141,14 +147,18 @@ team new`, `ensemble-runner config set`):
 | file | where | holds |
 | --- | --- | --- |
 | `config.yaml` | a helper team's folder in the runner's teams directory (`~/.config/ensemble/runner/teams/<name>/`), a folder linked there, or a pulled repository's clone | `limits`, `gates`, `tracker`, `agents` |
-| `hub.yaml` | `~/.config/ensemble/hub/`, on the computer that runs the hub | `owner`, the LLM backends the hub uses (`llm`), `knowledge`, `tasks`, `server`, `roles` and `interfaces` |
-| `runner.yaml` | `~/.config/ensemble/runner/`, one per computer | `name`, `works_for`, `workspace`, `hub`, the LLM backends its teams run on and shares (`llm`), `interfaces` |
+| `hub.yaml` | `~/.config/ensemble/hub/`, on the computer that runs the hub | the core: `owner`, the port (`http`), the LLM backends the hub uses (`llm`) and `accounts` (how people join and sign in, the `roles`); and `connectors`: `rest`, `mcp`, `runners`, `knowledge`, `tasks` (its `trackers`) and `sources` (its `adapters`) |
+| `runner.yaml` | `~/.config/ensemble/runner/`, one per computer | `name`, `works_for`, `workspace`, `hub`, the LLM backends its teams run on and shares (`llm`) |
 
 No setting has a default: every one is written, and a missing one is refused by
 name. Each file is changed by hand or setting by setting from the command line
 (`ensemble-runner config`, `ensemble-hub config`, `ensemble-runner team
 config`; `settings.rs` changes one setting as text, keeping comments), loaded
-before it is written. A block that is absent means its module is off. A path
+before it is written. Every connector of the hub is written, even one with no
+settings (`{}`), and none can be turned off; a connector's adapters are a map
+that may be empty. The few blocks that may be left out mean "not used" when
+they are (`llm.runners`, an embedding model, a runner's `hub`). The command
+line is always on and has no settings. A path
 (the hub's vault and tracker, the runner's workspace) is beside its file when
 it is relative, and the runner's `workspace` may start with `~/`. No file
 holds a secret: keys are named by the variable that holds them, read from the
@@ -465,12 +475,12 @@ the hub, to accounts with `compute` too.
 
 ## The link
 
-The runner opens WebSockets, says the version of the link's protocol it
+The runner opens WebSockets, at `/link` on the hub's port, says the version of the link's protocol it
 speaks as the `ensemble-protocol` header of the upgrade, and signs in with
 `Authorization: Bearer <token>`. The hub refuses a link of another version,
 or of none, before anything else, with 426 and words that name both versions
-and which of the two to update ("this hub speaks link protocol 4, the runner
-5: update ensemble-hub"), which the runner shows as they are; then a token
+and which of the two to update ("this hub speaks link protocol 5, the runner
+6: update ensemble-hub"), which the runner shows as they are; then a token
 that is not valid, with 401. A link without a token is signed in to nothing,
 and may only ask to be, for a token of its own. Frames are JSON text: requests
 `{id, method, params}`, replies `{id, result}` or `{id, error}`, and events
@@ -480,7 +490,7 @@ projects it has no folder for, one that says it is connected, one per project wh
 without a token to sign in, and a short one for `hello` when it signs in or
 says its status; and, when it shares backends or reaches others', a relay
 socket at `/relay` for model calls, whose frames `ensemble_link::relay`
-describes. This is version 4 of the protocol. It makes no HTTP request
+describes. This is version 5 of the protocol. It makes no HTTP request
 to the hub.
 
 | for | the runner asks | the hub sends |
@@ -505,8 +515,9 @@ token's permissions (its role, narrowed by its scopes), read again from the
 hub's state, so a revoked token stops at once. The permissions are `share`,
 `recall`, `tasks`, `admin`, `compute` and `host`. The same port serves the
 REST API under `/api/v1/` (accounts, sessions, access tokens, admin) and
-`/mcp`; a request that asks for a WebSocket upgrade is the link, or, at
-`/relay`, a runner's relay socket, and anything else is HTTP. The server speaks plain HTTP; for the internet a
+`/mcp`; a WebSocket upgrade is the link at `/link` or a runner's relay socket
+at `/relay`, and refused anywhere else (after the version check, so an older
+runner is still told to update), and anything else is HTTP. The server speaks plain HTTP; for the internet a
 TLS reverse proxy goes in front.
 
 ## Errors
@@ -555,17 +566,27 @@ work, and is written to be read by the person or the model that will see it.
   git repository like an image, and teams an agent writes at the person's
   request, which run once the person approves them. (Decided 2026-11-17.)
   The description is strict YAML, never natural language.
-- **Hub**: the core: identities, knowledge and its pipeline, tasks and the
-  tracker, the LLM backends it uses, and the runners connected to it. The word
-  "organization" is not used for it, to keep it apart from a helper team.
+- **Hub**: the center of the system. Its **core** is the accounts, their roles
+  and what each may do, the port it listens on and the LLM backends it uses;
+  everything else reaches it through a connector. The word "organization" is
+  not used for it, to keep it apart from a helper team.
 - **Runner**: a pure worker, `ensemble-runner`: a machine's capacity to do
   agent work, its helper teams, their agent CLIs and logins, and its models. It
   works on the hub's tasks and serves no client. A computer runs one runner,
   tied to no project. (Decided 2026-11-19.)
-- **Adapter**: whatever reaches the hub: MCP, the REST API, the link for
-  runners, sources, the CLI. (Decided 2026-11-19.)
-- **Source**: an adapter that brings knowledge in from outside, such as a
-  mailbox or a chat. (Decided 2026-11-19.)
+- **Connector**: a part of the hub beside its core: the REST API, MCP, the
+  link for runners, knowledge, tasks and sources. Every connector is always
+  on, and each is written in `hub.yaml`'s `connectors`; none can be turned
+  off. The runners' link is one connector among the others, not a special
+  one. The hub's command line is always on too, and has no settings.
+  (Decided 2026-11-19.)
+- **Adapter**: a pluggable part of a connector that the admin picks: the
+  trackers of `tasks` (markdown issues; Jira and others later), the
+  providers of `sources` (Microsoft 365, Telegram). A connector's adapters
+  are a map by name, which may be empty. An agent's adapter in a helper team
+  (what runs it) is the same idea on the runner's side. (Decided 2026-11-19.)
+- **Source**: knowledge brought in from outside, such as a mailbox or a chat,
+  through an adapter of the `sources` connector. (Decided 2026-11-19.)
 - **Interface**: what a person talks to the system through: their own agent
   (Claude Code, Codex, OpenCode, claude.ai) with the hub's MCP tools, the hub's
   tracker, or later a web UI over the REST API. There is no personal agent and
@@ -579,9 +600,10 @@ Ensemble is described as this, not as an MCP server.) It serves two kinds of
 user: a single developer who wants agents to work on
 tasks and save tokens by sending cheap work to cheap models, and an organization
 whose people and agents share knowledge. The same two executables serve both.
-Features beyond the core are modules switched on by their own config block; a
-block that is absent means the module is not used, which is the one kind of
-optional setting the config rules allow.
+The hub's connectors are always on, whatever the level; what changes is which
+adapters the admin picks, and a map of adapters may be empty. A block that
+may be left out means "not used", which is the one kind of optional setting
+the config rules allow.
 
 | Level | What runs | Who it is for |
 |---|---|---|
@@ -591,7 +613,7 @@ optional setting the config rules allow.
 A runner always needs a hub, and knowledge always belongs to one: one person
 on their own runs both on their computer. (Decided 2026-11-19.)
 
-## Hub, adapters and runners
+## Hub, connectors and runners
 
 (Decided 2026-11-19; being built: see the build order. Part one describes
 what is built, and is rewritten as this is built.)
@@ -608,18 +630,43 @@ what is built, and is rewritten as this is built.)
                  client agents, apps, a web UI later
 ```
 
-### The hub and its adapters
+### The hub's core and its connectors
 
-The hub is the core: accounts, knowledge, tasks and the tracker, and the LLM
-backends it uses. Everything that reaches it is an **adapter**, turned on in
-its settings like the interfaces of "Operations and interfaces":
+The hub's core is its accounts, their roles and what each may do; the one
+port every connector over HTTP is served on (`http.listen`); and the LLM
+backends it uses (`llm`). Everything else is a **connector**, always on and
+written in `hub.yaml`'s `connectors`, some holding **adapters** the admin
+picks:
 
-- **MCP over HTTP**, for client agents;
-- **the REST API**, for apps, and a web UI later, offering what MCP offers,
-  as both are made from the same operations;
-- **the link**, a WebSocket, for runners;
-- **sources**, for knowledge from outside;
-- **the CLI**, over the hub's local socket, for administration.
+- **`rest`**, the REST API at `/api/v1/`, for apps, and a web UI later,
+  offering what MCP offers, as both are made from the same operations;
+- **`mcp`**, MCP over HTTP at `/mcp`, for client agents;
+- **`runners`**, the link at `/link` and the relay sockets at `/relay`,
+  WebSockets, for runners;
+- **`knowledge`**, the vault and the models that distill it;
+- **`tasks`**, the tasks the hub keeps, with its `trackers` (adapters:
+  markdown issues; Jira and others later);
+- **`sources`**, knowledge from outside, with its `adapters` (Microsoft 365,
+  Telegram; none built yet).
+
+`rest`, `mcp` and `runners` have no settings and are written `{}`. The CLI,
+over the hub's local socket, for administration, is always on and is not in
+the file.
+
+```yaml
+version: 1
+owner: Acme
+http: { listen: 127.0.0.1:7700 }
+llm: { direct: { backends: { ... } } }
+accounts: { registration: ..., sessions: ..., lockout: ..., roles: { ... } }
+connectors:
+  rest: {}
+  mcp: {}
+  runners: {}
+  knowledge: { vault: vault, distill: ..., recall: ... }
+  tasks: { trackers: { issues: { type: local_markdown, dir: issues, label: ensemble, poll_seconds: 30 } } }
+  sources: { adapters: {} }
+```
 
 There are two executables, each its own crate and Nix package, from one
 repository: **`ensemble-hub`** and **`ensemble-runner`**. The library crates
@@ -643,7 +690,7 @@ There are no session hooks: the MCP server's instructions tell the agent to
 `recall` before work where earlier decisions may matter, and to `share` when
 the person asks, as the knowledge rules say. That is weaker than a hook, as
 the agent decides when to follow them, but every MCP client has it. (Built:
-`interfaces.mcp` in `hub.yaml`, `/mcp` on the hub's port, one `POST` per
+the `mcp` connector, always on, `/mcp` on the hub's port, one `POST` per
 message and no event stream, in `ensemble-hub`'s `mcp.rs`.)
 
 No client connects to a runner, and there is no delegation: the helper teams
@@ -1123,25 +1170,11 @@ every operation, those to come too.
 - A web UI, a desktop app, any other: a client of the REST API, or of the
   socket on the same computer.
 
-Each is turned on in the settings, never by building another binary:
-
-```yaml
-# hub.yaml
-interfaces:
-  cli: {}                                # the socket `ensemble-hub …` uses
-  rest_api: { listen: 127.0.0.1:7710 }   # its own port; left out: no REST API
-
-# runner.yaml
-interfaces:
-  cli: {}                                # a runner serves no one: the CLI alone
-```
-
-`ensemble-hub init` and `ensemble-runner setup` write `cli: {}`. A file that
-turns on no interface is refused: a hub or runner nobody can manage is a
-mistake. Without `cli`, the running process opens no socket, and the CLI
-refuses to change it while it runs rather than change its files behind it.
-The REST API has a port of its own, apart from the link's, because it is
-optional.
+None is turned off, and none is built into another binary: the CLI is always
+on, over the socket `ensemble-hub …` and `ensemble-runner …` use, and has no
+settings, so neither file names it; the REST API is the hub's `rest`
+connector, always on, on the hub's one port beside MCP and the runners' link
+(decided 2026-11-19, in place of an optional REST API on a port of its own).
 
 A runner's own operations reach the hub as one more adapter, over the link,
 for the runner's own account only: a person manages all their computers from
@@ -1256,12 +1289,13 @@ crate holds it today.
     its roles, sign-up, sessions, lockout, models, knowledge settings and
     owner at once, and starts again in its process for the rest; the node
     starts again in its process, its sessions carrying on through their
-    bridges.)
+    bridges. `interfaces` went with step 21.)
 17. The hub serves MCP over HTTP: `share`, `recall` and the tasks, signed in
     with an account's token as the API key; the server's instructions in place
     of session hooks; a token's answer gives the URL and a line to paste.
-    Clients install nothing. (Done: `interfaces.mcp.url` turns it on; the
-    node's MCP and its hooks go with step 18.)
+    Clients install nothing. (Done: `interfaces.mcp.url` turned it on, and
+    since step 21 it is always on; the node's MCP and its hooks go with step
+    18.)
 18. `ensemble-hub` and `ensemble-runner`, each its own crate, executable and
     Nix package, with one crate for the link's messages; the node becomes the
     runner, a pure worker: no MCP for clients, no hooks, no delegations;
@@ -1324,20 +1358,26 @@ crate holds it today.
     endpoints on the hub and on runners that reach others' backends;
     `runner.backends` with the models each runner listed; the link's
     protocol 4.)
-21. The REST API as an interface: one route per operation, the same as MCP
-    offers, OpenAPI, its own port, sign-up in it.
-22. The task tracker with backends behind one interface, the markdown issues
-    its one backend.
-23. Sources: the `Source` trait, and the collect and filter steps with one
+21. The hub's core and its connectors: `hub.yaml` as the core (`owner`,
+    `http`, `llm`, `accounts` with the `roles`) and `connectors`, each
+    always on and each written; tracker adapters by name under
+    `connectors.tasks.trackers`; no `interfaces` in either file, the command
+    line always on; no MCP `url`, a token's hints naming the address the
+    request reached; the link at its own path. (Done; the link's protocol 5.)
+22. The REST API as an interface: one route per operation, the same as MCP
+    offers, OpenAPI, sign-up in it, on the hub's port.
+23. The task tracker with backends behind one interface, the markdown issues
+    its one backend; more than one tracker at once.
+24. Sources: the `Source` trait, and the collect and filter steps with one
     LLM and the admin's prompt, raw messages dropped; `source.try` to see what
     a text would leave. No provider's adapter yet.
-24. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
+25. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
     and Teams, Telegram); a runner's operations from the hub, for its own
     account; goal operations (models, people, computers, teams from
     templates, knowledge); chat; a web UI.
 
 What remains besides is the "Not yet" of steps 4 and 5, and the modules
-marked not built above. A web UI and other interfaces come after step 21, as
+marked not built above. A web UI and other interfaces come after step 22, as
 adapters.
 
 ## Open questions
