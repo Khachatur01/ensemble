@@ -162,7 +162,13 @@ mod tasks {
     }
 
     impl TaskService for FakeTasks {
-        fn handle(&self, user: &str, method: &str, params: &Value) -> Result<Value, String> {
+        fn handle(
+            &self,
+            user: &str,
+            _: &[crate::board::Present],
+            method: &str,
+            params: &Value,
+        ) -> Result<Value, String> {
             self.heard
                 .lock()
                 .unwrap()

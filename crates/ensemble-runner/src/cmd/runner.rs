@@ -172,11 +172,12 @@ fn status() -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `ensemble-runner serve`: run this computer's runner until stopped. It runs
-/// the tasks of the repositories in its workspace with its teams; with a hub,
-/// it also offers what it offers. A change to runner.yaml has it start again,
-/// in this process: running tasks start again from where their work was last
-/// pushed.
+/// `ensemble-runner serve`: run this computer's runner until stopped. With a
+/// hub, it runs the tasks the hub keeps for it with its teams, in the
+/// repositories of its workspace or those it clones there, and tells the hub
+/// it is connected, with its agents and what it offers. A change to
+/// runner.yaml has it start again, in this process: running tasks start again
+/// from where their work was last pushed.
 fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
     let dir = state::runner_dir()?;
     let _lock = ensemble_core::lock::acquire(&dir).map_err(|pid| {
@@ -212,7 +213,7 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
     for line in &waiting {
         say(line);
     }
-    // With a hub: its tasks, and the link that offers what the runner offers.
+    // With a hub: its tasks, and the link that says the runner is there.
     // One token for all of it, replaced when `ensemble-runner login` signs in
     // again.
     let hub = match &runner.hub {
@@ -234,19 +235,11 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
     )
     .map_err(|e| format!("serve: {e}"))?;
     let worker = match &hub {
-        Some((url, token)) if runner.offers.runs.is_some() || runner.offers.models.is_some() => {
-            Some(
-                crate::worker::Worker::new(
-                    url,
-                    token.clone(),
-                    runner.clone(),
-                    Some(team.clone()),
-                    dir.join("runs"),
-                )
+        Some((url, token)) => Some(
+            crate::worker::Worker::new(url, token.clone(), runner.clone(), team.clone())
                 .map_err(|e| format!("serve: {e}"))?,
-            )
-        }
-        _ => None,
+        ),
+        None => None,
     };
     // What else holds the teams, given them again when they are reloaded.
     let reloaded = |config: &Config| -> Result<(), String> {
@@ -574,17 +567,17 @@ fn peers() -> Result<ExitCode, String> {
     let listed = ensemble_core::runtime::block_on(async {
         let mut link = ensemble_link::client::Connection::open(&url, token).await?;
         let listed = link
-            .call(ensemble_link::protocol::NODES, serde_json::json!({}))
+            .call(ensemble_link::protocol::RUNNERS, serde_json::json!({}))
             .await
             .map_err(|f| f.message());
         link.close().await;
         listed
     })?;
-    let nodes = listed["nodes"].as_array().cloned().unwrap_or_default();
-    if nodes.is_empty() {
+    let runners = listed["runners"].as_array().cloned().unwrap_or_default();
+    if runners.is_empty() {
         println!("No runner you may use is connected to {url}.");
     }
-    for n in nodes {
+    for n in runners {
         let names = |key: &str, field: Option<&str>| -> String {
             let all: Vec<&str> = n[key]
                 .as_array()
@@ -604,10 +597,9 @@ fn peers() -> Result<ExitCode, String> {
             }
         };
         println!(
-            "{}  ({}, {} running)\n  agents: {}\n  models: {}",
-            n["node"].as_str().unwrap_or("?"),
+            "{}  ({})\n  agents: {}\n  models: {}",
+            n["runner"].as_str().unwrap_or("?"),
             n["access"].as_str().unwrap_or("?"),
-            n["running"].as_u64().unwrap_or(0),
             names("agents", Some("name")),
             names("models", None)
         );

@@ -219,30 +219,41 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
     // connection is a task of its own.
     let hub: &'static config::Hub = Box::leak(Box::new(hub));
     let memory: &'static ensemble_knowledge::Memory = Box::leak(Box::new(memory));
+    // Every task the hub makes keeps the notes related to it, as its account
+    // may see them, for its agent to read as reference data.
+    let notes = |user: &str, query: &str| {
+        let found = memory.recall_as(user, query);
+        found
+            .starts_with(ensemble_knowledge::RECALL_HEADER)
+            .then_some(found)
+    };
     let inbox: Option<&'static crate::inbox::ServerInbox> = match &hub.tasks {
         Some(tasks) => Some(Box::leak(Box::new(
             crate::inbox::ServerInbox::new(tasks, &hub.roles, users.clone())
-                .map_err(|e| format!("serve: {e}"))?,
+                .map_err(|e| format!("serve: {e}"))?
+                .with_notes(notes),
         ))),
         None => None,
     };
     // What a task's agent reported when it was done is shared, so the vault
     // learns from the work as from what people share.
-    let tasks = crate::board::Service::new(&users).on_done(|user, project, task| {
-        let Some((title, text)) = crate::board::learned(project, task) else {
-            return;
-        };
-        let id = &task.task.ticket.id;
-        // Private, as the task was: its account alone recalls what came of it.
-        let private = ensemble_knowledge::Visibility::Private;
-        match memory.share_as(user, Some("task"), Some(project), private, &title, &text) {
-            Ok(share) => eprintln!(
-                "ensemble: knowledge: task {id} of {user} is share {}",
-                share.id
-            ),
-            Err(e) => eprintln!("ensemble: knowledge: task {id} of {user} was not shared: {e}"),
-        }
-    });
+    let tasks = crate::board::Service::new(&users)
+        .with_notes(notes)
+        .on_done(|user, project, task| {
+            let Some((title, text)) = crate::board::learned(project, task) else {
+                return;
+            };
+            let id = &task.task.ticket.id;
+            // Private, as the task was: its account alone recalls what came of it.
+            let private = ensemble_knowledge::Visibility::Private;
+            match memory.share_as(user, Some("task"), Some(project), private, &title, &text) {
+                Ok(share) => eprintln!(
+                    "ensemble: knowledge: task {id} of {user} is share {}",
+                    share.id
+                ),
+                Err(e) => eprintln!("ensemble: knowledge: task {id} of {user} was not shared: {e}"),
+            }
+        });
     let tasks: &'static crate::board::Service = Box::leak(Box::new(tasks));
     let mut server =
         crate::server::Server::new(memory, &hub.roles, server, users).with_tasks(tasks);

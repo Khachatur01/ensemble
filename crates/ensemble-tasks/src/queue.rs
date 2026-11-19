@@ -312,14 +312,16 @@ impl<'e> Queue<'e> {
     }
 
     /// Whether `task` may start here: assigned to an agent of this runner's
-    /// teams, not ended, not asking, not waiting for another task, and not
-    /// running on another runner. A task for an agent this runner does not
-    /// have is left for one of the account's runners that does.
+    /// teams, not ended, not asking, not waiting for another task, not running
+    /// on another runner, and not given back by this one. A task for an agent
+    /// this runner does not have is left for one of the account's runners that
+    /// does.
     fn may_start(&self, task: &Task, all: &[Task]) -> bool {
         task.status.is_none()
             && self.ensemble.config().agent(&task.ticket.agent).is_some()
             && task.question.is_none()
             && task.running_on.as_ref().is_none_or(|n| *n == self.runner)
+            && !task.given_back.iter().any(|g| g.runner == self.runner)
             && waiting_for(&task.ticket, all).is_empty()
     }
 
@@ -672,6 +674,7 @@ impl<'e> Queue<'e> {
             Some(Some(End::Ask {
                 question,
                 reply: result.text.clone(),
+                repository: false,
             }))
         } else if let Some((to, note)) = handoff {
             self.note(

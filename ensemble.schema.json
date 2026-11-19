@@ -283,38 +283,8 @@
             },
             {
               "$ref": "#/definitions/builtin_adapter"
-            },
-            {
-              "$ref": "#/definitions/node_adapter"
             }
           ]
-        }
-      }
-    },
-    "node_adapter": {
-      "type": "object",
-      "required": ["type", "hub", "agent", "nodes"],
-      "additionalProperties": false,
-      "properties": {
-        "type": {
-          "description": "node: an agent a node of a hub server offers. The task and a copy of the files git tracks go to the node; the agent works there in a folder of its own on the node owner's models, and what it changed comes back and is written here, where gates, branches and commits stay. Needs `ensemble-runner login` to the hub, and `compute` for another person's shared node.",
-          "const": "node"
-        },
-        "hub": {
-          "description": "The hub server, ws:// or wss://.",
-          "type": "string",
-          "pattern": "^wss?://"
-        },
-        "agent": {
-          "description": "The agent the nodes offer, by its name in their helper team.",
-          "type": "string",
-          "minLength": 1
-        },
-        "nodes": {
-          "description": "The nodes that may run it, as <owner>/<name>, tried in order: the first one connected that offers the agent runs it. `ensemble-runner peers` lists them.",
-          "type": "array",
-          "minItems": 1,
-          "items": { "type": "string", "pattern": "^[^/]+/[A-Za-z0-9._-]+$" }
         }
       }
     },

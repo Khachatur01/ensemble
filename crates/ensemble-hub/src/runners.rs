@@ -1,29 +1,27 @@
-//! The nodes connected to a hub server, and what passes between them.
+//! The runners connected to a hub server, and the model calls between them.
 //!
-//! A node is a connection that said `node`: it has an owner (the account it
-//! signed in as), a name, whom it works for (`private`: its owner;
-//! `shared`: also everyone whose role has `compute`), the agents it runs for
-//! others and the models it serves. The hub keeps no node when its
-//! connection is gone; nodes are presence, not state.
+//! A runner is a connection that said `runner`: it has an owner (the account
+//! it signed in as), a name, whom it works for (`private`: its owner;
+//! `shared`: also everyone whose role has `compute`), every agent of its
+//! teams, the agents it offers others and the models it serves. The hub keeps
+//! no runner when its connection is gone; runners are presence, not state.
+//! Who is connected says whether a task its runners gave back is blocked
+//! (`board`).
 //!
-//! - A **run**: a connection asks for an agent on one of the nodes it names;
-//!   the hub picks the first that is connected, may be used by that account
-//!   and offers the agent, sends it a `run` event, and passes what the node
-//!   says about it (`run_progress`, `run_done`) back to the connection that
-//!   asked. When either side goes away, the other is told.
-//! - A **model call**: an OpenAI-compatible request to `/nodes/v1/` on the
-//!   hub's port, with an access token as the API key, goes to a node that
-//!   serves the model as a `model_call` event, and what the node's server
-//!   answers is streamed back as it comes.
+//! A **model call**: an OpenAI-compatible request to `/nodes/v1/` on the
+//! hub's port, with an access token as the API key, goes to a runner that
+//! serves the model as a `model_call` event, and what the runner's server
+//! answers is streamed back as it comes.
 //!
 //! Every connection has an outbox here: events for it are put there by
 //! whichever connection has them, and the connection's own task sends them.
 
+use crate::board::Present;
 use crate::http::{self, Head};
 use crate::server::Server;
 use ensemble_config::Permission;
 use ensemble_core::runtime::blocking;
-use ensemble_link::protocol::{Event, MODEL_CALL_EVENT, RUN_CANCEL_EVENT, RUN_DONE, RUN_EVENT};
+use ensemble_link::protocol::{Event, MODEL_CALL_EVENT};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -37,23 +35,25 @@ use tokio::sync::mpsc::{
 
 /// The most a model request's body may be.
 const MAX_MODEL_BODY: usize = 16 * 1024 * 1024;
-/// How long a model call waits for its node when the node said nothing of
-/// its own.
+/// How long a model call waits for its runner when the runner said nothing
+/// of its own.
 const MODEL_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// One connected node.
+/// One connected runner.
 #[derive(Debug, Clone)]
-struct Node {
+struct Runner {
     owner: String,
     name: String,
     shared: bool,
-    /// The agents it runs, with the first line of each one's prompt.
+    /// Every agent of its teams, with the first line of each one's prompt.
     agents: Vec<(String, String)>,
+    /// The agents it offers others.
+    offers: Vec<String>,
     models: Vec<String>,
     model_timeout: Duration,
 }
 
-impl Node {
+impl Runner {
     fn id(&self) -> String {
         format!("{}/{}", self.owner, self.name)
     }
@@ -63,30 +63,31 @@ impl Node {
     fn serves(&self, user: &str, compute: bool) -> bool {
         self.owner == user || (self.shared && compute)
     }
-}
 
-struct Run {
-    /// The connection that asked for it.
-    caller: u64,
-    /// The node's connection.
-    node: u64,
+    /// Its agents `user` sees: all of them for its owner, those it offers
+    /// for anyone else.
+    fn agents_for(&self, user: &str) -> Vec<&(String, String)> {
+        self.agents
+            .iter()
+            .filter(|(name, _)| self.owner == user || self.offers.contains(name))
+            .collect()
+    }
 }
 
 struct Call {
-    node: u64,
+    runner: u64,
     reply: Sender<Value>,
 }
 
 #[derive(Default)]
 struct Inner {
     outboxes: HashMap<u64, Sender<Event>>,
-    nodes: HashMap<u64, Node>,
-    runs: HashMap<String, Run>,
+    runners: HashMap<u64, Runner>,
     calls: HashMap<String, Call>,
 }
 
-/// The connections of a hub server, the nodes among them, and the runs and
-/// model calls going on between them.
+/// The connections of a hub server, the runners among them, and the model
+/// calls going on between them.
 #[derive(Default)]
 pub(crate) struct Routes {
     inner: Mutex<Inner>,
@@ -110,52 +111,27 @@ impl Routes {
         (id, rx)
     }
 
-    /// A connection ended: its node is gone, a run it asked for is stopped,
-    /// and whoever waited on a run or a call it had is told.
+    /// A connection ended: its runner is gone, and whoever waited on a call it
+    /// had is told.
     pub(crate) fn disconnect(&self, conn: u64) {
         let mut inner = self.lock();
         inner.outboxes.remove(&conn);
-        let gone = inner.nodes.remove(&conn).map(|n| n.id());
-        let ended: Vec<String> = inner
-            .runs
-            .iter()
-            .filter(|(_, r)| r.caller == conn || r.node == conn)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for run in ended {
-            let Some(route) = inner.runs.remove(&run) else {
-                continue;
-            };
-            if route.node == conn {
-                let why = format!(
-                    "the node {} went away before the run ended",
-                    gone.as_deref().unwrap_or("?")
-                );
-                tell(
-                    &inner,
-                    route.caller,
-                    RUN_DONE,
-                    json!({"run": run, "ok": false, "error": why}),
-                );
-            } else {
-                tell(&inner, route.node, RUN_CANCEL_EVENT, json!({ "run": run }));
-            }
-        }
+        inner.runners.remove(&conn);
         let ended: Vec<String> = inner
             .calls
             .iter()
-            .filter(|(_, c)| c.node == conn)
+            .filter(|(_, c)| c.runner == conn)
             .map(|(id, _)| id.clone())
             .collect();
         for call in ended.iter().filter_map(|id| inner.calls.remove(id)) {
             let _ = call
                 .reply
-                .send(json!({"error": "the node went away before it answered"}));
+                .send(json!({"error": "the runner went away before it answered"}));
         }
     }
 
-    /// Make `conn` a node of `owner`. Its name must not be taken by another
-    /// connection of the same owner.
+    /// Make `conn` a runner of `owner`, or say again what it has. Its name
+    /// must not be taken by another connection of the same owner.
     pub(crate) fn register(
         &self,
         conn: u64,
@@ -166,7 +142,7 @@ impl Routes {
         let name = params["name"].as_str().unwrap_or("").trim().to_string();
         if !ensemble_config::runner::valid_name(&name) {
             return Err(format!(
-                "node: '{name}' is not a node name: letters, digits, '-', '_' or '.'"
+                "runner: '{name}' is not a runner name: letters, digits, '-', '_' or '.'"
             ));
         }
         let shared = match params["access"].as_str() {
@@ -174,13 +150,13 @@ impl Routes {
             Some("private") => false,
             other => {
                 return Err(format!(
-                    "node: `access` must be private or shared, not {other:?}"
+                    "runner: `access` must be private or shared, not {other:?}"
                 ));
             }
         };
         if shared && !may_host {
             return Err(
-                "node: a shared node needs the `host` permission in your role; connect it as private, or ask an admin"
+                "runner: a shared runner needs the `host` permission in your role; connect it as private, or ask an admin"
                     .into(),
             );
         }
@@ -208,11 +184,12 @@ impl Routes {
                     .collect()
             })
             .unwrap_or_default();
-        let node = Node {
+        let runner = Runner {
             owner: owner.to_string(),
             name,
             shared,
             agents,
+            offers: texts("offers"),
             models: texts("models"),
             model_timeout: params["model_timeout_seconds"]
                 .as_u64()
@@ -220,148 +197,65 @@ impl Routes {
                 .map_or(MODEL_TIMEOUT, Duration::from_secs),
         };
         let mut inner = self.lock();
-        let id = node.id();
-        if inner.nodes.iter().any(|(c, n)| *c != conn && n.id() == id) {
+        let id = runner.id();
+        if inner
+            .runners
+            .iter()
+            .any(|(c, r)| *c != conn && r.id() == id)
+        {
             return Err(format!(
-                "node: {id} is connected already, from another process; give this one another name"
+                "runner: {id} is connected already, from another process; give this one another name"
             ));
         }
-        inner.nodes.insert(conn, node);
-        Ok(json!({ "node": id }))
+        inner.runners.insert(conn, runner);
+        Ok(json!({ "runner": id }))
     }
 
-    /// The nodes `user` may use.
+    /// The runners `user` may use, each with the agents they see of it.
     pub(crate) fn listed(&self, user: &str, compute: bool) -> Value {
         let inner = self.lock();
-        let mut nodes: Vec<Value> = inner
-            .nodes
-            .iter()
-            .filter(|(_, n)| n.serves(user, compute))
-            .map(|(conn, n)| {
-                let running = inner.runs.values().filter(|r| r.node == *conn).count();
+        let mut runners: Vec<Value> = inner
+            .runners
+            .values()
+            .filter(|r| r.serves(user, compute))
+            .map(|r| {
                 json!({
-                    "node": n.id(),
-                    "access": if n.shared { "shared" } else { "private" },
-                    "agents": n.agents.iter().map(|(name, about)| json!({"name": name, "about": about})).collect::<Vec<_>>(),
-                    "models": n.models,
-                    "running": running,
+                    "runner": r.id(),
+                    "owner": r.owner,
+                    "access": if r.shared { "shared" } else { "private" },
+                    "agents": r.agents_for(user).iter().map(|(name, about)| json!({"name": name, "about": about})).collect::<Vec<_>>(),
+                    "models": r.models,
                 })
             })
             .collect();
-        nodes.sort_by(|a, b| a["node"].as_str().cmp(&b["node"].as_str()));
-        json!({ "nodes": nodes })
+        runners.sort_by(|a, b| a["runner"].as_str().cmp(&b["runner"].as_str()));
+        json!({ "runners": runners })
     }
 
-    /// Send a run to the first of the nodes it names that `user` may use and
-    /// that offers its agent; what the node says about it goes to `caller`.
-    pub(crate) fn start_run(
-        &self,
-        caller: u64,
-        user: &str,
-        compute: bool,
-        params: &Value,
-    ) -> Result<Value, String> {
-        let agent = params["agent"].as_str().unwrap_or("").trim();
-        if agent.is_empty() {
-            return Err("run: `agent` is required".into());
-        }
-        let wanted: Vec<&str> = params["nodes"]
-            .as_array()
-            .map(|a| a.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
-        if wanted.is_empty() {
-            return Err(
-                "run: `nodes` is required: the nodes that may run it, as <owner>/<name>".into(),
-            );
-        }
-        let mut inner = self.lock();
-        let mut why = Vec::new();
-        let mut chosen = None;
-        for id in &wanted {
-            match inner.nodes.iter().find(|(_, n)| n.id() == *id) {
-                None => why.push(format!("{id} is not connected")),
-                Some((_, n)) if !n.serves(user, compute) => why.push(format!(
-                    "{id} is {}",
-                    if n.shared {
-                        "shared, but your role has no `compute`"
-                    } else {
-                        "private to its owner"
-                    }
-                )),
-                Some((_, n)) if !n.agents.iter().any(|(a, _)| a == agent) => why.push(format!(
-                    "{id} does not offer `{agent}`; it offers {}",
-                    if n.agents.is_empty() {
-                        "no agents".to_string()
-                    } else {
-                        n.agents
-                            .iter()
-                            .map(|(a, _)| a.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    }
-                )),
-                Some((conn, _)) => {
-                    chosen = Some((*conn, id.to_string()));
-                    break;
-                }
-            }
-        }
-        let Some((node, id)) = chosen else {
-            return Err(format!(
-                "run: no node can run `{agent}`: {}",
-                why.join("; ")
-            ));
-        };
-        let run = self.fresh("run");
-        let event = json!({
-            "run": run,
-            "from": user,
-            "agent": agent,
-            "task": params["task"],
-            "context": params["context"],
-            "files": params["files"],
-        });
-        inner.runs.insert(run.clone(), Run { caller, node });
-        tell(&inner, node, RUN_EVENT, event);
-        Ok(json!({ "run": run, "node": id }))
+    /// `owner`'s runners connected now, and their agents.
+    pub(crate) fn present(&self, owner: &str) -> Vec<Present> {
+        let mut present: Vec<Present> = self
+            .lock()
+            .runners
+            .values()
+            .filter(|r| r.owner == owner)
+            .map(|r| Present {
+                name: r.name.clone(),
+                agents: r.agents.iter().map(|(name, _)| name.clone()).collect(),
+            })
+            .collect();
+        present.sort_by(|a, b| a.name.cmp(&b.name));
+        present
     }
 
-    /// The caller stops a run it asked for.
-    pub(crate) fn cancel_run(&self, caller: u64, params: &Value) -> Result<Value, String> {
-        let run = params["run"].as_str().unwrap_or("");
-        let mut inner = self.lock();
-        match inner.runs.get(run) {
-            Some(r) if r.caller == caller => {
-                let node = r.node;
-                inner.runs.remove(run);
-                tell(&inner, node, RUN_CANCEL_EVENT, json!({ "run": run }));
-                Ok(json!({ "cancelled": run }))
-            }
-            _ => Err(format!("run_cancel: no run '{run}' of yours is going on")),
-        }
-    }
-
-    /// What the node running a run says about it, for its caller.
-    pub(crate) fn pass_on(&self, node: u64, method: &str, params: &Value) -> Result<Value, String> {
-        let run = params["run"].as_str().unwrap_or("").to_string();
-        let mut inner = self.lock();
-        let Some(route) = inner.runs.get(&run).filter(|r| r.node == node) else {
-            return Err(format!("{method}: no run '{run}' is going on on this node"));
-        };
-        let caller = route.caller;
-        if method == RUN_DONE {
-            inner.runs.remove(&run);
-        }
-        tell(&inner, caller, method, params.clone());
-        Ok(json!({}))
-    }
-
-    /// What a node's model server answered, for whoever waits on the call.
-    pub(crate) fn model_reply(&self, node: u64, params: &Value) -> Result<Value, String> {
+    /// What a runner's model server answered, for whoever waits on the call.
+    pub(crate) fn model_reply(&self, runner: u64, params: &Value) -> Result<Value, String> {
         let call = params["call"].as_str().unwrap_or("").to_string();
         let mut inner = self.lock();
-        let Some(route) = inner.calls.get(&call).filter(|c| c.node == node) else {
-            return Err(format!("model_reply: no call '{call}' waits on this node"));
+        let Some(route) = inner.calls.get(&call).filter(|c| c.runner == runner) else {
+            return Err(format!(
+                "model_reply: no call '{call}' waits on this runner"
+            ));
         };
         let gone = route.reply.send(params.clone()).is_err();
         if gone || params.get("done").is_some() || params.get("error").is_some() {
@@ -370,14 +264,14 @@ impl Routes {
         Ok(json!({}))
     }
 
-    /// The models `user` may call, each once, with a node that serves it.
+    /// The models `user` may call, each once, with a runner that serves it.
     fn models(&self, user: &str, compute: bool) -> Vec<(String, String)> {
         let inner = self.lock();
         let mut out: Vec<(String, String)> = Vec::new();
-        for n in inner.nodes.values().filter(|n| n.serves(user, compute)) {
-            for m in &n.models {
+        for r in inner.runners.values().filter(|r| r.serves(user, compute)) {
+            for m in &r.models {
                 if !out.iter().any(|(name, _)| name == m) {
-                    out.push((m.clone(), n.id()));
+                    out.push((m.clone(), r.id()));
                 }
             }
         }
@@ -385,9 +279,9 @@ impl Routes {
         out
     }
 
-    /// Send a model request to the least busy node that serves `model` to
-    /// `user`, preferring the user's own: its call id, what the node answers,
-    /// and how long to wait for it.
+    /// Send a model request to the least busy runner that serves `model` to
+    /// `user`, preferring the user's own: its call id, what the runner
+    /// answers, and how long to wait for it.
     fn call_model(
         &self,
         user: &str,
@@ -398,24 +292,24 @@ impl Routes {
     ) -> Result<(String, Receiver<Value>, Duration), String> {
         let mut inner = self.lock();
         let busy =
-            |conn: u64, inner: &Inner| inner.calls.values().filter(|c| c.node == conn).count();
-        let node = inner
-            .nodes
+            |conn: u64, inner: &Inner| inner.calls.values().filter(|c| c.runner == conn).count();
+        let runner = inner
+            .runners
             .iter()
-            .filter(|(_, n)| n.serves(user, compute) && n.models.iter().any(|m| m == model))
-            .min_by_key(|(conn, n)| (n.owner != user, busy(**conn, &inner)))
-            .map(|(conn, n)| (*conn, n.model_timeout));
-        let Some((node, timeout)) = node else {
+            .filter(|(_, r)| r.serves(user, compute) && r.models.iter().any(|m| m == model))
+            .min_by_key(|(conn, r)| (r.owner != user, busy(**conn, &inner)))
+            .map(|(conn, r)| (*conn, r.model_timeout));
+        let Some((runner, timeout)) = runner else {
             return Err(format!(
-                "no node you may use serves the model '{model}'; GET /nodes/v1/models lists those that do"
+                "no runner you may use serves the model '{model}'; GET /nodes/v1/models lists those that do"
             ));
         };
         let call = self.fresh("call");
         let (tx, rx) = channel();
-        inner.calls.insert(call.clone(), Call { node, reply: tx });
+        inner.calls.insert(call.clone(), Call { runner, reply: tx });
         tell(
             &inner,
-            node,
+            runner,
             MODEL_CALL_EVENT,
             json!({"call": call, "from": user, "path": path, "body": body}),
         );
@@ -439,7 +333,7 @@ fn tell(inner: &Inner, conn: u64, event: &str, data: Value) {
 }
 
 impl Server<'_> {
-    /// Answer one request to `/nodes/v1/`, the models of the nodes, as an
+    /// Answer one request to `/nodes/v1/`, the models of the runners, as an
     /// OpenAI-compatible endpoint, then close the connection.
     pub(crate) async fn model_request(
         &self,
@@ -477,7 +371,7 @@ impl Server<'_> {
                     .routes
                     .models(&user, compute)
                     .into_iter()
-                    .map(|(m, node)| json!({"id": m, "object": "model", "owned_by": node}))
+                    .map(|(m, runner)| json!({"id": m, "object": "model", "owned_by": runner}))
                     .collect();
                 say(&format!("GET {} {user} 200", head.path));
                 http::respond(&mut stream, 200, &json!({"object": "list", "data": data}))
@@ -518,7 +412,7 @@ impl Server<'_> {
                     &mut stream,
                     404,
                     format!(
-                        "no such path: {}; the nodes' models are at /nodes/v1/models and /nodes/v1/chat/completions",
+                        "no such path: {}; the runners' models are at /nodes/v1/models and /nodes/v1/chat/completions",
                         head.path
                     ),
                 )
@@ -528,7 +422,7 @@ impl Server<'_> {
     }
 }
 
-/// Write what the node answers for a call to the client as it comes: the
+/// Write what the runner answers for a call to the client as it comes: the
 /// status and type first, then each chunk, until it is done.
 async fn stream_reply(
     stream: &mut TcpStream,
@@ -539,9 +433,9 @@ async fn stream_reply(
     let mut next = async || -> Result<Value, String> {
         match tokio::time::timeout_at(deadline, replies.recv()).await {
             Ok(Some(v)) => Ok(v),
-            Ok(None) => Err("the node went away".into()),
+            Ok(None) => Err("the runner went away".into()),
             Err(_) => Err(format!(
-                "the node gave no answer within {}s",
+                "the runner gave no answer within {}s",
                 timeout.as_secs()
             )),
         }
@@ -574,7 +468,7 @@ async fn stream_reply(
     let mut reply = first;
     loop {
         if let Some(chunk) = reply["chunk"].as_str() {
-            let data = ensemble_core::snapshot::decode(chunk)?;
+            let data = ensemble_link::base64::decode(chunk)?;
             stream
                 .write_all(&data)
                 .await
@@ -614,12 +508,14 @@ mod tests {
             .unwrap_or_else(|_| panic!("no `{event}` event came"))
     }
 
-    async fn node(url: &str, token: &str, name: &str, access: &str) -> Connection {
+    async fn runner(url: &str, token: &str, name: &str, access: &str) -> Connection {
         let mut link = Connection::open(url, token).await.unwrap();
         link.call(
-            NODE,
+            RUNNER,
             json!({"name": name, "access": access,
-                   "agents": [{"name": "coder", "about": "Writes code."}],
+                   "agents": [{"name": "web/coder", "about": "Writes code."},
+                              {"name": "web/reviewer", "about": "Reviews it."}],
+                   "offers": ["web/reviewer"],
                    "models": ["small"], "model_timeout_seconds": 5}),
         )
         .await
@@ -636,152 +532,110 @@ mod tests {
         link.call(method, params).await.unwrap_err().message()
     }
 
+    /// The names of the agents of the runner listed `at`.
+    fn agents(listed: &Value, at: usize) -> Vec<&str> {
+        listed["runners"][at]["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["name"].as_str().unwrap())
+            .collect()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_run_goes_to_a_node_that_offers_the_agent_and_its_end_comes_back() {
+    async fn every_runner_is_listed_to_its_owner_with_all_its_agents_and_to_others_with_what_it_offers()
+     {
         let hub = start();
-        // root may host a shared node; ana, a member, may not.
-        let mut gpu = node(&hub.url, &hub.root, "gpu-box", "shared").await;
+        // root may connect a shared runner; ana, a member, may not.
+        let _gpu = runner(&hub.url, &hub.root, "gpu-box", "shared").await;
         let mut ana = open(&hub.url, &hub.ana).await;
         let said = refused(
             &mut ana,
-            NODE,
+            RUNNER,
             json!({"name": "laptop", "access": "shared"}),
         )
         .await;
         assert!(said.contains("`host`"), "{said}");
-        let listed = ana.call(NODES, json!({})).await.unwrap();
-        assert_eq!(listed["nodes"][0]["node"], "root/gpu-box");
-        assert_eq!(listed["nodes"][0]["agents"][0]["about"], "Writes code.");
-
-        let started = ana
-            .call(
-                RUN,
-                json!({"agent": "coder", "nodes": ["ana/none", "root/gpu-box"],
-                       "task": "fix it", "context": null,
-                       "files": [{"path": "a.txt", "data": "aGk="}]}),
-            )
-            .await
-            .unwrap();
-        assert_eq!(started["node"], "root/gpu-box");
-        let run = started["run"].as_str().unwrap().to_string();
-        let got = expect(&mut gpu, RUN_EVENT).await;
+        // A runner that offers nothing is listed to its owner all the same.
+        ana.call(
+            RUNNER,
+            json!({"name": "laptop", "access": "private",
+                   "agents": [{"name": "web/coder", "about": ""}]}),
+        )
+        .await
+        .unwrap();
+        let listed = ana.call(RUNNERS, json!({})).await.unwrap();
+        assert_eq!(listed["runners"][0]["runner"], "ana/laptop");
+        assert_eq!(listed["runners"][0]["owner"], "ana");
+        assert_eq!(agents(&listed, 0), ["web/coder"]);
+        assert_eq!(listed["runners"][1]["runner"], "root/gpu-box");
+        assert_eq!(agents(&listed, 1), ["web/reviewer"], "what it offers ana");
+        assert_eq!(listed["runners"][1]["agents"][0]["about"], "Reviews it.");
+        let mut root = open(&hub.url, &hub.root).await;
+        let listed = root.call(RUNNERS, json!({})).await.unwrap();
         assert_eq!(
-            (got["from"].as_str(), got["task"].as_str()),
-            (Some("ana"), Some("fix it"))
+            listed["runners"].as_array().unwrap().len(),
+            1,
+            "ana's is private"
         );
-        assert_eq!(got["files"][0]["path"], "a.txt");
-        gpu.send(RUN_PROGRESS, json!({"run": run, "line": "coder · reading"}))
-            .await
-            .unwrap();
-        gpu.send(RUN_DONE, json!({"run": run, "ok": true, "text": "fixed"}))
-            .await
-            .unwrap();
-        assert_eq!(
-            expect(&mut ana, RUN_PROGRESS).await["line"],
-            "coder · reading"
-        );
-        assert_eq!(expect(&mut ana, RUN_DONE).await["text"], "fixed");
+        assert_eq!(agents(&listed, 0), ["web/coder", "web/reviewer"]);
+        // Said again, as when its teams change: what it has now.
+        ana.call(
+            RUNNER,
+            json!({"name": "laptop", "access": "private", "agents": []}),
+        )
+        .await
+        .unwrap();
+        let listed = ana.call(RUNNERS, json!({})).await.unwrap();
+        assert!(agents(&listed, 0).is_empty());
 
-        // A reader has no `compute`: the shared node is not theirs to use.
+        // A reader has no `compute`: the shared runner is not theirs to use.
         let mut rex = open(&hub.url, &hub.rex).await;
         assert_eq!(
-            rex.call(NODES, json!({})).await.unwrap()["nodes"],
+            rex.call(RUNNERS, json!({})).await.unwrap()["runners"],
             json!([])
-        );
-        let said = refused(
-            &mut rex,
-            RUN,
-            json!({"agent": "coder", "nodes": ["root/gpu-box"], "task": "x"}),
-        )
-        .await;
-        assert!(said.contains("no `compute`"), "{said}");
-        let said = refused(
-            &mut ana,
-            RUN,
-            json!({"agent": "writer", "nodes": ["root/gpu-box"], "task": "x"}),
-        )
-        .await;
-        assert!(
-            said.contains("does not offer `writer`; it offers coder"),
-            "{said}"
         );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_private_node_serves_its_owner_alone_and_a_name_is_taken_once() {
+    async fn a_runners_name_is_taken_once_and_it_is_present_while_connected() {
         let hub = start();
-        let _laptop = node(&hub.url, &hub.ana, "laptop", "private").await;
+        let laptop = runner(&hub.url, &hub.ana, "laptop", "private").await;
         let mut again = open(&hub.url, &hub.ana).await;
         let said = refused(
             &mut again,
-            NODE,
+            RUNNER,
             json!({"name": "laptop", "access": "private"}),
         )
         .await;
         assert!(said.contains("connected already"), "{said}");
-        let mut root = open(&hub.url, &hub.root).await;
-        let said = refused(
-            &mut root,
-            RUN,
-            json!({"agent": "coder", "nodes": ["ana/laptop"], "task": "x"}),
-        )
-        .await;
-        assert!(said.contains("private to its owner"), "{said}");
-        assert!(
-            again
-                .call(
-                    RUN,
-                    json!({"agent": "coder", "nodes": ["ana/laptop"], "task": "x"})
-                )
-                .await
-                .is_ok()
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn when_one_side_of_a_run_goes_away_the_other_is_told() {
-        let hub = start();
-        let mut gpu = node(&hub.url, &hub.root, "gpu-box", "shared").await;
-        let mut ana = open(&hub.url, &hub.ana).await;
-        async fn run(ana: &mut Connection) -> String {
-            ana.call(
-                RUN,
-                json!({"agent": "coder", "nodes": ["root/gpu-box"], "task": "x"}),
+        let present = hub.server.routes.present("ana");
+        assert_eq!(present.len(), 1);
+        assert_eq!(
+            (present[0].name.as_str(), present[0].agents.clone()),
+            (
+                "laptop",
+                vec!["web/coder".to_string(), "web/reviewer".into()]
             )
-            .await
-            .unwrap()["run"]
-                .as_str()
-                .unwrap()
-                .to_string()
-        }
-        // The caller cancels; then the caller goes away.
-        let first = run(&mut ana).await;
-        expect(&mut gpu, RUN_EVENT).await;
-        ana.call(RUN_CANCEL, json!({ "run": first })).await.unwrap();
-        assert_eq!(expect(&mut gpu, RUN_CANCEL_EVENT).await["run"], first);
-        let second = run(&mut ana).await;
-        expect(&mut gpu, RUN_EVENT).await;
-        ana.close().await;
-        drop(ana);
-        assert_eq!(expect(&mut gpu, RUN_CANCEL_EVENT).await["run"], second);
-        // The node goes away.
-        let mut ana = open(&hub.url, &hub.ana).await;
-        run(&mut ana).await;
-        expect(&mut gpu, RUN_EVENT).await;
-        gpu.close().await;
-        drop(gpu);
-        let done = expect(&mut ana, RUN_DONE).await;
-        assert_eq!(done["ok"], false);
-        assert!(
-            done["error"].as_str().unwrap().contains("went away"),
-            "{done}"
         );
+        assert!(hub.server.routes.present("root").is_empty());
+        let mut laptop = laptop;
+        laptop.close().await;
+        drop(laptop);
+        let gone = async {
+            while !hub.server.routes.present("ana").is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), gone)
+            .await
+            .expect("a runner that went away is not present");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_model_call_is_streamed_from_the_node_that_serves_the_model() {
+    async fn a_model_call_is_streamed_from_the_runner_that_serves_the_model() {
         let hub = start();
-        let mut gpu = node(&hub.url, &hub.root, "gpu-box", "shared").await;
+        let mut gpu = runner(&hub.url, &hub.root, "gpu-box", "shared").await;
         let http = hub.url.replace("ws://", "http://");
         let get = |token: &str| {
             blocking(|| {
@@ -801,8 +655,8 @@ mod tests {
         assert_eq!(models["data"][0]["owned_by"], "root/gpu-box");
         assert_eq!(get("ens_wrong").status(), 401);
 
-        // The node answers in two chunks while the client reads.
-        let node = tokio::spawn(async move {
+        // The runner answers in two chunks while the client reads.
+        let serving = tokio::spawn(async move {
             let call = expect(&mut gpu, MODEL_CALL_EVENT).await;
             assert_eq!(call["path"], "/chat/completions");
             assert_eq!(call["body"]["model"], "small");
@@ -815,7 +669,7 @@ mod tests {
             .await
             .unwrap();
             for part in ["data: one\n\n", "data: [DONE]\n\n"] {
-                let chunk = ensemble_core::snapshot::encode(part.as_bytes());
+                let chunk = ensemble_link::base64::encode(part.as_bytes());
                 gpu.send(MODEL_REPLY, json!({"call": id, "chunk": chunk}))
                     .await
                     .unwrap();
@@ -835,7 +689,7 @@ mod tests {
         });
         assert_eq!(kind, "text/event-stream");
         assert_eq!(body, "data: one\n\ndata: [DONE]\n\n");
-        let _gpu = node.await.unwrap();
+        let _gpu = serving.await.unwrap();
 
         // A model nobody serves, and a reader without `compute`.
         let missing = blocking(|| {

@@ -16,13 +16,22 @@
 //! changes one computer's folder, so once it has run there it is **pinned**
 //! to that runner, and waits for it.
 //!
+//! A runner that cannot work on a task where it is, such as one whose
+//! repository its computer cannot reach, **gives it back** with why, and does
+//! not take it again; the hub offers it to the account's other runners, and
+//! when every one connected with its agent gave it back, the task is
+//! **blocked** until one that has not connects, or it is assigned or answered
+//! again.
+//!
 //! [`Board`] is what the queue uses; a runner reaches the hub's tasks over the
 //! link ([`RemoteBoard`]). The hub keeps them in its database
 //! (`ensemble_hub::board`).
 
 use crate::tasks::{Detail, Status, Task};
 use async_trait::async_trait;
-use ensemble_link::protocol::{TASK, TASK_CLAIM, TASK_FINISH, TASK_RELEASE, TASK_RENEW, TASKS};
+use ensemble_link::protocol::{
+    TASK, TASK_CLAIM, TASK_FINISH, TASK_GIVE_BACK, TASK_RELEASE, TASK_RENEW, TASKS, TASKS_WAITING,
+};
 use ensemble_link::{Link, Token};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -89,8 +98,15 @@ pub enum End {
         extra: Vec<(String, String)>,
         text: String,
     },
-    /// The agent stopped to ask; the task waits for the answer.
-    Ask { question: String, reply: String },
+    /// The agent stopped to ask; the task waits for the answer. Asked by the
+    /// runner, not the agent, when it has no copy of the project and nowhere to
+    /// clone it from: then the answer is where the project's `repository` is.
+    Ask {
+        question: String,
+        reply: String,
+        #[serde(default)]
+        repository: bool,
+    },
     /// The agent handed the task to another agent, with a note.
     Handoff {
         from: String,
@@ -132,6 +148,10 @@ pub trait Board: Send + Sync {
         end: End,
         progress: Option<Progress>,
     ) -> Result<(), String>;
+    /// Give it back, for another runner, saying `why`: `node` does not take it
+    /// again. Whether it is blocked now: no connected runner with its agent is
+    /// left to try.
+    async fn give_back(&self, id: &str, node: &str, why: &str) -> Result<bool, String>;
 }
 
 /// One project's tasks on the hub, over the link.
@@ -215,4 +235,24 @@ impl Board for RemoteBoard {
         let params = json!({ "id": id, "node": node, "end": end, "progress": progress });
         self.ask(TASK_FINISH, params).await.map(|_| ())
     }
+    async fn give_back(&self, id: &str, node: &str, why: &str) -> Result<bool, String> {
+        let params = json!({ "id": id, "runner": node, "why": why });
+        read(&self.ask(TASK_GIVE_BACK, params).await?, "blocked")
+    }
+}
+
+/// A task of the account that waits for one of a runner's agents, and its
+/// project.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Waiting {
+    pub project: String,
+    pub task: Task,
+}
+
+/// The account's tasks, in every project, that wait for one of `agents`
+/// and that `runner` has not given back, over `link`: what a runner looks
+/// at for the projects it has no folder for.
+pub async fn waiting(link: &Link, runner: &str, agents: &[String]) -> Result<Vec<Waiting>, String> {
+    let params = json!({ "runner": runner, "agents": agents });
+    read(&link.ask(TASKS_WAITING, params).await?, "tasks")
 }

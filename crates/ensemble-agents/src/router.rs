@@ -394,7 +394,7 @@ impl Ensemble {
         progress: &(dyn Fn(&str) + Sync),
         cancel: &AtomicBool,
     ) -> Result<Outcome, RouteError> {
-        use crate::external::{builtin, claude_code, codex, direct, node, opencode};
+        use crate::external::{builtin, claude_code, codex, direct, opencode};
         let run = |run| self.run_tracked(agent, workdir, run);
         match &agent.adapter {
             Adapter::ClaudeCode(cc) => {
@@ -430,12 +430,6 @@ impl Ensemble {
                     .transpose()?;
                 run(Box::pin(opencode::run(
                     agent, oc, backend, task, context, workdir, progress, cancel,
-                )))
-                .await
-            }
-            Adapter::Node(na) => {
-                run(Box::pin(node::run(
-                    agent, na, task, context, workdir, progress, cancel,
                 )))
                 .await
             }
@@ -548,8 +542,6 @@ impl Ensemble {
                 Adapter::Codex(cx) => commands.push((ensemble_config::CODEX_AGENT, &cx.command)),
                 // No program: its backend, checked below, is all it needs.
                 Adapter::Direct(_) | Adapter::Builtin(_) => {}
-                // Checked below, against its hub.
-                Adapter::Node(_) => {}
             }
             for (b, model) in a.llm_backends() {
                 backends.entry(b).or_default().push(model);
@@ -583,14 +575,6 @@ impl Ensemble {
                 }),
             };
             out.push((name.to_string(), result));
-        }
-        for a in config.agents.values() {
-            if let Adapter::Node(na) = &a.adapter {
-                out.push((
-                    format!("{} ({})", a.runs_on(), na.agent),
-                    crate::external::node::health(na),
-                ));
-            }
         }
         out
     }

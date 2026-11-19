@@ -37,6 +37,8 @@ pub fn stop_on_signals() {
 
 #[cfg(unix)]
 extern "C" fn on_signal(_: libc::c_int) {
+    // A signal while it stops to start again stops it for good.
+    RESTART.store(false, Ordering::Relaxed);
     STOP.store(true, Ordering::Relaxed);
 }
 

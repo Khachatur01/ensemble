@@ -59,9 +59,6 @@ pub const DIRECT_AGENT: &str = "direct";
 pub const BUILTIN_AGENT: &str = "builtin";
 /// The tools a `builtin` agent may be given.
 pub const BUILTIN_TOOLS: [&str; 7] = ["read", "list", "grep", "glob", "write", "edit", "shell"];
-/// An agent a node on a hub server offers: the task and a copy of the files go
-/// there, and what the agent changed comes back.
-pub const NODE_AGENT: &str = "node";
 
 /// Where an OpenCode agent's model comes from.
 pub const PROVIDER_MODEL: &str = "provider";
@@ -174,21 +171,6 @@ pub enum Adapter {
     Codex(CodexAdapter),
     Direct(DirectAdapter),
     Builtin(BuiltinAdapter),
-    Node(NodeAdapter),
-}
-
-/// An agent that runs on a node of a hub server: one the node offers, never a
-/// definition sent from here, so the node's owner decides what runs there.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NodeAdapter {
-    /// The hub server, `ws://` or `wss://`, signed in to with `ensemble-runner login`.
-    pub hub: String,
-    /// The agent the nodes offer.
-    pub agent: String,
-    /// The nodes that may run it, as `<owner>/<name>`, tried in order.
-    pub nodes: Vec<String>,
-    /// `<agent> on <node> or <node>`, for listings.
-    pub label: String,
 }
 
 /// The Codex CLI, run headless in the project.
@@ -388,7 +370,6 @@ impl AgentConfig {
             Adapter::Codex(_) => CODEX_AGENT,
             Adapter::Direct(_) => DIRECT_AGENT,
             Adapter::Builtin(_) => BUILTIN_AGENT,
-            Adapter::Node(_) => NODE_AGENT,
         }
     }
 
@@ -399,14 +380,13 @@ impl AgentConfig {
             Adapter::Codex(c) => &c.model,
             Adapter::Direct(d) => d.model(),
             Adapter::Builtin(b) => b.model(),
-            Adapter::Node(n) => &n.label,
         }
     }
 
     /// The LLM backend its first model runs on, when it runs on one.
     pub fn llm_backend(&self) -> Option<&str> {
         match &self.adapter {
-            Adapter::ClaudeCode(_) | Adapter::Codex(_) | Adapter::Node(_) => None,
+            Adapter::ClaudeCode(_) | Adapter::Codex(_) => None,
             Adapter::OpenCode(o) => o.llm_backend(),
             Adapter::Direct(d) => Some(d.backend()),
             Adapter::Builtin(b) => Some(b.backend()),
@@ -416,7 +396,7 @@ impl AgentConfig {
     /// The models it may run on, in order, when it runs on LLM backends.
     pub fn fallback(&self) -> Option<&Fallback> {
         match &self.adapter {
-            Adapter::ClaudeCode(_) | Adapter::Codex(_) | Adapter::Node(_) => None,
+            Adapter::ClaudeCode(_) | Adapter::Codex(_) => None,
             Adapter::OpenCode(o) => match &o.model {
                 OpenCodeModel::Provider { .. } => None,
                 OpenCodeModel::LlmBackend(f) => Some(f),
@@ -463,9 +443,6 @@ impl AgentConfig {
     }
     /// Where it runs: the adapter type, and the LLM backend when there is one.
     pub fn runs_on(&self) -> String {
-        if let Adapter::Node(n) = &self.adapter {
-            return format!("{NODE_AGENT} {}", n.nodes.join(" or "));
-        }
         match self.llm_backend() {
             Some(backend) => format!("{} on {backend}", self.kind()),
             None => self.kind().to_string(),
@@ -485,8 +462,6 @@ impl AgentConfig {
             Adapter::Codex(c) => codex_sandbox_writes(&c.sandbox),
             Adapter::Direct(_) => false,
             Adapter::Builtin(b) => b.tools.iter().any(|t| builtin_tool_writes(t)),
-            // What it changed there comes back and is written here.
-            Adapter::Node(_) => true,
         }
     }
 
@@ -499,8 +474,6 @@ impl AgentConfig {
             Adapter::Codex(c) => vec![c.sandbox.as_str()],
             Adapter::Direct(_) => Vec::new(),
             Adapter::Builtin(b) => b.tools.iter().map(String::as_str).collect(),
-            // The node's own agent has tools; they are its owner's to choose.
-            Adapter::Node(_) => vec!["(on the node)"],
         }
     }
 }

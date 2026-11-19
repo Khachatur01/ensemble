@@ -15,14 +15,14 @@
 use crate::accounts::HubContext;
 use crate::board::TaskService;
 use crate::http::{self, Replay};
-use crate::nodes::Routes;
+use crate::runners::Routes;
 use crate::users::Users;
 use ensemble_config::Permission;
 use ensemble_core::runtime::{self, blocking};
 use ensemble_knowledge::Memory;
 use ensemble_link::protocol::{
-    Event, HELLO, JOIN, LOGIN, MODEL_REPLY, NODE, NODES, RECALL, RUN, RUN_CANCEL, RUN_DONE,
-    RUN_PROGRESS, Reply, Request, SHARE, TASK_METHODS, VERSION, VERSION_HEADER,
+    Event, HELLO, JOIN, LOGIN, MODEL_REPLY, RECALL, RUNNER, RUNNERS, Reply, Request, SHARE,
+    TASK_METHODS, VERSION, VERSION_HEADER,
 };
 use ensemble_ops::Caller;
 use futures_util::SinkExt;
@@ -57,7 +57,7 @@ pub struct Server<'a> {
     pub(crate) tasks: Option<&'a dyn TaskService>,
     /// Whether it serves MCP at `/mcp`.
     mcp: bool,
-    /// The connected nodes, and the runs and model calls between them.
+    /// The connected runners, and the model calls between them.
     pub(crate) routes: Routes,
 }
 
@@ -237,8 +237,7 @@ impl<'a> Server<'a> {
         loop {
             let message = tokio::select! {
                 () = runtime::until_set(stop) => return Ok(()),
-                // What other connections have for this one: runs, their
-                // progress, model calls.
+                // What other connections have for this one: model calls.
                 Some(event) = outbox.recv() => {
                     push(sender, &event).await?;
                     continue;
@@ -262,11 +261,9 @@ impl<'a> Server<'a> {
             };
             let reply = match serde_json::from_str::<Request>(&text) {
                 Ok(req) => {
-                    // A run's progress, a model's chunks and the tasks a runner
-                    // looks at every few seconds would drown the rest.
-                    if !matches!(req.method.as_str(), RUN_PROGRESS | MODEL_REPLY)
-                        && !TASK_METHODS.contains(&req.method.as_str())
-                    {
+                    // A model's chunks and the tasks a runner looks at every
+                    // few seconds would drown the rest.
+                    if req.method != MODEL_REPLY && !TASK_METHODS.contains(&req.method.as_str()) {
                         let who = session.map_or("a runner signing in", |s| s.user.as_str());
                         say(&format!("{who}: {}", req.method));
                     }
@@ -405,27 +402,24 @@ impl<'a> Server<'a> {
             }),
             method if TASK_METHODS.contains(&method) => {
                 may(Permission::Tasks).and_then(|()| match self.tasks {
-                    Some(tasks) => tasks.handle(&session.user, method, &req.params),
+                    Some(tasks) => tasks.handle(
+                        &session.user,
+                        &self.routes.present(&session.user),
+                        method,
+                        &req.params,
+                    ),
                     None => Err("this hub keeps no tasks".into()),
                 })
             }
-            NODE => self.routes.register(
+            RUNNER => self.routes.register(
                 conn,
                 &session.user,
                 &req.params,
                 permissions.contains(&Permission::Host),
             ),
-            NODES => Ok(self
+            RUNNERS => Ok(self
                 .routes
                 .listed(&session.user, permissions.contains(&Permission::Compute))),
-            RUN => self.routes.start_run(
-                conn,
-                &session.user,
-                permissions.contains(&Permission::Compute),
-                &req.params,
-            ),
-            RUN_CANCEL => self.routes.cancel_run(conn, &req.params),
-            RUN_PROGRESS | RUN_DONE => self.routes.pass_on(conn, &req.method, &req.params),
             MODEL_REPLY => self.routes.model_reply(conn, &req.params),
             other => Err(format!("no method `{other}`")),
         };
@@ -630,7 +624,7 @@ pub(crate) mod tests {
     fn a_link_without_a_token_may_only_sign_in() {
         let hub = start();
         let mut ws = connect(&hub.url, None).unwrap();
-        for (id, method) in [(1, HELLO), (2, RECALL), (3, NODES)] {
+        for (id, method) in [(1, HELLO), (2, RECALL), (3, RUNNERS)] {
             let err = ask(&mut ws, id, method, json!({"query": "deploy"}))
                 .error
                 .unwrap();

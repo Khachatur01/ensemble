@@ -8,8 +8,10 @@
 //!    issue says so. With no such account, or no project, the issue is
 //!    blocked, saying why, once.
 //! 2. The task waits on the hub until one of the account's runners with the
-//!    agent, and a repository of the project's name in its workspace, claims
-//!    it; the issue goes to `in-progress`, naming the runner.
+//!    agent claims it, in a repository of the project's name in its
+//!    workspace, cloned there first when it had none; the issue goes to
+//!    `in-progress`, naming the runner. A runner with no copy of the
+//!    project and no repository to clone asks where it is, as a question.
 //! 3. What the task says comes back: a question (the issue goes to `blocked`,
 //!    and the assignee's next comment is the answer), then its result
 //!    (`review` or `blocked`). Ensemble never closes an issue.
@@ -21,7 +23,7 @@
 
 use super::tracker::{Issue, IssueTracker, Status};
 use super::work::{self, AUTHOR, Update, reply_after};
-use crate::board::DbBoard;
+use crate::board::{DbBoard, Recall, recall_query};
 use crate::users::Users;
 use ensemble_config::{Permission, Tasks};
 use ensemble_store as store;
@@ -93,6 +95,8 @@ pub struct ServerInbox {
     /// Held for every pass, so the tracker and the deliveries change one step
     /// at a time.
     deliveries: Mutex<BTreeMap<String, Delivery>>,
+    /// The notes related to a task it makes, kept with the task.
+    notes: Option<Box<Recall>>,
 }
 
 impl ServerInbox {
@@ -108,7 +112,17 @@ impl ServerInbox {
             roles: roles.clone(),
             dir,
             deliveries: Mutex::new(deliveries),
+            notes: None,
         })
+    }
+
+    /// Keep in each task it makes the notes `notes` recalls for it.
+    pub fn with_notes(
+        mut self,
+        notes: impl Fn(&str, &str) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        self.notes = Some(Box::new(notes));
+        self
     }
 
     pub fn tracker(&self) -> &dyn IssueTracker {
@@ -242,7 +256,11 @@ impl ServerInbox {
         };
         d.account = account.clone();
         d.project = project.to_string();
-        let ticket = work::ticket_for(issue, &self.tasks.label);
+        let mut ticket = work::ticket_for(issue, &self.tasks.label);
+        ticket.notes = self
+            .notes
+            .as_ref()
+            .and_then(|recall| recall(&account, &recall_query(&ticket)));
         let task = self.board(&d).add(&ticket)?;
         let whom = if ticket.agent.is_empty() {
             "in the backlog, for the helper team to assign".to_string()
@@ -252,7 +270,7 @@ impl ServerInbox {
         self.say(
             issue,
             &format!(
-                "Picked up as task {task}, {whom}. It runs on the first of {account}'s computers that has the agent and a folder named {project}."
+                "Picked up as task {task}, {whom}. It runs on the first of {account}'s runners that has the agent, in its folder named {project}; a runner without one asks here which repository to clone."
             ),
             Status::Open,
             &mut d,
@@ -472,6 +490,7 @@ mod tests {
                 End::Ask {
                     question: "Which page?".into(),
                     reply: "r".into(),
+                    repository: false,
                 },
                 None,
             )

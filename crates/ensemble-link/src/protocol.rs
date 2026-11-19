@@ -5,8 +5,8 @@
 //!
 //! - The runner asks: `{"id": 1, "method": "share", "params": {...}}`.
 //! - The hub answers: `{"id": 1, "result": {...}}` or `{"id": 1, "error": "..."}`.
-//! - The hub may also tell: `{"event": "...", "data": {...}}`, unasked: a run
-//!   or a model call for a runner that offers them.
+//! - The hub may also tell: `{"event": "...", "data": {...}}`, unasked: a
+//!   model call for a runner that serves models.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,7 +14,7 @@ use serde_json::Value;
 /// The version of what is said here. The runner sends it as the
 /// [`VERSION_HEADER`] of every link it opens, and a hub refuses one of
 /// another version, or of none, before anything else.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 /// The header of the upgrade that carries the runner's [`VERSION`].
 pub const VERSION_HEADER: &str = "ensemble-protocol";
 
@@ -80,8 +80,17 @@ pub const TASK_ASSIGN: &str = "task_assign";
 /// Cancel a task: `{project, id}`, answered with `{cancel}`: `before` it
 /// started, `running` (its runner stops it) or `ended` already.
 pub const TASK_CANCEL: &str = "task_cancel";
+/// The account's tasks, in every project, that wait for one of the runner's
+/// agents and that it has not given back: `{runner, agents}`, answered with
+/// `{tasks: [{project, task}]}`. A runner looks for the projects it has no
+/// folder for.
+pub const TASKS_WAITING: &str = "tasks_waiting";
+/// Give a task back, for another runner: `{project, id, runner, why}`, such
+/// as when this computer cannot reach its repository. Answered with
+/// `{blocked}`: whether no connected runner with its agent is left to try.
+pub const TASK_GIVE_BACK: &str = "task_give_back";
 /// Every task method, for the server to pass on.
-pub const TASK_METHODS: [&str; 10] = [
+pub const TASK_METHODS: [&str; 12] = [
     TASKS,
     TASK,
     TASK_CREATE,
@@ -92,42 +101,32 @@ pub const TASK_METHODS: [&str; 10] = [
     TASK_ANSWER,
     TASK_ASSIGN,
     TASK_CANCEL,
+    TASKS_WAITING,
+    TASK_GIVE_BACK,
 ];
 
-/// This connection is a node: `{name, access, agents: [{name, about}],
-/// models: [names]}`. A shared node needs the `host` permission. Answered
-/// with `{node}`, its `<owner>/<name>`.
-pub const NODE: &str = "node";
-/// The nodes this account may use: `{}`, answered with `{nodes: [{node,
-/// access, agents, models, running}]}`.
-pub const NODES: &str = "nodes";
-/// Run an agent a node offers: `{agent, nodes, task, context, files}`.
-/// Answered at once with `{run, node}`; then `run_progress` and `run_done`
-/// events come on this connection.
-pub const RUN: &str = "run";
-/// Stop a run this connection started: `{run}`.
-pub const RUN_CANCEL: &str = "run_cancel";
-/// From the node running it: a line of what the agent is doing, `{run, line}`.
-pub const RUN_PROGRESS: &str = "run_progress";
-/// From the node running it: how it ended, `{run, ok, text | error, model,
-/// prompt_tokens, completion_tokens, steps, tool_calls, commands, changes}`.
-pub const RUN_DONE: &str = "run_done";
-/// From a node answering a model call: `{call, status, content_type}` first,
-/// then `{call, chunk}` (base64) as the server sends it, then `{call, done}`;
-/// or `{call, error}`.
+/// This connection is a runner, said once it connects and again when its
+/// teams change: `{name, access, agents: [{name, about}], offers: [agents],
+/// models: [names], model_timeout_seconds}`: every agent of its teams, those
+/// it offers others, and the models it serves. A shared runner needs the
+/// `host` permission. Answered with `{runner}`, its `<owner>/<name>`.
+pub const RUNNER: &str = "runner";
+/// The runners connected now that this account may use: `{}`, answered with
+/// `{runners: [{runner, owner, access, agents, models}]}`: a runner of the
+/// account's own with every agent, another's shared one with what it offers.
+pub const RUNNERS: &str = "runners";
+/// From a runner answering a model call: `{call, status, content_type}`
+/// first, then `{call, chunk}` (base64) as the server sends it, then `{call,
+/// done}`; or `{call, error}`.
 pub const MODEL_REPLY: &str = "model_reply";
 
-/// Event: run this for someone, `{run, from, agent, task, context, files}`.
-/// Also, on the connection that asked for a run: `run_progress` and
-/// `run_done`, with the data the node sent.
-pub const RUN_EVENT: &str = "run";
-/// Event: the run was cancelled, or its caller went away, `{run}`.
-pub const RUN_CANCEL_EVENT: &str = "run_cancel";
-/// Event: a request for one of the node's models, `{call, from, path, body}`.
+/// Event: a request for one of the runner's models, `{call, from, path,
+/// body}`.
 pub const MODEL_CALL_EVENT: &str = "model_call";
 
-/// The most a WebSocket message may be: a run's files, base64, and some room.
-pub const MAX_MESSAGE: usize = 48 * 1024 * 1024;
+/// The most a WebSocket message may be: a model call's request, and some
+/// room.
+pub const MAX_MESSAGE: usize = 24 * 1024 * 1024;
 
 /// What the link's WebSockets accept, on both ends.
 pub fn socket_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {

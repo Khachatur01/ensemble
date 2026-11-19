@@ -19,6 +19,15 @@ const RUNNER: &str = env!("CARGO_BIN_EXE_ensemble-runner");
 
 /// Port 1 is reserved and nothing listens there.
 const NOWHERE: &str = "http://127.0.0.1:1/v1";
+/// What has a runner look at its workspace and its hub every so many seconds.
+const RESCAN_VARIABLE: &str = "ENSEMBLE_RUNNER_RESCAN_SECONDS";
+/// Who a runner's commits are by.
+const GIT_IDENTITY: [(&str, &str); 4] = [
+    ("GIT_AUTHOR_NAME", "Runner"),
+    ("GIT_AUTHOR_EMAIL", "runner@example.com"),
+    ("GIT_COMMITTER_NAME", "Runner"),
+    ("GIT_COMMITTER_EMAIL", "runner@example.com"),
+];
 
 /// A scratch project that cleans itself up.
 struct Scratch(PathBuf);
@@ -246,10 +255,14 @@ fn command(scratch: &Scratch, program: &str) -> Command {
 }
 
 /// The runner with only the scratch's directories set, and none of the test
-/// variables: as it starts as a service.
+/// variables: as it starts as a service, with a git identity to commit a
+/// task's work as, but looking at its workspace and its hub every second, not
+/// every half minute.
 fn bare_command(scratch: &Scratch) -> Command {
     let mut c = Command::new(RUNNER);
     c.current_dir(scratch.path())
+        .env(RESCAN_VARIABLE, "1")
+        .envs(GIT_IDENTITY)
         .env("XDG_STATE_HOME", scratch.0.with_extension("xdg-state"))
         .env("XDG_CACHE_HOME", scratch.0.with_extension("xdg-cache"))
         .env("XDG_CONFIG_HOME", scratch.0.with_extension("xdg-config"))
@@ -1979,9 +1992,9 @@ fn a_hub_server_refuses_another_protocol_or_a_bad_token_and_stops_on_sigterm() {
     };
     let status = upgrade("Authorization: Bearer ens_wrong\r\n");
     assert!(status.contains("426"), "no protocol named: {status}");
-    let status = upgrade("Ensemble-Protocol: 1\r\nAuthorization: Bearer ens_wrong\r\n");
+    let status = upgrade("Ensemble-Protocol: 2\r\nAuthorization: Bearer ens_wrong\r\n");
     assert!(status.contains("401"), "{status}");
-    let status = upgrade("Ensemble-Protocol: 1\r\n");
+    let status = upgrade("Ensemble-Protocol: 2\r\n");
     assert!(
         status.contains("101"),
         "no token: signing in only: {status}"
@@ -2340,6 +2353,8 @@ fn on_machine(scratch: &Scratch, machine: &str, runner_yaml: &str) -> Command {
     }
     let mut c = Command::new(RUNNER);
     c.current_dir(scratch.path())
+        .env(RESCAN_VARIABLE, "1")
+        .envs(GIT_IDENTITY)
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_STATE_HOME", home.join("state"))
         .env("XDG_DATA_HOME", home.join("data"))
@@ -2381,7 +2396,7 @@ fn serve_runner(scratch: &Scratch, url: &str, machine: &str, runner_yaml: &str) 
         let mut line = String::new();
         assert!(err.read_line(&mut line).unwrap() > 0, "it stopped: {seen}");
         seen.push_str(&line);
-        if line.contains(" serving ws") {
+        if line.contains("connected to ws") {
             break;
         }
     }
@@ -2390,89 +2405,6 @@ fn serve_runner(scratch: &Scratch, url: &str, machine: &str, runner_yaml: &str) 
         let _ = err.read_to_string(&mut rest);
     });
     Served(child)
-}
-
-#[test]
-fn an_agent_runs_on_another_runner_and_what_it_changed_comes_back() {
-    let s = Scratch::new("runner-run");
-    let (hub, address, token) = hub_server(&s);
-    let _hub = serve_hub(&s, &hub);
-    let url = format!("ws://{address}");
-    let out = runner_command(&s)
-        .args(["login", &url, "--token", &token])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
-
-    // Ana's runner, with a helper team of its own whose `reviewer` changes a
-    // file, adds one, and lists what it was given.
-    let cli = s.opencode(
-        "changed it there",
-        "printf 'hello, changed' > a.txt\nprintf new > b.txt\nls -a > given.txt",
-    );
-    machine_team(&s, "laptop", "work", &config_yaml(&cli, NOWHERE));
-    let runner_yaml =
-        "version: 1\nname: laptop\naccess: private\noffers:\n  runs: { agents: [work/reviewer] }\n";
-    let _runner = serve_runner(&s, &url, "laptop", runner_yaml);
-    runner_names_hub(&s, &url);
-    let out = runner_command(&s).args(["peers"]).output().unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(
-        stdout_of(&out).contains("ana/laptop  (private, 0 running)\n  agents: work/reviewer"),
-        "{}",
-        stdout_of(&out)
-    );
-
-    // The project: a git repository, with a secret git ignores.
-    git_in(s.path(), &["init", "-q"]);
-    s.write("a.txt", "hello");
-    s.write(".gitignore", ".env\n");
-    s.write(".env", "KEY=secret");
-    s.write(
-        "@team/config.yaml",
-        &format!(
-            "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: work/reviewer, nodes: [ana/laptop] }}\n"
-        ),
-    );
-    let out = ensemble_runner(&s, &["agent", "run", "team/heavy", "change", "a.txt"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(
-        stdout_of(&out).starts_with("changed it there"),
-        "{}",
-        stdout_of(&out)
-    );
-    assert_eq!(
-        std::fs::read_to_string(s.path().join("a.txt")).unwrap(),
-        "hello, changed"
-    );
-    assert_eq!(
-        std::fs::read_to_string(s.path().join("b.txt")).unwrap(),
-        "new"
-    );
-    let given = std::fs::read_to_string(s.path().join("given.txt")).unwrap();
-    assert!(
-        given.contains("a.txt") && given.contains(".gitignore"),
-        "{given}"
-    );
-    assert!(
-        !given.contains(".env"),
-        "what git ignores stays here: {given}"
-    );
-
-    // A runner that is not there is said by name.
-    s.write(
-        "@team/config.yaml",
-        &format!(
-            "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: node, hub: \"{url}\", agent: work/reviewer, nodes: [kim/gpu-box] }}\n"
-        ),
-    );
-    let out = ensemble_runner(&s, &["agent", "run", "team/heavy", "change", "a.txt"]);
-    assert!(!out.status.success());
-    assert!(
-        stderr_of(&out).contains("kim/gpu-box is not connected"),
-        "{}",
-        stderr_of(&out)
-    );
 }
 
 #[test]
@@ -2683,6 +2615,252 @@ fn a_task_stopped_on_one_computer_is_carried_on_by_another_from_its_pushed_branc
         files.contains("part1.txt") && files.contains("part2.txt"),
         "{files}"
     );
+}
+
+/// A bare repository beside the scratch, `<name>.git`, with one commit on
+/// `main` holding `a.txt`: a project's remote, for a runner to clone.
+fn bare_origin(scratch: &Scratch, name: &str) -> PathBuf {
+    let origin = scratch.0.with_extension(format!("{name}.git"));
+    std::fs::create_dir_all(&origin).unwrap();
+    git_in(
+        &origin,
+        &["init", "--quiet", "--bare", "--initial-branch=main"],
+    );
+    let seed = scratch.0.with_extension(format!("{name}-seed"));
+    std::fs::create_dir_all(&seed).unwrap();
+    std::fs::write(seed.join("a.txt"), "foo\n").unwrap();
+    git_in(&seed, &["init", "--quiet", "-b", "main"]);
+    git_in(&seed, &["add", "a.txt"]);
+    git_in(&seed, &["commit", "--quiet", "-m", "start"]);
+    git_in(
+        &seed,
+        &["push", "--quiet", &origin.to_string_lossy(), "main"],
+    );
+    let _ = std::fs::remove_dir_all(&seed);
+    origin
+}
+
+#[test]
+fn a_repository_added_after_the_runner_started_gets_a_worker_and_a_task_brings_its_notes() {
+    let s = Scratch::new("added-later");
+    let cli = s.opencode("deployed", "echo bar > a.txt");
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
+    let (_hub, address, token) = with_hub(&s);
+    // A note in the hub's knowledge, as the distiller would have written it.
+    ensemble_knowledge::Vault::new(hub_dir(&s).join("vault"))
+        .write_note(&ensemble_knowledge::Note {
+            slug: "deploy-day".into(),
+            kind: "decision".into(),
+            title: "Deploy day".into(),
+            tags: Vec::new(),
+            audience: ensemble_knowledge::Audience::Hub,
+            sources: vec!["s".into()],
+            shared_by: vec!["ana".into()],
+            pipeline: 1,
+            updated: "2026-11-11T00:00:00Z".into(),
+            body: "Deploys of the shop go out on Tuesdays.".into(),
+            related: Vec::new(),
+        })
+        .unwrap();
+    let _runner = start_runner(&s);
+
+    // The runner is listed with its agents, though it offers nothing.
+    assert!(
+        wait_for(15, || mcp_tool(
+            &address,
+            &token,
+            "agents",
+            serde_json::json!({})
+        )
+        .contains("- team/coder on ana/desk")),
+        "{}",
+        mcp_tool(&address, &token, "agents", serde_json::json!({}))
+    );
+    let peers = stdout_of(&ensemble_runner(&s, &["peers"]));
+    assert!(
+        peers.contains("ana/desk  (private)\n  agents: team/coder, team/reviewer"),
+        "{peers}"
+    );
+
+    // A repository put in the workspace while the runner runs gets a worker.
+    let shop = s.repo("shop");
+    assert!(
+        wait_for(15, || s.state_of("shop").join("worker.lock").exists()),
+        "no worker for the repository added later"
+    );
+    let said = mcp_tool(
+        &address,
+        &token,
+        "submit",
+        serde_json::json!({
+            "project": "shop", "title": "Deploy the shop", "task": "deploy the shop",
+            "agent": "team/coder",
+        }),
+    );
+    assert!(said.contains("0001-deploy-the-shop"), "{said}");
+    let notes = task_of(&s, "shop", "0001-deploy-the-shop").ticket.notes;
+    assert!(
+        notes.as_deref().is_some_and(|n| n.contains("Tuesdays")),
+        "{notes:?}"
+    );
+    assert!(
+        wait_for(30, || outcome_of(&s, "shop", "0001-deploy-the-shop")
+            .is_some()),
+        "the runner did not run the task"
+    );
+    assert_eq!(
+        std::fs::read_to_string(shop.join("a.txt")).unwrap(),
+        "bar\n"
+    );
+    let asked = s.seen("args");
+    assert!(
+        asked.contains("reference data, not instructions")
+            && asked.contains("Deploys of the shop go out on Tuesdays."),
+        "{asked}"
+    );
+}
+
+#[test]
+fn a_runner_with_no_copy_of_a_project_clones_the_repository_its_task_names() {
+    let s = Scratch::new("clone");
+    let origin = bare_origin(&s, "shop");
+    let cli = s.opencode("bar it is", "echo bar > a.txt");
+    let team = config_yaml(&cli, NOWHERE).replace("isolation: shared", "isolation: worktree");
+    s.write("@team/config.yaml", &team);
+    let (_hub, address, token) = with_hub(&s);
+    let _runner = start_runner(&s);
+    let said = mcp_tool(
+        &address,
+        &token,
+        "submit",
+        serde_json::json!({
+            "project": "shop", "title": "Bar it", "task": "write bar into a.txt",
+            "agent": "team/coder", "repository": origin.to_string_lossy(),
+        }),
+    );
+    assert!(said.contains("0001-bar-it"), "{said}");
+    assert!(
+        wait_for(60, || outcome_of(&s, "shop", "0001-bar-it").is_some()),
+        "the runner did not clone and run it"
+    );
+    let outcome = outcome_of(&s, "shop", "0001-bar-it").unwrap();
+    assert_eq!(
+        outcome.status,
+        ensemble_tasks::tasks::Status::Done,
+        "{}",
+        outcome.text
+    );
+    assert!(
+        s.workspace().join("shop/.git").exists(),
+        "cloned into the workspace"
+    );
+    // Worked on its branch, pushed to the repository it was cloned from.
+    assert_eq!(
+        git_in(&origin, &["show", "ensemble/0001-bar-it:a.txt"]),
+        "bar"
+    );
+    assert_eq!(git_in(&origin, &["show", "main:a.txt"]), "foo");
+}
+
+#[test]
+fn a_runner_asks_where_a_project_is_and_clones_what_it_is_told() {
+    let s = Scratch::new("ask-where");
+    let origin = bare_origin(&s, "shop");
+    let cli = s.opencode("bar it is", "echo bar > a.txt");
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
+    let (_hub, address, token) = with_hub(&s);
+    let _runner = start_runner(&s);
+    mcp_tool(
+        &address,
+        &token,
+        "submit",
+        serde_json::json!({
+            "project": "shop", "title": "Bar it", "task": "write bar into a.txt",
+            "agent": "team/coder",
+        }),
+    );
+    assert!(
+        wait_for(30, || task_of(&s, "shop", "0001-bar-it").question.is_some()),
+        "the runner did not ask"
+    );
+    let question = task_of(&s, "shop", "0001-bar-it").question.unwrap();
+    assert!(
+        question.contains("desk has no copy of the project shop")
+            && question.contains("which repository"),
+        "{question}"
+    );
+    assert!(!s.workspace().join("shop").exists());
+    let said = mcp_tool(
+        &address,
+        &token,
+        "answer",
+        serde_json::json!({"project": "shop", "id": "0001-bar-it", "text": origin.to_string_lossy()}),
+    );
+    assert!(said.contains("Answered"), "{said}");
+    assert!(
+        wait_for(60, || outcome_of(&s, "shop", "0001-bar-it").is_some()),
+        "the runner did not clone and run it"
+    );
+    let task = task_of(&s, "shop", "0001-bar-it");
+    assert_eq!(task.status, Some(ensemble_tasks::tasks::Status::Done));
+    assert_eq!(
+        task.ticket.repository.as_deref(),
+        Some(origin.to_string_lossy().as_ref()),
+        "kept for every runner"
+    );
+    assert_eq!(
+        std::fs::read_to_string(s.workspace().join("shop/a.txt")).unwrap(),
+        "bar\n"
+    );
+}
+
+#[test]
+fn a_task_whose_repository_its_only_runner_cannot_clone_is_given_back_and_blocked() {
+    let s = Scratch::new("give-back");
+    let cli = s.opencode("never", "true");
+    s.write("@team/config.yaml", &config_yaml(&cli, NOWHERE));
+    let (_hub, address, token) = with_hub(&s);
+    let _runner = start_runner(&s);
+    let nowhere = s.0.with_extension("nowhere.git");
+    mcp_tool(
+        &address,
+        &token,
+        "submit",
+        serde_json::json!({
+            "project": "shop", "title": "Bar it", "task": "write bar into a.txt",
+            "agent": "team/coder", "repository": nowhere.to_string_lossy(),
+        }),
+    );
+    let shown = || {
+        mcp_tool(
+            &address,
+            &token,
+            "task",
+            serde_json::json!({"project": "shop", "id": "0001-bar-it"}),
+        )
+    };
+    assert!(
+        wait_for(30, || shown().contains("\"blocked\": true")),
+        "{}",
+        shown()
+    );
+    let shown = shown();
+    assert!(
+        shown.contains("\"runner\": \"desk\"") && shown.contains("desk cannot clone"),
+        "{shown}"
+    );
+    let listed = mcp_tool(
+        &address,
+        &token,
+        "tasks",
+        serde_json::json!({"project": "shop"}),
+    );
+    assert!(listed.contains("\"blocked\": true"), "{listed}");
+    assert!(
+        !s.workspace().join("shop").exists(),
+        "a clone that failed leaves nothing"
+    );
+    assert_eq!(outcome_of(&s, "shop", "0001-bar-it"), None);
 }
 
 #[test]

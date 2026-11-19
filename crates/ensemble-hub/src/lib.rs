@@ -3,8 +3,9 @@
 //! signed in with an account's token, to share to and recall from the
 //! organization's vault and to make and follow tasks. Each member's runner
 //! opens WebSockets to it (`ensemble_link`), signed in with a token: to lease
-//! and run the tasks the hub keeps for its account (`board`), and as a runner
-//! that offers them, to run agents and serve models for others (`nodes`).
+//! and run the tasks the hub keeps for its account (`board`), and to say it
+//! is connected, with its agents and the models it serves for others
+//! (`runners`).
 //!
 //! ```text
 //!   client agents (Claude Code, OpenCode, Codex, ...)
@@ -34,7 +35,7 @@ pub mod inbox;
 #[cfg(test)]
 mod link_tests;
 mod mcp;
-mod nodes;
+mod runners;
 pub mod server;
 pub mod users;
 

@@ -218,7 +218,6 @@ pub(super) fn validate(raw: RawConfig, path: &Path, env: &dyn Env) -> Result<Con
             RawAdapter::Builtin(b) => {
                 Adapter::Builtin(builtin_adapter(&at, b, &raw.llm_backends, &mut problems))
             }
-            RawAdapter::Node(n) => Adapter::Node(node_adapter(&at, n, &mut problems)),
         };
         agents.insert(
             name.clone(),
@@ -602,46 +601,5 @@ pub(super) fn resolve_openai(
         })
     } else {
         Err(problems)
-    }
-}
-
-pub(super) fn node_adapter(
-    at: &str,
-    ad: &RawNodeAdapter,
-    problems: &mut Vec<String>,
-) -> NodeAdapter {
-    let hub = ad.hub.trim().trim_end_matches('/').to_string();
-    if !(hub.starts_with("ws://") || hub.starts_with("wss://")) {
-        problems.push(format!(
-            "{at}: hub '{hub}' must be a hub server's ws:// or wss:// address, such as wss://hub.example.com"
-        ));
-    }
-    let agent = ad.agent.trim().to_string();
-    if agent.is_empty() {
-        problems.push(format!(
-            "{at}: `agent` is empty: name an agent the nodes offer"
-        ));
-    }
-    if ad.nodes.is_empty() {
-        problems.push(format!(
-            "{at}: `nodes` is empty: name at least one, as <owner>/<name>"
-        ));
-    }
-    let nodes: Vec<String> = ad.nodes.iter().map(|n| n.trim().to_string()).collect();
-    for n in &nodes {
-        let fine = n
-            .split_once('/')
-            .is_some_and(|(owner, name)| !owner.is_empty() && crate::runner::valid_name(name));
-        if !fine {
-            problems.push(format!(
-                "{at}: node '{n}' must be <owner>/<name>, such as kim/gpu-box"
-            ));
-        }
-    }
-    NodeAdapter {
-        label: format!("{agent} on {}", nodes.join(" or ")),
-        hub,
-        agent,
-        nodes,
     }
 }

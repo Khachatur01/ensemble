@@ -192,18 +192,6 @@ fn show(config: &Config, name: &str, probe: bool) -> Result<ExitCode, String> {
                 println!("system prompt:\n{prompt}");
             }
         }
-        Adapter::Node(na) => {
-            println!(
-                "{} `run` {}",
-                na.hub,
-                serde_json::json!({
-                    "agent": na.agent,
-                    "nodes": na.nodes,
-                    "task": TASK,
-                    "files": "<the files git tracks in the working folder>",
-                })
-            );
-        }
     }
     let Some(fallback) = agent.fallback().filter(|f| f.candidates.len() > 1) else {
         return Ok(ExitCode::SUCCESS);

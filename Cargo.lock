@@ -667,7 +667,6 @@ dependencies = [
  "ensemble-backends",
  "ensemble-config",
  "ensemble-core",
- "ensemble-link",
  "harness-rs",
  "harness-rs-context",
  "harness-rs-loop",

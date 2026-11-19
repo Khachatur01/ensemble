@@ -222,27 +222,6 @@ agents:
       # Most tokens of answer per model call.
       max_tokens: 4000
 
-  # An agent a runner of a hub server offers, such as a colleague's shared runner
-  # on a machine with big GPUs. The task and a copy of the files git tracks go
-  # there; what the agent changed comes back and is written here, where gates,
-  # branches and commits stay. Needs `ensemble-runner login <hub>`.
-  heavy-coder:
-    prompt: |
-      Implements large changes on a big model.
-    max_seconds: 3600
-    max_concurrent: 1
-    isolation: worktree
-    budget:
-      type: unlimited
-    adapter:
-      type: node
-      hub: wss://hub.example.com
-      # The agent the runners offer, by its name in their helper team.
-      agent: coder
-      # The runners that may run it, as <owner>/<name>, tried in order;
-      # `ensemble-runner peers` lists them.
-      nodes: [kim/gpu-box]
-
   # The Codex CLI, on your own login.
   fixer:
     prompt: |

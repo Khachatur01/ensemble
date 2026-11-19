@@ -487,11 +487,6 @@ fn the_schema_names_exactly_the_keys_the_config_accepts() {
             "direct adapter",
         ),
         (
-            "node_adapter",
-            accepted_keys::<RawNodeAdapter>(),
-            "node adapter",
-        ),
-        (
             "opencode_llm_backend_model",
             accepted_keys::<RawBackendModel>(),
             "opencode llm_backend model",
@@ -549,7 +544,6 @@ fn the_schema_requires_every_key_but_the_optional_two() {
         ("opencode_adapter", vec![]),
         ("opencode_provider_model", vec![]),
         ("direct_adapter", vec![]),
-        ("node_adapter", vec![]),
         ("opencode_llm_backend_model", vec![]),
         ("opencode_llm_backend_candidate", vec![]),
         ("direct_candidate", vec![]),
@@ -571,7 +565,6 @@ fn the_schemas_choices_are_the_codes() {
     assert_eq!(tag("codex_adapter"), CODEX_AGENT);
     assert_eq!(tag("opencode_adapter"), OPENCODE_AGENT);
     assert_eq!(tag("direct_adapter"), DIRECT_AGENT);
-    assert_eq!(tag("node_adapter"), NODE_AGENT);
     assert_eq!(tag("opencode_provider_model"), PROVIDER_MODEL);
     assert_eq!(tag("opencode_llm_backend_model"), LLM_BACKEND_MODEL);
     assert_eq!(schema["properties"]["version"]["const"], SUPPORTED_VERSION);
@@ -666,7 +659,6 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
         CODEX_AGENT,
         DIRECT_AGENT,
         BUILTIN_AGENT,
-        NODE_AGENT,
     ] {
         assert!(
             kinds.contains(&kind),
@@ -742,7 +734,6 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
                 .flat_map(|a| a["try"].as_array().unwrap())
                 .collect(),
         ),
-        ("node_adapter", adapters(NODE_AGENT)),
         ("opencode_provider_model", models(PROVIDER_MODEL)),
         ("opencode_llm_backend_model", models(LLM_BACKEND_MODEL)),
         (
@@ -1807,46 +1798,6 @@ fn a_runner_offers_agents_of_its_teams_and_its_sample_and_schema_agree() {
     assert_eq!(schema_required(&defs["models"]), required);
     let id = schema["$id"].as_str().unwrap();
     assert!(runner::RUNNER_SAMPLE.starts_with(&format!("# yaml-language-server: $schema={id}")));
-}
-
-#[test]
-fn a_node_agent_names_a_hub_server_an_agent_and_nodes_as_owner_and_name() {
-    let team = |adapter: &str| {
-        format!(
-            "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  heavy:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: worktree\n    budget: {{ type: unlimited }}\n    adapter: {adapter}\n"
-        )
-    };
-    let c = parse(
-        &team("{ type: node, hub: \"wss://hub.example.com/\", agent: coder, nodes: [kim/gpu-box, ana/box] }"),
-        &p(),
-        &env(&[]),
-    )
-    .unwrap();
-    let heavy = &c.agents["heavy"];
-    let Adapter::Node(n) = &heavy.adapter else {
-        panic!("a node agent")
-    };
-    assert_eq!(n.hub, "wss://hub.example.com");
-    assert_eq!(heavy.kind(), NODE_AGENT);
-    assert_eq!(heavy.runs_on(), "node kim/gpu-box or ana/box");
-    assert_eq!(heavy.model(), "coder on kim/gpu-box or ana/box");
-    assert!(heavy.can_change_files());
-    let said = joined_problems(&team(
-        "{ type: node, hub: \"https://hub\", agent: \" \", nodes: [gpu-box] }",
-    ));
-    for wanted in [
-        "ws:// or wss://",
-        "`agent` is empty",
-        "'gpu-box' must be <owner>/<name>",
-    ] {
-        assert!(said.contains(wanted), "{wanted}: {said}");
-    }
-    assert!(
-        joined_problems(&team(
-            "{ type: node, hub: \"ws://h\", agent: a, nodes: [] }"
-        ))
-        .contains("`nodes` is empty")
-    );
 }
 
 #[test]

@@ -154,20 +154,6 @@ pub(crate) enum RawAdapter {
     Direct(RawDirectAdapter),
     #[serde(rename = "builtin")]
     Builtin(RawBuiltinAdapter),
-    #[serde(rename = "node")]
-    Node(RawNodeAdapter),
-}
-
-/// An agent a node on a hub server offers.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawNodeAdapter {
-    /// The hub server, `ws://` or `wss://`.
-    pub(crate) hub: String,
-    /// The agent the nodes offer.
-    pub(crate) agent: String,
-    /// The nodes, as `<owner>/<name>`, tried in order.
-    pub(crate) nodes: Vec<String>,
 }
 
 /// A light agent: the task, and the agent's prompt as the system prompt,

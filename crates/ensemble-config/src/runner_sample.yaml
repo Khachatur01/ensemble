@@ -21,18 +21,18 @@ access: private
 
 # The folder it works in. Each git repository directly inside it is a project,
 # named for its folder: the runner runs the tasks the hub keeps for it, and
-# finds a repository you add within half a minute. ~/ is your home directory.
+# finds a repository you add within half a minute. For a task whose project it
+# has no folder for, it clones the repository the task names here, or asks on
+# the task where it is. ~/ is your home directory.
 workspace: ~/ensemble
 
 hub: wss://hub.example.com       # the hub server it connects to (`ensemble-runner login` first); leave out for none
 
 offers:
-  # Agents of its teams, which others name with an agent of `type: node`. A run
-  # sent here gets a copy of the files git tracks, works in a folder of its own,
-  # and sends back what it changed; gates, branches and commits stay with
-  # whoever sent it.
+  # Agents of its teams it lends to others on the hub, listed to everyone
+  # who may use this runner.
   runs:
-    agents: [web/coder]            # which agents may run here, as <team>/<agent>
+    agents: [web/coder]            # which agents others may use, as <team>/<agent>
 
   # Models an OpenAI-compatible server here serves, reached through the hub at
   # https://<hub>/nodes/v1 with an access token as the API key.

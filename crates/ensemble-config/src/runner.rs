@@ -4,9 +4,10 @@
 //!
 //! A runner says who it works for (its owner alone, or also the others whose
 //! role has `compute`), where it works (its workspace, a folder of git
-//! repositories, each a project named for its folder), and what it offers:
-//! agents of its teams that run work sent to it, named `<team>/<agent>`, and
-//! the models a server here serves. Its teams are the folders of its teams
+//! repositories, each a project named for its folder, where it clones the
+//! repository of a task whose project it has no copy of), and what it offers
+//! others: agents of its teams it lends, named `<team>/<agent>`, and the
+//! models a server here serves. Its teams are the folders of its teams
 //! directory (`teams`).
 
 use super::validate::explain;
@@ -33,7 +34,8 @@ pub struct Runner {
     pub name: String,
     pub access: Access,
     /// The folder it works in: each git repository directly inside it is a
-    /// project, named for its folder, whose tasks the runner runs.
+    /// project, named for its folder, whose tasks the runner runs; it clones
+    /// a task's repository here for a project it has none of.
     pub workspace: PathBuf,
     /// The hub server it connects to, `ws://` or `wss://`, signed in to with
     /// `ensemble-runner login`. None: it uses no hub.
@@ -71,11 +73,11 @@ pub struct Offers {
     pub models: Option<OfferedModels>,
 }
 
-/// Agents of the runner's teams, which run work sent to the runner in a
-/// folder of their own and send back what they changed.
+/// Agents of the runner's teams it lends to others on the hub, listed to
+/// everyone who may use the runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfferedRuns {
-    /// Which agents of its teams others may run, as `<team>/<agent>`.
+    /// Which agents of its teams others may use, as `<team>/<agent>`.
     pub agents: Vec<String>,
 }
 

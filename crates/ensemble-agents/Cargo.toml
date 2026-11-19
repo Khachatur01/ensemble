@@ -15,7 +15,6 @@ test-support = ["ensemble-core/test-support"]
 ensemble-backends.workspace = true
 ensemble-config.workspace = true
 ensemble-core.workspace = true
-ensemble-link.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
