@@ -14,7 +14,7 @@
 
 use async_trait::async_trait;
 use ensemble_backends::resolve::Resolver;
-use ensemble_config::{Hub, Knowledge, LlmBackend};
+use ensemble_config::{Hub, Knowledge, LlmBackend, RelayAt};
 use ensemble_core::runtime;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -114,6 +114,8 @@ pub struct Memory {
     /// The agent CLI on the other end, once it has said its name.
     client: Mutex<Option<String>>,
     backends: RwLock<Arc<BTreeMap<String, LlmBackend>>>,
+    /// Where the hub serves the backends of runners it uses, when it does.
+    relay: Option<RelayAt>,
     resolver: Resolver,
     /// The last failure to find notes by their meaning, said once.
     meaning: meaning::Meaning,
@@ -137,6 +139,7 @@ impl Memory {
             project,
             client: Mutex::new(None),
             backends: RwLock::new(Arc::new(hub.llm.backends(None))),
+            relay: None,
             resolver: Resolver::default(),
             meaning: meaning::Meaning::default(),
         }
@@ -149,7 +152,15 @@ impl Memory {
         *self.knowledge.write().unwrap_or_else(|e| e.into_inner()) =
             Arc::new(hub.knowledge.clone());
         *self.backends.write().unwrap_or_else(|e| e.into_inner()) =
-            Arc::new(hub.llm.backends(None));
+            Arc::new(hub.llm.backends(self.relay.as_ref()));
+    }
+
+    /// This, using the backends of runners that `hub` names, served at
+    /// `relay`.
+    pub fn with_relay(mut self, hub: &Hub, relay: RelayAt) -> Memory {
+        self.backends = RwLock::new(Arc::new(hub.llm.backends(Some(&relay))));
+        self.relay = Some(relay);
+        self
     }
 
     pub(crate) fn backends(&self) -> Arc<BTreeMap<String, LlmBackend>> {

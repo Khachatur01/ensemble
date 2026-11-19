@@ -2059,9 +2059,9 @@ fn a_hub_server_refuses_another_protocol_or_a_bad_token_and_stops_on_sigterm() {
     };
     let status = upgrade("Authorization: Bearer ens_wrong\r\n");
     assert!(status.contains("426"), "no protocol named: {status}");
-    let status = upgrade("Ensemble-Protocol: 3\r\nAuthorization: Bearer ens_wrong\r\n");
+    let status = upgrade("Ensemble-Protocol: 4\r\nAuthorization: Bearer ens_wrong\r\n");
     assert!(status.contains("401"), "{status}");
-    let status = upgrade("Ensemble-Protocol: 3\r\n");
+    let status = upgrade("Ensemble-Protocol: 4\r\n");
     assert!(
         status.contains("101"),
         "no token: signing in only: {status}"
@@ -2448,6 +2448,18 @@ fn machine_team(scratch: &Scratch, machine: &str, team: &str, config: &str) {
 /// `ensemble-runner serve` on the computer `machine`, whose runner is
 /// `runner_yaml`, started and waited for until it is connected.
 fn serve_runner(scratch: &Scratch, url: &str, machine: &str, runner_yaml: &str) -> Served {
+    serve_runner_saying(scratch, url, machine, runner_yaml, "connected to ws")
+}
+
+/// The runner of the computer `machine`, as [`serve_runner`], waited for
+/// until it says `said`.
+fn serve_runner_saying(
+    scratch: &Scratch,
+    url: &str,
+    machine: &str,
+    runner_yaml: &str,
+    said: &str,
+) -> Served {
     // The runner names the hub it connects to.
     let runner_yaml = if runner_yaml.contains("\nhub:") {
         runner_yaml.to_string()
@@ -2466,7 +2478,7 @@ fn serve_runner(scratch: &Scratch, url: &str, machine: &str, runner_yaml: &str) 
         let mut line = String::new();
         assert!(err.read_line(&mut line).unwrap() > 0, "it stopped: {seen}");
         seen.push_str(&line);
-        if line.contains("connected to ws") {
+        if line.contains(said) {
             break;
         }
     }
@@ -2475,6 +2487,112 @@ fn serve_runner(scratch: &Scratch, url: &str, machine: &str, runner_yaml: &str) 
         let _ = err.read_to_string(&mut rest);
     });
     Served(child)
+}
+
+#[test]
+fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_the_hub() {
+    let s = Scratch::new("relay");
+    let origin = bare_origin(&s, "shop");
+    // The model server on ana's gpu box: it lists `small`, and answers every
+    // chat with one note to keep.
+    let items = r#"{"items":[{"kind":"decision","title":"Deploy day","body":"Deploys go out on Tuesdays.","tags":["ops"]}]}"#;
+    let server = models_stub(
+        &serde_json::json!({
+            "data": [{"id": "small"}],
+            "choices": [{"message": {"content": items}, "finish_reason": "stop"}]
+        })
+        .to_string(),
+    );
+    let (hub, address, ana) = hub_server(&s);
+    // The hub distills on the backend the gpu box shares, and nothing else.
+    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    let end_of_llm = text.find("\nllm:\n").unwrap()
+        + text[text.find("\nllm:\n").unwrap()..].find("\n\n").unwrap();
+    let text = format!(
+        "{}\n  runners:\n    backends:\n      gpu: {{ runner: ana/gpu, backend: local }}{}",
+        &text[..end_of_llm],
+        &text[end_of_llm..]
+    )
+    .replace(
+        "      - backend: central\n        model: qwen3.5-72b\n",
+        "      - backend: gpu\n        model: small\n",
+    );
+    std::fs::write(hub.join("hub.yaml"), text).unwrap();
+    let _hub = serve_hub(&s, &hub);
+    let url = format!("ws://{address}");
+    let login = |machine: &str, yaml: &str| {
+        let out = on_machine(&s, machine, yaml)
+            .args(["login", &url, "--token", &ana])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr_of(&out));
+    };
+
+    // The gpu box shares its model server as `local`.
+    let gpu = format!(
+        "version: 1\nname: gpu\nworks_for: owner\nhub: \"{url}\"\nllm:\n  direct:\n    backends:\n      local: {{ type: openai-compatible-api, base_url: \"{server}\", timeout_seconds: 10 }}\n    shares: [local]\n    max_shared_calls: 2\n"
+    );
+    login("gpu", &gpu);
+    let _gpu = serve_runner_saying(&s, &url, "gpu", &gpu, "sharing local through the hub");
+    // The hub's admin sees what it shares, to name it in hub.yaml.
+    let out = ensemble_hub(&s, &["runner", "backends"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out)
+            .contains("ana/gpu  local  (works for owner, 2 call(s) at once)  models: small"),
+        "{}",
+        stdout_of(&out)
+    );
+
+    // ana's laptop has no model server: its agent runs on the gpu box's.
+    let laptop = format!(
+        "version: 1\nname: laptop\nworks_for: owner\nhub: \"{url}\"\n{}  hub:\n    backends:\n      gpu-local: {{ runner: ana/gpu, backend: local }}\n",
+        llm_block("{}")
+    );
+    login("laptop", &laptop);
+    machine_team(
+        &s,
+        "laptop",
+        "team",
+        "version: 1\nlimits: {}\ngates: {}\nagents:\n  summariser:\n    prompt: You summarise.\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: direct\n      try: [{ backend: gpu-local, model: small }]\n      when_none: fail\n      max_tokens: 100\n",
+    );
+    let _laptop = serve_runner(&s, &url, "laptop", &laptop);
+    let said = mcp_tool(
+        &address,
+        &ana,
+        "submit",
+        serde_json::json!({
+            "project": "shop", "title": "Sum it", "task": "sum it up",
+            "agent": "team/summariser", "repository": origin.to_string_lossy(),
+        }),
+    );
+    assert!(said.contains("0001-sum-it"), "{said}");
+    assert!(
+        wait_for(60, || outcome_of(&s, "shop", "0001-sum-it").is_some()),
+        "the laptop did not finish the task: {:?}",
+        task_of(&s, "shop", "0001-sum-it")
+    );
+    let outcome = outcome_of(&s, "shop", "0001-sum-it").unwrap();
+    assert_eq!(
+        outcome.status,
+        ensemble_tasks::tasks::Status::Done,
+        "{}",
+        outcome.text
+    );
+    assert!(outcome.text.contains("Deploy day"), "{}", outcome.text);
+
+    // The hub distills a share on the gpu box's model too.
+    let said = mcp_tool(
+        &address,
+        &ana,
+        "share",
+        serde_json::json!({ "title": "Deploys", "text": "We deploy on Tuesdays." }),
+    );
+    assert!(said.starts_with("Shared as "), "{said}");
+    assert!(
+        wait_for(60, || hub.join("vault/notes/deploy-day.md").exists()),
+        "the hub made no note of the share"
+    );
 }
 
 #[test]

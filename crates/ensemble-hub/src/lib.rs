@@ -28,6 +28,7 @@
 pub mod accounts;
 mod api;
 pub mod board;
+pub mod calls;
 mod cli;
 mod cmd;
 mod http;

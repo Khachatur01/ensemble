@@ -14,6 +14,7 @@
 
 use crate::accounts::HubContext;
 use crate::board::{Asker, TaskService};
+use crate::calls::Calls;
 use crate::http::{self, Replay};
 use crate::runners::Routes;
 use crate::users::Users;
@@ -30,6 +31,7 @@ use futures_util::stream::{SplitSink, StreamExt};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
@@ -59,6 +61,8 @@ pub struct Server<'a> {
     mcp: bool,
     /// The connected runners.
     pub(crate) routes: Routes,
+    /// The runners' relay sockets, and the model calls between them.
+    pub(crate) calls: Arc<Calls>,
 }
 
 /// Who a connection signed in as.
@@ -84,7 +88,15 @@ impl<'a> Server<'a> {
             tasks: None,
             mcp: false,
             routes: Routes::default(),
+            calls: Arc::default(),
         }
+    }
+
+    /// Relay model calls through `calls`, which the hub's own calls go
+    /// through too.
+    pub fn with_calls(mut self, calls: Arc<Calls>) -> Self {
+        self.calls = calls;
+        self
     }
 
     /// Keep its accounts' tasks in `tasks`.
@@ -194,6 +206,9 @@ impl<'a> Server<'a> {
         )
         .await
         .map_err(|e| format!("refused or broken handshake: {e}"))?;
+        if head.path == ensemble_link::relay::PATH {
+            return self.relay(ws, session.as_ref(), stop, say).await;
+        }
         let who = session
             .as_ref()
             .map_or("a runner signing in", |s| s.user.as_str())
@@ -273,6 +288,103 @@ impl<'a> Server<'a> {
             };
             send(sender, &reply).await?;
         }
+    }
+
+    /// Serve one runner's relay socket until it closes or `stop` is set: what
+    /// it shares, the calls it serves, and those it makes, as the account it
+    /// signed in as (`calls`).
+    async fn relay(
+        &self,
+        ws: WebSocketStream<Replay<TcpStream>>,
+        session: Option<&Session>,
+        stop: &AtomicBool,
+        say: &(dyn Fn(&str) + Sync),
+    ) -> Result<(), String> {
+        let (mut sender, mut receiver) = ws.split();
+        let say_no = async |sender: &mut Sender, why: String| {
+            let _ = sender
+                .send(Message::text(json!({ "error": why }).to_string()))
+                .await;
+            let _ = sender.close().await;
+        };
+        let Some(session) = session else {
+            say_no(
+                &mut sender,
+                "a relay socket is signed in with a token".into(),
+            )
+            .await;
+            return Ok(());
+        };
+        let offer = match tokio::time::timeout(HEAD_WAIT, receiver.next()).await {
+            Ok(Some(Ok(Message::Text(t)))) => {
+                serde_json::from_str::<ensemble_link::relay::Offer>(&t).map_err(|e| e.to_string())
+            }
+            _ => Err("a relay socket says what it shares first".to_string()),
+        };
+        let offer = match offer {
+            Ok(offer) => offer,
+            Err(e) => {
+                say_no(&mut sender, e).await;
+                return Ok(());
+            }
+        };
+        let permissions = match blocking(|| self.permissions(session)) {
+            Ok(p) => p,
+            Err(e) => {
+                say_no(&mut sender, e).await;
+                return Ok(());
+            }
+        };
+        let connected = self.calls.connect(
+            &session.user,
+            &offer,
+            permissions.contains(&Permission::Host),
+        );
+        let (socket, runner, mut outbox) = match connected {
+            Ok(c) => c,
+            Err(e) => {
+                say(&format!("{}: {e}", session.user));
+                say_no(&mut sender, e).await;
+                return Ok(());
+            }
+        };
+        say(&format!(
+            "{runner} relays, sharing {}",
+            if offer.shares.is_empty() {
+                "nothing".to_string()
+            } else {
+                offer.shares.join(", ")
+            }
+        ));
+        let caller = crate::calls::Caller::Account {
+            name: session.user.clone(),
+            compute: permissions.contains(&Permission::Compute),
+        };
+        let mut ended = sender
+            .send(Message::text(json!({ "runner": runner }).to_string()))
+            .await
+            .map_err(|e| e.to_string());
+        while ended.is_ok() {
+            tokio::select! {
+                () = runtime::until_set(stop) => break,
+                Some(frame) = outbox.recv() => {
+                    ended = sender.send(frame.to_message()).await.map_err(|e| e.to_string());
+                }
+                message = receiver.next() => match message {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(m)) => {
+                        if let Some(frame) = ensemble_link::relay::Frame::from_message(&m) {
+                            self.calls.frame(socket, &caller, frame);
+                        }
+                    }
+                    Some(Err(e)) => ended = Err(e.to_string()),
+                },
+            }
+        }
+        self.calls.disconnect(socket);
+        say(&format!("{runner} stopped relaying"));
+        let _ = sender.close().await;
+        ended
     }
 
     /// The user an upgrade request's bearer token signs in as; none without

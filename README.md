@@ -255,13 +255,6 @@ user, outside every repository:
 ```yaml
 version: 1
 
-llm_backends:
-  local:
-    type: openai-compatible-api
-    base_url: "http://127.0.0.1:8888/v1"
-    api_key_env: OPENAI_LOCAL_API_KEY
-    timeout_seconds: 600
-
 limits: {}
 
 gates:
@@ -311,10 +304,8 @@ agents:
 missing one is refused by name (``agents.coder: `max_seconds` is required``).
 What differs between cases is a tagged variant (`type:`) carrying exactly its
 own settings, so a setting that does not apply cannot be written and one that
-does cannot be forgotten. Only two settings may be left out, because leaving
-them out means "not used": an agent's `prompt` (the CLI's own system prompt
-alone) and a backend's `api_key_env` (no key). `llm_backends: {}` says there
-are none.
+does cannot be forgotten. Only an agent's `prompt` may be left out, because
+leaving it out means "not used": the CLI's own system prompt alone.
 
 An **agent** is a member of the helper team. Its names are yours; nothing is
 hardcoded as planner, coder or reviewer. There is no hierarchy: every agent is
@@ -330,11 +321,31 @@ one professional a task can go to. It has:
 | `budget` | how much it may run in an hour: `{ type: unlimited }`, `{ type: per_hour, delegations: 20 }` (runs), or `{ type: per_hour_tokens, tokens: 2000000 }` (the tokens its runs reported). A task and each gate retry count, across every repository (`usage.json` in the helper team's state directory). Over it, a task waits until its agent may run again, and a gate retry is not made |
 | `adapter` | what runs it. `type` decides which other fields the adapter takes |
 
-An **LLM backend** is a model server of yours, or one your company runs, defined
-once. An OpenCode agent names it in its model (`type: llm_backend`), and a
-`builtin` or `direct` agent in its adapter, and Ensemble hands the agent's CLI the endpoint
-and key for each run, so you never configure the same server again in the CLI's
-own settings. It has a `type`:
+An **LLM backend** is a model server of yours, or one your company runs. Each
+runner defines the backends it has in its `runner.yaml` (`llm`, see
+[Sharing LLM backends](#sharing-llm-backends)), with their addresses and keys,
+and a team names them by name alone: an OpenCode agent in its model (`type:
+llm_backend`), and a `builtin` or `direct` agent in its adapter. So one team
+runs on every runner that defines the backends it names, each with its own
+servers and keys, and Ensemble hands the agent's CLI the endpoint and key for
+each run, so you never configure the same server again in the CLI's own
+settings. The team above names `local`, which a runner defines like this:
+
+```yaml
+# ~/.config/ensemble/runner/runner.yaml
+llm:
+  direct:
+    backends:
+      local:
+        type: openai-compatible-api
+        base_url: "http://127.0.0.1:8888/v1"
+        api_key_env: OPENAI_LOCAL_API_KEY   # left out when the server wants no key
+        timeout_seconds: 600
+    shares: []
+    max_shared_calls: 1
+```
+
+A backend has a `type`:
 
 - `openai-compatible-api`: any `/chat/completions` endpoint: llama-server, vLLM,
   Ollama, Unsloth, a hosted API. `opencode`, `builtin` and `direct` agents can
@@ -414,7 +425,7 @@ agents:
     adapter:
       type: opencode
       model:
-        type: llm_backend      # models that llm_backends serve
+        type: llm_backend      # models the runner's LLM backends serve
         try:                   # in order; a run uses the first that works
           - backend: local
             name: qwen3.5-9b       # the id the server serves
@@ -514,7 +525,7 @@ agents:
     adapter:
       type: direct
       try:                   # in order; a run uses the first that works
-        - backend: local     # one of llm_backends
+        - backend: local     # one of the runner's LLM backends
           model: qwen3.5:9b  # the id the server serves
       when_none: fail        # or wait: a task waits for a backend
       max_tokens: 1000       # an answer cut off here is marked unfinished
@@ -545,7 +556,7 @@ agents:
     adapter:
       type: builtin
       try:                       # in order; a run uses the first that works
-        - backend: local         # one of llm_backends, of either type
+        - backend: local         # one of the runner's LLM backends, of either type
           model: qwen3-coder:30b
           context_window: 65536  # the loop compacts before it outgrows it
       when_none: fail
@@ -948,7 +959,7 @@ as always.
 ### Secrets
 
 API keys are named by the **variable** that holds them (`api_key_env`), never
-written in `config.yaml`: there is no `api_key` field, and a config that tries
+written in `runner.yaml` or `hub.yaml`: there is no `api_key` field, and a config that tries
 one is rejected by name, before it reaches a commit.
 
 The values come from the environment, or from the runner's hidden file of
@@ -990,11 +1001,11 @@ A setting is named by its keys joined by dots:
 
 ```console
 $ ensemble-runner config get hub
-$ ensemble-runner config set access shared
+$ ensemble-runner config set works_for hub
 $ ensemble-runner config set workspace ~/code
 $ ensemble-hub config set server.listen 0.0.0.0:7700
 $ ensemble-runner team config web set agents.coder.max_concurrent 2
-$ ensemble-runner config unset offers.models
+$ ensemble-runner config set llm.direct.shares '[local]'
 $ ensemble-hub config edit            # in $VISUAL or $EDITOR
 $ ensemble-runner config path
 ```
@@ -1048,9 +1059,15 @@ Every independent problem is reported in one pass:
 $ ensemble-runner team check
 ensemble: team 'web': ~/.config/ensemble/runner/teams/web/config.yaml is invalid:
   - version: 2 is not supported; this build understands version 1
-  - llm_backends.x: type 'ollama' is unknown. Known types: openai-compatible-api.
-  - agents.coder.adapter: LLM backend 'lcoal' is not defined. Defined LLM backends: local.
-  - agents.reviewer.adapter: LLM backend 'lcoal' is not defined. Defined LLM backends: local.
+  - agents.coder: `max_seconds` must be greater than 0
+```
+
+A team that is valid is then checked against the runner's backends:
+
+```console
+$ ensemble-runner team check
+ensemble: team 'web': ~/.config/ensemble/runner/teams/web/config.yaml is invalid:
+  - agents.coder.adapter.model.try[0]: LLM backend 'lcoal' is not defined in runner.yaml's `llm`. Defined LLM backends: local.
 ```
 
 A typo'd key is an error, never a silent default, and a missing key is an
@@ -1088,8 +1105,13 @@ $ ensemble-hub serve                      # until Ctrl-C or SIGTERM
 ```yaml
 version: 1
 owner: Acme                 # the hub's name
-llm_backends:               # the models the hub itself calls, to distill knowledge
-  central: { type: openai-compatible-api, base_url: "http://127.0.0.1:8000/v1", timeout_seconds: 300 }
+llm:                        # the models the hub calls, to distill knowledge
+  direct:                   # its own
+    backends:
+      central: { type: openai-compatible-api, base_url: "http://127.0.0.1:8000/v1", timeout_seconds: 300 }
+  runners:                  # runners' it reaches through their links; leave it out for none
+    backends:
+      gpu: { runner: ana/gpu-box, backend: local }
 knowledge:
   vault: vault              # a git repository, relative to this folder
   distill:                  # the models that turn shares into notes; no tools
@@ -1422,11 +1444,15 @@ name: gpu-box                    # a hub knows it as <you>/gpu-box
 works_for: hub                   # owner: you alone; hub: also others with `compute`
 workspace: ~/ensemble            # its git repositories; ~/ is your home, a relative path is beside this file
 hub: wss://hub.example.com       # the hub it connects to; left out: none, and no tasks
-offers:                          # through a hub; each block may be left out
-  models:                        # models a server here serves
-    base_url: http://127.0.0.1:11434/v1
-    timeout_seconds: 600
-    names: [qwen3.5:72b]
+llm:                             # the LLM backends its teams' agents run on
+  direct:                        # its own
+    backends:
+      local: { type: openai-compatible-api, base_url: "http://127.0.0.1:11434/v1", timeout_seconds: 600 }
+    shares: [local]              # those it offers through the hub; [] none
+    max_shared_calls: 1          # the most calls of others to them at once
+  hub:                           # others' it reaches through the hub; leave it out for none
+    backends:
+      team-gpu: { runner: kim/workstation, backend: big }
 interfaces:
   cli: {}                        # `ensemble-runner …` on this computer
 ```
@@ -1446,7 +1472,7 @@ workspace: one you cloned there, or one it cloned for a task that names its
 
 **Working for others.** A runner with `works_for: hub` works on the tasks of
 other accounts too, with the agents it lends. Nobody lists them: it lends
-every agent of its teams that runs on models from `llm_backends` (`opencode`
+every agent of its teams that runs on models of LLM backends (`opencode`
 on `llm_backend`, `builtin`, or `direct`), and never one on an agent CLI's own
 login or provider (`claude-code`, `codex`, `opencode` on a `provider`): a
 subscription, such as Claude Code's, belongs to its owner and is never used
@@ -1478,22 +1504,38 @@ of it).
   it lends run with your computer's permissions (a `builtin` agent's `shell`
   too). Make a runner work for the hub only where both sides accept that.
 
-**Using a runner's models.** A runner that offers `models` serves them through the
-hub as an OpenAI-compatible endpoint at `https://<hub>/nodes/v1`, with an
-access token as the API key, to its owner, and, when it works for the hub, to
-everyone whose role has `compute`: `GET /nodes/v1/models` lists the models you may
-use, and `POST /nodes/v1/chat/completions` (and `/completions`) goes to the
-least busy runner that serves the model, your own first, streamed as it comes.
-In a helper team it is a backend like any other:
+### Sharing LLM backends
 
-```yaml
-llm_backends:
-  gpu:
-    type: openai-compatible-api
-    base_url: https://hub.example.com/nodes/v1
-    api_key_env: HUB_TOKEN       # an access token with `compute`
-    timeout_seconds: 600
+A hub may run on a small machine and need a strong model, and so may a
+runner. A runner may offer some of its own backends through the hub
+(`llm.direct.shares`), and the hub and other runners use them: the hub's admin
+names one under hub.yaml's `llm.runners`, and a runner's owner under its
+runner.yaml's `llm.hub`, each by the runner, `<owner>/<name>`, and its name
+there. Either then names it like any backend, by the name given it there, in
+a `try` list, the distiller or a team. A name is unique across the groups of a
+file's `llm`, so a backend moves between groups without changing where it is
+used.
+
+```console
+$ ensemble-hub runner backends        # what the connected runners share, with their models
+ana/gpu-box  local  (works for owner, 1 call(s) at once)  models: qwen3.5:72b
 ```
+
+- **Who may use it.** The hub, and its owner's other runners; when the runner
+  works for the hub, also the runners of everyone whose role has `compute`.
+- **What they learn.** Nothing of its address or key: the runner calls its own
+  server, and only for what an agent needs of it (its models, chats,
+  completions and embeddings). Whoever runs it sees what is sent to it:
+  choosing a runner's backend is a decision of trust.
+- **How it goes.** Calls go on a second WebSocket of each runner, beside its
+  link, so a long prompt or a busy stream never holds up its tasks. The hub
+  and a runner that reaches others' backends serve them on loopback, where
+  each looks like any OpenAI-compatible backend to the agents. Through the hub
+  a call takes a few milliseconds longer than one made directly.
+- **When it cannot.** A runner takes `max_shared_calls` calls of others at
+  once; the hub keeps the next waiting for up to 10 seconds, then answers that
+  it is busy. Busy, offline or not shared, the backend is unavailable and the
+  `try` list's next model is used.
 
 ## Installation
 
@@ -1583,15 +1625,18 @@ starts once its file is there. The module adds no setting of its own;
     settings = {                           # merged into runner.yaml; the rest is `ensemble-runner`'s
       version = 1;
       name = "laptop";
-      access = "private";
+      works_for = "owner";
       hub = "wss://hub.example.com";       # left out: no hub
-      offers = { };
+      llm.direct = {                       # its LLM backends, which teams name
+        backends = { };
+        shares = [ ];
+        max_shared_calls = 1;
+      };
     };
     teams = {
       web.source = inputs.acme-web-team;   # a team repository, pinned by flake.lock
       docs.settings = {                    # or a team written here: its config.yaml
         version = 1;
-        llm_backends = { };
         limits = { };
         gates = { };
         agents.reviewer = {
@@ -1644,7 +1689,7 @@ package it comes from.
     settings = {                           # merged into hub.yaml; the rest is `ensemble-hub`'s
       version = 1;
       owner = "acme";
-      llm_backends.central = {
+      llm.direct.backends.central = {
         type = "openai-compatible-api";
         base_url = "http://127.0.0.1:8000/v1";
         timeout_seconds = 300;
@@ -1709,8 +1754,12 @@ Home Manager module runs this computer's runner: a systemd user service,
     settings = {                         # or leave it out and run `ensemble-runner setup`
       version = 1;
       name = "macbook";
-      access = "private";
-      offers = { };
+      works_for = "owner";
+      llm.direct = {
+        backends = { };
+        shares = [ ];
+        max_shared_calls = 1;
+      };
     };
     teams.web.source = ./teams/web;    # a folder with config.yaml
   };

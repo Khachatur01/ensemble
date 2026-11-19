@@ -116,6 +116,15 @@ fn with_relayed(
     all
 }
 
+/// Each backend of `relayed` by its name, with the runner that serves it and
+/// its name there: what a loopback endpoint serves.
+pub fn routes(relayed: &BTreeMap<String, Relayed>) -> BTreeMap<String, (String, String)> {
+    relayed
+        .iter()
+        .map(|(name, r)| (name.clone(), (r.runner.clone(), r.backend.clone())))
+        .collect()
+}
+
 /// Is `id` a runner as a hub knows it, `<owner>/<name>`?
 pub fn valid_runner_id(id: &str) -> bool {
     id.split_once('/').is_some_and(|(owner, name)| {

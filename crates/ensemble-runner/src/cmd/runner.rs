@@ -199,11 +199,7 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
 /// The runner, as runner.yaml says now, until it stops or starts again.
 fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
     let runner = ctx.runner().map_err(|e| format!("serve: {e}"))?;
-    let (team, waiting) = teams::load_all(&runner.llm, None).map_err(|e| format!("serve: {e}"))?;
     let say = |line: &str| eprintln!("ensemble: {line}");
-    for line in &waiting {
-        say(line);
-    }
     // With a hub: its tasks, and the link that says the runner is there.
     // One token for all of it, replaced when `ensemble-runner login` signs in
     // again.
@@ -214,10 +210,45 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
         }
         None => None,
     };
+    // The relay, when it shares backends or reaches others' through the hub,
+    // and where its agents reach those.
+    let relay = hub
+        .as_ref()
+        .filter(|_| !runner.llm.shares.is_empty() || !runner.llm.hub.is_empty())
+        .map(|(url, token)| {
+            std::sync::Arc::new(crate::relay::Relay::new(url, token.clone(), &runner))
+        });
+    let loopback = match relay.as_ref().filter(|_| !runner.llm.hub.is_empty()) {
+        Some(relay) => Some(
+            ensemble_core::runtime::shared()
+                .block_on(ensemble_link::loopback::Loopback::start(
+                    config::llm::routes(&runner.llm.hub),
+                    std::sync::Arc::new(crate::relay::RelayOpener(relay.clone())),
+                ))
+                .map_err(|e| format!("serve: the relay's endpoint: {e}"))?,
+        ),
+        None => None,
+    };
+    let relay_at = loopback.as_ref().map(|l| config::RelayAt {
+        base_url: l.base_url.clone(),
+        key: l.key.clone(),
+    });
+    let (team, waiting) =
+        teams::load_all(&runner.llm, relay_at.as_ref()).map_err(|e| format!("serve: {e}"))?;
+    for line in &waiting {
+        say(line);
+    }
     // What `ensemble-runner …` asks of it while it runs.
     let operations = operations();
-    let daemon = daemon::Daemon::new(runner.clone(), hub.clone(), team.clone(), &operations, &say)
-        .map_err(|e| format!("serve: {e}"))?;
+    let daemon = daemon::Daemon::new(
+        runner.clone(),
+        hub.clone(),
+        team.clone(),
+        relay_at,
+        &operations,
+        &say,
+    )
+    .map_err(|e| format!("serve: {e}"))?;
     let worker = hub.as_ref().map(|(url, token)| {
         crate::worker::Worker::new(url, token.clone(), runner.clone(), team.clone())
     });
@@ -240,8 +271,16 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
                 stop.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         };
-        let (served, ()) = ensemble_core::runtime::shared()
-            .block_on(async { tokio::join!(daemon.serve(&socket, &reloaded), link) });
+        let relaying = async {
+            if let Some(relay) = &relay
+                && let Err(e) = relay.work(stop, &say).await
+            {
+                *refused.lock().unwrap() = Some(e);
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        };
+        let (served, (), ()) = ensemble_core::runtime::shared()
+            .block_on(async { tokio::join!(daemon.serve(&socket, &reloaded), link, relaying) });
         local::STOP.store(true, std::sync::atomic::Ordering::Relaxed);
         served
     };

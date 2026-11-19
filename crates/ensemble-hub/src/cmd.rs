@@ -193,7 +193,21 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
     let hub =
         config::load_hub(&path, env_file.as_deref(), &SystemEnv).map_err(|e| e.to_string())?;
     let server = hub.server;
-    let memory = ensemble_knowledge::Memory::new(&hub, None);
+    // The backends of runners the hub uses, served on loopback, each call
+    // relayed to its runner.
+    let calls: std::sync::Arc<crate::calls::Calls> = std::sync::Arc::default();
+    let loopback = ensemble_core::runtime::shared()
+        .block_on(ensemble_link::loopback::Loopback::start(
+            ensemble_config::llm::routes(&hub.llm.runners),
+            std::sync::Arc::new(crate::calls::HubOpener(calls.clone())),
+        ))
+        .map_err(|e| format!("serve: the relay's endpoint: {e}"))?;
+    let relay = config::RelayAt {
+        base_url: loopback.base_url.clone(),
+        key: loopback.key.clone(),
+    };
+    let loopback: &'static ensemble_link::loopback::Loopback = Box::leak(Box::new(loopback));
+    let memory = ensemble_knowledge::Memory::new(&hub, None).with_relay(&hub, relay);
     // A hub written by hand, or by a NixOS module, gets its vault here.
     memory
         .vault()
@@ -259,8 +273,27 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
             }
         });
     let tasks: &'static crate::board::Service = Box::leak(Box::new(tasks));
-    let mut server =
-        crate::server::Server::new(memory, &hub.roles, server, users).with_tasks(tasks);
+    let mut server = crate::server::Server::new(memory, &hub.roles, server, users)
+        .with_tasks(tasks)
+        .with_calls(calls.clone());
+    // `runner.backends` lists what the connected runners share.
+    server.operations().1.when_serving(move || {
+        serde_json::Value::Array(
+            calls
+                .offered()
+                .into_iter()
+                .map(|o| {
+                    serde_json::json!({
+                        "runner": o.runner,
+                        "backend": o.backend,
+                        "works_for": if o.for_hub { "hub" } else { "owner" },
+                        "max_calls": o.max_calls,
+                        "models": o.models,
+                    })
+                })
+                .collect(),
+        )
+    });
     if let Some(mcp) = &hub.interfaces.mcp {
         server = server.with_mcp();
         say(&format!("MCP for client agents at {}", mcp.endpoint()));
@@ -286,6 +319,7 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
         if let Ok(accounts) = server.operations().1.accounts() {
             accounts.apply(now.roles.clone(), now.server);
         }
+        loopback.set_names(ensemble_config::llm::routes(&now.llm.runners));
         memory.apply(&now);
         Some("The running hub uses it now.".into())
     });

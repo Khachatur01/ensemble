@@ -26,7 +26,7 @@
 
 use crate::cmd::runner::RunnerContext;
 use ensemble_agents::router::Ensemble;
-use ensemble_config::{Config, Runner, WorksFor};
+use ensemble_config::{Config, RelayAt, Runner, WorksFor};
 use ensemble_link::Link;
 use ensemble_link::Token;
 use ensemble_ops::local::{self, STOP, read_line};
@@ -71,6 +71,9 @@ pub struct Daemon<'a> {
     /// Its teams, as one helper team: `<team>/<agent>`. Replaced when they are
     /// reloaded.
     team: RwLock<Config>,
+    /// Where it serves the backends it reaches through the hub, when it
+    /// does.
+    relay: Option<RelayAt>,
     /// The runner's operations, and what they are given here; none when its
     /// `interfaces.cli` is off.
     operations: Option<(&'a Registry<RunnerContext>, RunnerContext)>,
@@ -96,6 +99,7 @@ impl<'a> Daemon<'a> {
         runner: Runner,
         hub: Option<(String, Token)>,
         team: Config,
+        relay: Option<RelayAt>,
         operations: &'a Registry<RunnerContext>,
         say: &'a (dyn Fn(&str) + Sync),
     ) -> Result<Self, String> {
@@ -118,6 +122,7 @@ impl<'a> Daemon<'a> {
             runner,
             hub,
             team: RwLock::new(team),
+            relay,
             operations,
             open: Mutex::new(HashMap::new()),
             workers: Mutex::new(Vec::new()),
@@ -230,7 +235,7 @@ impl<'a> Daemon<'a> {
         &self,
         reloaded: &(dyn Fn(&Config) -> Result<(), String> + Sync),
     ) -> Result<String, String> {
-        let (team, waiting) = crate::teams::load_all(&self.runner.llm, None)?;
+        let (team, waiting) = crate::teams::load_all(&self.runner.llm, self.relay.as_ref())?;
         reloaded(&team)?;
         for repository in self.open.lock().unwrap().values() {
             repository.ensemble.set_config(team.clone());

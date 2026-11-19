@@ -16,7 +16,8 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 /// How long one request may wait for its answer.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+/// A WebSocket to a hub.
+pub type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// Why a request got no result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,34 +54,7 @@ impl Connection {
     /// A link with a token, or without one, which may only sign in.
     async fn connect(url: &str, token: Option<&str>) -> Result<Connection, String> {
         let url = crate::tokens::normal(url);
-        let mut req = url
-            .as_str()
-            .into_client_request()
-            .map_err(|e| format!("{url}: {e}"))?;
-        req.headers_mut()
-            .insert(VERSION_HEADER, VERSION.to_string().parse().expect("digits"));
-        if let Some(token) = token {
-            let bearer = format!("Bearer {}", token.trim())
-                .parse()
-                .map_err(|_| "the token has characters a header cannot carry")?;
-            req.headers_mut().insert("authorization", bearer);
-        }
-        let config = Some(crate::protocol::socket_config());
-        let opened = tokio::time::timeout(
-            TIMEOUT,
-            tokio_tungstenite::connect_async_with_config(req, config, false),
-        )
-        .await
-        .map_err(|_| format!("cannot reach the hub {url}: it did not answer in time"))?;
-        let (socket, _) = opened.map_err(|e| match e {
-            tungstenite::Error::Http(resp) if resp.status() == 401 => format!(
-                "the hub {url} did not accept the token; `ensemble-runner login {url}` with a new one"
-            ),
-            tungstenite::Error::Http(resp) if resp.status() == 426 => {
-                format!("the hub {url} refused the link: {}", outdated(&resp))
-            }
-            e => format!("cannot reach the hub {url}: {e}"),
-        })?;
+        let socket = handshake(&url, &url, token).await?;
         Ok(Connection {
             url,
             socket,
@@ -178,6 +152,47 @@ impl Connection {
     pub async fn close(&mut self) {
         let _ = self.socket.close(None).await;
     }
+}
+
+/// A WebSocket to `target` on the hub `url`, saying the protocol version
+/// and, when there is one, signed in with `token`.
+async fn handshake(url: &str, target: &str, token: Option<&str>) -> Result<Socket, String> {
+    let mut req = target
+        .into_client_request()
+        .map_err(|e| format!("{target}: {e}"))?;
+    req.headers_mut()
+        .insert(VERSION_HEADER, VERSION.to_string().parse().expect("digits"));
+    if let Some(token) = token {
+        let bearer = format!("Bearer {}", token.trim())
+            .parse()
+            .map_err(|_| "the token has characters a header cannot carry")?;
+        req.headers_mut().insert("authorization", bearer);
+    }
+    let config = Some(crate::protocol::socket_config());
+    let opened = tokio::time::timeout(
+        TIMEOUT,
+        tokio_tungstenite::connect_async_with_config(req, config, false),
+    )
+    .await
+    .map_err(|_| format!("cannot reach the hub {url}: it did not answer in time"))?;
+    let (socket, _) = opened.map_err(|e| match e {
+        tungstenite::Error::Http(resp) if resp.status() == 401 => format!(
+            "the hub {url} did not accept the token; `ensemble-runner login {url}` with a new one"
+        ),
+        tungstenite::Error::Http(resp) if resp.status() == 426 => {
+            format!("the hub {url} refused the link: {}", outdated(&resp))
+        }
+        e => format!("cannot reach the hub {url}: {e}"),
+    })?;
+    Ok(socket)
+}
+
+/// A runner's relay socket to the hub `url`, signed in with `token`
+/// (`crate::relay`).
+pub async fn relay_socket(url: &str, token: &str) -> Result<Socket, String> {
+    let url = crate::tokens::normal(url);
+    let target = format!("{}{}", url.trim_end_matches('/'), crate::relay::PATH);
+    handshake(&url, &target, Some(token)).await
 }
 
 /// Why a hub refused a runner of another version: what it said, or, when its

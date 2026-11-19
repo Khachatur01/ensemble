@@ -31,6 +31,7 @@
 mod cli;
 mod cmd;
 mod daemon;
+mod relay;
 pub mod remote;
 pub mod setup;
 pub mod teams;

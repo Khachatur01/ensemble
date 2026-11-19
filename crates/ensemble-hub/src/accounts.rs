@@ -8,6 +8,7 @@
 //! | `config.get`, `config.set`, `config.unset`, `config.path` | admin |
 //! | `me.show` | any signed-in account |
 //! | `me.tracker`, `me.password`, `me.tokens`, `me.token`, `me.join-code`, `me.revoke`, `account.logout` | a session |
+//! | `runner.backends` | admin, of the running hub |
 //! | `account.register`, `account.login`, `runner.login`, `runner.join` | anyone |
 //!
 //! A **session** comes from logging in with the password, and only a session
@@ -131,8 +132,12 @@ pub struct HubContext {
     /// What the running hub does once its hub.yaml changed, and says of it:
     /// set by the hub ([`HubContext::when_changed`]); nothing otherwise.
     changed: Arc<OnceLock<Box<Changed>>>,
+    /// The backends the connected runners share, as the running hub lists
+    /// them ([`HubContext::when_serving`]); nothing otherwise.
+    offered: OnceLock<Box<Offered>>,
 }
 
+type Offered = dyn Fn() -> Value + Send + Sync;
 type Load = dyn Fn() -> Result<(Roles, ensemble_config::Server), String> + Send + Sync;
 type Changed = dyn Fn() -> Option<String> + Send + Sync;
 
@@ -161,7 +166,14 @@ impl HubContext {
             load: Box::new(load),
             settings,
             changed,
+            offered: OnceLock::new(),
         }
+    }
+
+    /// Have `runner.backends` list what `offered` returns: the backends the
+    /// runners connected to the running hub share.
+    pub fn when_serving(&self, offered: impl Fn() -> Value + Send + Sync + 'static) {
+        let _ = self.offered.set(Box::new(offered));
     }
 
     /// Have `apply` run once hub.yaml changed, and say what it returns: what
@@ -872,6 +884,56 @@ fn runner_operations() -> Vec<Operation<HubContext>> {
                 Ok(json!({ "name": name, "token": token }))
             },
         ),
+        operation(
+            Spec {
+                name: "runner.backends",
+                summary: "The backends the connected runners share, with their models: what hub.yaml's `llm.runners` may name.",
+                access: ADMIN,
+                input: &[],
+            },
+            |c: &HubContext, _: &Caller, _: Nothing| match c.offered.get() {
+                Some(offered) => Ok(json!({ "backends": offered() })),
+                None => Err(Error::new(
+                    Code::Unavailable,
+                    "only the running hub knows which runners are connected; start it with `ensemble-hub serve`",
+                )),
+            },
+        )
+        .shown(|out| {
+            let lines: Vec<String> = out["backends"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|b| {
+                    let models: Vec<&str> = b["models"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect();
+                    format!(
+                        "{}  {}  (works for {}, {} call(s) at once)  models: {}",
+                        b["runner"].as_str().unwrap_or(""),
+                        b["backend"].as_str().unwrap_or(""),
+                        b["works_for"].as_str().unwrap_or(""),
+                        b["max_calls"],
+                        if models.is_empty() {
+                            "-".to_string()
+                        } else {
+                            models.join(", ")
+                        }
+                    )
+                })
+                .collect();
+            Said {
+                out: if lines.is_empty() {
+                    "No connected runner shares a backend.".into()
+                } else {
+                    lines.join("\n")
+                },
+                note: None,
+            }
+        }),
     ]
 }
 
