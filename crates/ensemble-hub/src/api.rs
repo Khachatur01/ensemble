@@ -24,6 +24,13 @@
 //! | `POST /api/v1/users/{name}/join-codes` | `user.join-code` |
 //! | `DELETE /api/v1/users/{name}/tokens` | `user.revoke` |
 //! | `DELETE /api/v1/users/{name}` | `user.remove` |
+//! | `GET /api/v1/ops` | the operations the token may run, each with the JSON Schema of its input, for a UI to make its forms from |
+//! | `POST /api/v1/ops/{name}` `{…its input}` | any operation, such as `backend.add` or `knowledge.models` |
+//!
+//! The routes above are the accounts' own; every operation, theirs too, is
+//! also reached by its name under `/api/v1/ops/`, so an interface needs no
+//! route of its own for what it shows. A secret field, such as a backend's
+//! key, is given in the body and never answered back.
 
 use crate::accounts::view;
 use crate::http::{self, Head};
@@ -187,7 +194,25 @@ impl Server<'_> {
                 ok(run("user.revoke", json!({ "name": name }))?)
             }
             ("DELETE", ["users", name]) => ok(run("user.remove", json!({ "name": name }))?),
-            (_, ["register" | "login" | "logout" | "me" | "users" | "roles"])
+            ("GET", ["ops"]) => {
+                let operations: Vec<Value> = self
+                    .operations
+                    .operations()
+                    .iter()
+                    .filter(|op| caller.may(op.spec.access).is_ok())
+                    .map(|op| {
+                        json!({
+                            "name": op.spec.name,
+                            "summary": op.spec.summary,
+                            "input": op.spec.input_schema(),
+                        })
+                    })
+                    .collect();
+                ok(json!({ "operations": operations }))
+            }
+            ("POST", ["ops", name]) => ok(run(name, Value::Object(body()?))?),
+            (_, ["register" | "login" | "logout" | "me" | "users" | "roles" | "ops"])
+            | (_, ["ops", _])
             | (_, ["me", "password" | "tokens" | "join-codes"])
             | (_, ["me", "tokens", _])
             | (_, ["users", _])
@@ -527,6 +552,62 @@ mod tests {
             Some(&session),
             None,
         );
+        assert_eq!(status, 405);
+    }
+
+    #[test]
+    fn every_operation_is_reached_by_its_name_and_listed_with_its_input() {
+        let hub = start();
+        let (_, root) = login(&hub.url, "root", PASSWORD);
+        let root = root["token"].as_str().unwrap().to_string();
+        let (status, listed) = call(&hub.url, "GET", "/api/v1/ops", Some(&root), None);
+        assert_eq!(status, 200, "{listed}");
+        let ops = listed["operations"].as_array().unwrap();
+        let add = ops
+            .iter()
+            .find(|o| o["name"] == "backend.add")
+            .expect("backend.add is listed");
+        assert_eq!(
+            add["input"]["properties"]["key"]["writeOnly"], true,
+            "{add}"
+        );
+        assert!(ops.iter().any(|o| o["name"] == "knowledge.models"));
+        let (status, roles) = call(
+            &hub.url,
+            "POST",
+            "/api/v1/ops/role.list",
+            Some(&root),
+            Some(json!({})),
+        );
+        assert_eq!(status, 200, "{roles}");
+        assert!(roles.to_string().contains("reader"), "{roles}");
+
+        // A reader sees and runs only what its role lets.
+        let (_, listed) = call(&hub.url, "GET", "/api/v1/ops", Some(&hub.rex), None);
+        let names: Vec<&str> = listed["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["name"].as_str().unwrap())
+            .collect();
+        assert!(!names.contains(&"backend.add"), "{names:?}");
+        let (status, _) = call(
+            &hub.url,
+            "POST",
+            "/api/v1/ops/backend.list",
+            Some(&hub.rex),
+            Some(json!({})),
+        );
+        assert_eq!(status, 403);
+        let (status, _) = call(
+            &hub.url,
+            "POST",
+            "/api/v1/ops/nope.never",
+            Some(&root),
+            Some(json!({})),
+        );
+        assert_eq!(status, 404);
+        let (status, _) = call(&hub.url, "GET", "/api/v1/ops/role.list", Some(&root), None);
         assert_eq!(status, 405);
     }
 
