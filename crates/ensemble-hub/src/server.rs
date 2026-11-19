@@ -5,8 +5,9 @@
 //! asks the same way for a client agent. Shares go into the organization
 //! vault under the signed-in user's name, never a name the client sends.
 //!
-//! The same port serves the REST API under `/api/v1/` (`api`): a request that
-//! asks for a WebSocket upgrade is the link, anything else is REST.
+//! The one port serves every connector over HTTP: the runners' link at
+//! `/link` and their relay sockets at `/relay`, both WebSockets; MCP at
+//! `/mcp` (`mcp`); and the REST API under `/api/v1/` (`api`).
 //!
 //! The server speaks plain HTTP. For the internet, a TLS reverse proxy in front
 //! (such as Caddy) turns `https://` and `wss://` into it; on a LAN or a VPN it
@@ -22,8 +23,8 @@ use ensemble_config::Permission;
 use ensemble_core::runtime::{self, blocking};
 use ensemble_knowledge::Memory;
 use ensemble_link::protocol::{
-    Event, HELLO, JOIN, LOGIN, RECALL, RUNNER, RUNNERS, Reply, Request, SHARE, TASK_METHODS,
-    VERSION, VERSION_HEADER,
+    Event, HELLO, JOIN, LOGIN, PATH as LINK, RECALL, RUNNER, RUNNERS, Reply, Request, SHARE,
+    TASK_METHODS, VERSION, VERSION_HEADER,
 };
 use ensemble_ops::Caller;
 use futures_util::SinkExt;
@@ -181,6 +182,9 @@ impl<'a> Server<'a> {
                 .and_then(|v| v.to_str().ok()?.trim().parse::<u32>().ok());
             if version != Some(VERSION) {
                 return Err(outdated(version));
+            }
+            if req.uri().path() != LINK && req.uri().path() != ensemble_link::relay::PATH {
+                return Err(nowhere(req.uri().path()));
             }
             match blocking(|| self.sign_in(req)) {
                 Ok(s) => {
@@ -590,6 +594,15 @@ fn refused() -> ErrorResponse {
     resp
 }
 
+/// The refusal of a WebSocket at a path that is neither the link nor the relay.
+fn nowhere(path: &str) -> ErrorResponse {
+    let mut resp = ErrorResponse::new(Some(format!(
+        "no WebSocket at {path}: a runner's link is at {LINK}"
+    )));
+    *resp.status_mut() = tungstenite::http::StatusCode::NOT_FOUND;
+    resp
+}
+
 /// The refusal of a runner that speaks `version` of the link, or named none:
 /// both versions, and what to update.
 fn outdated(version: Option<u32>) -> ErrorResponse {
@@ -739,6 +752,19 @@ pub(crate) mod tests {
         token: Option<&str>,
         version: Option<&str>,
     ) -> Result<Client, tungstenite::Error> {
+        connect_at(
+            &format!("{}{LINK}", url.trim_end_matches('/')),
+            token,
+            version,
+        )
+    }
+
+    /// A WebSocket at `url`, path and all.
+    fn connect_at(
+        url: &str,
+        token: Option<&str>,
+        version: Option<&str>,
+    ) -> Result<Client, tungstenite::Error> {
         let mut req = url.into_client_request().unwrap();
         if let Some(token) = token {
             req.headers_mut()
@@ -822,6 +848,30 @@ pub(crate) mod tests {
                 other => panic!("{version:?}: {:?}", other.map(|_| ())),
             }
         }
+    }
+
+    #[test]
+    fn the_link_is_at_its_path_alone_and_an_old_runner_elsewhere_is_told_to_update() {
+        let hub = start();
+        let older = (VERSION - 1).to_string();
+        // A runner of before the link had its path opens it at the root.
+        match connect_at(&hub.url, Some(&hub.ana), Some(&older)) {
+            Err(tungstenite::Error::Http(resp)) => assert_eq!(resp.status(), 426),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        let current = VERSION.to_string();
+        for path in ["", "/other"] {
+            let url = format!("{}{path}", hub.url.trim_end_matches('/'));
+            match connect_at(&url, Some(&hub.ana), Some(&current)) {
+                Err(tungstenite::Error::Http(resp)) => {
+                    assert_eq!(resp.status(), 404);
+                    let said = String::from_utf8(resp.body().clone().unwrap()).unwrap();
+                    assert!(said.contains("a runner's link is at /link"), "{said}");
+                }
+                other => panic!("{path}: {:?}", other.map(|_| ())),
+            }
+        }
+        assert!(connect(&hub.url, Some(&hub.ana)).is_ok());
     }
 
     #[test]

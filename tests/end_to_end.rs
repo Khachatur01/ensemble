@@ -2047,22 +2047,27 @@ fn a_hub_server_refuses_another_protocol_or_a_bad_token_and_stops_on_sigterm() {
     let s = Scratch::new("hub-serve");
     let (hub, address, _) = hub_server(&s);
     let mut child = serve_hub(&s, &hub);
-    let upgrade = |headers: &str| {
+    let upgrade = |path: &str, headers: &str| {
         let mut stream = std::net::TcpStream::connect(&address).unwrap();
         write!(
             stream,
-            "GET / HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{headers}\r\n"
+            "GET {path} HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{headers}\r\n"
         )
         .unwrap();
         let mut status = String::new();
         BufReader::new(&stream).read_line(&mut status).unwrap();
         status
     };
-    let status = upgrade("Authorization: Bearer ens_wrong\r\n");
+    let status = upgrade("/link", "Authorization: Bearer ens_wrong\r\n");
     assert!(status.contains("426"), "no protocol named: {status}");
-    let status = upgrade("Ensemble-Protocol: 4\r\nAuthorization: Bearer ens_wrong\r\n");
+    let status = upgrade(
+        "/link",
+        "Ensemble-Protocol: 5\r\nAuthorization: Bearer ens_wrong\r\n",
+    );
     assert!(status.contains("401"), "{status}");
-    let status = upgrade("Ensemble-Protocol: 4\r\n");
+    let status = upgrade("/", "Ensemble-Protocol: 5\r\n");
+    assert!(status.contains("404"), "the link is at /link: {status}");
+    let status = upgrade("/link", "Ensemble-Protocol: 5\r\n");
     assert!(
         status.contains("101"),
         "no token: signing in only: {status}"

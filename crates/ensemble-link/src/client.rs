@@ -54,7 +54,8 @@ impl Connection {
     /// A link with a token, or without one, which may only sign in.
     async fn connect(url: &str, token: Option<&str>) -> Result<Connection, String> {
         let url = crate::tokens::normal(url);
-        let socket = handshake(&url, &url, token).await?;
+        let target = format!("{}{}", url.trim_end_matches('/'), crate::protocol::PATH);
+        let socket = handshake(&url, &target, token).await?;
         Ok(Connection {
             url,
             socket,

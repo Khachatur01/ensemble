@@ -1,6 +1,7 @@
 //! What a runner and a hub server say to each other: JSON text frames over one
-//! WebSocket the runner opens, saying the [`VERSION`] it speaks and, once it
-//! has one, signed in with `Authorization: Bearer <token>` when it connects.
+//! WebSocket the runner opens at [`PATH`] on the hub's port, saying the
+//! [`VERSION`] it speaks and, once it has one, signed in with
+//! `Authorization: Bearer <token>` when it connects.
 //! A connection without a token may only sign in ([`LOGIN`], [`JOIN`]).
 //!
 //! - The runner asks: `{"id": 1, "method": "share", "params": {...}}`.
@@ -13,7 +14,9 @@ use serde_json::Value;
 /// The version of what is said here. The runner sends it as the
 /// [`VERSION_HEADER`] of every link it opens, and a hub refuses one of
 /// another version, or of none, before anything else.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
+/// The path of a runner's link on the hub's port.
+pub const PATH: &str = "/link";
 /// The header of the upgrade that carries the runner's [`VERSION`].
 pub const VERSION_HEADER: &str = "ensemble-protocol";
 
