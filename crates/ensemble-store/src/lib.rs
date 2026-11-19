@@ -1,7 +1,7 @@
 //! The hub server's state that changes while it runs: its accounts and their
 //! tokens (`ensemble_hub::users`), the tasks it keeps for them
-//! (`ensemble_hub::board`), which issue of the tracker became which task (the
-//! inbox). One Turso database, `database.db`, in the hub's folder
+//! (`ensemble_hub::board`), which issue of which tracker became which task
+//! (the inbox). One Turso database, `database.db`, in the hub's folder
 //! (`~/.config/ensemble/hub/`), which only whoever runs the hub may enter.
 //! [`open`] opens another Turso file, such as the knowledge vault's cache of
 //! its notes' vectors.
@@ -51,9 +51,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     data TEXT NOT NULL,
     PRIMARY KEY (owner, project, id)
 );
-CREATE TABLE IF NOT EXISTS deliveries (
-    issue TEXT PRIMARY KEY,
-    data TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS tracker_deliveries (
+    tracker TEXT NOT NULL,
+    issue TEXT NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (tracker, issue)
 );
 ";
 
@@ -188,7 +190,7 @@ mod tests {
             transaction(
                 c,
                 vec![(
-                    "INSERT INTO deliveries (issue, data) VALUES (?1, ?2)",
+                    "INSERT INTO tracker_deliveries (tracker, issue, data) VALUES ('t', ?1, ?2)",
                     vec![Value::Text("7".into()), Value::Text("{}".into())],
                 )],
             )
@@ -201,11 +203,11 @@ mod tests {
                 c,
                 vec![
                     (
-                        "INSERT INTO deliveries (issue, data) VALUES (?1, ?2)",
+                        "INSERT INTO tracker_deliveries (tracker, issue, data) VALUES ('t', ?1, ?2)",
                         vec![Value::Text("8".into()), Value::Text("{}".into())],
                     ),
                     (
-                        "INSERT INTO deliveries (issue, data) VALUES (?1, ?2)",
+                        "INSERT INTO tracker_deliveries (tracker, issue, data) VALUES ('t', ?1, ?2)",
                         vec![Value::Text("7".into()), Value::Text("{}".into())],
                     ),
                 ],
@@ -214,7 +216,12 @@ mod tests {
         });
         assert!(failed.is_err());
         let issues = with(&dir, async |c| {
-            rows(c, "SELECT issue FROM deliveries ORDER BY issue", vec![]).await
+            rows(
+                c,
+                "SELECT issue FROM tracker_deliveries ORDER BY issue",
+                vec![],
+            )
+            .await
         })
         .unwrap();
         let issues: Vec<Option<String>> = issues.iter().map(|r| text(&r[0])).collect();

@@ -119,7 +119,8 @@ connectors:
   # trackers named here. An issue with a tracker's label reaches the helper
   # team of the member it is assigned to. An account names itself in the
   # tracker with `tracker_user` (PUT /api/v1/me, or `ensemble-hub user
-  # tracker`). One tracker for now; `trackers: {}` for no inbox.
+  # tracker`). Each tracker has an inbox and a folder of its own; `trackers:
+  # {}` for no inbox.
   tasks:
     trackers:
       issues:

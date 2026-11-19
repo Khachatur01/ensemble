@@ -613,8 +613,9 @@ adapter of the `tasks` connector, named under `connectors.tasks.trackers` in
 `hub.yaml` with its `type`, its `label` and how often it is looked at
 (`poll_seconds`). The first type is a folder of markdown files on the hub's
 computer (`local_markdown`, with its `dir`); GitLab, GitHub and Jira come
-later. A hub watches one tracker for now; `trackers: {}` is none, and then
-tasks come from your agent alone.
+later. A hub watches every tracker it names, each with an inbox of its own
+and a folder of its own; `trackers: {}` is none, and then tasks come from your
+agent alone.
 
 ```yaml
 connectors:
@@ -2188,7 +2189,7 @@ scripts stand in for the CLIs.
   owner nor the task's account is asked about each task: the roles decide. A
   runner's models are reached at `/chat/completions` and `/completions` only.
   The hub keeps nothing of a runner once it disconnects.
-- **One tracker so far.** The inbox reads a folder of markdown issues; GitLab,
-  GitHub and Jira adapters are not built, and an issue cannot name a
+- **Markdown issues only so far.** Each inbox reads a folder of markdown
+  issues; GitLab, GitHub and Jira adapters are not built, and an issue cannot name a
   `repository`: a runner without a copy asks on the issue. A member's runner
   runs a hub's tasks only while it runs.

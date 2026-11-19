@@ -242,16 +242,15 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
             .starts_with(ensemble_knowledge::RECALL_HEADER)
             .then_some(found)
     };
-    // A hub watches one tracker for now: hub.yaml names at most one.
-    let inbox: Option<&'static crate::inbox::ServerInbox> =
-        match hub.connectors.tasks.trackers.values().next() {
-            Some(tracker) => Some(Box::leak(Box::new(
-                crate::inbox::ServerInbox::new(tracker, &hub.accounts.roles, users.clone())
-                    .map_err(|e| format!("serve: {e}"))?
-                    .with_notes(notes),
-            ))),
-            None => None,
-        };
+    // An inbox for each tracker hub.yaml names.
+    let mut inboxes: Vec<&'static crate::inbox::ServerInbox> = Vec::new();
+    for (name, tracker) in &hub.connectors.tasks.trackers {
+        let inbox =
+            crate::inbox::ServerInbox::new(name, tracker, &hub.accounts.roles, users.clone())
+                .map_err(|e| format!("serve: {e}"))?
+                .with_notes(notes);
+        inboxes.push(Box::leak(Box::new(inbox)));
+    }
     // What a task's agent reported when it was done is shared, so the vault
     // learns from the work as from what people share.
     let tasks = crate::board::Service::new(&users)
@@ -324,7 +323,7 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
     });
     std::thread::scope(|scope| {
         scope.spawn(|| memory.work(&STOP, &say));
-        if let Some(inbox) = inbox {
+        for inbox in &inboxes {
             scope.spawn(|| inbox.work(&STOP, &say));
         }
         ensemble_core::runtime::shared().block_on(async {

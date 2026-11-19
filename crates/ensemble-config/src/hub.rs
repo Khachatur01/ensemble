@@ -514,14 +514,6 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
         }
     };
     let trackers = &raw.connectors.tasks.trackers;
-    // Which issue became which task is kept by the issue's id alone, so two
-    // trackers would mix theirs up.
-    if trackers.len() > 1 {
-        problems.push(format!(
-            "connectors.tasks.trackers: names {} trackers; a hub watches one for now",
-            trackers.len()
-        ));
-    }
     let tasks = Tasks {
         trackers: trackers
             .iter()
@@ -556,6 +548,17 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             })
             .collect(),
     };
+    // Two inboxes on one folder would each take its issues.
+    let mut watched: BTreeMap<&Path, &str> = BTreeMap::new();
+    for (name, tracker) in &tasks.trackers {
+        let IssueTracker::LocalMarkdown { dir } = &tracker.kind;
+        if let Some(first) = watched.insert(dir, name) {
+            problems.push(format!(
+                "connectors.tasks.trackers.{name}: watches {}, as {first} does; give each tracker a folder of its own",
+                dir.display()
+            ));
+        }
+    }
     for name in raw.connectors.sources.adapters.keys() {
         problems.push(format!(
             "connectors.sources.adapters.{name}: no source adapter is built yet; leave `adapters: {{}}`"

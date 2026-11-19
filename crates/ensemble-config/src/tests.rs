@@ -1503,8 +1503,15 @@ fn a_hub_inbox_names_its_tracker_and_label() {
         "      issues: {",
         "      more: { type: local_markdown, dir: more, label: ensemble, poll_seconds: 30 }\n      issues: {",
     );
-    let said = hub_refusal(&two);
-    assert!(said.contains("a hub watches one for now"), "{said}");
+    let hub = parse_hub(&two, Path::new("/hubs/ana/hub.yaml"), &env(&[])).unwrap();
+    let names: Vec<&String> = hub.connectors.tasks.trackers.keys().collect();
+    assert_eq!(names, ["issues", "more"], "a hub watches each");
+    let same = two.replace("dir: more", "dir: issues");
+    let said = hub_refusal(&same);
+    assert!(
+        said.contains("connectors.tasks.trackers.more: watches /hubs/ana/issues, as issues does"),
+        "{said}"
+    );
 }
 
 #[test]

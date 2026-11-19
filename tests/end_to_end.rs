@@ -3657,18 +3657,7 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
     ok(&["knowledge", "recall", "--max-notes", "5"]);
     assert!(yaml().contains("max_notes: 5"));
 
-    // Trackers: one at a time for now.
-    let out = run(&[
-        "tracker",
-        "add",
-        "work",
-        "--type",
-        "local_markdown",
-        "--dir",
-        "work",
-    ]);
-    assert!(!out.status.success(), "the sample watches one already");
-    ok(&["tracker", "remove", "issues"]);
+    // Trackers: each with a folder of its own.
     ok(&[
         "tracker",
         "add",
@@ -3678,11 +3667,27 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
         "--dir",
         "work",
     ]);
+    let out = run(&[
+        "tracker",
+        "add",
+        "again",
+        "--type",
+        "local_markdown",
+        "--dir",
+        "work",
+    ]);
+    assert!(
+        stderr_of(&out).contains("give each tracker a folder of its own"),
+        "{}",
+        stderr_of(&out)
+    );
     let list = ok(&["tracker", "list"]);
     assert!(
         list.contains("work  local_markdown in") && list.contains("label ensemble"),
         "{list}"
     );
+    assert!(list.contains("issues"), "{list}");
+    ok(&["tracker", "remove", "issues"]);
 
     // Roles, and who may sign up.
     ok(&["role", "set", "auditor", "recall,share"]);
