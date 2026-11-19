@@ -1307,14 +1307,15 @@ crate holds it today.
     and through the hub.
 21. The REST API as an interface: one route per operation, the same as MCP
     offers, OpenAPI, its own port, sign-up in it.
-22. The task tracker with backends behind one interface: the markdown issues
-    first, Jira later.
-23. Sources: the collect and filter steps with one LLM and the admin's
-    prompt, raw messages dropped; then Microsoft 365 (mail and Teams), then
-    Telegram.
-24. Later: a runner's operations from the hub, for its own account; goal
-    operations (models, people, computers, teams from templates, knowledge);
-    chat; a web UI.
+22. The task tracker with backends behind one interface, the markdown issues
+    its one backend.
+23. Sources: the `Source` trait, and the collect and filter steps with one
+    LLM and the admin's prompt, raw messages dropped; `source.try` to see what
+    a text would leave. No provider's adapter yet.
+24. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
+    and Teams, Telegram); a runner's operations from the hub, for its own
+    account; goal operations (models, people, computers, teams from
+    templates, knowledge); chat; a web UI.
 
 What remains besides is the "Not yet" of steps 4 and 5, and the modules
 marked not built above. A web UI and other interfaces come after step 21, as
