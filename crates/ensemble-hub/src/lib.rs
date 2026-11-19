@@ -37,6 +37,7 @@ pub mod inbox;
 #[cfg(test)]
 mod link_tests;
 mod mcp;
+mod openapi;
 mod runners;
 pub mod server;
 pub mod users;

@@ -26,6 +26,7 @@
 //! | `DELETE /api/v1/users/{name}` | `user.remove` |
 //! | `GET /api/v1/ops` | the operations the token may run, each with the JSON Schema of its input, for a UI to make its forms from |
 //! | `POST /api/v1/ops/{name}` `{…its input}` | any operation, such as `backend.add` or `knowledge.models` |
+//! | `GET /api/v1/openapi.json` | this API as an OpenAPI 3.1 document ([`openapi`](crate::openapi)), for anyone |
 //!
 //! The routes above are the accounts' own; every operation, theirs too, is
 //! also reached by its name under `/api/v1/ops/`, so an interface needs no
@@ -211,7 +212,18 @@ impl Server<'_> {
                 ok(json!({ "operations": operations }))
             }
             ("POST", ["ops", name]) => ok(run(name, Value::Object(body()?))?),
-            (_, ["register" | "login" | "logout" | "me" | "users" | "roles" | "ops"])
+            ("GET", ["openapi.json"]) => {
+                let owner = self.hub.hub().map(|h| h.owner).unwrap_or_default();
+                let base = crate::accounts::hub_base(&self.hub);
+                ok(crate::openapi::document(&self.operations, &base, &owner))
+            }
+            (
+                _,
+                [
+                    "register" | "login" | "logout" | "me" | "users" | "roles" | "ops"
+                    | "openapi.json",
+                ],
+            )
             | (_, ["ops", _])
             | (_, ["me", "password" | "tokens" | "join-codes"])
             | (_, ["me", "tokens", _])
@@ -609,6 +621,52 @@ mod tests {
         assert_eq!(status, 404);
         let (status, _) = call(&hub.url, "GET", "/api/v1/ops/role.list", Some(&root), None);
         assert_eq!(status, 405);
+    }
+
+    #[test]
+    fn anyone_reads_the_openapi_document_of_every_route_and_operation() {
+        let hub = start();
+        let (status, doc) = call(&hub.url, "GET", "/api/v1/openapi.json", None, None);
+        assert_eq!(status, 200, "{doc}");
+        assert_eq!(doc["openapi"], "3.1.0");
+        let paths = doc["paths"].as_object().unwrap();
+        let add = &paths["/api/v1/ops/backend.add"]["post"];
+        assert_eq!(add["security"], json!([{ "bearer": [] }]));
+        let key = &add["requestBody"]["content"]["application/json"]["schema"]["properties"]["key"];
+        assert_eq!(key["writeOnly"], true, "{add}");
+        let register = &paths["/api/v1/register"]["post"];
+        assert_eq!(register["security"], json!([]), "anyone signs up");
+        let approve = &paths["/api/v1/users/{name}/approve"]["post"];
+        let body = &approve["requestBody"]["content"]["application/json"]["schema"];
+        assert!(
+            body["properties"].get("name").is_none(),
+            "the path names it"
+        );
+        assert_eq!(body["required"], json!(["role"]), "{body}");
+        assert!(paths.contains_key("/api/v1/ops/config.set"));
+
+        // Each route the document shows is one the API answers.
+        let (_, session) = login(&hub.url, "root", PASSWORD);
+        let root = session["token"].as_str().unwrap().to_string();
+        for route in crate::openapi::ROUTES {
+            let path = format!("/api/v1{}", route.path)
+                .replace("{name}", "nobody")
+                .replace("{id}", "nobody");
+            assert!(
+                paths.contains_key(&format!("/api/v1{}", route.path)),
+                "{path}"
+            );
+            if route.path == "/logout" {
+                continue;
+            }
+            let (status, answer) = call(&hub.url, route.method, &path, Some(&root), None);
+            let error = answer["error"].as_str().unwrap_or_default();
+            assert!(
+                status != 405 && !error.starts_with("no such path"),
+                "{} {path}: {status} {answer}",
+                route.method
+            );
+        }
     }
 
     #[test]

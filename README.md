@@ -397,6 +397,11 @@ come and for scripts. JSON in and out.
 
 | `GET /api/v1/ops` | any token | the operations it may run, each with the JSON Schema of its input (secrets `writeOnly`), for a UI to make its forms from |
 | `POST /api/v1/ops/{name}` `{…its input}` | as the operation says | runs any operation by its name, such as `backend.add`, `knowledge.models` or `tracker.add` |
+| `GET /api/v1/openapi.json` | anyone | this API as an OpenAPI 3.1 document: every path above and every operation, with its body and who may call it |
+
+Point an OpenAPI tool at `/api/v1/openapi.json` to browse the API or make a
+client for it. The document is the same for everyone: what a token may
+actually run is what `GET /api/v1/ops` lists for it.
 
 Errors are `{"error": "..."}` with 400, 401, 403, 404, 405, 409 or 429.
 

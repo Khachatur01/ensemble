@@ -390,7 +390,7 @@ pub(crate) fn reached_at<T>(base: Option<String>, f: impl FnOnce() -> T) -> T {
 /// The address clients reach the hub at: the one the request being answered
 /// reached it at; else where it listens, when that is one address; else a
 /// stand-in for the person to fill.
-fn hub_base(c: &HubContext) -> String {
+pub(crate) fn hub_base(c: &HubContext) -> String {
     if let Some(base) = REACHED_AT.with_borrow(Clone::clone) {
         return base;
     }

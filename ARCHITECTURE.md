@@ -1373,11 +1373,12 @@ crate holds it today.
     line always on; no MCP `url`, a token's hints naming the address the
     request reached; the link at its own path. (Done; the link's protocol 5.)
 22. The REST API as an interface: one route per operation, the same as MCP
-    offers, OpenAPI, sign-up in it, on the hub's port. (Partly done: every
+    offers, OpenAPI, sign-up in it, on the hub's port. (Done: every
     operation by its name at `POST /api/v1/ops/<name>`, and those a token may
     run, with the JSON Schema of their input, at `GET /api/v1/ops`; the goal
     operations for backends and their keys, knowledge, trackers, roles and
-    sign-up. Not yet: OpenAPI.)
+    sign-up; the OpenAPI 3.1 document at `GET /api/v1/openapi.json`, made
+    from the routes and the operations, the same for anyone who asks.)
 23. The task tracker with backends behind one interface, the markdown issues
     its one backend; more than one tracker at once.
 24. Sources: the `Source` trait, and the collect and filter steps with one
