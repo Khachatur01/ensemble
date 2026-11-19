@@ -129,7 +129,7 @@ fn check(ctx: &Ctx) -> Result<ExitCode, String> {
     };
     // Recall works without its embedding model, by words alone: said, but
     // no failure.
-    match &knowledge.recall.embed {
+    match &knowledge.embed {
         None => println!("recall: by words"),
         Some(e) => {
             let answered = match backends.get(&e.backend) {

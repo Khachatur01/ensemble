@@ -16,7 +16,7 @@
 #
 # Nothing has a default value: every setting is written here, and one that is
 # missing is refused by name. Only these may be left out, because leaving them
-# out means "not used": `llm.runners`, `connectors.knowledge.recall.embed`, and
+# out means "not used": `llm.runners`, `connectors.knowledge.embed`, and
 # a backend's `api_key_env`. A map of adapters may be empty: `{}`.
 # Check the file with `ensemble-hub check`.
 
@@ -93,6 +93,14 @@ connectors:
   # Knowledge: the hub's vault. What members share becomes notes here.
   knowledge:
     vault: vault
+    # The embedding model: each note's vector when it is written, so the
+    # distiller and recall find notes by what they mean as well as by their
+    # words. One an openai-compatible backend serves at /embeddings. Left out:
+    # by their words alone, as when the model cannot be asked.
+    embed:
+      backend: central
+      model: nomic-embed-text
+      min_similarity: 0.5        # how alike a note must be, by cosine; depends on the model
     distill:                     # the models that turn shares into notes, with no tools
       try:                       # in order; a share uses the first that works
         - backend: central
@@ -106,13 +114,6 @@ connectors:
     recall:
       max_notes: 8
       max_chars: 6000
-      # Find notes by what they mean as well as by their words, with an embedding
-      # model an openai-compatible backend serves at /embeddings. Left out: by
-      # their words alone, as when the model cannot be asked.
-      embed:
-        backend: central
-        model: nomic-embed-text
-        min_similarity: 0.5      # how alike a note must be, by cosine; depends on the model
 
   # Tasks: the tasks the hub keeps, made by client agents over MCP and by the
   # trackers named here. An issue with a tracker's label reaches the helper

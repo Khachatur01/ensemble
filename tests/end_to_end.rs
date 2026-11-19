@@ -1636,13 +1636,13 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
     let (head, tail) = text.split_once("\nllm:\n").unwrap();
     let (_, rest) = tail.split_once("# ---").unwrap();
     let (_, try_and_on) = rest.split_once("      try:").unwrap();
+    let after_try = try_and_on.split_once("      when_none:").unwrap().1;
     // The sample's embedding model is on a backend this test takes out.
-    let after_try = try_and_on
-        .split_once("      when_none:")
+    let accounts_to_try = rest
+        .split_once("      try:")
         .unwrap()
-        .1
+        .0
         .replace("backend: central", "backend: up");
-    let accounts_to_try = rest.split_once("      try:").unwrap().0;
     std::fs::write(
         hub.join("hub.yaml"),
         format!(

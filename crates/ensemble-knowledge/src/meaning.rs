@@ -1,4 +1,4 @@
-//! Finding notes by what they mean, with `knowledge.recall.embed`. Each note's
+//! Finding notes by what they mean, with `knowledge.embed`. Each note's
 //! title and body is a vector from the embedding model, kept in a Turso file in
 //! the vault, `.ensemble/embeddings.db`, out of its history: a cache, made
 //! again whenever a note or the model changes, as the notes are of the shares.
@@ -47,7 +47,7 @@ impl Memory {
     /// and by what they mean when the hub has an embedding model.
     pub(crate) fn find<'n>(&self, notes: &'n [Note], query: &str, limit: usize) -> Vec<&'n Note> {
         let by_words = search::rank(notes, query, notes.len());
-        let Some(_) = &self.knowledge().recall.embed else {
+        let Some(_) = &self.knowledge().embed else {
             return by_words.into_iter().take(limit).collect();
         };
         match self.by_meaning(notes, query) {
@@ -63,7 +63,7 @@ impl Memory {
     /// need not: what the hub's worker does after it writes notes. How many
     /// it embedded.
     pub fn embed_notes(&self) -> Result<usize, String> {
-        if self.knowledge().recall.embed.is_none() {
+        if self.knowledge().embed.is_none() {
             return Ok(0);
         }
         self.fill(&self.vault().notes())
@@ -74,11 +74,7 @@ impl Memory {
     /// alike first.
     fn by_meaning<'n>(&self, notes: &'n [Note], query: &str) -> Result<Vec<&'n Note>, String> {
         let knowledge = self.knowledge();
-        let e = knowledge
-            .recall
-            .embed
-            .as_ref()
-            .ok_or("no embedding model")?;
+        let e = knowledge.embed.as_ref().ok_or("no embedding model")?;
         self.fill(notes)?;
         let asked = self
             .vectors(&[query.trim().to_string()])?
@@ -121,7 +117,7 @@ impl Memory {
     /// and forget the vectors of notes gone and of other models. How many it
     /// embedded.
     fn fill(&self, notes: &[Note]) -> Result<usize, String> {
-        let model = match &self.knowledge().recall.embed {
+        let model = match &self.knowledge().embed {
             Some(e) => e.model.clone(),
             None => return Ok(0),
         };
@@ -192,11 +188,7 @@ impl Memory {
     /// The vectors of `texts`, from the hub's embedding model.
     fn vectors(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
         let knowledge = self.knowledge();
-        let e = knowledge
-            .recall
-            .embed
-            .as_ref()
-            .ok_or("no embedding model")?;
+        let e = knowledge.embed.as_ref().ok_or("no embedding model")?;
         let backends = self.backends();
         let backend = backends
             .get(&e.backend)
@@ -279,7 +271,7 @@ mod tests {
     /// one about lunch.
     fn memory_with(tmp: &TempDir, url: &str) -> Memory {
         let yaml = format!(
-            "version: 1\nowner: Ana\nhttp: {{ listen: \"127.0.0.1:0\" }}\nllm:\n  direct:\n    backends:\n      local: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\naccounts:\n  registration: {{ type: closed }}\n  sessions: {{ hours: 1 }}\n  lockout: {{ failures: 3, minutes: 1 }}\n  roles: {{ member: [share, recall] }}\nconnectors:\n  rest: {{}}\n  mcp: {{}}\n  runners: {{}}\n  knowledge:\n    vault: \"{}\"\n    distill:\n      try:\n        - {{ backend: local, model: small }}\n      when_none: wait\n      max_tokens: 100\n    recall:\n      max_notes: 3\n      max_chars: 1000\n      embed: {{ backend: local, model: e, min_similarity: 0.5 }}\n  tasks: {{ trackers: {{}} }}\n  sources: {{ adapters: {{}} }}\n",
+            "version: 1\nowner: Ana\nhttp: {{ listen: \"127.0.0.1:0\" }}\nllm:\n  direct:\n    backends:\n      local: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\naccounts:\n  registration: {{ type: closed }}\n  sessions: {{ hours: 1 }}\n  lockout: {{ failures: 3, minutes: 1 }}\n  roles: {{ member: [share, recall] }}\nconnectors:\n  rest: {{}}\n  mcp: {{}}\n  runners: {{}}\n  knowledge:\n    vault: \"{}\"\n    distill:\n      try:\n        - {{ backend: local, model: small }}\n      when_none: wait\n      max_tokens: 100\n    embed: {{ backend: local, model: e, min_similarity: 0.5 }}\n    recall:\n      max_notes: 3\n      max_chars: 1000\n  tasks: {{ trackers: {{}} }}\n  sources: {{ adapters: {{}} }}\n",
             tmp.0.join("vault").display()
         );
         let hub = ensemble_config::parse_hub(

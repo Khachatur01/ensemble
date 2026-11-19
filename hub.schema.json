@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/hub.schema.json",
   "title": "Ensemble hub: hub.yaml",
-  "description": "A hub, in ~/.config/ensemble/hub/hub.yaml, run by `ensemble-hub serve`. Its core is its accounts, their roles and what each may do, the port it listens on (`http`) and the LLM backends it uses (`llm`); everything else reaches it through a connector, each always on and each written in `connectors`: the REST API, MCP, the runners' link, knowledge, tasks and sources. A connector may hold adapters the admin picks, in a map that may be empty. Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (`llm.runners`, `connectors.knowledge.recall.embed`, and a backend's `api_key_env`).",
+  "description": "A hub, in ~/.config/ensemble/hub/hub.yaml, run by `ensemble-hub serve`. Its core is its accounts, their roles and what each may do, the port it listens on (`http`) and the LLM backends it uses (`llm`); everything else reaches it through a connector, each always on and each written in `connectors`: the REST API, MCP, the runners' link, knowledge, tasks and sources. A connector may hold adapters the admin picks, in a map that may be empty. Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (`llm.runners`, `connectors.knowledge.embed`, and a backend's `api_key_env`).",
   "type": "object",
   "required": ["version", "owner", "http", "llm", "accounts", "connectors"],
   "additionalProperties": false,
@@ -224,6 +224,7 @@
           "type": "string",
           "minLength": 1
         },
+        "embed": { "$ref": "#/definitions/embed" },
         "distill": { "$ref": "#/definitions/distill" },
         "recall": { "$ref": "#/definitions/recall" }
       }
@@ -264,12 +265,11 @@
           "description": "Most characters one recall returns, all notes together.",
           "type": "integer",
           "minimum": 1
-        },
-        "embed": { "$ref": "#/definitions/embed" }
+        }
       }
     },
     "embed": {
-      "description": "An embedding model, so notes are found by what they mean as well as by their words. Left out: by their words alone.",
+      "description": "An embedding model: each note's vector when it is written, so the distiller and recall find notes by what they mean as well as by their words. Left out: by their words alone.",
       "type": "object",
       "required": ["backend", "model", "min_similarity"],
       "additionalProperties": false,

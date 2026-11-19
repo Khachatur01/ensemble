@@ -82,6 +82,10 @@ pub struct Connectors {
 pub struct Knowledge {
     /// The vault's directory, made absolute against the hub's directory.
     pub vault: PathBuf,
+    /// The embedding model: each note's vector when it is written, and
+    /// finding notes by what they mean, for the distiller and for recall.
+    /// Absent: notes are found by their words alone.
+    pub embed: Option<Embed>,
     /// The models that turn shares into notes, and the most tokens of an answer.
     pub distill: DirectAdapter,
     pub recall: Recall,
@@ -159,14 +163,12 @@ impl Permission {
 /// The issue tracker types that ship.
 pub const LOCAL_MARKDOWN_TRACKER: &str = "local_markdown";
 
-/// How much one recall returns, and how notes are found.
+/// How much one recall returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recall {
     pub max_notes: u32,
     /// All the notes together.
     pub max_chars: u32,
-    /// Absent: notes are found by their words alone.
-    pub embed: Option<Embed>,
 }
 
 /// An embedding model, which finds notes by what they mean as well as by
@@ -304,6 +306,7 @@ pub(crate) struct RawLocalMarkdownIssues {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawKnowledge {
     pub(crate) vault: String,
+    pub(crate) embed: Option<RawEmbed>,
     pub(crate) distill: RawDistill,
     pub(crate) recall: RawRecall,
 }
@@ -324,7 +327,6 @@ pub(crate) struct RawDistill {
 pub(crate) struct RawRecall {
     pub(crate) max_notes: u32,
     pub(crate) max_chars: u32,
-    pub(crate) embed: Option<RawEmbed>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -473,24 +475,24 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
         if k.recall.max_chars == 0 {
             problems.push("connectors.knowledge.recall: `max_chars` must be greater than 0".into());
         }
-        let embed = k.recall.embed.as_ref().map(|e| {
+        let embed = k.embed.as_ref().map(|e| {
             match kinds.get(&e.backend) {
                 None => problems.push(format!(
-                    "connectors.knowledge.recall.embed.backend: '{}' is not one of the backends of `llm`",
+                    "connectors.knowledge.embed.backend: '{}' is not one of the backends of `llm`",
                     e.backend
                 )),
                 Some(&OPENAI_COMPATIBLE_API) => {}
                 Some(_) => problems.push(format!(
-                    "connectors.knowledge.recall.embed.backend: '{}' is not an openai-compatible-api backend, which is what serves /embeddings",
+                    "connectors.knowledge.embed.backend: '{}' is not an openai-compatible-api backend, which is what serves /embeddings",
                     e.backend
                 )),
             }
             if e.model.trim().is_empty() {
-                problems.push("connectors.knowledge.recall.embed.model: is empty".into());
+                problems.push("connectors.knowledge.embed.model: is empty".into());
             }
             if !(0.0..=1.0).contains(&e.min_similarity) {
                 problems.push(
-                    "connectors.knowledge.recall.embed.min_similarity: must be from 0 to 1, such as 0.5"
+                    "connectors.knowledge.embed.min_similarity: must be from 0 to 1, such as 0.5"
                         .into(),
                 );
             }
@@ -503,11 +505,11 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
         });
         Knowledge {
             vault: base.join(k.vault.trim()),
+            embed,
             distill,
             recall: Recall {
                 max_notes: k.recall.max_notes,
                 max_chars: k.recall.max_chars,
-                embed,
             },
         }
     };
@@ -566,11 +568,7 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
             .candidates
             .iter()
             .any(|c| &c.backend == name)
-            || knowledge
-                .recall
-                .embed
-                .as_ref()
-                .is_some_and(|e| &e.backend == name);
+            || knowledge.embed.as_ref().is_some_and(|e| &e.backend == name);
         if !used {
             eprintln!(
                 "ensemble: note: LLM backend '{name}' is defined but nothing in the hub uses it"

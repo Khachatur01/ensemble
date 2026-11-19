@@ -575,7 +575,7 @@ earlier decisions or setup may matter, and gets the matching notes, best first,
 within `max_notes` and `max_chars`, marked as reference data.
 The search is by words (BM25, a
 title's words counting more), with no index to keep, and, with an embedding
-model, by what the notes mean: `connectors.knowledge.recall.embed` in `hub.yaml` names one
+model, by what the notes mean: `connectors.knowledge.embed` in `hub.yaml` names one
 an `openai-compatible-api` backend serves at `/embeddings` (Ollama's
 `nomic-embed-text`, say), and notes at least `min_similarity` alike to the
 query are found too, in other words than yours. A note found both ways comes
@@ -2114,7 +2114,7 @@ scripts stand in for the CLIs.
   factor. The API sends no CORS headers, so a UI is served from the hub's own
   origin. Connectors to chats and mail are not built either.
 - **Recall needs an embedding model to find by meaning.** Without
-  `connectors.knowledge.recall.embed`, or while its model cannot be asked, it finds notes
+  `connectors.knowledge.embed`, or while its model cannot be asked, it finds notes
   that use your words, not ones that only mean the same; how alike is alike
   enough (`min_similarity`) depends on the model, and is yours to tune. The
   notes are compared one by one, which suits a vault of thousands of notes, not

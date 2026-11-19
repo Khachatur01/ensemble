@@ -742,7 +742,7 @@ runner. A runner may offer its model backends; the hub relays calls to them,
 so the hub and other runners use them. Runners never reach each other.
 
 The hub's admin lists the backends the hub uses, as with any backend, and
-names them where they are used (`knowledge.distill`, `recall.embed`,
+names them where they are used (`knowledge.distill`, `knowledge.embed`,
 `sources`):
 
 ```yaml

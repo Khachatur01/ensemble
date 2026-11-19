@@ -1348,7 +1348,7 @@ fn an_embedding_model_is_an_openai_compatible_backend_and_a_similarity_from_0_to
     let with = |embed: &str| {
         HUB.replace(
             "    recall: { max_notes: 3, max_chars: 1000 }\n",
-            &format!("    recall: {{ max_notes: 3, max_chars: 1000, embed: {embed} }}\n"),
+            &format!("    embed: {embed}\n    recall: {{ max_notes: 3, max_chars: 1000 }}\n"),
         )
     };
     let hub = parse_hub(
@@ -1357,7 +1357,7 @@ fn an_embedding_model_is_an_openai_compatible_backend_and_a_similarity_from_0_to
         &env(&[]),
     )
     .unwrap();
-    let embed = hub.connectors.knowledge.recall.embed.unwrap();
+    let embed = hub.connectors.knowledge.embed.unwrap();
     assert_eq!(
         (embed.backend.as_str(), embed.model.as_str()),
         ("local", "nomic-embed-text")
@@ -1368,7 +1368,6 @@ fn an_embedding_model_is_an_openai_compatible_backend_and_a_similarity_from_0_to
             .unwrap()
             .connectors
             .knowledge
-            .recall
             .embed
             .is_none(),
         "no block, words alone"
@@ -1616,9 +1615,13 @@ fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
             accepted_keys::<hub::RawLocalMarkdownIssues>(),
             vec![],
         ),
-        ("knowledge", accepted_keys::<hub::RawKnowledge>(), vec![]),
         ("distill", accepted_keys::<hub::RawDistill>(), vec![]),
-        ("recall", accepted_keys::<hub::RawRecall>(), vec!["embed"]),
+        (
+            "knowledge",
+            accepted_keys::<hub::RawKnowledge>(),
+            vec!["embed"],
+        ),
+        ("recall", accepted_keys::<hub::RawRecall>(), vec![]),
         ("embed", accepted_keys::<hub::RawEmbed>(), vec![]),
         ("llm", accepted_keys::<llm::RawHubLlm>(), vec!["runners"]),
         ("direct", accepted_keys::<llm::RawDirect>(), vec![]),
@@ -1710,7 +1713,7 @@ fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
         ("knowledge", vec![knowledge]),
         ("distill", vec![&knowledge["distill"]]),
         ("recall", vec![&knowledge["recall"]]),
-        ("embed", vec![&knowledge["recall"]["embed"]]),
+        ("embed", vec![&knowledge["embed"]]),
         ("llm", vec![&doc["llm"]]),
         ("direct", vec![&doc["llm"]["direct"]]),
         ("relayed_group", vec![&doc["llm"]["runners"]]),
@@ -1960,7 +1963,7 @@ fn a_hub_reaches_backends_runners_share_and_names_them_alone() {
         )
         .replace(
             "    recall: { max_notes: 3, max_chars: 1000 }\n",
-            "    recall: { max_notes: 3, max_chars: 1000, embed: { backend: gpu, model: e, min_similarity: 0.5 } }\n",
+            "    embed: { backend: gpu, model: e, min_similarity: 0.5 }\n    recall: { max_notes: 3, max_chars: 1000 }\n",
         );
     let hub = parse_hub(&doc, Path::new("hub.yaml"), &env(&[])).unwrap();
     assert_eq!(hub.llm.runners["gpu"].runner, "ana/gpu-box");
