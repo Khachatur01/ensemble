@@ -1,7 +1,7 @@
 # What the NixOS and Home Manager modules share about a runner: its options.
 # They only run it. Its settings and the keys of its backends are kept in its
 # database, `~/.config/ensemble/runner/database.db`, and changed with
-# `ensemble-runner setup`, `… config set`, `… backend …` and `… login`; its
+# `ensemble-runner setup`, `… settings …`, `… backend …` and `… login`; its
 # teams are added with `ensemble-runner team pull`, `link` or `new`. Before
 # each start the service runs `ensemble-runner init --keep`, which makes a
 # runner named for the computer, working in `~/ensemble`, when there is none.

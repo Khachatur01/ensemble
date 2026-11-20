@@ -141,13 +141,15 @@ Ensemble first, so that `ensemble-hub` and `ensemble-runner` are on your
 `PATH`.
 
 ```console
-$ ensemble-hub init                        # its settings, every one of them, and the vault
-$ ensemble-hub config edit                 # its name, models, roles, tracker
-$ ensemble-hub check                       # validates them
-$ ensemble-hub user add ana --role admin   # the first admin; prints their token once
+$ ensemble-hub setup                       # names the hub, adds you as its first admin, prints your token once
 $ ensemble-hub user password ana           # typed without echo
 $ ensemble-hub serve                       # until Ctrl-C or SIGTERM
 ```
+
+A new hub runs on this computer alone, closed to sign-ups, with no model
+yet: give it one when you want shares distilled into notes
+(`ensemble-hub backend add`, `ensemble-hub knowledge models`; see
+[Changing settings](#changing-settings)).
 
 The token's answer gives the line that adds the hub to your agent
 ([Connect your agent](#connect-your-agent)). Your agent learns the tools from
@@ -216,7 +218,7 @@ in `~/.config/ensemble/hub/`:
 
 ```text
 ~/.config/ensemble/hub/
-  database.db    its settings and their history, its backends' keys (sealed), accounts, tokens,
+  database.db    its settings and who changed them, its backends' keys (sealed), accounts, tokens,
                  tasks, and which issue became which task (Turso), readable only by you
   master.key     what seals the keys in database.db, readable only by you: back it up
   .env           keys a secrets manager keeps (NAME=value), if any
@@ -225,77 +227,67 @@ in `~/.config/ensemble/hub/`:
 
 Its settings are kept in its database, as a GitLab instance keeps its
 application settings: the commands below, the REST API and a web UI change
-them, each change checked before it is kept, and each kept in their history.
+them, each change checked before it is kept, and kept in their audit log with
+who made it.
 Where it runs, such as a NixOS module, only runs it.
 
 On the hub's computer:
 
 ```console
-$ ensemble-hub init                       # its settings, every one of them, and the vault
-$ ensemble-hub config edit                # its name, models, roles, tracker, in $EDITOR
-$ ensemble-hub backend key central        # a backend's key, typed without echo
-$ ensemble-hub check                      # validates them; says which model would distill shares now
-$ ensemble-hub user add root --role admin # the first admin; prints their token once
+$ ensemble-hub setup                      # its settings and vault, and its first admin, whose token it prints once
 $ ensemble-hub user password root         # typed without echo
+$ ensemble-hub backend add central --type openai-compatible-api --url http://127.0.0.1:8000/v1
+$ ensemble-hub knowledge models central:qwen3.5-72b   # the models that turn shares into notes
+$ ensemble-hub check                      # says which model would distill shares now
 $ ensemble-hub serve                      # until Ctrl-C or SIGTERM
 ```
 
-The settings are the core, then the connectors. Every connector is written, even
-one with no settings (`{}`), and none can be turned off; a connector's
-adapters are a map by name, which may be empty. The hub's command line,
-`ensemble-hub …` on its computer, is always on and has no settings.
+`ensemble-hub settings show` shows every setting; `--json` prints them as
+data, which `ensemble-hub settings import` takes on another hub. A hub that
+was just set up, given a model server:
 
-```yaml
-version: 1
-owner: Acme                 # the hub's name
-
-# The core.
-http:
-  listen: 127.0.0.1:7700    # the one port for every connector over HTTP
-llm:                        # the models the hub calls, to distill knowledge
-  direct:                   # its own
-    backends:
-      central: { type: openai-compatible-api, base_url: "http://127.0.0.1:8000/v1", timeout_seconds: 300 }
-  runners:                  # runners' it reaches through their links; leave it out for none
-    backends:
-      gpu: { runner: ana/gpu-box, backend: local }
-accounts:
-  registration:
-    type: approval          # anyone may sign up; an admin lets them in
-    max_pending: 20         # or: registration: { type: closed }, only an admin adds users
-  sessions:
-    hours: 12               # how long a login lasts
-  lockout:
-    failures: 5             # failed logins before a name is refused
-    minutes: 15             # and for how long
-  roles:                    # yours to name; each a list of permissions
-    admin: [admin, share, recall, tasks, compute, host]
-    member: [share, recall, tasks, compute]
-    reader: [recall]
-
-# Everything else: each connector always on.
-connectors:
-  rest: {}                  # the REST API at /api/v1/
-  mcp: {}                   # MCP for client agents at /mcp
-  runners: {}               # the runners' link at /link and /relay
-  knowledge:                # see Knowledge
-    vault: vault            # a git repository, relative to this folder
-    distill:                # the models that turn shares into notes; no tools
-      try:
-        - { backend: central, model: qwen3.5-72b }
-      when_none: wait       # or fail: the share goes to review/ with why
-      max_tokens: 4000
-    recall:
-      max_notes: 8
-      max_chars: 6000       # all returned notes together
-  tasks:                    # see Tasks from a tracker
-    trackers:               # adapters by name; {} for no inbox
-      issues: { type: local_markdown, dir: issues, label: ensemble, poll_seconds: 30 }
-  sources:
-    adapters: {}            # none is built yet
+```text
+$ ensemble-hub settings show
+backends:
+  central:
+    api_key_env: none
+    base_url: http://127.0.0.1:8000/v1
+    timeout_seconds: 300
+    type: openai-compatible-api
+distill:
+  max_tokens: 4000
+  try:
+    -
+      backend: central
+      model: qwen3.5-72b
+  when_none: wait
+embed: none
+listen: 127.0.0.1:7700
+lockout_failures: 5
+lockout_minutes: 15
+owner: Acme
+recall_max_chars: 6000
+recall_max_notes: 8
+registration:
+  type: closed
+roles:
+  admin: admin, share, recall, tasks, compute, host
+  member: share, recall, tasks, compute
+  reader: recall
+session_hours: 12
+source_filter: none
+trackers: none
+vault: vault
 ```
 
-**The port.** `http.listen` is where the hub listens, for every connector over
+Its core is its owner, where it listens, its accounts and roles, and the LLM
+backends it uses; the rest reaches it through connectors, each always on: the
+REST API at `/api/v1/`, MCP at `/mcp`, the runners' link, knowledge, tasks
+and sources. `ensemble-hub settings history` says who changed what, when,
+and with which operation. The hub's command line, `ensemble-hub …` on its
+computer, is always on and has no settings.
+
+**The port.** `listen` is where the hub listens, for every connector over
 HTTP: the REST API at `/api/v1/`, MCP at `/mcp`, and the runners' WebSockets at
 `/link` and `/relay`. A WebSocket anywhere else is refused. The hub speaks
 plain HTTP and WebSocket. For the internet, put a TLS reverse proxy in front,
@@ -308,7 +300,8 @@ hub.example.com {
 }
 ```
 
-On a LAN or a VPN, listen on that address instead and connect with `ws://`.
+On a LAN or a VPN, listen on that address instead
+(`ensemble-hub settings listen 10.0.0.2:7700`) and connect with `ws://`.
 For one person alone, the hub listens on `127.0.0.1` and the runner names
 `ws://127.0.0.1:7700`. The hub needs no setting for its own address: the
 hints it gives with a new token or join code name the address the request
@@ -316,9 +309,8 @@ reached it at (through a proxy, from its `X-Forwarded-Proto` and
 `X-Forwarded-Host`), or, from the command line, where it listens.
 
 **The LLM backends** are the models the hub itself calls, such as to distill
-knowledge: its own (`llm.direct`), with the keys it keeps, and those runners
-share through it (`llm.runners`, see
-[Sharing LLM backends](#sharing-llm-backends)). A connector names one by its
+knowledge: its own, with the keys it keeps, and those runners share through
+it (`type: runner`, see [Sharing LLM backends](#sharing-llm-backends)). A connector names one by its
 name alone. `ensemble-hub backend add` adds one and keeps its key for you
 (see [Changing settings](#changing-settings)).
 
@@ -478,10 +470,8 @@ $ ensemble-runner login wss://hub.example.com --user ana    # asks the password;
 $ ensemble-runner join wss://hub.example.com join_…         # or a join code, in place of the password
 ```
 
-```yaml
-# the runner's settings (`ensemble-runner config edit`)
-hub: wss://hub.example.com
-```
+Signing in names the hub in the runner's settings (`hub: wss://hub.example.com`
+in `ensemble-runner settings show`), and `logout` takes it out.
 
 The runner signs in over its link, the WebSocket it works on, and makes no
 other request to the hub: a link opened without a token may only sign in.
@@ -591,7 +581,7 @@ earlier decisions or setup may matter, and gets the matching notes, best first,
 within `max_notes` and `max_chars`, marked as reference data.
 The search is by words (BM25, a
 title's words counting more), with no index to keep, and, with an embedding
-model, by what the notes mean: `connectors.knowledge.embed` in the hub's settings names one
+model, by what the notes mean: `ensemble-hub knowledge embedding <backend>:<model>` names one
 an `openai-compatible-api` backend serves at `/embeddings` (Ollama's
 `nomic-embed-text`, say), and notes at least `min_similarity` alike to the
 query are found too, in other words than yours. A note found both ways comes
@@ -616,19 +606,14 @@ Issues live in a tracker and are assigned to **people**. When an issue is
 assigned to you and carries the hub's label, the hub's inbox makes it a task of
 yours, which the hub keeps like any other, and writes what happens back on the
 issue. Your helper team never touches the tracker itself. A tracker is an
-adapter of the `tasks` connector, named under `connectors.tasks.trackers` in
-the hub's settings with its `type`, its `label` and how often it is looked at
-(`poll_seconds`). The first type is a folder of markdown files on the hub's
+adapter of the `tasks` connector, added by name with its `type`, its `label`
+and how often it is looked at (`poll_seconds`). The first type is a folder of markdown files on the hub's
 computer (`local_markdown`, with its `dir`); GitLab, GitHub and Jira come
 later. A hub watches every tracker it names, each with an inbox of its own
-and a folder of its own; `trackers: {}` is none, and then tasks come from your
-agent alone.
+and a folder of its own; with none, tasks come from your agent alone.
 
-```yaml
-connectors:
-  tasks:
-    trackers:
-      issues: { type: local_markdown, dir: issues, label: ensemble, poll_seconds: 30 }
+```console
+$ ensemble-hub tracker add issues --type local_markdown --dir issues --label ensemble --poll-seconds 30
 ```
 
 An issue is a markdown file anyone can write:
@@ -681,29 +666,20 @@ A source brings knowledge in from outside, such as a mailbox or a chat, so
 what a team decides there reaches the vault too. Each is an adapter of the
 `sources` connector, which an admin connects for the whole hub: Microsoft 365
 (Outlook mail and Teams) and Telegram (a bot in the team's groups) are to
-come. None is built yet, so `sources` is written with no adapters.
+come. None is built yet.
 
 What a source brings goes through one model before the distiller, the
 `filter`. It first keeps what is worth knowing, then removes what your
 `prompt` calls confidential. Only what is left becomes a share, for everyone
-who may recall, and the raw messages are dropped. Leave `filter` out and no
-source may be connected.
+who may recall, and the raw messages are dropped. With no filter, no source
+may be connected.
 
-```yaml
-connectors:
-  sources:
-    filter:
-      try:
-        - { backend: central, model: qwen3.5-72b }
-      when_none: wait            # or fail: what came in is dropped, saying why
-      max_tokens: 2000
-      prompt: Salaries, contracts and prices agreed with clients; clients' names.
-    adapters: {}
+```console
+$ ensemble-hub source filter central:qwen3.5-72b --prompt "Salaries, contracts and prices agreed with clients; clients' names."
+$ ensemble-hub source filter --when-none fail   # what came in is dropped, saying why, when no model can be used
+$ ensemble-hub source try "…"                    # what the filter would leave of a text, shared nowhere
+$ ensemble-hub source filter --off               # no filter: no source may be connected
 ```
-
-`ensemble-hub source try "…"` shows what the filter would leave of a text
-without sharing it. `ensemble-hub source filter central:qwen3.5-72b --prompt
-"…"` chooses the model and the prompt.
 
 ## Runners
 
@@ -724,26 +700,18 @@ hub whose role has `compute`, when no runner of their own takes them.
 Connecting a runner that works for the hub needs `host`. The hub connects
 them, and keeps no runner once it is gone.
 
-```yaml
-# the runner's settings, as `ensemble-runner config edit` opens them; `ensemble-runner setup` or `ensemble-runner init` makes them
-version: 1
-name: gpu-box                    # a hub knows it as <you>/gpu-box
-works_for: hub                   # owner: you alone; hub: also others with `compute`
-workspace: ~/ensemble            # its git repositories; ~/ is your home, a relative path is in ~/.config/ensemble/runner/
-hub: wss://hub.example.com       # the hub it connects to; left out: none, and no tasks
-llm:                             # the LLM backends its teams' agents run on
-  direct:                        # its own
-    backends:
-      local: { type: openai-compatible-api, base_url: "http://127.0.0.1:11434/v1", timeout_seconds: 600 }
-    shares: [local]              # those it offers through the hub; [] none
-    max_shared_calls: 1          # the most calls of others to them at once
-  hub:                           # others' it reaches through the hub; leave it out for none
-    backends:
-      team-gpu: { runner: kim/workstation, backend: big }
-```
+`ensemble-runner setup` or `ensemble-runner init` makes the runner;
+`ensemble-runner settings show` shows its settings, and an operation changes
+each:
 
 ```console
-$ ensemble-runner login wss://hub.example.com --user kim     # once, for the hub its settings name
+$ ensemble-runner settings name gpu-box                       # a hub knows it as <you>/gpu-box
+$ ensemble-runner settings works-for hub                      # owner: you alone; hub: also others with `compute`
+$ ensemble-runner settings workspace ~/ensemble               # its git repositories; ~/ is your home
+$ ensemble-runner backend add local --type openai-compatible-api --url http://127.0.0.1:11434/v1 --share
+$ ensemble-runner backend add team-gpu --type runner --runner kim/workstation --runner-backend big
+$ ensemble-runner settings shared-calls 1                     # the most calls of others to what it shares, at once
+$ ensemble-runner login wss://hub.example.com --user kim     # once: it names this hub
 $ git clone git@github.com:acme/shop.git ~/ensemble/shop      # a project of its workspace, or let a task name it
 $ ensemble-runner serve                                       # until Ctrl-C or SIGTERM
 $ ensemble-runner peers                                       # the runners of the hub that work for you now, yours too
@@ -842,17 +810,17 @@ worktree`.
 
 A hub may run on a small machine and need a strong model, and so may a
 runner. A runner may offer some of its own backends through the hub
-(`llm.direct.shares`), and the hub and other runners use them: the hub's admin
-names one under the hub's `llm.runners`, and a runner's owner under its
-runner's `llm.hub`, each by the runner, `<owner>/<name>`, and its name
-there. Either then names it like any backend, by the name given it there, in
-a `try` list, the distiller or a team. A name is unique across the groups of a
-file's `llm`, so a backend moves between groups without changing where it is
-used.
+(`ensemble-runner backend share`), and the hub and other runners use them:
+each adds one as a backend of `type: runner`, naming the runner,
+`<owner>/<name>`, and its name there. Then it names it like any backend, by
+the name it gave it, in a `try` list, the distiller or a team. A backend's
+name is unique among all of a hub's or a runner's.
 
 ```console
-$ ensemble-hub runner backends        # what the connected runners share, with their models
+$ ensemble-runner backend share local                      # on ana's gpu box
+$ ensemble-hub runner backends                             # what the connected runners share, with their models
 ana/gpu-box  local  (works for owner, 1 call(s) at once)  models: qwen3.5:72b
+$ ensemble-hub backend add gpu --type runner --runner ana/gpu-box --runner-backend local
 ```
 
 - **Who may use it.** The hub, and its owner's other runners; when the runner
@@ -867,7 +835,7 @@ ana/gpu-box  local  (works for owner, 1 call(s) at once)  models: qwen3.5:72b
   each looks like any OpenAI-compatible backend to the agents. Through the hub
   a call takes a few milliseconds longer than one made directly.
 - **When it cannot.** A runner takes `max_shared_calls` calls of others at
-  once; the hub keeps the next waiting for up to 10 seconds, then answers that
+  once (`ensemble-runner settings shared-calls`); the hub keeps the next waiting for up to 10 seconds, then answers that
   it is busy. Busy, offline or not shared, the backend is unavailable and the
   `try` list's next model is used.
 
@@ -964,27 +932,18 @@ one professional a task can go to. It has:
 | `adapter` | what runs it. `type` decides which other fields the adapter takes |
 
 An **LLM backend** is a model server of yours, or one your company runs. Each
-runner defines the backends it has in its settings (`llm`, see
+runner keeps the backends it has (`ensemble-runner backend add`, see
 [Sharing LLM backends](#sharing-llm-backends)), with their addresses and keys,
 and a team names them by name alone: an OpenCode agent in its model (`type:
 llm_backend`), and a `builtin` or `direct` agent in its adapter. So one team
 runs on every runner that defines the backends it names, each with its own
 servers and keys, and Ensemble hands the agent's CLI the endpoint and key for
 each run, so you never configure the same server again in the CLI's own
-settings. The team above names `local`, which a runner defines like this:
+settings. The team above names `local`, which a runner adds like this, its
+key asked for when the server wants one:
 
-```yaml
-# the runner's settings
-llm:
-  direct:
-    backends:
-      local:
-        type: openai-compatible-api
-        base_url: "http://127.0.0.1:8888/v1"
-        api_key_env: OPENAI_LOCAL_API_KEY   # left out when the server wants no key
-        timeout_seconds: 600
-    shares: []
-    max_shared_calls: 1
+```console
+$ ensemble-runner backend add local --type openai-compatible-api --url http://127.0.0.1:8888/v1 --timeout 600
 ```
 
 A backend has a `type`:
@@ -1642,10 +1601,11 @@ error too: ``agents.coder: `max_seconds` is required at line 12 column 5``.
 
 ## Changing settings
 
-Nobody needs to open a settings file, nor know the name of a variable. What
-you mean to change is an operation, the same from the command line, the REST
-API (`POST /api/v1/ops/<name>`) and a web UI to come, each checked as it is
-made; and every other setting is changed by its keys.
+There is no settings file to open, nor a variable to name. The settings of a
+hub and of a runner are kept in their databases, as typed rows, and what you
+mean to change is an operation, the same from the command line, the REST API
+(`POST /api/v1/ops/<name>`) and a web UI to come, each checked as it is made.
+Only a helper team's `config.yaml` is a file, as it is shared in git.
 
 ### By what you mean
 
@@ -1685,33 +1645,32 @@ $ ensemble-runner backend share local | unshare local
 - **What something uses stays.** A backend the distiller, the embedding model
   or a runner's team uses is not removed, nor a role an account has.
 
-Each is written through the settings, as below: loaded before it is kept,
-and used by the running hub or runner at once.
-
-### Setting by setting
-
-Every setting can be changed without opening anything: the runner's with
-`ensemble-runner config`, the hub's settings with `ensemble-hub config`, and a team's
-config.yaml (one made here or linked) with `ensemble-runner team config <team>`.
-A setting is named by its keys joined by dots:
+### Every other setting
 
 ```console
-$ ensemble-runner config get hub
-$ ensemble-runner config set works_for hub
-$ ensemble-runner config set workspace ~/code
-$ ensemble-hub config set http.listen 0.0.0.0:7700
-$ ensemble-runner team config web set agents.coder.max_concurrent 2
-$ ensemble-runner config set llm.direct.shares '[local]'
-$ ensemble-hub config edit            # in $VISUAL or $EDITOR
-$ ensemble-runner config path
+$ ensemble-hub settings owner acme
+$ ensemble-hub settings listen 0.0.0.0:7700          # where it listens: it starts again there
+$ ensemble-hub settings sessions 12                  # hours a login lasts
+$ ensemble-hub settings lockout --failures 5 --minutes 15
+$ ensemble-hub knowledge vault vault                 # the vault's folder
+$ ensemble-runner settings name laptop
+$ ensemble-runner settings workspace ~/code
+$ ensemble-runner settings works-for hub
+$ ensemble-runner settings shared-calls 2
+$ ensemble-hub settings show [--json]                # every setting; ensemble-runner's alike
+$ ensemble-hub settings history                      # who changed what, when, with which operation
+$ ensemble-hub settings import "$(cat hub.json)"     # settings another hub's `settings show --json` printed
 ```
 
-A value is written as YAML when it reads as YAML (`laptop`, `8`, `true`,
-`[a, b]`, `{}`), and as a string otherwise. The file is changed as text, so its
-comments and order stay; the change is loaded before it is written, and one
-that would not load is refused with what is wrong, and nothing changes (`edit`
-keeps your edit beside the file to try again). While the hub or the runner
-runs, `ensemble-hub …` and `ensemble-runner …` ask it, over its socket, and it
+Every operation prints JSON with `--json`, for a script. A change is checked
+before it is kept, and one that would not load is refused with what is wrong,
+and nothing changes. Each is kept in the audit log with who made it, by which
+operation, with what input, its secrets hidden. A team's `config.yaml` (one
+made here or linked) is changed setting by setting, its comments kept, with
+`ensemble-runner team config <team> get|set|unset|edit|path`, such as
+`ensemble-runner team config web set agents.coder.max_concurrent 2`.
+
+While the hub or the runner runs, `ensemble-hub …` and `ensemble-runner …` ask it, over its socket, and it
 makes the change itself and uses it at once: a team, the hub's roles, how
 people sign up and how long a login lasts, its models and knowledge settings,
 its owner. A change the hub cannot use as it runs (where it listens, its
@@ -1719,8 +1678,7 @@ vault, its trackers) has it start again, in the same process;
 runners connect again by themselves. A change to the runner's settings has it
 start again, in the same process: running tasks start again from where their
 work was last pushed. When neither runs, the command makes the change itself, in
-its database or a team's file, and the hub or the runner reads it when it
-starts. `ensemble-runner
+its database, and the hub or the runner reads it when it starts. `ensemble-runner
 login <url>` names the hub in the runner's settings by itself, and `ensemble-runner
 logout` takes it out.
 
@@ -1784,7 +1742,7 @@ system flake, and import the module:
 The module has two parts, each enabled on its own. Each runs as the person it is
 for, from their `~/.config/ensemble/`, so they manage it with `ensemble-hub` and
 `ensemble-runner` as on any platform: `ensemble-hub user add`, `ensemble-runner
-team pull`, `ensemble-runner config set` and the rest, as themselves, with no
+team pull`, `ensemble-runner settings …` and the rest, as themselves, with no
 `sudo`.
 
 Neither has settings in Nix, as one runs a GitLab instance: the settings of
@@ -1813,7 +1771,7 @@ API or a web UI). Back up both files.
 The first time it starts, it makes a runner named for this computer, working
 for her in `~/ensemble`, offering nothing (`ensemble-runner init --keep`).
 Then, as `ana`: `ensemble-runner login <url> --user ana`, `ensemble-runner
-backend add …`, `ensemble-runner config set …`, and its teams with
+backend add …`, `ensemble-runner settings …`, and its teams with
 `ensemble-runner team pull`, `link` or `new`; the running runner uses each at
 once. `ensemble-runner` is put on the system's `PATH`, for managing it;
 `services.ensemble.runner.package` is the package it comes from.
@@ -1828,7 +1786,7 @@ at boot without a login, and, as a user service, it has their
   services.ensemble.hub = {
     enable = true;
     user = "ana";                          # their hub: they run `ensemble-hub …` as themselves
-    port = 7700;                           # the port of its http.listen, one of its settings
+    port = 7700;                           # the port it listens on, one of its settings
     openFirewall = false;                  # opens `port`
     environmentFile = "/run/secrets/ensemble-hub.env";  # keys a secrets manager keeps; null: their hub/.env
   };
@@ -1838,11 +1796,12 @@ at boot without a login, and, as a user service, it has their
 The module only runs the hub, as one runs a GitLab instance: its settings and
 the keys of its backends are kept in its `database.db`, and changed with
 `ensemble-hub …` as `user`, its REST API or a web UI, never in Nix. The first
-time it starts, it writes the sample settings, every one of them, and its
-vault (`ensemble-hub init --keep`). Then `ensemble-hub user add root --role admin`, `ensemble-hub config
-set owner acme`, `ensemble-hub backend add …`, `ensemble-hub knowledge
-models …` and the rest, run as `user`. To reach it from other computers, set
-`ensemble-hub config set http.listen 0.0.0.0:7700` and give the module
+time it starts, it makes the settings a new hub starts with, every one of
+them, named for `user`, and its vault (`ensemble-hub init --keep`). Then, as
+`user`: `ensemble-hub setup`, which adds the first admin and signs this
+computer's runner in, and `ensemble-hub backend add …`, `ensemble-hub
+knowledge models …` and the rest. To reach it from other computers, run
+`ensemble-hub settings listen 0.0.0.0:7700` and give the module
 `port = 7700;` and `openFirewall = true;`. Back up `database.db` and
 `master.key`: without `master.key`, no key the hub keeps can be read.
 `ensemble-hub` is put on the system's `PATH`, from
@@ -1949,7 +1908,7 @@ has its own `--help`:
 ```console
 # This computer's runner
 $ ensemble-runner setup [--name N] [--workspace PATH] [--yes]   # find the CLIs, write the runner, check the teams
-$ ensemble-runner init [--force|--keep|--stdout]   # the runner setup makes, asking nothing; --stdout prints every setting
+$ ensemble-runner init [--force|--keep]   # the runner setup makes, asking nothing
 $ ensemble-runner serve                     # run the runner until stopped; a computer runs one
 $ ensemble-runner reload                    # the running runner reads its teams again (an `ensemble-runner team` command does it by itself)
 $ ensemble-runner status                    # its name, whether it runs, its workspace and projects, its hub: signed in as whom, its teams
@@ -1958,7 +1917,9 @@ $ ensemble-runner login <wss://url> --user <name>   # sign in to a hub with your
 $ ensemble-runner join <wss://url> <code>   # the same with a join code
 $ ensemble-runner logout <wss://url>
 $ ensemble-runner peers                     # the other runners of your hub you may use now
-$ ensemble-runner config get|set|unset|edit|path   # its settings, setting by setting
+$ ensemble-runner settings show|history [--json]   # its settings, and who changed them
+$ ensemble-runner settings name|workspace|works-for|shared-calls <value>
+$ ensemble-runner settings import <json>   # settings `settings show --json` printed, whole
 
 # Its helper teams
 $ ensemble-runner team list                 # each team, where it comes from, its agents
@@ -1982,7 +1943,8 @@ $ ensemble-runner agent add <team>/<name> --adapter A [--model M] [--backend B] 
 $ ensemble-runner agent remove <team>/<name>
 
 # A hub this computer runs
-$ ensemble-hub init [--force|--keep|--stdout]   # its settings in its database, and its vault
+$ ensemble-hub setup [--owner N] [--admin A] [--yes]   # make the hub, its first admin, and sign this computer's runner in
+$ ensemble-hub init [--force|--keep] [--owner N]   # the settings a new hub starts with, and its vault
 $ ensemble-hub check                      # validate its settings; which model would distill now
 $ ensemble-hub serve                      # run the hub until stopped
 $ ensemble-hub user list
@@ -1994,7 +1956,9 @@ $ ensemble-hub user password|token|revoke|remove <name>   # a password is asked,
 $ ensemble-hub user join-code <name>      # a code, shown once, that signs one runner in within 24 hours
 $ ensemble-hub user tracker <name> [<tracker name>]
 $ ensemble-hub knowledge status|distill|rebuild
-$ ensemble-hub config get|set|unset|edit|path    # its settings, setting by setting
+$ ensemble-hub settings show|history [--json]    # its settings, and who changed them
+$ ensemble-hub settings owner|listen|sessions|lockout …
+$ ensemble-hub settings import <json>     # settings `settings show --json` printed, whole
 
 $ ensemble-runner completions zsh|bash|fish|elvish|powershell   # a completion script for your shell
 $ ensemble-hub completions zsh|bash|fish|elvish|powershell
@@ -2030,9 +1994,9 @@ crates (`ensemble-hub`, `ensemble-knowledge`);
 [ARCHITECTURE.md](ARCHITECTURE.md) says what each file does and how the pieces
 work together at run time.
 
-`ensemble.schema.json`, at the root, is the JSON Schema for `config.yaml`, and
-`hub.schema.json` and `runner.schema.json` the ones for the hub's settings
-(as `ensemble-hub config edit` opens them) and the runner's.
+`ensemble.schema.json`, at the root, is the JSON Schema for `config.yaml`. The
+settings of a hub and of a runner have no file, nor schema: they are typed
+rows of their databases (`ensemble-store`'s `kept.rs`).
 
 A task's worker knows the router; it does not know which CLIs exist. The router
 knows agents; only the adapters in `crates/ensemble-agents/src/external/` know
@@ -2120,8 +2084,8 @@ scripts stand in for the CLIs.
   and wait for an admin; there is no password reset by mail, and no second
   factor. The API sends no CORS headers, so a UI is served from the hub's own
   origin. Connectors to chats and mail are not built either.
-- **Recall needs an embedding model to find by meaning.** Without
-  `connectors.knowledge.embed`, or while its model cannot be asked, it finds notes
+- **Recall needs an embedding model to find by meaning.** Without one
+  (`knowledge embedding`), or while its model cannot be asked, it finds notes
   that use your words, not ones that only mean the same; how alike is alike
   enough (`min_similarity`) depends on the model, and is yours to tune. The
   notes are compared one by one, which suits a vault of thousands of notes, not

@@ -7,13 +7,13 @@
 #
 # The hub is only run from here, as a GitLab instance is: its settings and the
 # keys of its backends are kept in its database, and changed with
-# `ensemble-hub …`, its REST API or a web UI. It writes the sample settings the
-# first time it starts. Only a key a secrets manager keeps comes from here,
-# through `environmentFile`.
+# `ensemble-hub …`, its REST API or a web UI. It makes the settings a new hub
+# starts with the first time it starts. Only a key a secrets manager keeps
+# comes from here, through `environmentFile`.
 #
 # The runner is only run from here, too: its settings, the keys of its
 # backends and its teams are made and changed with `ensemble-runner setup`,
-# `… config set`, `… backend …` and `ensemble-runner team …`. It makes a
+# `… settings …`, `… backend …` and `ensemble-runner team …`. It makes a
 # runner named for the computer the first time it starts.
 { self }:
 {
@@ -85,9 +85,9 @@ in
         type = types.nullOr types.port;
         default = null;
         description = ''
-          The port of the hub's `http.listen`, one of its settings, for
-          `openFirewall` to open. Set `http.listen` to an address on it with
-          `ensemble-hub config set http.listen 0.0.0.0:<port>`.
+          The port the hub listens on, one of its settings, for
+          `openFirewall` to open. Have it listen on an address with that port
+          with `ensemble-hub settings listen 0.0.0.0:<port>`.
         '';
         example = 7700;
       };
@@ -128,7 +128,7 @@ in
       assertions = [
         {
           assertion = hub.openFirewall -> hub.port != null;
-          message = "services.ensemble.hub.openFirewall needs services.ensemble.hub.port, the port of the hub's http.listen";
+          message = "services.ensemble.hub.openFirewall needs services.ensemble.hub.port, the port the hub listens on";
         }
       ];
 
@@ -144,7 +144,8 @@ in
         unitConfig.ConditionUser = hub.user;
         # The vault is a git repository.
         path = [ pkgs.git ];
-        # The sample settings, with its vault, the first time it starts.
+        # The settings a new hub starts with, and its vault, the first time
+        # it starts; `ensemble-hub setup` adds its first admin.
         preStart = ''
           ${lib.getExe hub.package} init --keep
         '';

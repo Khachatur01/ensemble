@@ -104,7 +104,7 @@ Each process is one of the two executables. What runs in each:
 | command | what it runs | ends |
 | --- | --- | --- |
 | `ensemble-runner serve` | the runner, one per computer: a worker per git repository directly inside its workspace, each running the tasks the hub keeps for the repository's project, and, for a runner that works for the hub, one per repository of another account's in `<workspace>/.for/<account>/`; every 30 seconds, the workspace looked at again and the hub asked for the tasks of its agents in projects it has no folder for, whose repositories it clones, asks about or gives back; a socket for the operations `ensemble-runner …` asks of it and for reloading its teams; and with the hub its settings name, a link that says it is connected, with its agents (`Worker`), and, when it shares backends or reaches others', a relay socket for model calls (`Relay`) | on SIGINT or SIGTERM; a change to its settings has it start again in the same process |
-| `ensemble-hub serve` | the hub, from `~/.config/ensemble/hub/`: one port (`http.listen`) for the runners' link at `/link` and their relay sockets at `/relay`, the REST API under `/api/v1/` and MCP for client agents at `/mcp`; a socket for the operations `ensemble-hub …` asks of it; the tasks; the vault's distiller; the tracker inbox | on SIGINT or SIGTERM; a change to its settings it cannot use as it runs has it start again in the same process |
+| `ensemble-hub serve` | the hub, from `~/.config/ensemble/hub/`: one port (its `listen`) for the runners' link at `/link` and their relay sockets at `/relay`, the REST API under `/api/v1/` and MCP for client agents at `/mcp`; a socket for the operations `ensemble-hub …` asks of it; the tasks; the vault's distiller; the tracker inbox | on SIGINT or SIGTERM; a change to its settings it cannot use as it runs has it start again in the same process |
 | everything else | one command: read the config and the state, or ask the running process over its socket, do one thing, print | at once |
 
 A repository's tasks are run by one worker of the computer at a time: whoever
@@ -124,10 +124,10 @@ and the runner on none of the hub's alone: `ensemble-knowledge` and
 | crate | what it is | files |
 | --- | --- | --- |
 | `ensemble-core` | what everything shares | the error vocabulary (`port.rs`); the per-user state, cache and config directories (`state.rs`); the working folder, a `repo` inside it and what a run changed (`workspace.rs`); the record of runs behind `ensemble-runner agent stats` (`records.rs`); the one-worker lock (`lock.rs`); dates in UTC (`time.rs`); the async runtime and its bridges to code that blocks (`runtime.rs`) |
-| `ensemble-ops` | operations, defined once for every interface, and what both command lines share | the operation, its spec (name, summary, who may run it, input fields), errors as data, the caller, and the registry that checks both before it runs one (`lib.rs`); the commands made from the operations, `config edit`, and asking at the terminal (`cli.rs`); operations run by the running process over its socket, or here, and stopping or starting again on a signal or a change (`local.rs`) |
-| `ensemble-config` | the settings: a team's file, the hub's and the runner's | `config.yaml`: the document as written (`raw.rs`), the environment, `.env` files and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), adding and removing an agent as text, comments kept (`edit.rs`); one setting read or set as text (`settings.rs`); a settings file, or the settings a `Store` keeps, and its `config.*` operations (`settings_file.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); the hub's settings (`hub.rs`); the runner's (`runner.rs`) |
+| `ensemble-ops` | operations, defined once for every interface, and what both command lines share | the operation, its spec (name, summary, who may run it, input fields), errors as data, the caller, and the registry that checks both before it runs one (`lib.rs`); the commands made from the operations, each with `--json`, editing a team's file in $EDITOR, and asking at the terminal (`cli.rs`); an output as plain lines (`lines`, `lib.rs`); operations run by the running process over its socket, or here, and stopping or starting again on a signal or a change (`local.rs`) |
+| `ensemble-config` | the settings: a team's file, the hub's and the runner's | `config.yaml`: the document as written (`raw.rs`), the environment, `.env` files and `--env-file` (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), adding and removing an agent as text, comments kept (`edit.rs`); one setting of a team's file read or set as text (`settings.rs`), and its `config.*` operations (`settings_file.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); the hub's settings as kept, `HubSettings`, and resolved (`hub.rs`); the runner's, `RunnerSettings` (`runner.rs`); their backends, one type of which a runner serves (`llm.rs`); kept settings as operations change them, each change checked and kept with who made it (`kept.rs`) |
 | `ensemble-backends` | talking to model servers | one chat request in the server's own format (`chat.rs`); which models a server serves (`models.rs`); the first usable model of a `try` list (`resolve.rs`); texts as vectors (`embed.rs`); a stand-in server for tests (`testing.rs`) |
-| `ensemble-store` | Turso files | the hub's `database.db`, opened for each read or change, with the tables of `ensemble-hub`, and any other Turso file, such as the vault's cache of vectors (`lib.rs`); the settings, their history and the keys sealed by `master.key` that a hub or a runner keeps, the runner's in a `database.db` of its own with only those tables (`kept.rs`) |
+| `ensemble-store` | Turso files | the hub's `database.db`, opened for each read or change, with the tables of `ensemble-hub`, and any other Turso file, such as the vault's cache of vectors (`lib.rs`); the settings of a hub or a runner as typed rows (a row of settings; the backends, roles, models and trackers), the audit log of their changes, and the keys sealed by `master.key`, the runner's in a `database.db` of its own with only its tables (`kept.rs`) |
 | `ensemble-knowledge` | the hub's knowledge, the hub's alone | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); notes by meaning, with their vectors in `.ensemble/embeddings.db` (`meaning.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait (`lib.rs`) |
 | `ensemble-link` | what the runner and the hub share of the link | the frames of the link (`protocol.rs`); bytes as text, for a model's answer (`base64.rs`); the runner's side, `Connection` and `Link`, one reconnecting, which says who its token is, and signing in without a token, for one (`client.rs`); the token file (`tokens.rs`) |
 | `ensemble-agents` | running one agent once | the adapters (`external/`): `claude_code.rs`, `opencode.rs`, `codex.rs`, `builtin.rs`, `direct.rs`, the subprocess runner (`process.rs`) and gates (`gate.rs`); a git worktree per task (`worktree.rs`); the router: agents to adapters, models, records, `health` (`router.rs`) |
@@ -143,28 +143,28 @@ and read.
 
 ## Configuration and state
 
-What a person writes is **configuration**, reviewed and never changed by
-Ensemble except on request (`ensemble-runner agent add`, `ensemble-runner
-team new`, `ensemble-runner config set`):
+What a person decides is **configuration**, never changed by Ensemble except
+on request (`ensemble-runner agent add`, `ensemble-runner team new`, an
+operation):
 
 | file | where | holds |
 | --- | --- | --- |
 | `config.yaml` | a helper team's folder in the runner's teams directory (`~/.config/ensemble/runner/teams/<name>/`), a folder linked there, or a pulled repository's clone | `limits`, `gates`, `tracker`, `agents` |
-| the hub's settings | its `database.db`, in `~/.config/ensemble/hub/` on the computer that runs the hub | the core: `owner`, the port (`http`), the LLM backends the hub uses (`llm`) and `accounts` (how people join and sign in, the `roles`); and `connectors`: `rest`, `mcp`, `runners`, `knowledge`, `tasks` (its `trackers`) and `sources` (its `adapters`) |
-| the runner's settings | its `database.db`, in `~/.config/ensemble/runner/`, one per computer | `name`, `works_for`, `workspace`, `hub`, the LLM backends its teams run on and shares (`llm`) |
+| the hub's settings | typed rows of its `database.db`, in `~/.config/ensemble/hub/` on the computer that runs the hub | the core: `owner`, where it listens, its LLM `backends`, how people join and sign in, the `roles`; and its connectors' settings: the `vault`, the `distill` and `embed` models, `recall`, the `trackers` and the `source_filter` |
+| the runner's settings | typed rows of its `database.db`, in `~/.config/ensemble/runner/`, one per computer | `name`, `works_for`, `workspace`, `hub`, the LLM `backends` its teams run on, the `shares` and `max_shared_calls` |
 
-No setting has a default: every one is written, and a missing one is refused by
-name. Each is changed by hand (`config edit` for the hub's) or setting by setting
-from the command line, the REST API or a goal operation (`ensemble-runner
-config`, `ensemble-hub config`, `ensemble-runner team config`; `settings.rs`
-changes one setting as text, keeping comments), loaded before it is written;
-each change of the hub's is kept in their history. Every connector of the hub is written, even one with no
-settings (`{}`), and none can be turned off; a connector's adapters are a map
-that may be empty. The few blocks that may be left out mean "not used" when
-they are (`llm.runners`, an embedding model, a runner's `hub`). The command
-line is always on and has no settings. A path
-(the hub's vault and tracker, the runner's workspace) is beside its file, or the
-hub's database, when it is relative, and the runner's `workspace` may start
+No setting has a default: a new hub or runner starts with every one written
+(`HubSettings::starting`, `RunnerSettings::starting`), and a missing one is
+refused by name. The settings of a hub and a runner are changed only through
+operations, from the command line, the REST API or a UI, each checked before
+it is kept and kept in the audit log (`settings.history`); `settings.show`
+shows them and `settings.import` takes them whole, as JSON. A team's
+`config.yaml` is a file, changed by hand or setting by setting (`ensemble-runner
+team config`; `settings.rs` changes one setting as text, keeping comments).
+The few settings that may be absent mean "not used" when they are (an
+embedding model, a source filter, a runner's `hub`). The command line is
+always on and has no settings. A path (the hub's vault and tracker, the
+runner's workspace) is in the folder of its database when it is relative, and the runner's `workspace` may start
 with `~/`. No settings hold a secret: keys are named by the variable that
 holds them. The hub keeps the keys it is given sealed in its database, by
 `master.key` (AES-256-GCM, the variable's name bound to each), and the runner
@@ -640,10 +640,9 @@ what is built, and is rewritten as this is built.)
 ### The hub's core and its connectors
 
 The hub's core is its accounts, their roles and what each may do; the one
-port every connector over HTTP is served on (`http.listen`); and the LLM
-backends it uses (`llm`). Everything else is a **connector**, always on and
-written in the hub's `connectors`, some holding **adapters** the admin
-picks:
+port every connector over HTTP is served on (`listen`); and the LLM
+backends it uses. Everything else is a **connector**, always on, some
+holding **adapters** the admin picks:
 
 - **`rest`**, the REST API at `/api/v1/`, for apps, and a web UI later,
   offering what MCP offers, as both are made from the same operations;
@@ -656,24 +655,8 @@ picks:
 - **`sources`**, knowledge from outside, with its `adapters` (Microsoft 365,
   Telegram; none built yet).
 
-`rest`, `mcp` and `runners` have no settings and are written `{}`. The CLI,
-over the hub's local socket, for administration, is always on and is not in
-the file.
-
-```yaml
-version: 1
-owner: Acme
-http: { listen: 127.0.0.1:7700 }
-llm: { direct: { backends: { ... } } }
-accounts: { registration: ..., sessions: ..., lockout: ..., roles: { ... } }
-connectors:
-  rest: {}
-  mcp: {}
-  runners: {}
-  knowledge: { vault: vault, distill: ..., recall: ... }
-  tasks: { trackers: { issues: { type: local_markdown, dir: issues, label: ensemble, poll_seconds: 30 } } }
-  sources: { adapters: {} }
-```
+`rest`, `mcp` and `runners` have no settings. The CLI, over the hub's local
+socket, for administration, is always on and has none either.
 
 There are two executables, each its own crate and Nix package, from one
 repository: **`ensemble-hub`** and **`ensemble-runner`**. The library crates
@@ -748,34 +731,18 @@ A hub may run on a small machine and need a strong model, and so may a
 runner. A runner may offer its model backends; the hub relays calls to them,
 so the hub and other runners use them. Runners never reach each other.
 
-The hub's admin lists the backends the hub uses, as with any backend, and
-names them where they are used (`knowledge.distill`, `knowledge.embed`,
-`sources`):
+The hub's admin adds a backend a runner serves as one of `type: runner`, and
+names it where it is used (the distiller, the embedding model, the source
+filter), as any backend:
 
-```yaml
-# the hub's settings
-llm:
-  direct:                        # backends the hub calls itself
-    backends:
-      claude: { type: anthropic-api, base_url: https://api.anthropic.com, api_key_env: ANTHROPIC_API_KEY }
-  runners:                       # backends runners serve over their links
-    backends:
-      gpu-box: { runner: alice-workstation, backend: local-qwen }
-
-# the runner's settings
-llm:
-  direct:
-    backends:
-      local-qwen: { type: openai-compatible-api, base_url: http://127.0.0.1:8000/v1 }
-    shares: [local-qwen]         # what it offers through the hub; empty offers nothing
-  hub:                           # backends other runners serve, through the hub
-    backends:
-      team-gpu: { runner: alice-workstation, backend: local-qwen }
+```console
+$ ensemble-runner backend share local-qwen         # on alice's workstation
+$ ensemble-hub backend add gpu-box --type runner --runner alice/workstation --runner-backend local-qwen
+$ ensemble-hub knowledge models gpu-box:qwen3.5-72b
 ```
 
-- A name is unique across the groups, so a `try` list or a team names a
-  backend by its name alone, and a backend moves between groups without
-  changing where it is used.
+- A backend's name is unique among all of a hub's or a runner's, so a `try`
+  list or a team names a backend by its name alone.
 - Choosing a runner's backend is the admin's trust decision: whoever runs the
   serving machine sees what is sent to it. `runner.backends` (`ensemble-hub
   runner backends`) lists what the connected runners share and the models of
@@ -1135,11 +1102,11 @@ Everything a person can do to a hub or a runner is an **operation**, defined
 once, in the core:
 
 - a name, such as `backend.add`, `knowledge.models`, `user.join-code`,
-  `config.set`;
+  `settings.listen`;
 - its input and output, as Rust types with JSON Schemas made from them;
 - who may run it: a permission of the hub's roles, or the runner's owner;
-- its secret fields, written and never read back (keys are kept sealed in
-  the hub's database, or in the runner's `.env`);
+- its secret fields, written and never read back nor kept in the audit log
+  (keys are kept sealed in the database of the hub or the runner);
 - errors as data, `{code, field, message, hint}`, so an interface shows each
   next to what it is about;
 - for long work (a rebuild, testing a model), the events it goes through.
@@ -1153,12 +1120,13 @@ let a computer join; add a team from a template; rebuild the knowledge.
 (Built: `backend.*` on the hub and the runner, in `ensemble-backends`'
 `ops.rs`; `knowledge.models`, `knowledge.embedding`, `knowledge.recall`,
 `tracker.*`, `role.set`, `role.remove`, `registration.set` in
-`ensemble-hub`'s `goals.rs`. A key given to a runner whose keys come from
-an `--env-file` is refused, as Ensemble does not write that file.) **Settings operations**
-(`settings.describe`, `settings.set`) reach every setting, from the JSON
-Schemas the files already have and the checks `config set` makes: a change
-is loaded before it is written, comments stay, and what Nix declares comes
-back read-only with why.
+`ensemble-hub`'s `goals.rs`.) **Settings operations** reach every other
+setting, one each (`settings.owner`, `settings.listen`, `settings.sessions`,
+`settings.lockout`, `knowledge.vault` on the hub; `settings.name`,
+`settings.workspace`, `settings.works-for`, `settings.shared-calls` on the
+runner), with `settings.show`, `settings.history` and `settings.import`: a
+change is loaded before it is kept, and kept in the audit log with who made
+it.
 
 An operation runs **where the state it changes lives**: a running hub or
 runner applies it in memory, at once, then writes its settings, so nothing needs a
@@ -1399,21 +1367,33 @@ crate holds it today.
     `source filter` and `source try` operations. No adapter takes messages
     yet, so no loop runs.)
 25. The hub's settings in its database, as a GitLab instance keeps them, so
-    a web UI changes them and a deployment only runs the hub. (Done: one YAML
-    document in `database.db` with each change in its history; the backends'
-    keys sealed there by `master.key`, made the first time one is kept; a
-    `init --keep`; the NixOS module without `settings`, with `port` for the
+    a web UI changes them and a deployment only runs the hub. (Done, first
+    as one YAML document in `database.db`; the backends' keys sealed there by
+    `master.key`, made the first time one is kept; `init --keep`; the NixOS module without `settings`, with `port` for the
     firewall.)
 26. The runner's settings in its database, as the hub keeps its own, so
     nothing that installs a runner configures it by editing a file. (Done:
     `ensemble-store`'s `kept.rs`, shared by both: the runner's
-    `database.db` holds only its settings, their history and its keys,
+    `database.db` holds only its settings and its keys,
     sealed by its `master.key`; `init` makes the runner `setup` would,
     asking nothing, and `init --keep` is what the modules run before each
     start; the NixOS and Home Manager modules without `settings`,
     `workspace` or `teams`, and no `config merge` or `.nix-managed` left.
     Teams stay folders: a team is added with `team pull`, `link` or `new`.)
-27. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
+27. No YAML for the settings of a hub or a runner, as a GitLab instance
+    keeps its application settings: typed rows, one of settings and a table
+    for each kind of thing there are several of, changed only through
+    operations, each change in an audit log with who made it. (Done:
+    `HubSettings` and `RunnerSettings`, kept by `ensemble-store`'s
+    `kept.rs` and changed through `ensemble-config`'s `Kept`; an operation
+    for every setting, `settings.show`, `settings.history` and
+    `settings.import`, and `--json` on every command; a backend a runner
+    serves is one more type of backend; `config get|set|unset|edit|path`,
+    the samples and the two schemas gone; a new hub starts on this computer
+    alone, closed, with no backend or model, and `ensemble-hub setup` makes
+    it and its first admin and signs this computer's runner in. A team's
+    `config.yaml` stays a file.)
+28. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
     and Teams, Telegram); a runner's operations from the hub, for its own
     account; the remaining goal operations (people, computers, teams from
     templates); chat; a web UI.
