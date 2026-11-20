@@ -682,7 +682,11 @@ agents:
                 )]))
             })
             .unwrap();
-        Ensemble::new(cfg, workdir)
+        // Its runs in the test's folder, never in this user's state.
+        match workdir {
+            Some(dir) => Ensemble::new(cfg, Some(dir.clone())).with_state(dir.join("state")),
+            None => Ensemble::new(cfg, None),
+        }
     }
 
     /// A model server that serves `models` and answers every chat request
