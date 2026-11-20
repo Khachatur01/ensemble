@@ -666,15 +666,17 @@ mod tests {
     use crate::vault::Visibility;
     use ensemble_backends::testing::{model_server, nowhere};
     use ensemble_core::workspace::testing::TempDir;
-    use std::path::Path;
 
     /// The knowledge of a hub that distills on `url`, its vault in `tmp`.
     fn memory_on(tmp: &TempDir, url: &str, when_none: &str) -> Memory {
-        let mut settings = crate::tests::settings_on(tmp, url);
+        let mut settings = crate::tests::settings_on(url);
         settings.distill.when_none = serde_json::from_value(serde_json::json!(when_none)).unwrap();
         settings.distill.max_tokens = 500;
         let hub = settings
-            .resolve(Path::new("database.db"), &std::collections::BTreeMap::new())
+            .resolve(
+                &ensemble_core::state::HubDir::new(&tmp.0),
+                &std::collections::BTreeMap::new(),
+            )
             .unwrap();
         let memory = Memory::new(&hub, Some("shop".into()));
         memory.vault().init().unwrap();

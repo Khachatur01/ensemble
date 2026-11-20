@@ -1,12 +1,51 @@
-//! Where Ensemble keeps what it learns while it runs: per-user state, never
-//! configuration and never in the project. Tasks, run logs, worktrees and usage
-//! counters live under `$XDG_STATE_HOME/ensemble/` (by default
-//! `~/.local/state/ensemble/`), one directory per working directory.
+//! Where Ensemble keeps everything on a computer: one folder, `--config-dir`
+//! (by default `$XDG_STATE_HOME/ensemble`, that is
+//! `~/.local/state/ensemble/`), with a folder for a hub, `hub/`, and one for
+//! a runner, `runner/`, each of its own: neither reads the other's.
+//!
+//! ```text
+//! <config-dir>/
+//!   hub/                 a hub this computer runs (HubDir)
+//!     core/              database.db (settings, accounts, sealed keys), master.key
+//!     knowledge/         vault/ (the notes, a git repository), embeddings.db
+//!     tasks/             database.db (the tasks it keeps)
+//!     trackers/          database.db (which issue became which task)
+//!   runner/              this computer's runner (RunnerDir)
+//!     core/              database.db (settings, sealed keys, hub tokens), master.key
+//!     teams/             its helper teams, a folder each
+//!     workdirs/          the runs and worktrees of each repository it works in
+//!     orgs/              what agents of each team used
+//! ```
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
+/// The database file in a folder of a hub's or a runner's, such as its core.
+pub const DB_FILE: &str = "database.db";
+
+/// The folder `--config-dir` names, for the rest of this process.
+static ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Keep everything in `dir` for the rest of this process, as `--config-dir`
+/// says, in place of `$XDG_STATE_HOME/ensemble`. The first call wins.
+pub fn use_root(dir: &Path) -> Result<(), String> {
+    let dir = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("cannot read the current directory: {e}"))?
+            .join(dir)
+    };
+    let _ = ROOT.set(dir);
+    Ok(())
+}
+
+/// The folder everything is kept in: `--config-dir`, or else
 /// `$XDG_STATE_HOME/ensemble`, or `~/.local/state/ensemble`.
 pub fn root() -> Result<PathBuf, String> {
+    if let Some(dir) = ROOT.get() {
+        return Ok(dir.clone());
+    }
     let base = match std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
         Some(dir) => PathBuf::from(dir),
         None => {
@@ -34,58 +73,119 @@ pub fn cache_root() -> Result<PathBuf, String> {
     Ok(base.join("ensemble"))
 }
 
-/// `$XDG_CONFIG_HOME/ensemble`, or `~/.config/ensemble`: everything a person
-/// sets up on this computer, in two fixed folders: `runner/` for its runner
-/// and `hub/` for a hub it runs.
-pub fn config_root() -> Result<PathBuf, String> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => {
-            let home = std::env::var_os("HOME")
-                .filter(|v| !v.is_empty())
-                .ok_or("cannot find a config directory: neither XDG_CONFIG_HOME nor HOME is set")?;
-            PathBuf::from(home).join(".config")
-        }
-    };
-    Ok(base.join("ensemble"))
+/// The folder of a hub, `<config-dir>/hub/`: a folder for its core and one
+/// for each of its connectors that keeps anything. A computer runs one hub;
+/// its lock and its socket are named for this folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HubDir(PathBuf);
+
+impl HubDir {
+    /// The hub whose folder is `dir`.
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        HubDir(dir.into())
+    }
+
+    /// The hub this computer runs: `<config-dir>/hub/`.
+    pub fn this() -> Result<Self, String> {
+        Ok(HubDir(root()?.join("hub")))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Its core: `database.db`, with its settings, its accounts and their
+    /// tokens, the keys of its backends, sealed, and the audit log of its
+    /// settings; and `master.key`, which seals the keys.
+    pub fn core(&self) -> PathBuf {
+        self.0.join("core")
+    }
+
+    /// Its core's database, where its settings are kept.
+    pub fn database(&self) -> PathBuf {
+        self.core().join(DB_FILE)
+    }
+
+    /// The knowledge connector's: the vault, and the vectors of its notes.
+    pub fn knowledge(&self) -> PathBuf {
+        self.0.join("knowledge")
+    }
+
+    /// The knowledge vault: shares and notes, Markdown files in a git
+    /// repository.
+    pub fn vault(&self) -> PathBuf {
+        self.knowledge().join("vault")
+    }
+
+    /// The tasks connector's: the tasks the hub keeps for its accounts.
+    pub fn tasks(&self) -> PathBuf {
+        self.0.join("tasks")
+    }
+
+    /// The trackers': which issue of which tracker became which task; and a
+    /// local tracker's folder, when it names a relative one.
+    pub fn trackers(&self) -> PathBuf {
+        self.0.join("trackers")
+    }
 }
 
-/// The file in `runner/` and in `hub/` that holds their secrets, such as API
-/// keys, as `NAME=value` lines: hidden, out of the YAML, readable only by you.
-pub const ENV_FILE: &str = ".env";
+/// The folder of this computer's runner, `<config-dir>/runner/`. A computer
+/// runs one runner; its lock and its socket are named for this folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerDir(PathBuf);
 
-/// This computer's runner: `runner.yaml`, its helper teams in `teams/`, its
-/// secrets in `.env`, and its hub tokens in `hubs.json`.
-pub fn runner_config_dir() -> Result<PathBuf, String> {
-    Ok(config_root()?.join("runner"))
+impl RunnerDir {
+    /// The runner whose folder is `dir`.
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        RunnerDir(dir.into())
+    }
+
+    /// This computer's runner: `<config-dir>/runner/`.
+    pub fn this() -> Result<Self, String> {
+        Ok(RunnerDir(root()?.join("runner")))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Its core: `database.db`, with its settings, the keys of its backends,
+    /// sealed, its hub tokens, sealed, and the audit log of its settings; and
+    /// `master.key`, which seals them.
+    pub fn core(&self) -> PathBuf {
+        self.0.join("core")
+    }
+
+    /// Its core's database, where its settings are kept.
+    pub fn database(&self) -> PathBuf {
+        self.core().join(DB_FILE)
+    }
+
+    /// Its helper teams: a folder per team, named for it.
+    pub fn teams(&self) -> PathBuf {
+        self.0.join("teams")
+    }
 }
 
 /// The runner's helper teams: a folder per team, named for it.
 pub fn teams_dir() -> Result<PathBuf, String> {
-    Ok(runner_config_dir()?.join("teams"))
+    Ok(RunnerDir::this()?.teams())
 }
 
-/// A hub this computer runs (`ensemble-hub serve`): its `database.db` of
-/// settings, sealed keys, accounts and deliveries, the `master.key` that
-/// seals the keys, a `.env` of keys a secrets manager keeps, and its
-/// knowledge vault.
-pub fn hub_config_dir() -> Result<PathBuf, String> {
-    Ok(config_root()?.join("hub"))
-}
-
-/// The state of the work done in `workdir`: its tasks, runs and worktrees.
-/// Named for the folder, with a hash of its whole path so two folders of the
-/// same name do not share one.
+/// The state of the work the runner does in `workdir`: its tasks, runs and
+/// worktrees. Named for the folder, with a hash of its whole path so two
+/// folders of the same name do not share one.
 pub fn dir_for(workdir: &Path) -> Result<PathBuf, String> {
-    dir_in(&root()?, workdir)
+    dir_in(RunnerDir::this()?.path(), workdir)
 }
 
-/// [`dir_for`], under the state directory `root` instead of this user's.
-pub fn dir_in(root: &Path, workdir: &Path) -> Result<PathBuf, String> {
+/// [`dir_for`], for the runner whose folder is `runner` instead of this
+/// computer's.
+pub fn dir_in(runner: &Path, workdir: &Path) -> Result<PathBuf, String> {
     let canonical = workdir
         .canonicalize()
         .map_err(|e| format!("{}: {e}", workdir.display()))?;
-    Ok(root.join("workdirs").join(labelled(&canonical)))
+    Ok(runner.join("workdirs").join(labelled(&canonical)))
 }
 
 /// What is shared by every project that uses the helper team at `config`: how
@@ -95,19 +195,20 @@ pub fn team_dir(config: &Path) -> Result<PathBuf, String> {
     let canonical = config
         .canonicalize()
         .map_err(|e| format!("{}: {e}", config.display()))?;
-    Ok(root()?.join("orgs").join(labelled(&canonical)))
+    Ok(RunnerDir::this()?
+        .path()
+        .join("orgs")
+        .join(labelled(&canonical)))
 }
 
-/// What this computer's runner keeps: its lock and its runs for others. A
-/// computer runs one runner.
+/// What this computer's runner keeps while it runs: its lock.
 pub fn runner_dir() -> Result<PathBuf, String> {
-    Ok(root()?.join("runner"))
+    Ok(RunnerDir::this()?.path().to_path_buf())
 }
 
-/// What a hub this computer runs keeps while it runs: its lock. A computer
-/// runs one hub.
+/// What a hub this computer runs keeps while it runs: its lock.
 pub fn hub_dir() -> Result<PathBuf, String> {
-    Ok(root()?.join("hub"))
+    Ok(HubDir::this()?.path().to_path_buf())
 }
 
 /// Where the hub whose state is in `hub_dir` takes the operations of

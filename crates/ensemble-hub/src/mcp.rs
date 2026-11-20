@@ -670,7 +670,7 @@ mod tests {
             text.contains("only you"),
             "private unless it says hub: {text}"
         );
-        let shares = hub.tmp.0.join("vault").join("shares");
+        let shares = hub.tmp.0.join("knowledge/vault").join("shares");
         let kept: Vec<String> = walk(&shares)
             .into_iter()
             .map(|p| std::fs::read_to_string(p).unwrap())

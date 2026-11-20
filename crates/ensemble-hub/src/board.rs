@@ -1,5 +1,5 @@
-//! The hub's tasks, kept in its database per account and project and leased
-//! to runners, as `ensemble_tasks::board` says. [`DbBoard`] is one project's
+//! The hub's tasks, kept in the tasks connector's database per account and
+//! project and leased to runners, as `ensemble_tasks::board` says. [`DbBoard`] is one project's
 //! tasks of one account; [`Service`] answers the link's task methods with
 //! them, as the server passes those on ([`TaskService`]), with the runners
 //! connected now that may take an account's tasks ([`Present`]), which say
@@ -28,6 +28,27 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
+
+/// The tasks the hub keeps, in the tasks connector's database
+/// (`<config-dir>/hub/tasks/`).
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS tasks (
+    owner TEXT NOT NULL,
+    project TEXT NOT NULL,
+    id TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (owner, project, id)
+);
+";
+
+/// Open the tasks' database in `dir`, and run `work` on it.
+fn with<T>(
+    dir: &Path,
+    work: impl AsyncFnOnce(&store::Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    store::with(dir, SCHEMA, work)
+}
 
 /// The hub's tasks, as the server passes the link's task methods to them, so
 /// the server knows nothing of how they are kept.
@@ -281,7 +302,7 @@ impl DbBoard {
 
     /// Every task's record, oldest first.
     fn records(&self) -> Result<Vec<Record>, String> {
-        let rows = store::with(&self.dir, async |c| {
+        let rows = with(&self.dir, async |c| {
             store::rows(
                 c,
                 "SELECT data FROM tasks WHERE owner = ?1 AND project = ?2 ORDER BY number",
@@ -300,7 +321,7 @@ impl DbBoard {
     fn record(&self, id: &str) -> Result<Option<Record>, String> {
         let mut keys = self.keys();
         keys.push(Sql::Text(id.to_string()));
-        let rows = store::with(&self.dir, async |c| {
+        let rows = with(&self.dir, async |c| {
             store::rows(
                 c,
                 "SELECT data FROM tasks WHERE owner = ?1 AND project = ?2 AND id = ?3",
@@ -330,7 +351,7 @@ impl DbBoard {
         let mut params = vec![Sql::Text(data)];
         params.extend(self.keys());
         params.push(Sql::Text(id.to_string()));
-        store::with(&self.dir, async |c| {
+        with(&self.dir, async |c| {
             store::execute(
                 c,
                 "UPDATE tasks SET data = ?1 WHERE owner = ?2 AND project = ?3 AND id = ?4",
@@ -432,7 +453,7 @@ impl DbBoard {
         let data = serde_json::to_string(&record).map_err(|e| e.to_string())?;
         let mut params = self.keys();
         params.extend([Sql::Text(id.clone()), Sql::Integer(number), Sql::Text(data)]);
-        store::with(&self.dir, async |c| {
+        with(&self.dir, async |c| {
             store::execute(
                 c,
                 "INSERT INTO tasks (owner, project, id, number, data) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -765,7 +786,7 @@ fn slug(title: &str) -> String {
 #[async_trait]
 impl Board for DbBoard {
     fn place(&self) -> String {
-        format!("the hub's database in {}", self.dir.display())
+        format!("the hub's tasks in {}", self.dir.display())
     }
     async fn scan(&self) -> Result<Vec<Task>, String> {
         blocking(|| self.list())
@@ -819,7 +840,7 @@ pub fn waiting(
     agents: &[String],
     present: &[Present],
 ) -> Result<Vec<Waiting>, String> {
-    let rows = store::with(dir, async |c| {
+    let rows = with(dir, async |c| {
         store::rows(
             c,
             "SELECT project, data FROM tasks WHERE owner = ?1 ORDER BY project, number",
@@ -865,7 +886,7 @@ pub fn lent(
     runners: &(dyn Fn(&str) -> Vec<Present> + Sync),
     compute: &(dyn Fn(&str) -> bool + Sync),
 ) -> Result<Vec<Waiting>, String> {
-    let rows = store::with(dir, async |c| {
+    let rows = with(dir, async |c| {
         store::rows(
             c,
             "SELECT owner, project, data FROM tasks WHERE owner != ?1 ORDER BY owner, project, number",
@@ -2081,7 +2102,7 @@ mod tests {
         // `host`.
         link.call(RUNNER, as_gpu("hub")).await.unwrap();
         let scoped = {
-            let mut users = crate::users::Users::load(&hub.tmp.0.join("state")).unwrap();
+            let mut users = crate::users::Users::load(&hub.tmp.0.join("state/core")).unwrap();
             let (_, token, _) = users
                 .create_token(
                     "root",

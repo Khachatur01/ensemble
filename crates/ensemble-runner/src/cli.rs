@@ -8,27 +8,27 @@ use ensemble_ops::cli::mount;
 use std::path::PathBuf;
 
 const AFTER_HELP: &str = "\
-Files:
-  ~/.config/ensemble/runner/ database.db (its settings, and the keys of its
-                             backends), master.key, teams/ (one folder per
-                             team), hubs.json, .env
-  ~/.local/state/ensemble/   run logs and worktrees, per repository
+Files, in --config-dir (by default ~/.local/state/ensemble):
+  runner/core/      database.db (its settings, the keys of its backends and
+                    its hub tokens, sealed), master.key
+  runner/teams/     its helper teams, one folder each
+  runner/workdirs/  run logs and worktrees, per repository
 
-Its settings are kept in its database, and changed with `settings`, `backend`
-and `login`; `settings show` shows them, `settings history` who changed what. A key given to `backend add` or `backend key` is kept there,
+Its settings are kept in its core's database, and changed with `settings`,
+`backend` and `login`; `settings show` shows them, `settings history` who
+changed what. A key given to `backend add` or `backend key` is kept there,
 sealed by master.key: back up both. A key a secrets manager keeps is read from
-the environment, or from the runner's .env (or --env-file), and named with
-`backend key --key-env`.";
+the environment, and named with `backend key --key-env`.";
 
 /// This computer's Ensemble runner: it runs the tasks of your hub with your
 /// helper teams.
 #[derive(Debug, Parser)]
 #[command(name = "ensemble-runner", version, after_help = AFTER_HELP, max_term_width = 100)]
 pub struct Cli {
-    /// A file of NAME=value lines read for variables the environment does not
-    /// set, instead of the runner's .env.
-    #[arg(long, global = true, value_name = "PATH")]
-    pub env_file: Option<PathBuf>,
+    /// The folder everything is kept in, the runner in its runner/; by
+    /// default ~/.local/state/ensemble.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub config_dir: Option<PathBuf>,
     /// The folder an agent works in for `agent run`, and where `agent health`
     /// and `doctor` start agent CLIs. Default: the current directory.
     #[arg(short, long, global = true, value_name = "PATH")]

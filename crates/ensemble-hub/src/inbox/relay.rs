@@ -27,10 +27,10 @@ use super::work::{self, AUTHOR, Update, reply_after};
 use crate::board::{DbBoard, Recall, recall_query};
 use crate::users::Users;
 use ensemble_config::{Permission, Tracker};
+use ensemble_core::state::HubDir;
 use ensemble_store as store;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -69,10 +69,20 @@ pub struct Delivery {
     pub asked: Option<String>,
 }
 
+/// Which issue of which tracker became which task, in the trackers'
+/// database (`<config-dir>/hub/trackers/`).
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS tracker_deliveries (
+    tracker TEXT NOT NULL,
+    issue TEXT NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (tracker, issue)
+);
+";
+
 /// The deliveries of the tracker named `tracker` kept in `dir`, by issue.
 fn load(dir: &std::path::Path, tracker: &str) -> Result<BTreeMap<String, Delivery>, String> {
-    store::with(dir, async |c| {
-        adopt(c, tracker).await?;
+    store::with(dir, SCHEMA, async |c| {
         let mut out = BTreeMap::new();
         let rows = store::rows(
             c,
@@ -92,32 +102,6 @@ fn load(dir: &std::path::Path, tracker: &str) -> Result<BTreeMap<String, Deliver
     })
 }
 
-/// Give the deliveries of a hub that watched one tracker, kept by the issue
-/// alone, to the first tracker that loads them: the one it watched, as it
-/// had no other.
-async fn adopt(c: &store::Connection, tracker: &str) -> Result<(), String> {
-    let old = store::rows(
-        c,
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'deliveries'",
-        vec![],
-    )
-    .await?;
-    if old.is_empty() {
-        return Ok(());
-    }
-    store::transaction(
-        c,
-        vec![
-            (
-                "INSERT OR IGNORE INTO tracker_deliveries (tracker, issue, data) SELECT ?1, issue, data FROM deliveries",
-                vec![store::Value::Text(tracker.into())],
-            ),
-            ("DROP TABLE deliveries", vec![]),
-        ],
-    )
-    .await
-}
-
 /// A hub server's task inbox, for one tracker.
 pub struct ServerInbox {
     /// The tracker's name in `connectors.tasks.trackers`.
@@ -126,9 +110,9 @@ pub struct ServerInbox {
     settings: Tracker,
     tracker: Box<dyn IssueTracker + Send>,
     roles: BTreeMap<String, Vec<Permission>>,
-    /// The hub's state directory, with its database: its users, their tasks,
-    /// and the deliveries.
-    dir: PathBuf,
+    /// The hub's folder: its users in its core, their tasks, and the
+    /// deliveries in the trackers'.
+    dir: HubDir,
     /// Held for every pass, so the tracker and the deliveries change one step
     /// at a time.
     deliveries: Mutex<BTreeMap<String, Delivery>>,
@@ -141,15 +125,15 @@ impl ServerInbox {
         name: &str,
         settings: &Tracker,
         roles: &BTreeMap<String, Vec<Permission>>,
-        dir: PathBuf,
+        dir: &HubDir,
     ) -> Result<Self, String> {
-        let deliveries = load(&dir, name)?;
+        let deliveries = load(&dir.trackers(), name)?;
         Ok(ServerInbox {
             name: name.to_string(),
             tracker: super::tracker_for(settings),
             settings: settings.clone(),
             roles: roles.clone(),
-            dir,
+            dir: dir.clone(),
             deliveries: Mutex::new(deliveries),
             notes: None,
         })
@@ -194,7 +178,9 @@ impl ServerInbox {
                 ],
             ));
         }
-        store::with(&self.dir, async |c| store::transaction(c, statements).await)
+        store::with(&self.dir.trackers(), SCHEMA, async |c| {
+            store::transaction(c, statements).await
+        })
     }
 
     /// The account the issue is for: active, `tracker_name` its assignee, with
@@ -208,13 +194,13 @@ impl ServerInbox {
     }
 
     fn board(&self, d: &Delivery) -> DbBoard {
-        DbBoard::new(&self.dir, &d.account, &d.project)
+        DbBoard::new(&self.dir.tasks(), &d.account, &d.project)
     }
 
     /// One look at the tracker and at the tasks. Returns a line for each
     /// thing it did.
     pub fn pass(&self) -> Result<Vec<String>, String> {
-        let users = Users::load(&self.dir).map_err(String::from)?;
+        let users = Users::load(&self.dir.core()).map_err(String::from)?;
         let mut deliveries = self.deliveries.lock().unwrap_or_else(|e| e.into_inner());
         let mut said = Vec::new();
         let issues = self.tracker.labelled(&self.settings.label);
@@ -450,7 +436,8 @@ mod tests {
             ),
             ("reader".to_string(), vec![Permission::Recall]),
         ]);
-        let mut users = Users::load(&tmp.0.join("state")).unwrap();
+        let state = HubDir::new(tmp.0.join("state"));
+        let mut users = Users::load(&state.core()).unwrap();
         users.add("ana", "member", &roles).unwrap();
         users.set_tracker_user("ana", Some("ana.p")).unwrap();
         users.add("rex", "reader", &roles).unwrap();
@@ -462,7 +449,7 @@ mod tests {
             label: "ensemble".into(),
             poll_seconds: 1,
         };
-        let inbox = ServerInbox::new("issues", &tracker, &roles, tmp.0.join("state")).unwrap();
+        let inbox = ServerInbox::new("issues", &tracker, &roles, &state).unwrap();
         World { tmp, inbox }
     }
 
@@ -486,7 +473,7 @@ mod tests {
 
         /// Ana's tasks in the project shop.
         fn board(&self) -> DbBoard {
-            DbBoard::new(&self.tmp.0.join("state"), "ana", "shop")
+            DbBoard::new(&self.inbox.dir.tasks(), "ana", "shop")
         }
     }
 
@@ -631,8 +618,7 @@ mod tests {
         w.issue("1", "ana.p", "shop");
         w.inbox.pass().unwrap();
         let roles = w.inbox.roles.clone();
-        let again =
-            ServerInbox::new("issues", &w.inbox.settings, &roles, w.tmp.0.join("state")).unwrap();
+        let again = ServerInbox::new("issues", &w.inbox.settings, &roles, &w.inbox.dir).unwrap();
         assert_eq!(again.deliveries(), w.inbox.deliveries());
         assert_eq!(again.deliveries()["1"].stage, Stage::Queued);
     }
@@ -648,7 +634,7 @@ mod tests {
             ..w.inbox.settings.clone()
         };
         let roles = w.inbox.roles.clone();
-        let other = ServerInbox::new("work", &work, &roles, w.tmp.0.join("state")).unwrap();
+        let other = ServerInbox::new("work", &work, &roles, &w.inbox.dir).unwrap();
         w.issue("1", "ana.p", "shop");
         std::fs::write(
             w.tmp.0.join("work").join("1.md"),
@@ -660,46 +646,10 @@ mod tests {
         assert_eq!(w.board().list().unwrap().len(), 2, "one task of each");
         // Each keeps its own, and a pass of one leaves the other's alone.
         w.inbox.pass().unwrap();
-        let again = ServerInbox::new("work", &work, &roles, w.tmp.0.join("state")).unwrap();
+        let again = ServerInbox::new("work", &work, &roles, &w.inbox.dir).unwrap();
         assert_eq!(again.deliveries(), other.deliveries());
         assert_ne!(other.deliveries()["1"].task, w.inbox.deliveries()["1"].task);
         other.pass().unwrap();
         assert_eq!(w.board().list().unwrap().len(), 2, "made once each");
-    }
-
-    #[test]
-    fn the_deliveries_of_a_hub_that_watched_one_tracker_go_to_it() {
-        let w = world();
-        let state = w.tmp.0.join("state");
-        let d = Delivery {
-            issue: "7".into(),
-            account: "ana".into(),
-            project: "shop".into(),
-            stage: Stage::Queued,
-            task: Some("0001-x".into()),
-            comments: 1,
-            asked: None,
-        };
-        store::with(&state, async |c| {
-            store::execute(
-                c,
-                "CREATE TABLE deliveries (issue TEXT PRIMARY KEY, data TEXT NOT NULL)",
-                vec![],
-            )
-            .await?;
-            store::execute(
-                c,
-                "INSERT INTO deliveries (issue, data) VALUES ('7', ?1)",
-                vec![store::Value::Text(serde_json::to_string(&d).unwrap())],
-            )
-            .await
-            .map(|_| ())
-        })
-        .unwrap();
-        let roles = w.inbox.roles.clone();
-        let inbox = ServerInbox::new("issues", &w.inbox.settings, &roles, state.clone()).unwrap();
-        assert_eq!(inbox.deliveries()["7"], d);
-        let other = ServerInbox::new("work", &w.inbox.settings, &roles, state).unwrap();
-        assert!(other.deliveries().is_empty(), "adopted once");
     }
 }

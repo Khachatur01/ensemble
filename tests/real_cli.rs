@@ -31,7 +31,7 @@ impl Project {
     fn new(config: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("ensemble-real-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let team = dir.join("config/ensemble/runner/teams/probe");
+        let team = dir.join("state/ensemble/runner/teams/probe");
         std::fs::create_dir_all(&team).unwrap();
         std::fs::create_dir_all(dir.join("work")).unwrap();
         std::fs::write(team.join("config.yaml"), config).unwrap();

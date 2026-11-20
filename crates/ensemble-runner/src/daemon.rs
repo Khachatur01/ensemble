@@ -93,10 +93,8 @@ pub struct Daemon<'a> {
 }
 
 impl<'a> Daemon<'a> {
-    /// A runner from `runner`, its teams loaded as `team`, reading its keys
-    /// from `env_file` when one is given (`--env-file`).
+    /// A runner from `runner`, its teams loaded as `team`.
     pub fn new(
-        env_file: Option<std::path::PathBuf>,
         runner: Runner,
         hub: Option<(String, Token)>,
         team: Config,
@@ -110,7 +108,7 @@ impl<'a> Daemon<'a> {
                 Some((url, token)) => read_token_again(url, token),
                 None => Err("the runner names no hub".to_string()),
             };
-            (operations, RunnerContext::running(env_file, relink)?)
+            (operations, RunnerContext::running(relink)?)
         };
         Ok(Daemon {
             hub_link: hub
@@ -619,7 +617,7 @@ pub async fn reload(socket: &Path) -> Result<String, String> {
 /// Read the token of the hub at `url` again, as `ensemble-runner login` kept
 /// it, into `token`, which every link to the hub follows. What it did.
 fn read_token_again(url: &str, token: &Token) -> Result<String, String> {
-    let kept = ensemble_link::Tokens::load()?
+    let kept = crate::kept::Tokens::load()?
         .get(url)
         .map(String::from)
         .ok_or_else(|| format!("no token is kept for {url}; `ensemble-runner login {url}`"))?;

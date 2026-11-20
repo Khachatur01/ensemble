@@ -640,13 +640,11 @@ pub fn instructions_for(tools: &[&str]) -> String {
 mod tests {
     use super::*;
     use ensemble_core::workspace::testing::TempDir;
-    use std::path::Path;
 
     /// The settings of a hub of Ana's whose one backend, `local`, is at `url`
-    /// and distills with `small`, its vault in `tmp`.
-    pub(crate) fn settings_on(tmp: &TempDir, url: &str) -> ensemble_config::HubSettings {
+    /// and distills with `small`.
+    pub(crate) fn settings_on(url: &str) -> ensemble_config::HubSettings {
         let mut s = ensemble_config::HubSettings::starting("Ana");
-        s.listen = "127.0.0.1:0".into();
         s.backends.insert(
             "local".into(),
             ensemble_config::BackendSetting::OpenAiCompatible {
@@ -655,7 +653,6 @@ mod tests {
                 timeout_seconds: 5,
             },
         );
-        s.vault = tmp.0.join("vault").display().to_string();
         s.distill = ensemble_config::ModelsSetting {
             candidates: vec![ensemble_config::ModelSetting {
                 backend: "local".into(),
@@ -670,8 +667,11 @@ mod tests {
     }
 
     pub(crate) fn memory(tmp: &TempDir) -> Memory {
-        let hub = settings_on(tmp, "http://127.0.0.1:1/v1")
-            .resolve(Path::new("database.db"), &std::collections::BTreeMap::new())
+        let hub = settings_on("http://127.0.0.1:1/v1")
+            .resolve(
+                &ensemble_core::state::HubDir::new(&tmp.0),
+                &std::collections::BTreeMap::new(),
+            )
             .unwrap();
         let memory = Memory::new(&hub, Some("shop".into()));
         memory.vault().init().unwrap();

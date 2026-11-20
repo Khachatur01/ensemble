@@ -106,7 +106,7 @@ fn runner_on(backends: &str, env: &dyn Env) -> Result<Runner, ConfigError> {
         backends,
         ..RunnerSettings::starting("laptop", "/code")
     }
-    .resolve(Path::new("/r/database.db"), env)
+    .resolve(&ensemble_core::state::RunnerDir::new("/r"), env)
 }
 
 /// The team `doc` on the runner of RUNNER_BACKENDS.
@@ -592,35 +592,6 @@ fn the_schemas_choices_are_the_codes() {
     assert_eq!(tag("opencode_provider_model"), PROVIDER_MODEL);
     assert_eq!(tag("opencode_llm_backend_model"), LLM_BACKEND_MODEL);
     assert_eq!(schema["properties"]["version"]["const"], SUPPORTED_VERSION);
-}
-
-#[test]
-fn a_dotenv_file_is_read_with_comments_quotes_and_export() {
-    let text =
-        "# keys\nexport A_KEY=sk-1 # trailing\n\nB=\"two words\"\nC='it#is'\nD=\nE = spaced \n";
-    let vars = parse_dotenv(text, Path::new(".env")).unwrap();
-    assert_eq!(vars["A_KEY"], "sk-1");
-    assert_eq!(vars["B"], "two words");
-    assert_eq!(vars["C"], "it#is");
-    assert_eq!(vars["D"], "");
-    assert_eq!(vars["E"], "spaced");
-    assert_eq!(vars.len(), 5);
-}
-
-#[test]
-fn a_malformed_dotenv_line_is_reported_with_its_number() {
-    let Err(ConfigError::Invalid { problems, .. }) =
-        parse_dotenv("OK=1\njust words\n9X=1\n", Path::new(".env"))
-    else {
-        panic!("expected invalid");
-    };
-    assert_eq!(
-        problems,
-        [
-            "line 2: expected NAME=value",
-            "line 3: '9X' is not a variable name"
-        ]
-    );
 }
 
 #[test]
@@ -1314,7 +1285,7 @@ fn hub_settings() -> HubSettings {
 
 fn hub_problems(hub: &HubSettings) -> String {
     problems_of(
-        hub.resolve(Path::new("/hubs/ana/database.db"), &env(&[]))
+        hub.resolve(&ensemble_core::state::HubDir::new("/hubs/ana"), &env(&[]))
             .unwrap_err(),
     )
     .join("\n")
@@ -1323,14 +1294,17 @@ fn hub_problems(hub: &HubSettings) -> String {
 #[test]
 fn a_new_hub_starts_on_this_computer_closed_with_no_backend_and_loads() {
     let hub = HubSettings::starting("Ana")
-        .resolve(Path::new("/hubs/ana/database.db"), &env(&[]))
+        .resolve(&ensemble_core::state::HubDir::new("/hubs/ana"), &env(&[]))
         .unwrap();
     assert_eq!(hub.owner, "Ana");
-    assert_eq!(hub.http.listen.to_string(), "127.0.0.1:7700");
     assert_eq!(hub.accounts.rules.registration, Registration::Closed);
     assert!(hub.llm.direct.is_empty() && hub.llm.runners.is_empty());
     let k = &hub.connectors.knowledge;
-    assert_eq!(k.vault, Path::new("/hubs/ana/vault"), "in the hub's folder");
+    assert_eq!(
+        k.vault,
+        Path::new("/hubs/ana/knowledge/vault"),
+        "in the hub's folder"
+    );
     assert!(k.distill.fallback.candidates.is_empty(), "shares wait");
     assert_eq!(k.distill.fallback.when_none, WhenNone::Wait);
     assert!(k.embed.is_none() && hub.connectors.sources.filter.is_none());
@@ -1342,7 +1316,6 @@ fn a_new_hub_starts_on_this_computer_closed_with_no_backend_and_loads() {
 fn a_hub_names_every_problem_of_its_settings() {
     let mut hub = hub_settings();
     hub.owner = " ".into();
-    hub.listen = "anywhere".into();
     hub.registration = RegistrationSetting::Approval { max_pending: 0 };
     hub.session_hours = 0;
     hub.roles
@@ -1352,7 +1325,6 @@ fn a_hub_names_every_problem_of_its_settings() {
     let said = hub_problems(&hub);
     for wanted in [
         "owner: is empty",
-        "listen: 'anywhere' must be an address and a port",
         "registration: `max_pending` must be greater than 0",
         "session_hours: must be greater than 0",
         "the role name 'two words' must be one word",
@@ -1379,7 +1351,9 @@ fn an_embedding_model_is_an_openai_compatible_backend_and_a_similarity_from_0_to
         model: "nomic".into(),
         min_similarity: 0.5,
     });
-    let resolved = hub.resolve(Path::new("/h/database.db"), &env(&[])).unwrap();
+    let resolved = hub
+        .resolve(&ensemble_core::state::HubDir::new("/h"), &env(&[]))
+        .unwrap();
     assert_eq!(
         resolved
             .connectors
@@ -1409,7 +1383,9 @@ fn the_source_filter_is_one_of_the_hubs_models_and_the_admins_prompt() {
         models: hub.distill.clone(),
         prompt: "Salaries.".into(),
     });
-    let resolved = hub.resolve(Path::new("/h/database.db"), &env(&[])).unwrap();
+    let resolved = hub
+        .resolve(&ensemble_core::state::HubDir::new("/h"), &env(&[]))
+        .unwrap();
     assert_eq!(
         resolved.connectors.sources.filter.unwrap().prompt,
         "Salaries."
@@ -1438,12 +1414,14 @@ fn a_hub_inbox_names_its_tracker_and_label_and_each_tracker_its_own_folder() {
     };
     hub.trackers
         .insert("issues".into(), tracker("issues", "ensemble"));
-    let resolved = hub.resolve(Path::new("/h/database.db"), &env(&[])).unwrap();
+    let resolved = hub
+        .resolve(&ensemble_core::state::HubDir::new("/h"), &env(&[]))
+        .unwrap();
     let t = &resolved.connectors.tasks.trackers["issues"];
     assert_eq!(
         t.kind,
         IssueTracker::LocalMarkdown {
-            dir: PathBuf::from("/h/issues")
+            dir: PathBuf::from("/h/trackers/issues")
         }
     );
     assert_eq!(t.label, "ensemble");
@@ -1474,7 +1452,9 @@ fn a_hub_reaches_backends_runners_share_and_names_them_alone() {
         backend: "gpu".into(),
         model: "big".into(),
     });
-    let resolved = hub.resolve(Path::new("/h/database.db"), &env(&[])).unwrap();
+    let resolved = hub
+        .resolve(&ensemble_core::state::HubDir::new("/h"), &env(&[]))
+        .unwrap();
     assert_eq!(
         resolved.llm.runners["gpu"],
         Relayed {
@@ -1520,7 +1500,7 @@ fn runner_with(edit: impl FnOnce(&mut RunnerSettings)) -> Result<Runner, ConfigE
     let mut runner = RunnerSettings::starting("laptop", "~/ensemble");
     edit(&mut runner);
     runner.resolve(
-        Path::new("/home/ana/.config/ensemble/runner/database.db"),
+        &ensemble_core::state::RunnerDir::new("/home/ana/.local/state/ensemble/runner"),
         &env(&[]),
     )
 }
@@ -1534,7 +1514,7 @@ fn a_new_runner_works_for_its_owner_in_its_workspace_and_loads() {
     let relative = runner_with(|r| r.workspace = "work".into()).unwrap();
     assert_eq!(
         relative.workspace,
-        Path::new("/home/ana/.config/ensemble/runner/work"),
+        Path::new("/home/ana/.local/state/ensemble/runner/work"),
         "a relative path is in the runner's folder"
     );
     let said = runner_with(|r| {
@@ -1635,42 +1615,11 @@ fn a_builtin_agent_runs_on_llm_backends_with_tools_it_has() {
 }
 
 #[test]
-fn a_key_is_kept_in_dotenv_with_the_other_lines_as_they_were() {
-    let dir = std::env::temp_dir().join(format!("ensemble-dotenv-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let path = dir.join(".env");
-    set_dotenv(&path, "ENSEMBLE_BACKEND_CENTRAL_KEY", Some("sk-1")).unwrap();
-    std::fs::write(
-        &path,
-        format!(
-            "# mine\nOTHER=x\n{}",
-            std::fs::read_to_string(&path).unwrap()
-        ),
-    )
-    .unwrap();
-    let tricky = "a b#c\"d\\e";
-    set_dotenv(&path, "ENSEMBLE_BACKEND_CENTRAL_KEY", Some(tricky)).unwrap();
-    set_dotenv(&path, "NEW", Some("plain-1")).unwrap();
-    let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.starts_with("# mine\nOTHER=x\n"), "{text}");
-    let vars = parse_dotenv(&text, &path).unwrap();
-    assert_eq!(vars["ENSEMBLE_BACKEND_CENTRAL_KEY"], tricky);
-    assert_eq!(vars["NEW"], "plain-1");
-    set_dotenv(&path, "ENSEMBLE_BACKEND_CENTRAL_KEY", None).unwrap();
-    let vars = parse_dotenv(&std::fs::read_to_string(&path).unwrap(), &path).unwrap();
-    assert!(!vars.contains_key("ENSEMBLE_BACKEND_CENTRAL_KEY"));
-    assert_eq!(vars["OTHER"], "x");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "readable by its owner alone");
-    }
+fn a_backends_key_is_named_for_it() {
     assert_eq!(
         backend_key_variable("team-gpu.2"),
         "ENSEMBLE_BACKEND_TEAM_GPU_2_KEY"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

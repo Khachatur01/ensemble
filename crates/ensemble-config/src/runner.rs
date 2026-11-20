@@ -15,6 +15,7 @@
 
 use super::llm::BackendSetting;
 use super::*;
+use ensemble_core::state::RunnerDir;
 use serde::{Deserialize, Serialize};
 
 /// One runner.
@@ -95,10 +96,10 @@ impl RunnerSettings {
         }
     }
 
-    /// The runner these settings make, checked, with the keys they name from
-    /// `env`. `source` is where they are kept, the runner's database: a
-    /// relative workspace is in its folder.
-    pub fn resolve(&self, source: &Path, env: &dyn Env) -> Result<Runner, ConfigError> {
+    /// The runner in `dir` these settings make, checked, with the keys they
+    /// name from `env`: a relative workspace is in its folder.
+    pub fn resolve(&self, dir: &RunnerDir, env: &dyn Env) -> Result<Runner, ConfigError> {
+        let source = &dir.database();
         let mut problems = Vec::new();
         let name = self.name.trim().to_string();
         if !valid_name(&name) {
@@ -106,7 +107,7 @@ impl RunnerSettings {
                 "name: '{name}' must be letters, digits, '-', '_' or '.', such as laptop or gpu-box"
             ));
         }
-        let workspace = workspace_path(self.workspace.trim(), source).unwrap_or_else(|e| {
+        let workspace = workspace_path(self.workspace.trim(), dir.path()).unwrap_or_else(|e| {
             problems.push(format!("workspace: {e}"));
             PathBuf::new()
         });
@@ -176,9 +177,9 @@ impl RunnerSettings {
     }
 }
 
-/// The folder `workspace` names for the runner kept at `source`: `~/…` in the
-/// home directory, and a relative path in the runner's folder.
-fn workspace_path(workspace: &str, source: &Path) -> Result<PathBuf, String> {
+/// The folder `workspace` names for the runner in `dir`: `~/…` in the home
+/// directory, and a relative path in the runner's folder.
+fn workspace_path(workspace: &str, dir: &Path) -> Result<PathBuf, String> {
     if workspace.is_empty() {
         return Err("is empty: name the folder the runner works in, such as ~/ensemble".into());
     }
@@ -188,7 +189,7 @@ fn workspace_path(workspace: &str, source: &Path) -> Result<PathBuf, String> {
             .ok_or_else(|| format!("'{workspace}' starts with ~, and HOME is not set"))?;
         return Ok(PathBuf::from(home).join(rest));
     }
-    Ok(source.parent().unwrap_or(Path::new(".")).join(workspace))
+    Ok(dir.join(workspace))
 }
 
 /// A runner's name: what a hub's users write after `<owner>/`.

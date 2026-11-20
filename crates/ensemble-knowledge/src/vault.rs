@@ -5,7 +5,6 @@
 //! notes/<slug>.md              written only by the pipeline
 //! review/<share-id>.md         what the pipeline would not write, and why
 //! log.jsonl                    one line per share the pipeline has processed
-//! .ensemble/embeddings.db      the notes' vectors, a cache out of the history
 //! ```
 //!
 //! The notes are a product of the shares: a new note format rebuilds them from
@@ -22,8 +21,6 @@ use std::time::SystemTime;
 /// The author of every commit in a vault: only Ensemble writes one.
 const GIT_NAME: &str = "ensemble";
 const GIT_EMAIL: &str = "ensemble@localhost";
-/// The folder of what is made again from the notes, out of the history.
-const CACHE_DIR: &str = ".ensemble";
 
 /// One vault, by its directory.
 #[derive(Debug, Clone)]
@@ -212,27 +209,6 @@ impl Vault {
     }
 
     /// Make the directory a git repository, unless it is one.
-    /// `.ensemble/`: what is made again from the notes, such as their vectors,
-    /// made when first asked for and kept out of the vault's history by its
-    /// `.gitignore`.
-    pub fn cache_dir(&self) -> Result<PathBuf, String> {
-        let dir = self.root.join(CACHE_DIR);
-        fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        let ignore = self.root.join(".gitignore");
-        let ignored = format!("/{CACHE_DIR}/");
-        let text = fs::read_to_string(&ignore).unwrap_or_default();
-        if !text.lines().any(|l| l.trim() == ignored) {
-            let sep = if text.is_empty() || text.ends_with('\n') {
-                ""
-            } else {
-                "\n"
-            };
-            write_atomically(&ignore, &format!("{text}{sep}{ignored}\n"))
-                .map_err(|e| format!("cannot write {}: {e}", ignore.display()))?;
-        }
-        Ok(dir)
-    }
-
     pub fn init(&self) -> Result<(), String> {
         fs::create_dir_all(&self.root)
             .map_err(|e| format!("cannot create {}: {e}", self.root.display()))?;

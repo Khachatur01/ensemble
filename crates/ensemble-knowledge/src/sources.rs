@@ -202,12 +202,11 @@ mod tests {
     use ensemble_backends::testing::{model_server, nowhere};
     use ensemble_core::workspace::testing::TempDir;
     use serde_json::Value;
-    use std::path::Path;
     use std::sync::Mutex;
 
     /// The knowledge of a hub whose source filter runs on `url`.
     fn memory_on(tmp: &TempDir, url: &str, when_none: &str) -> Memory {
-        let mut settings = crate::tests::settings_on(tmp, url);
+        let mut settings = crate::tests::settings_on(url);
         settings.distill.max_tokens = 500;
         settings.source_filter = Some(ensemble_config::SourceFilterSetting {
             models: ensemble_config::ModelsSetting {
@@ -217,7 +216,10 @@ mod tests {
             prompt: "Salaries.".into(),
         });
         let hub = settings
-            .resolve(Path::new("database.db"), &std::collections::BTreeMap::new())
+            .resolve(
+                &ensemble_core::state::HubDir::new(&tmp.0),
+                &std::collections::BTreeMap::new(),
+            )
             .unwrap();
         let memory = Memory::new(&hub, None);
         memory.vault().init().unwrap();

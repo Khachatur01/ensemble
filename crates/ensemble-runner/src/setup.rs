@@ -79,7 +79,7 @@ pub fn starting(name: &str, workspace: &str) -> Result<ensemble_config::RunnerSe
     let settings = ensemble_config::RunnerSettings::starting(name.trim(), workspace.trim());
     settings
         .resolve(
-            &crate::kept::source(Path::new("")),
+            &ensemble_core::state::RunnerDir::new(""),
             &ensemble_config::SystemEnv,
         )
         .map_err(|e| e.to_string())?;
@@ -301,7 +301,7 @@ mod tests {
     fn a_new_runner_is_complete_and_loads() {
         let settings = starting("desk-2", "/code").unwrap();
         let runner = settings
-            .resolve(Path::new("database.db"), &BTreeMap::new())
+            .resolve(&ensemble_core::state::RunnerDir::new(""), &BTreeMap::new())
             .unwrap();
         assert_eq!(runner.name, "desk-2");
         assert_eq!(runner.works_for, ensemble_config::WorksFor::Owner);

@@ -23,6 +23,7 @@ use crate::users::{JOIN_HOURS, Kind, Roles, Token, User, Users, UsersError};
 use ensemble_backends::ops::{Backends, KeptBackends, Side, WithBackends};
 use ensemble_config::kept::{Change, Kept, WithKept};
 use ensemble_config::{HubSettings, Permission, Registration};
+use ensemble_core::state::HubDir;
 use ensemble_ops::{
     Access, Caller, Code, Error, Field, Kind as FieldKind, Operation, Registry, Said, Spec,
     operation,
@@ -31,13 +32,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 /// The hub's accounts, in its database, and what changing them needs.
 pub struct Accounts {
-    /// The hub's folder, with its database.
+    /// The hub's core, with its database.
     dir: PathBuf,
     /// The roles, and how people join, how long a login lasts and when failed
     /// logins lock a name: as the hub's settings say now ([`Accounts::apply`]).
@@ -125,7 +127,7 @@ impl From<UsersError> for Error {
 /// What the hub's operations are given: its accounts, when its settings
 /// load, and its settings, which may be changed even when they do not.
 pub struct HubContext {
-    dir: PathBuf,
+    dir: HubDir,
     /// Its accounts, made the first time an operation asks for them.
     accounts: OnceLock<Result<Accounts, String>>,
     /// Its settings, loaded: its roles and account rules, or why not.
@@ -137,9 +139,9 @@ pub struct HubContext {
     /// The backends the connected runners share, as the running hub lists
     /// them ([`HubContext::when_serving`]); nothing otherwise.
     offered: OnceLock<Box<Offered>>,
-    /// The file variables are read from when one is given (`--env-file`), in
-    /// place of its own `.env` ([`HubContext::keys_from`]).
-    env_file: OnceLock<PathBuf>,
+    /// Where the running hub listens ([`HubContext::listening`]); nothing
+    /// otherwise.
+    listen: OnceLock<SocketAddr>,
 }
 
 type Offered = dyn Fn() -> Value + Send + Sync;
@@ -150,16 +152,16 @@ impl HubContext {
     /// The hub in `dir`: its accounts, from what `load` reads of its settings
     /// when an operation first needs them, and its settings, in its database.
     pub fn new(
-        dir: &Path,
+        dir: &HubDir,
         load: impl Fn() -> Result<(Roles, ensemble_config::AccountRules), String>
         + Send
         + Sync
         + 'static,
     ) -> Self {
-        let checked = crate::kept::source(dir);
+        let checked = dir.clone();
         let changed: Arc<OnceLock<Box<Changed>>> = Arc::default();
         let settings = Kept::new(
-            ensemble_store::kept::HubStore::new(dir),
+            crate::kept::settings(dir),
             crate::kept::SETTINGS_NAME,
             "`ensemble-hub init`",
             move |s: &HubSettings| {
@@ -173,36 +175,30 @@ impl HubContext {
             move || changed.get().and_then(|apply| apply())
         });
         HubContext {
-            dir: dir.to_path_buf(),
+            dir: dir.clone(),
             accounts: OnceLock::new(),
             load: Box::new(load),
             settings,
             changed,
             offered: OnceLock::new(),
-            env_file: OnceLock::new(),
+            listen: OnceLock::new(),
         }
     }
 
-    /// Read variables from `given` (`--env-file`) in place of its own `.env`.
-    pub fn keys_from(&self, given: Option<PathBuf>) {
-        if let Some(file) = given {
-            let _ = self.env_file.set(file);
-        }
-    }
-
-    /// The hub's folder, with its database.
-    pub(crate) fn dir(&self) -> &Path {
+    /// The hub's folder.
+    pub(crate) fn dir(&self) -> &HubDir {
         &self.dir
     }
 
-    /// The file variables are read from now, if there is one.
-    fn keys_file(&self) -> Option<PathBuf> {
-        ensemble_ops::cli::env_file(self.env_file.get().map(PathBuf::as_path), &self.dir)
+    /// Say that the running hub listens on `listen`, which the hints of new
+    /// tokens and join codes name when no request does.
+    pub fn listening(&self, listen: SocketAddr) {
+        let _ = self.listen.set(listen);
     }
 
     /// Its settings as they are now, with the keys they name.
     pub(crate) fn hub(&self) -> Result<ensemble_config::Hub, Error> {
-        crate::kept::load(&self.dir, self.keys_file().as_deref()).map_err(|e| {
+        crate::kept::load(&self.dir).map_err(|e| {
             Error::new(Code::Unavailable, e)
                 .hint("`ensemble-hub settings show` shows them; the operations change them")
         })
@@ -222,7 +218,7 @@ impl HubContext {
 
     pub fn accounts(&self) -> Result<&Accounts, Error> {
         let made = self.accounts.get_or_init(|| {
-            (self.load)().map(|(roles, rules)| Accounts::new(&self.dir, roles, rules))
+            (self.load)().map(|(roles, rules)| Accounts::new(&self.dir.core(), roles, rules))
         });
         made.as_ref().map_err(|why| {
             Error::new(Code::Unavailable, format!("the hub's accounts: {why}"))
@@ -251,9 +247,7 @@ impl WithBackends for HubContext {
 
     fn variable(&self, name: &str) -> Option<String> {
         use ensemble_config::Env;
-        crate::kept::variables(&self.dir, self.keys_file().as_deref())
-            .ok()?
-            .get(name)
+        crate::kept::variables(&self.dir).ok()?.get(name)
     }
 
     fn kept_backends(&self) -> Result<KeptBackends, Error> {
@@ -388,15 +382,6 @@ fn join_note(c: &HubContext, name: &str, code: &str) -> String {
     )
 }
 
-/// Its settings as they are now, when they load.
-fn hub_file(c: &HubContext) -> Option<ensemble_config::Hub> {
-    c.settings
-        .read()
-        .ok()?
-        .resolve(&crate::kept::source(&c.dir), &ensemble_config::SystemEnv)
-        .ok()
-}
-
 thread_local! {
     /// The address the request being answered reached the hub at.
     static REACHED_AT: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -419,10 +404,8 @@ pub(crate) fn hub_base(c: &HubContext) -> String {
     if let Some(base) = REACHED_AT.with_borrow(Clone::clone) {
         return base;
     }
-    match hub_file(c) {
-        Some(hub) if !hub.http.listen.ip().is_unspecified() => {
-            format!("http://{}", hub.http.listen)
-        }
+    match c.listen.get() {
+        Some(listen) if !listen.ip().is_unspecified() => format!("http://{listen}"),
         _ => "<hub-url>".into(),
     }
 }

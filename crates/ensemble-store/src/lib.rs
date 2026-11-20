@@ -1,13 +1,10 @@
-//! The hub server's state that changes while it runs: its settings, each change
-//! of them kept in their history, and the keys of its backends, sealed
-//! ([`kept`]); its accounts and their tokens
-//! (`ensemble_hub::users`), the tasks it keeps for them
-//! (`ensemble_hub::board`), which issue of which tracker became which task
-//! (the inbox). One Turso database, `database.db`, in the hub's folder
-//! (`~/.config/ensemble/hub/`), which only whoever runs the hub may enter.
+//! Turso databases, each a `database.db` in a folder only its owner may
+//! enter ([`with`]), with the tables its schema makes: the hub has one for
+//! its core and one for each connector that keeps anything, a runner one
+//! for its core. What a hub's core and a runner's both keep, their settings'
+//! audit log, the LLM backends and the keys of those, sealed, is [`kept`].
 //! [`open`] opens another Turso file, such as the knowledge vault's cache of
-//! its notes' vectors. A runner keeps its settings and keys the same way, in a
-//! `database.db` of its own with only those tables ([`kept`]).
+//! its notes' vectors.
 //!
 //! Turso locks the file while it is open, and another process cannot open it
 //! then. So each read or change opens it, does its work (a change in one
@@ -22,50 +19,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 pub use turso::{Connection, Value};
 
-/// The database file in the hub's folder, or a runner's.
-pub const DB_FILE: &str = "database.db";
+/// The database file in a folder.
+pub use ensemble_core::state::DB_FILE;
 /// How long an open waits for another process to let go of the file.
 const WAIT: Duration = Duration::from_secs(5);
 
-/// The hub's own tables.
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS users (
-    name TEXT PRIMARY KEY,
-    role TEXT NOT NULL,
-    status TEXT NOT NULL,
-    registered TEXT NOT NULL,
-    password_rounds INTEGER,
-    password_salt TEXT,
-    password_hash TEXT,
-    tracker_user TEXT
-);
-CREATE TABLE IF NOT EXISTS tokens (
-    sha256 TEXT PRIMARY KEY,
-    user TEXT NOT NULL,
-    id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    scopes TEXT,
-    expires TEXT,
-    made TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS tasks (
-    owner TEXT NOT NULL,
-    project TEXT NOT NULL,
-    id TEXT NOT NULL,
-    number INTEGER NOT NULL,
-    data TEXT NOT NULL,
-    PRIMARY KEY (owner, project, id)
-);
-CREATE TABLE IF NOT EXISTS tracker_deliveries (
-    tracker TEXT NOT NULL,
-    issue TEXT NOT NULL,
-    data TEXT NOT NULL,
-    PRIMARY KEY (tracker, issue)
-);
-";
-
-/// The tables a hub's database and a runner's both have: the keys kept,
+/// The tables a hub's core and a runner's both have: the keys kept,
 /// sealed, the LLM backends, and the audit log of their settings.
 const KEPT_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS secrets (
@@ -91,28 +50,21 @@ CREATE TABLE IF NOT EXISTS settings_audit (
 );
 ";
 
-/// Open the database in `dir`, made with its tables when it is not there,
-/// and run `work` on it. The folder is made, and kept, readable only by its
-/// owner.
+/// Open the database in `dir`, made with the tables of `schema` when they
+/// are not there, and run `work` on it. The folder is made, and kept,
+/// readable only by its owner.
 pub fn with<T>(
     dir: &Path,
+    schema: &str,
     work: impl AsyncFnOnce(&turso::Connection) -> Result<T, String>,
 ) -> Result<T, String> {
     private_dir(dir)?;
-    open(&dir.join(DB_FILE), SCHEMA, async |c| {
-        c.execute_batch(KEPT_SCHEMA)
-            .await
-            .map_err(|e| e.to_string())?;
-        c.execute_batch(kept::HUB_SCHEMA)
-            .await
-            .map_err(|e| e.to_string())?;
-        work(c).await
-    })
+    open(&dir.join(DB_FILE), schema, work)
 }
 
-/// Open the database in `dir` with only the tables both a hub and a runner
-/// have, and those of `schema`, as a runner's is, and run `work` on it.
-fn kept_with<T>(
+/// Open the core database in `dir`, a hub's or a runner's: with the tables
+/// both have, and those of `schema`, and run `work` on it.
+pub fn kept_with<T>(
     dir: &Path,
     schema: &str,
     work: impl AsyncFnOnce(&turso::Connection) -> Result<T, String>,
@@ -125,7 +77,7 @@ fn kept_with<T>(
 }
 
 /// Open the Turso file at `path`, made with the tables of `schema` when they
-/// are not there, and run `work` on it, as [`with`] does the hub's database.
+/// are not there, and run `work` on it, as [`with`] does a folder's database.
 pub fn open<T>(
     path: &Path,
     schema: &str,
@@ -263,12 +215,14 @@ mod tests {
     use super::*;
     use ensemble_core::workspace::testing::TempDir;
 
+    const DELIVERIES: &str = "CREATE TABLE IF NOT EXISTS tracker_deliveries (tracker TEXT NOT NULL, issue TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (tracker, issue));";
+
     #[test]
     fn a_transaction_is_kept_whole_and_the_folder_is_private() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = TempDir::new();
         let dir = tmp.0.join("hub");
-        with(&dir, async |c| {
+        with(&dir, DELIVERIES, async |c| {
             transaction(
                 c,
                 vec![(
@@ -280,7 +234,7 @@ mod tests {
         })
         .unwrap();
         // A statement that fails takes the ones before it back with it.
-        let failed = with(&dir, async |c| {
+        let failed = with(&dir, DELIVERIES, async |c| {
             transaction(
                 c,
                 vec![
@@ -297,7 +251,7 @@ mod tests {
             .await
         });
         assert!(failed.is_err());
-        let issues = with(&dir, async |c| {
+        let issues = with(&dir, DELIVERIES, async |c| {
             rows(
                 c,
                 "SELECT issue FROM tracker_deliveries ORDER BY issue",

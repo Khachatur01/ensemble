@@ -16,4 +16,3 @@ pub mod relay;
 pub mod tokens;
 
 pub use client::{Link, Token};
-pub use tokens::Tokens;

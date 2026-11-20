@@ -15,9 +15,9 @@
 //!
 //! Secrets never live in this file. An API key is named by the *variable* that
 //! holds it (`api_key_env`), and the value is read from the environment at load
-//! time. There is no `api_key` field; a config that tries one is rejected by
-//! name so the mistake is caught before the file is committed. The values can
-//! also come from a file passed with `--env-file`, out of git.
+//! time, or from the keys the runner keeps, sealed in its database. There is no
+//! `api_key` field; a config that tries one is rejected by name so the mistake
+//! is caught before the file is committed.
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -647,7 +647,7 @@ mod validate;
 
 pub use env::*;
 pub use hub::{
-    AccountRules, Accounts, Connectors, Embed, EmbedSetting, Http, Hub, HubSettings, IssueTracker,
+    AccountRules, Accounts, Connectors, Embed, EmbedSetting, Hub, HubSettings, IssueTracker,
     Knowledge, ModelSetting, ModelsSetting, Permission, Recall, Registration, RegistrationSetting,
     SourceFilter, SourceFilterSetting, Sources, Tasks, Tracker, TrackerSetting,
 };

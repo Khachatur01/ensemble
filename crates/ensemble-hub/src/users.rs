@@ -184,7 +184,7 @@ pub type Roles = BTreeMap<String, Vec<Permission>>;
 impl Users {
     /// The accounts kept in `dir`, none when there are none yet.
     pub fn load(dir: &Path) -> Result<Users, UsersError> {
-        let users = store::with(dir, async |c| read(c).await).map_err(UsersError::Io)?;
+        let users = crate::kept::core(dir, async |c| read(c).await).map_err(UsersError::Io)?;
         Ok(Users {
             dir: dir.to_path_buf(),
             users,
@@ -200,7 +200,7 @@ impl Users {
                 .retain(|t| t.expires.as_ref().is_none_or(|e| *e > now));
         }
         let statements = statements(&self.users);
-        store::with(&self.dir, async |c| store::transaction(c, statements).await)
+        crate::kept::core(&self.dir, async |c| store::transaction(c, statements).await)
             .map_err(UsersError::Io)
     }
 

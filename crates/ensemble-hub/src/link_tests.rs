@@ -64,7 +64,7 @@ mod signing_in {
         let token = login(&hub.url, "ana", PASSWORD).await.unwrap();
         let hello = Link::new(&hub.url, &token).hello().await.unwrap();
         assert_eq!(hello.user, "ana");
-        let users = Users::load(&hub.tmp.0.join("state")).unwrap();
+        let users = Users::load(&hub.tmp.0.join("state/core")).unwrap();
         let tokens = users.tokens("ana").unwrap();
         assert!(tokens.iter().any(|t| t.name == "runner desk"), "{tokens:?}");
         assert!(
@@ -138,7 +138,7 @@ mod signing_in {
             )
             .unwrap();
         let code = made["code"].as_str().unwrap();
-        let state = hub.tmp.0.join("state");
+        let state = hub.tmp.0.join("state/core");
         let mut users = Users::load(&state).unwrap();
         users.expire_join_codes("rex");
         users.save().unwrap();

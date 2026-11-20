@@ -82,7 +82,7 @@ fn new(name: Option<String>, stdout: bool) -> Result<ExitCode, String> {
     let name = name.as_deref().ok_or("team new: needs the team's name")?;
     let dir = teams::make(name, config::SAMPLE).map_err(|e| format!("team new: {e}"))?;
     println!(
-        "wrote {}: the team '{name}', a sample with every setting. Edit its agents, then check it with `ensemble-runner team check`. API keys go in ~/.config/ensemble/runner/.env or the environment; never in this directory.",
+        "wrote {}: the team '{name}', a sample with every setting. Edit its agents, then check it with `ensemble-runner team check`. API keys are kept with `ensemble-runner backend key`, or come from the environment; never in this directory.",
         config::config_path(&dir).display()
     );
     reload_runner();

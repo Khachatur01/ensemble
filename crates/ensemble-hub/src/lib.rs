@@ -17,9 +17,11 @@
 //!   ensemble-runner serve                  (ensemble-runner)
 //! ```
 //!
-//! The hub's settings and the keys of its backends are kept in its database
-//! (`kept`), its users and their tokens in `users`, and its operations in
-//! `accounts`. `server` is the hub's side of the link.
+//! Everything the hub keeps is in its folder, `hub/` in `--config-dir`
+//! (`ensemble_core::state::HubDir`): its core's database, with its settings
+//! and the keys of its backends (`kept`) and its users and their tokens
+//! (`users`), and a folder for each connector that keeps anything. Its
+//! operations are in `accounts`. `server` is the hub's side of the link.
 //! The same port serves a REST API (`api`, over a little `http`) for signing
 //! up and for admins. Issues of the hub's tracker become tasks (`inbox`).
 //!
@@ -74,8 +76,11 @@ pub fn main() -> ExitCode {
 /// Run what `matches` names: one of the hub's operations, or one of the other
 /// commands.
 fn dispatch(matches: &clap::ArgMatches, hub: &Registry<HubContext>) -> Result<ExitCode, String> {
+    if let Some(dir) = matches.get_one::<PathBuf>("config_dir") {
+        state::use_root(dir)?;
+    }
     let ctx = Ctx {
-        env_file: matches.get_one::<PathBuf>("env_file").cloned(),
+        dir: state::HubDir::this()?,
     };
     if let Some((name, leaf)) = matched(hub, matches) {
         let route = route(&ctx);
@@ -94,9 +99,9 @@ fn dispatch(matches: &clap::ArgMatches, hub: &Registry<HubContext>) -> Result<Ex
 /// Where the hub's operations run: in the running hub, over its socket, else
 /// in this process. A hub that runs with no socket takes no commands.
 fn route(ctx: &Ctx) -> Result<ensemble_ops::local::Route<HubContext>, String> {
-    let hub_dir = state::hub_dir()?;
-    ensemble_ops::local::Route::to(&state::hub_socket(&hub_dir), || {
-        if let Some(pid) = ensemble_core::lock::holder(&hub_dir) {
+    let hub_dir = ctx.dir.path();
+    ensemble_ops::local::Route::to(&state::hub_socket(hub_dir), || {
+        if let Some(pid) = ensemble_core::lock::holder(hub_dir) {
             return Err(format!(
                 "the running hub (process {pid}) does not answer on its socket; stop it and start it again"
             ));
@@ -107,16 +112,6 @@ fn route(ctx: &Ctx) -> Result<ensemble_ops::local::Route<HubContext>, String> {
 
 /// What every command is given: the global options, resolved.
 struct Ctx {
-    env_file: Option<PathBuf>,
-}
-
-impl Ctx {
-    /// The hub's file of `NAME=value` lines, such as keys a secrets manager
-    /// keeps: `~/.config/ensemble/hub/.env`, or `--env-file`.
-    fn hub_env(&self) -> Result<Option<PathBuf>, String> {
-        Ok(ensemble_ops::cli::env_file(
-            self.env_file.as_deref(),
-            &state::hub_config_dir()?,
-        ))
-    }
+    /// The hub's folder: `hub/` in `--config-dir`.
+    dir: state::HubDir,
 }

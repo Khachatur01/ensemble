@@ -14,7 +14,7 @@
 use crate::{Access, Code, Error, Field, Kind, Registry};
 use serde_json::{Map, Value, json};
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 /// `command` with a subcommand for each of the operations of `registry` the
@@ -248,30 +248,6 @@ pub fn edit(call: Call<'_>) -> Result<(), String> {
             copy.display()
         )),
     }
-}
-
-/// The file of `NAME=value` lines read for the variables the environment does
-/// not set, such as API keys: `given` (`--env-file`), or else `.env` in `dir`
-/// when there is one.
-pub fn env_file(given: Option<&Path>, dir: &Path) -> Option<PathBuf> {
-    if let Some(file) = given {
-        return Some(file.to_path_buf());
-    }
-    let file = dir.join(ensemble_core::state::ENV_FILE);
-    if !file.is_file() {
-        return None;
-    }
-    #[cfg(unix)]
-    if let Ok(meta) = std::fs::metadata(&file) {
-        use std::os::unix::fs::PermissionsExt;
-        if meta.permissions().mode() & 0o077 != 0 {
-            eprintln!(
-                "ensemble: note: other users can read {}; `chmod 600` it",
-                file.display()
-            );
-        }
-    }
-    Some(file)
 }
 
 /// A secret, such as a password: typed at the terminal without echo, or read

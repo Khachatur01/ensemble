@@ -1,5 +1,5 @@
 //! The helper teams a runner holds: one directory, `teams/`, with a folder per
-//! team named for it (`~/.config/ensemble/runner/teams/web/`). A team is there
+//! team named for it (`~/.local/state/ensemble/runner/teams/web/`). A team is there
 //! in one of three ways:
 //!
 //! - **made here**: a folder with its `config.yaml`, written by a person

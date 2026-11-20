@@ -53,7 +53,7 @@ impl Scratch {
     /// directory, so its agents are `team/<agent>`.
     fn team_dir(&self) -> PathBuf {
         self.0
-            .with_extension("xdg-config")
+            .with_extension("xdg-state")
             .join("ensemble/runner/teams/team")
     }
 
@@ -61,7 +61,7 @@ impl Scratch {
     /// the scratch's own XDG state directory.
     fn state(&self) -> PathBuf {
         ensemble_core::state::dir_in(
-            &self.0.with_extension("xdg-state").join("ensemble"),
+            &self.0.with_extension("xdg-state").join("ensemble/runner"),
             &self.0,
         )
         .unwrap()
@@ -115,20 +115,28 @@ impl Scratch {
     /// Where the tasks and runs of the workspace's repository `name` go.
     fn state_of(&self, name: &str) -> PathBuf {
         ensemble_core::state::dir_in(
-            &self.0.with_extension("xdg-state").join("ensemble"),
+            &self.0.with_extension("xdg-state").join("ensemble/runner"),
             &self.workspace().join(name),
         )
         .unwrap()
     }
 
-    /// This scratch computer's runner folder, `~/.config/ensemble/runner/`.
+    /// This scratch computer's runner folder, `~/.local/state/ensemble/runner/`.
     fn runner_dir(&self) -> PathBuf {
-        self.0.with_extension("xdg-config").join("ensemble/runner")
+        self.0.with_extension("xdg-state").join("ensemble/runner")
+    }
+
+    /// Keep `key` as the variable `name` among the scratch computer's
+    /// runner's keys, sealed in its database.
+    fn keep_key(&self, name: &str, key: &str) {
+        ensemble_runner::kept::keys(&ensemble_core::state::RunnerDir::new(self.runner_dir()))
+            .keep(name, Some(key))
+            .unwrap();
     }
 
     /// A path in the project; `@team/<file>` is one in the helper team's
-    /// folder, `@runner/<file>` one in the runner's, such as its `.env`, and
-    /// `@state/<path>` one in the project's state directory.
+    /// folder, `@runner/<file>` one in the runner's, and `@state/<path>` one
+    /// in the project's state directory.
     fn place(&self, name: &str) -> PathBuf {
         if let Some(rest) = name.strip_prefix("@runner/") {
             self.runner_dir().join(rest)
@@ -147,10 +155,6 @@ impl Scratch {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(&p, contents).expect("write scratch file");
-        if name == "@runner/.env" {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
-        }
         p
     }
 
@@ -221,7 +225,7 @@ fn openai(url: &str, timeout: u64) -> Value {
 /// has any.
 fn runner_settings(dir: &Path) -> Option<Value> {
     use ensemble_config::kept::Keep;
-    ensemble_runner::kept::settings(dir)
+    ensemble_runner::kept::settings(&ensemble_core::state::RunnerDir::new(dir))
         .read()
         .unwrap()
         .map(|s| serde_json::to_value(s).unwrap())
@@ -237,7 +241,7 @@ fn read_runner(dir: &Path) -> Value {
 fn write_runner(dir: &Path, settings: Value) {
     use ensemble_config::kept::{Change, Keep};
     let settings: ensemble_config::RunnerSettings = serde_json::from_value(settings).unwrap();
-    ensemble_runner::kept::settings(dir)
+    ensemble_runner::kept::settings(&ensemble_core::state::RunnerDir::new(dir))
         .write(&settings, &Change::by_this_computer("test"))
         .unwrap();
 }
@@ -580,12 +584,12 @@ fn run_starts_the_agents_cli_with_the_task_and_prints_its_answer() {
 }
 
 #[test]
-fn an_agent_on_an_llm_backend_gets_its_endpoint_and_the_key_from_dotenv() {
+fn an_agent_on_an_llm_backend_gets_its_endpoint_and_the_key_kept() {
     let s = Scratch::new("run-backend");
     let cli = s.opencode("done", "");
     s.local_backend("http://127.0.0.1:8888/v1");
     s.write("@team/config.yaml", &config_yaml(&cli));
-    s.write("@runner/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-from-dotenv\n");
+    s.keep_key("ENSEMBLE_TEST_LOCAL_KEY", "sk-kept");
 
     let out = ensemble_runner(&s, &["agent", "run", "team/coder", "do it"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -598,8 +602,21 @@ fn an_agent_on_an_llm_backend_gets_its_endpoint_and_the_key_from_dotenv() {
     let config: serde_json::Value = serde_json::from_str(&s.seen("config")).unwrap();
     let provider = &config["provider"]["ensemble-openai-local"];
     assert_eq!(provider["options"]["baseURL"], "http://127.0.0.1:8888/v1");
-    assert_eq!(provider["options"]["apiKey"], "sk-from-dotenv");
+    assert_eq!(provider["options"]["apiKey"], "sk-kept");
     assert_eq!(provider["models"]["qwen3-coder"]["limit"]["context"], 32768);
+
+    // The environment comes before the keys kept.
+    let out = runner_command(&s)
+        .env("ENSEMBLE_TEST_LOCAL_KEY", "sk-from-env")
+        .args(["agent", "run", "team/coder", "do it"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let config: serde_json::Value = serde_json::from_str(&s.seen("config")).unwrap();
+    assert_eq!(
+        config["provider"]["ensemble-openai-local"]["options"]["apiKey"],
+        "sk-from-env"
+    );
 }
 
 #[test]
@@ -607,7 +624,7 @@ fn show_prints_how_an_agent_starts_with_the_key_hidden() {
     let s = Scratch::new("show");
     s.local_backend("http://127.0.0.1:8888/v1");
     s.write("@team/config.yaml", &config_yaml("opencode"));
-    s.write("@runner/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-secret-value\n");
+    s.keep_key("ENSEMBLE_TEST_LOCAL_KEY", "sk-secret-value");
 
     let out = ensemble_runner(&s, &["agent", "show", "team/coder"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -743,55 +760,6 @@ fn team_new_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_acci
 
     let printed = ensemble_runner(&s, &["team", "new", "--stdout"]);
     assert_eq!(stdout_of(&printed), written);
-}
-
-#[test]
-fn variables_come_from_the_env_file_unless_the_environment_sets_them() {
-    let s = Scratch::new("dotenv");
-    s.local_backend(NOWHERE);
-    s.write("@team/config.yaml", &config_yaml("opencode"));
-    s.write("@runner/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-from-dotenv\n");
-    let out = ensemble_runner(&s, &["team", "check"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    let text = stdout_of(&out);
-    assert!(text.contains("authenticated"), "{text}");
-    assert!(!text.contains("sk-from-dotenv"), "{text}");
-
-    // --env-file is read instead of the runner's .env.
-    let other = s.write("keys.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-other\n");
-    let out = runner_command(&s)
-        .arg("--env-file")
-        .arg(&other)
-        .args(["agent", "show", "team/coder"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
-
-    s.write("@runner/.env", "not a line\n");
-    let out = ensemble_runner(&s, &["team", "check"]);
-    assert!(!out.status.success());
-    assert!(
-        stderr_of(&out).contains("line 1: expected NAME=value"),
-        "{}",
-        stderr_of(&out)
-    );
-    let out = runner_command(&s)
-        .arg("--env-file")
-        .arg(&other)
-        .args(["team", "check"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
-
-    // One that others can read is still read, with a note to make it private.
-    let dotenv = s.write("@runner/.env", "ENSEMBLE_TEST_LOCAL_KEY=sk-from-dotenv\n");
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dotenv, std::fs::Permissions::from_mode(0o644)).unwrap();
-    }
-    let out = ensemble_runner(&s, &["team", "check"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(stderr_of(&out).contains("chmod 600"), "{}", stderr_of(&out));
 }
 
 #[test]
@@ -1105,7 +1073,7 @@ fn origin(scratch: &Scratch, config: &str) -> (String, String) {
 fn pinned_commit(scratch: &Scratch, name: &str) -> String {
     let file = scratch
         .0
-        .with_extension("xdg-config")
+        .with_extension("xdg-state")
         .join("ensemble/runner/teams")
         .join(name)
         .join("pulled.json");
@@ -1172,7 +1140,7 @@ fn a_pulled_team_is_pinned_shown_trusted_and_then_used() {
     // A pin nobody trusted is not used, and says how to trust it.
     let (_, other) = origin(&s, &config_yaml("opencode"));
     let teams =
-        s.0.with_extension("xdg-config")
+        s.0.with_extension("xdg-state")
             .join("ensemble/runner/teams");
     std::fs::create_dir_all(teams.join("sneaky")).unwrap();
     std::fs::write(
@@ -1636,13 +1604,17 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let made = read_hub(&hub);
     assert_eq!(made["owner"], "Acme");
-    assert_eq!(made["listen"], "127.0.0.1:7700", "this computer alone");
+    assert!(
+        made.get("listen").is_none(),
+        "where it listens is `serve`'s"
+    );
     assert_eq!(made["registration"], json!({ "type": "closed" }));
     assert_eq!(made["backends"], json!({}));
     assert!(
-        hub.join("vault/.git").exists(),
+        hub.join("knowledge/vault/.git").exists(),
         "the vault is a git repository"
     );
+    assert!(hub.join("core/database.db").exists(), "{}", hub.display());
     let again = ensemble_hub(&scratch, &["init"]);
     assert!(
         !again.status.success(),
@@ -1654,10 +1626,9 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
     assert!(stdout_of(&kept).is_empty(), "{}", stdout_of(&kept));
     let shown = stdout_of(&ensemble_hub(&scratch, &["settings", "show"]));
     assert!(
-        shown.contains("owner: Acme") && shown.contains("listen: 127.0.0.1:7700"),
+        shown.contains("owner: Acme") && !shown.contains("listen"),
         "{shown}"
     );
-    assert!(!hub.join("hub.yaml").exists());
     let check = ensemble_hub(&scratch, &["check"]);
     assert!(check.status.success(), "{}", stderr_of(&check));
 
@@ -1696,7 +1667,7 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
 /// The files under the vault's `shares/`.
 fn share_files(hub: &Path) -> Vec<String> {
     let mut found = Vec::new();
-    let mut dirs = vec![hub.join("vault/shares")];
+    let mut dirs = vec![hub.join("knowledge/vault/shares")];
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let path = entry.path();
@@ -1733,7 +1704,7 @@ fn shares_become_notes_by_hand_on_the_hub_and_in_the_background_while_it_runs() 
     let (hub, address, token) = hub_server(&s);
     // No model can be used yet: the share waits.
     distill_on(&hub, NOWHERE);
-    let served = serve_hub(&s, &hub);
+    let served = serve_hub(&s, &address);
     let said = mcp_tool(
         &address,
         &token,
@@ -1766,7 +1737,7 @@ fn shares_become_notes_by_hand_on_the_hub_and_in_the_background_while_it_runs() 
         "{}",
         stdout_of(&out)
     );
-    let note = std::fs::read_to_string(hub.join("vault/notes/deploy-day.md")).unwrap();
+    let note = std::fs::read_to_string(hub.join("knowledge/vault/notes/deploy-day.md")).unwrap();
     assert!(
         note.contains("kind: decision") && note.contains("Tuesdays"),
         "{note}"
@@ -1782,7 +1753,7 @@ fn shares_become_notes_by_hand_on_the_hub_and_in_the_background_while_it_runs() 
 
     // While the hub runs, a share becomes a note without anyone asking, and
     // a client agent recalls it.
-    let _served = serve_hub(&s, &hub);
+    let _served = serve_hub(&s, &address);
     let recalled = mcp_tool(
         &address,
         &token,
@@ -1801,7 +1772,7 @@ fn shares_become_notes_by_hand_on_the_hub_and_in_the_background_while_it_runs() 
     );
     assert!(said.starts_with("Shared as "), "{said}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    let vault = ensemble_knowledge::Vault::new(hub.join("vault"));
+    let vault = ensemble_knowledge::Vault::new(hub.join("knowledge/vault"));
     while !ensemble_knowledge::pipeline::pending(&vault).is_empty() {
         assert!(
             std::time::Instant::now() < deadline,
@@ -1824,7 +1795,7 @@ fn a_hub_servers_admin_adds_users_whose_tokens_are_shown_once() {
     // MCP is always on, so the answer says how an agent adds the hub.
     assert!(
         stderr_of(&out).contains(&format!(
-            "claude mcp add --transport http ensemble http://127.0.0.1:7700/mcp --header \"Authorization: Bearer {token}\""
+            "claude mcp add --transport http ensemble <hub-url>/mcp --header \"Authorization: Bearer {token}\""
         )),
         "{}",
         stderr_of(&out)
@@ -1845,15 +1816,15 @@ fn a_hub_servers_admin_adds_users_whose_tokens_are_shown_once() {
 /// A hub server made by `ensemble-hub init`, listening on a free loopback port, with
 /// `ana` a member. Returns the hub, its address and ana's token.
 /// A hub server made by `ensemble-hub init --server`, beside the project.
-/// The scratch computer's hub folder, `~/.config/ensemble/hub/`.
+/// The scratch computer's hub folder, `~/.local/state/ensemble/hub/`.
 fn hub_dir(scratch: &Scratch) -> PathBuf {
-    scratch.0.with_extension("xdg-config").join("ensemble/hub")
+    scratch.0.with_extension("xdg-state").join("ensemble/hub")
 }
 
 /// The settings of the hub in `hub`, as its database keeps them.
 fn read_hub(hub: &Path) -> Value {
     use ensemble_config::kept::Keep;
-    let settings = ensemble_hub::kept::settings(hub)
+    let settings = ensemble_hub::kept::settings(&ensemble_core::state::HubDir::new(hub))
         .read()
         .unwrap()
         .expect("the hub has its settings");
@@ -1866,7 +1837,8 @@ fn write_hub(hub: &Path, settings: Value) -> Result<(), String> {
     use ensemble_config::kept::{Change, Keep};
     let settings: ensemble_config::HubSettings =
         serde_json::from_value(settings).map_err(|e| e.to_string())?;
-    ensemble_hub::kept::settings(hub).write(&settings, &Change::by_this_computer("test"))
+    ensemble_hub::kept::settings(&ensemble_core::state::HubDir::new(hub))
+        .write(&settings, &Change::by_this_computer("test"))
 }
 
 /// A hub made by `ensemble-hub init` on the scratch computer, with a model
@@ -1906,7 +1878,7 @@ fn hub_server_of(scratch: &Scratch) -> PathBuf {
 fn runner_names_hub(scratch: &Scratch, url: &str) {
     let config = scratch
         .0
-        .with_extension("xdg-config")
+        .with_extension("xdg-state")
         .join("ensemble/runner");
     let mut runner = runner_doc("desk", "owner", local_backend(NOWHERE));
     runner["workspace"] = json!(scratch.workspace());
@@ -1945,9 +1917,6 @@ fn hub_server(scratch: &Scratch) -> (PathBuf, String, String) {
     let hub = hub_server_of(scratch);
     let port = free_port();
     let address = format!("127.0.0.1:{port}");
-    let mut settings = read_hub(&hub);
-    settings["listen"] = json!(address);
-    write_hub(&hub, settings).unwrap();
     let out = hub_command(scratch)
         .args(["user", "add", "ana", "--role", "member"])
         .output()
@@ -1960,15 +1929,15 @@ fn hub_server(scratch: &Scratch) -> (PathBuf, String, String) {
 /// its runner names and is signed in to as ana: where its tasks are kept.
 /// Its address, and ana's token.
 fn with_hub(scratch: &Scratch) -> (Served, String, String) {
-    let (hub, address, token) = hub_server(scratch);
-    let served = serve_hub(scratch, &hub);
+    let (_hub, address, token) = hub_server(scratch);
+    let served = serve_hub(scratch, &address);
     runner_with_hub(scratch, &format!("ws://{address}"), &token);
     (served, address, token)
 }
 
 /// The tasks of ana's `project` on the scratch computer's hub.
 fn tasks_of(scratch: &Scratch, project: &str) -> ensemble_hub::board::DbBoard {
-    ensemble_hub::board::DbBoard::new(&hub_dir(scratch), "ana", project)
+    ensemble_hub::board::DbBoard::new(&hub_dir(scratch).join("tasks"), "ana", project)
 }
 
 /// Keep a task of ana's `project` on the hub, for `agent`, as a client
@@ -2052,9 +2021,11 @@ fn start_runner(s: &Scratch) -> Served {
     Served(runner)
 }
 
-fn serve_hub(scratch: &Scratch, _hub: &Path) -> Served {
+/// The scratch computer's hub, served on `address` until dropped.
+fn serve_hub(scratch: &Scratch, address: &str) -> Served {
+    let port = address.rsplit(':').next().unwrap();
     let mut child = hub_command(scratch)
-        .args(["serve"])
+        .args(["serve", "--http-port", port])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -2079,8 +2050,8 @@ fn serve_hub(scratch: &Scratch, _hub: &Path) -> Served {
 #[test]
 fn a_hub_server_refuses_another_protocol_or_a_bad_token_and_stops_on_sigterm() {
     let s = Scratch::new("hub-serve");
-    let (hub, address, _) = hub_server(&s);
-    let mut child = serve_hub(&s, &hub);
+    let (_hub, address, _) = hub_server(&s);
+    let mut child = serve_hub(&s, &address);
     let upgrade = |path: &str, headers: &str| {
         let mut stream = std::net::TcpStream::connect(&address).unwrap();
         write!(
@@ -2122,8 +2093,8 @@ fn a_runner_started_before_it_is_signed_in_waits_for_its_token() {
     let s = Scratch::new("hub-wait");
     s.local_backend(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("opencode"));
-    let (hub, address, token) = hub_server(&s);
-    let _hub = serve_hub(&s, &hub);
+    let (_hub, address, token) = hub_server(&s);
+    let _hub = serve_hub(&s, &address);
     let url = format!("ws://{address}");
     runner_names_hub(&s, &url);
     // As a service started at boot, before anyone signed it in.
@@ -2163,8 +2134,8 @@ fn a_runner_signs_in_to_a_hub_server_and_takes_a_new_token_as_it_runs() {
     let s = Scratch::new("hub-remote");
     s.local_backend(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("opencode"));
-    let (hub, address, token) = hub_server(&s);
-    let mut child = serve_hub(&s, &hub);
+    let (_hub, address, token) = hub_server(&s);
+    let mut child = serve_hub(&s, &address);
     let url = format!("ws://{address}");
     runner_names_hub(&s, &url);
 
@@ -2209,17 +2180,12 @@ fn a_runner_signs_in_to_a_hub_server_and_takes_a_new_token_as_it_runs() {
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(stdout_of(&out).contains("as kim"), "{}", stdout_of(&out));
-    let tokens =
-        s.0.with_extension("xdg-config")
-            .join("ensemble/runner/hubs.json");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(&tokens).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
+    // Kept in its database, sealed.
+    let tokens = ensemble_runner::kept::Tokens::load_from(&ensemble_core::state::RunnerDir::new(
+        other.runner_dir(),
+    ))
+    .unwrap();
+    assert_eq!(tokens.get(&url), Some(kim.as_str()));
 
     // Signed in again, as kim: the running runner uses the new token at once.
     let _runner = start_runner(&s);
@@ -2278,7 +2244,7 @@ fn someone_signs_up_is_let_in_and_logs_in_from_a_runner_with_a_password() {
     s.local_backend(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("opencode"));
     let (hub, address, _) = hub_server(&s);
-    let child = serve_hub(&s, &hub);
+    let child = serve_hub(&s, &address);
     let password = "correct horse battery";
     let (status, body) = post_json(
         &address,
@@ -2320,7 +2286,7 @@ fn someone_signs_up_is_let_in_and_logs_in_from_a_runner_with_a_password() {
     let mut closed = read_hub(&hub);
     closed["registration"] = json!({ "type": "closed" });
     write_hub(&hub, closed).unwrap();
-    let _child = serve_hub(&s, &hub);
+    let _child = serve_hub(&s, &address);
     let (status, _) = post_json(
         &address,
         "/api/v1/register",
@@ -2332,8 +2298,8 @@ fn someone_signs_up_is_let_in_and_logs_in_from_a_runner_with_a_password() {
 #[test]
 fn a_runner_joins_a_hub_with_a_code_an_admin_made_and_spends_it() {
     let s = Scratch::new("hub-join");
-    let (hub, address, _) = hub_server(&s);
-    let _child = serve_hub(&s, &hub);
+    let (_hub, address, _) = hub_server(&s);
+    let _child = serve_hub(&s, &address);
     s.runner();
     let url = format!("ws://{address}");
     let out = ensemble_hub(&s, &["user", "join-code", "ana"]);
@@ -2439,15 +2405,15 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_runner_and_reported_back() 
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
-    std::fs::create_dir_all(hub.join("issues")).unwrap();
-    let _hub = serve_hub(&s, &hub);
+    std::fs::create_dir_all(hub.join("trackers/issues")).unwrap();
+    let _hub = serve_hub(&s, &address);
 
     // Ana's runner, with her helper team, signed in to the hub, and the
     // project in its workspace.
     runner_with_hub(&s, &format!("ws://{address}"), &token);
     let _runner = start_runner(&s);
     let project = "shop";
-    let issue = hub.join("issues/7.md");
+    let issue = hub.join("trackers/issues/7.md");
     std::fs::write(
         &issue,
         format!("---\ntitle: Rename foo\nassignee: ana.p\nlabels: [ensemble, \"ensemble:team/coder\"]\nproject: {project}\nstatus: open\n---\nRename foo to bar in a.txt.\n"),
@@ -2479,19 +2445,20 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_runner_and_reported_back() 
 /// hubs the scratch signed in to.
 fn on_machine(scratch: &Scratch, machine: &str, runner: &Value) -> Command {
     let home = scratch.0.with_extension("machines").join(machine);
-    let config = home.join("config").join("ensemble/runner");
+    let config = home.join("state").join("ensemble/runner");
     let mut runner = runner.clone();
     if runner["workspace"].is_null() {
         runner["workspace"] = json!(home.join("workspace"));
     }
     write_runner(&config, runner);
-    let tokens = scratch
-        .0
-        .with_extension("xdg-config")
-        .join("ensemble/runner/hubs.json");
-    if tokens.exists() {
-        std::fs::copy(&tokens, config.join("hubs.json")).unwrap();
+    use ensemble_core::state::RunnerDir;
+    use ensemble_runner::kept::Tokens;
+    let signed = Tokens::load_from(&RunnerDir::new(scratch.runner_dir())).unwrap();
+    let mut tokens = Tokens::load_from(&RunnerDir::new(&config)).unwrap();
+    for url in signed.urls() {
+        tokens.set(url, signed.get(url).unwrap());
     }
+    tokens.save().unwrap();
     let mut c = Command::new(RUNNER);
     c.current_dir(scratch.path())
         .env(RESCAN_VARIABLE, "1")
@@ -2510,7 +2477,7 @@ fn machine_team(scratch: &Scratch, machine: &str, team: &str, config: &str) {
         .0
         .with_extension("machines")
         .join(machine)
-        .join("config/ensemble/runner/teams")
+        .join("state/ensemble/runner/teams")
         .join(team);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("config.yaml"), config).unwrap();
@@ -2582,7 +2549,7 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
     settings["distill"]["try"] = gpu.clone();
     settings["source_filter"]["models"]["try"] = gpu;
     write_hub(&hub, settings).unwrap();
-    let _hub = serve_hub(&s, &hub);
+    let _hub = serve_hub(&s, &address);
     let url = format!("ws://{address}");
     let login = |machine: &str, runner: &Value| {
         let out = on_machine(&s, machine, runner)
@@ -2657,7 +2624,9 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
     );
     assert!(said.starts_with("Shared as "), "{said}");
     assert!(
-        wait_for(60, || hub.join("vault/notes/deploy-day.md").exists()),
+        wait_for(60, || hub
+            .join("knowledge/vault/notes/deploy-day.md")
+            .exists()),
         "the hub made no note of the share"
     );
 }
@@ -2665,8 +2634,8 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
 #[test]
 fn only_a_host_connects_a_runner_that_works_for_the_hub() {
     let s = Scratch::new("runner-host");
-    let (hub, address, token) = hub_server(&s);
-    let _hub = serve_hub(&s, &hub);
+    let (_hub, address, token) = hub_server(&s);
+    let _hub = serve_hub(&s, &address);
     let url = format!("ws://{address}");
     let out = runner_command(&s)
         .args(["login", &url, "--token", &token])
@@ -2751,8 +2720,8 @@ fn machine_runner(scratch: &Scratch, machine: &str, url: &str) -> Served {
 #[test]
 fn a_task_stopped_on_one_computer_is_carried_on_by_another_from_its_pushed_branch() {
     let s = Scratch::new("carry-on");
-    let (hub, address, token) = hub_server(&s);
-    let _hub = serve_hub(&s, &hub);
+    let (_hub, address, token) = hub_server(&s);
+    let _hub = serve_hub(&s, &address);
     let url = format!("ws://{address}");
     runner_with_hub(&s, &url, &token);
 
@@ -2875,7 +2844,7 @@ fn a_repository_added_after_the_runner_started_gets_a_worker_and_a_task_brings_i
     s.write("@team/config.yaml", &config_yaml(&cli));
     let (_hub, address, token) = with_hub(&s);
     // A note in the hub's knowledge, as the distiller would have written it.
-    ensemble_knowledge::Vault::new(hub_dir(&s).join("vault"))
+    ensemble_knowledge::Vault::new(hub_dir(&s).join("knowledge/vault"))
         .write_note(&ensemble_knowledge::Note {
             slug: "deploy-day".into(),
             kind: "decision".into(),
@@ -3131,7 +3100,7 @@ fn another_accounts_runner_that_works_for_the_hub_does_a_task_no_runner_of_its_o
     // coder runs on an LLM backend, so bob's runner lends it.
     let team = config_yaml(&cli).replace("isolation: shared", "isolation: worktree");
     let (hub, address, ana) = hub_server(&s);
-    let _hub = serve_hub(&s, &hub);
+    let _hub = serve_hub(&s, &address);
     let url = format!("ws://{address}");
     let _gpu = bobs_runner(&s, &url, &team);
     // ana has no runner of her own: bob's takes her task, with what it lends.
@@ -3172,7 +3141,7 @@ fn another_accounts_runner_that_works_for_the_hub_does_a_task_no_runner_of_its_o
         "bar"
     );
     // What it reported is ana's knowledge, not bob's.
-    let shares = ensemble_knowledge::Vault::new(hub.join("vault")).shares();
+    let shares = ensemble_knowledge::Vault::new(hub.join("knowledge/vault")).shares();
     assert!(
         shares
             .iter()
@@ -3187,8 +3156,8 @@ fn a_runner_that_works_for_the_hub_never_lends_an_agent_on_its_clis_own_login() 
     let s = Scratch::new("lends-no-login");
     let cli = s.opencode("reviewed", "true");
     // reviewer runs on a provider of OpenCode's own: its login, never lent.
-    let (hub, address, ana) = hub_server(&s);
-    let _hub = serve_hub(&s, &hub);
+    let (_hub, address, ana) = hub_server(&s);
+    let _hub = serve_hub(&s, &address);
     let url = format!("ws://{address}");
     let _gpu = bobs_runner(&s, &url, &config_yaml(&cli));
     let agents = mcp_tool(&address, &ana, "agents", serde_json::json!({}));
@@ -3294,8 +3263,8 @@ fn settings_are_changed_from_the_command_line_and_each_change_is_in_the_history(
 #[test]
 fn signing_in_to_a_hub_names_it_in_the_runner_and_signing_out_takes_it_out() {
     let s = Scratch::new("login-names-hub");
-    let (hub, address, token) = hub_server(&s);
-    let _hub = serve_hub(&s, &hub);
+    let (_hub, address, token) = hub_server(&s);
+    let _hub = serve_hub(&s, &address);
     s.runner();
     let url = format!("ws://{address}");
     let out = ensemble_runner(&s, &["login", &url, "--token", &token]);
@@ -3352,8 +3321,8 @@ fn a_running_runner_makes_a_change_to_its_settings_itself() {
 #[test]
 fn a_running_hub_uses_changed_settings_at_once_or_starts_again() {
     let s = Scratch::new("hub-live");
-    let (hub, _address, _token) = hub_server(&s);
-    let _served = serve_hub(&s, &hub);
+    let (_hub, address, _token) = hub_server(&s);
+    let _served = serve_hub(&s, &address);
     // Roles: used at once.
     let out = ensemble_hub(&s, &["role", "set", "reader", "recall,share"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -3364,10 +3333,8 @@ fn a_running_hub_uses_changed_settings_at_once_or_starts_again() {
     );
     let roles = stdout_of(&ensemble_hub(&s, &["role", "list"]));
     assert!(roles.contains("reader: recall, share"), "{roles}");
-    // Where it listens: it starts again, there.
-    let port = free_port();
-    let listen = format!("127.0.0.1:{port}");
-    let out = ensemble_hub(&s, &["settings", "listen", &listen]);
+    // The trackers it watches: it starts again, where it listened.
+    let out = ensemble_hub(&s, &["tracker", "remove", "issues"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stderr_of(&out).contains("starts again"),
@@ -3375,8 +3342,8 @@ fn a_running_hub_uses_changed_settings_at_once_or_starts_again() {
         stderr_of(&out)
     );
     assert!(
-        wait_for(15, || std::net::TcpStream::connect(&listen).is_ok()),
-        "the hub listens on {listen}"
+        wait_for(15, || std::net::TcpStream::connect(&address).is_ok()),
+        "the hub listens on {address}"
     );
     assert!(wait_for(5, || ensemble_hub(&s, &["user", "list"])
         .status
@@ -3402,7 +3369,11 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
     let hub = hub_server_of(&s);
     let yaml = || read_hub(&hub);
     // The keys the hub keeps, sealed in its database.
-    let vars = || ensemble_hub::kept::keys(&hub).all().unwrap();
+    let vars = || {
+        ensemble_hub::kept::keys(&ensemble_core::state::HubDir::new(&hub))
+            .all()
+            .unwrap()
+    };
     let server = models_stub(r#"{"data":[{"id":"small"}]}"#);
 
     // It answers without a key: added, with none.
@@ -3447,11 +3418,10 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
         !yaml().to_string().contains("sk-local"),
         "the key is never in the settings"
     );
-    assert!(!hub.join(".env").exists(), "nor in a .env");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(hub.join("master.key"))
+        let mode = std::fs::metadata(hub.join("core/master.key"))
             .unwrap()
             .permissions()
             .mode();
@@ -3512,19 +3482,24 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
     assert!(!vars().contains_key("ENSEMBLE_BACKEND_LOCAL_KEY"));
     assert!(yaml()["backends"].get("local").is_none());
 
-    // A file a secrets manager writes is read for its variables, and left
-    // alone: a key given is kept in the database still.
-    let other = s.path().join("secrets.env");
-    std::fs::write(&other, "MANAGED_KEY=sk-managed\n").unwrap();
-    let with_file = |args: &[&str], stdin: &str| {
-        let mut all = vec!["--env-file", other.to_str().unwrap()];
-        all.extend_from_slice(args);
-        hub_with_stdin(&s, &all, stdin)
+    // A key a secrets manager keeps is read from the environment: a key
+    // given is kept in the database still.
+    let with_env = |args: &[&str], stdin: &str| {
+        let mut child = hub_command(&s)
+            .env("MANAGED_KEY", "sk-managed")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        write!(child.stdin.take().unwrap(), "{stdin}").unwrap();
+        child.wait_with_output().unwrap()
     };
-    let out = with_file(&["backend", "key", "down", "--no-check"], "sk-x\n");
+    let out = with_env(&["backend", "key", "down", "--no-check"], "sk-x\n");
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(vars()["ENSEMBLE_BACKEND_DOWN_KEY"], "sk-x");
-    let out = with_file(
+    let out = with_env(
         &[
             "backend",
             "key",
@@ -3537,12 +3512,8 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!vars().contains_key("ENSEMBLE_BACKEND_DOWN_KEY"));
-    let list = stdout_of(&with_file(&["backend", "list"], ""));
+    let list = stdout_of(&with_env(&["backend", "list"], ""));
     assert!(list.contains("key from $MANAGED_KEY"), "{list}");
-    assert_eq!(
-        std::fs::read_to_string(&other).unwrap(),
-        "MANAGED_KEY=sk-managed\n"
-    );
 }
 
 #[test]
@@ -3607,11 +3578,13 @@ fn a_runners_owner_adds_shares_and_removes_backends_its_teams_do_not_use() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let dir = s.runner_dir();
     assert_eq!(
-        ensemble_runner::kept::keys(&dir).all().unwrap()["ENSEMBLE_BACKEND_GPU_KEY"],
+        ensemble_runner::kept::keys(&ensemble_core::state::RunnerDir::new(&dir))
+            .all()
+            .unwrap()["ENSEMBLE_BACKEND_GPU_KEY"],
         "sk-gpu"
     );
     assert!(!yaml().to_string().contains("sk-gpu") && !dir.join(".env").exists());
-    assert!(dir.join("master.key").exists());
+    assert!(dir.join("core/master.key").exists());
     let out = run(&["backend", "test", "gpu"]);
     assert!(
         stdout_of(&out).contains("gpu: answers, serves big"),

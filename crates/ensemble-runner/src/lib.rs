@@ -72,15 +72,14 @@ fn dispatch(
     matches: &clap::ArgMatches,
     runner: &Registry<RunnerContext>,
 ) -> Result<ExitCode, String> {
-    let ctx = Ctx::new(
-        matches.get_one::<PathBuf>("env_file").cloned(),
-        matches.get_one::<PathBuf>("dir"),
-    )?;
+    if let Some(dir) = matches.get_one::<PathBuf>("config_dir") {
+        state::use_root(dir)?;
+    }
+    let ctx = Ctx::new(matches.get_one::<PathBuf>("dir"))?;
     if matched(runner, matches).is_some() {
         // The running runner runs it, else this process does.
         let socket = state::runner_socket(&state::runner_dir()?);
-        let route =
-            ensemble_ops::local::Route::to(&socket, || RunnerContext::new(ctx.env_file.clone()));
+        let route = ensemble_ops::local::Route::to(&socket, RunnerContext::new);
         let call = |name: &str, input| {
             route
                 .as_ref()
@@ -97,15 +96,13 @@ fn dispatch(
 
 /// What every command is given: the global options, resolved.
 struct Ctx {
-    env_file: Option<PathBuf>,
     /// The folder an agent works in, for the commands that run one.
     dir: PathBuf,
 }
 
 impl Ctx {
-    /// From the global options: `--env-file`, and `--dir`, or else the current
-    /// directory.
-    fn new(env_file: Option<PathBuf>, dir: Option<&PathBuf>) -> Result<Self, String> {
+    /// From the global options: `--dir`, or else the current directory.
+    fn new(dir: Option<&PathBuf>) -> Result<Self, String> {
         let dir = match dir {
             Some(d) => d
                 .canonicalize()
@@ -113,16 +110,7 @@ impl Ctx {
             None => std::env::current_dir()
                 .map_err(|e| format!("cannot read the current directory: {e}"))?,
         };
-        Ok(Ctx { env_file, dir })
-    }
-
-    /// The runner's file of `NAME=value` lines, such as API keys:
-    /// `~/.config/ensemble/runner/.env`, or `--env-file`.
-    fn runner_env(&self) -> Result<Option<PathBuf>, String> {
-        Ok(ensemble_ops::cli::env_file(
-            self.env_file.as_deref(),
-            &state::runner_config_dir()?,
-        ))
+        Ok(Ctx { dir })
     }
 
     /// The runner's teams, as one helper team on its LLM backends, saying
@@ -138,28 +126,22 @@ impl Ctx {
         Ok(config)
     }
 
-    /// This computer's runner, its keys read from [`Ctx::runner_env`].
+    /// This computer's runner.
     fn runner(&self) -> Result<config::Runner, String> {
-        load_this_runner(self.runner_env()?.as_deref())
+        this_runner()
     }
 
     /// This computer's runner, as [`Ctx::runner`], or none without runner
     /// settings.
     fn runner_if_any(&self) -> Result<Option<config::Runner>, String> {
-        kept::load(self.runner_env()?.as_deref())
+        kept::load()
     }
 }
 
-/// This computer's runner, from its settings, its keys from those it keeps
-/// or its `.env`.
+/// This computer's runner, from its settings, with the keys they name from
+/// the environment or those it keeps.
 fn this_runner() -> Result<config::Runner, String> {
-    load_this_runner(ensemble_ops::cli::env_file(None, &state::runner_config_dir()?).as_deref())
-}
-
-/// This computer's runner, its keys read from `env_file` where the
-/// environment and the keys it keeps lack them.
-fn load_this_runner(env_file: Option<&Path>) -> Result<config::Runner, String> {
-    kept::load(env_file)?.ok_or_else(|| {
+    kept::load()?.ok_or_else(|| {
         "this computer has no runner yet; `ensemble-runner setup` or `ensemble-runner init` makes one".to_string()
     })
 }
@@ -172,7 +154,7 @@ fn runner_hub(command: &str) -> Result<(String, String), String> {
             "{command}: this computer's runner names no hub; `ensemble-runner login <url>` names one"
         )
     })?;
-    let token = ensemble_link::Tokens::load()?
+    let token = kept::Tokens::load()?
         .get(&url)
         .ok_or_else(|| {
             format!("{command}: no token for the hub {url}. Sign in first: ensemble-runner login {url} --user <name>, or ensemble-runner join {url} <code>")

@@ -110,7 +110,7 @@ impl<S: Clone> Kept<S> {
     /// The settings as they are kept now.
     pub fn read(&self) -> Result<S, Error> {
         self.store.read().map_err(Error::failed)?.ok_or_else(|| {
-            Error::not_found(format!("there are no {} yet", self.name))
+            Error::not_found(format!("{} are not made yet", self.name))
                 .hint(format!("{} makes them", self.made_by))
         })
     }

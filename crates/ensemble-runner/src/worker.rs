@@ -190,7 +190,10 @@ mod tests {
             settings.hub = Some("ws://hub".into());
             settings.works_for = serde_json::from_value(serde_json::json!(works_for)).unwrap();
             settings
-                .resolve(Path::new("database.db"), &std::collections::BTreeMap::new())
+                .resolve(
+                    &ensemble_core::state::RunnerDir::new(""),
+                    &std::collections::BTreeMap::new(),
+                )
                 .unwrap()
         };
         // Its agents on OpenCode with a provider, Codex and Claude Code use

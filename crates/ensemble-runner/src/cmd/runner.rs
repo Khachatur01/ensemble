@@ -8,12 +8,12 @@ use ensemble_agents::router::Ensemble;
 use ensemble_backends::ops::{Backends, KeptBackends, Side, WithBackends};
 use ensemble_config::kept::{Change, Keep, Kept, WithKept};
 use ensemble_config::{self as config, Config, RunnerSettings, WorksFor};
-use ensemble_core::state;
+use ensemble_core::state::{self, RunnerDir};
 use ensemble_ops::cli::ask;
 use ensemble_ops::local;
 use ensemble_ops::{Access, Caller, Code, Error, Field, Registry, Spec, operation};
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
 pub fn run(ctx: &Ctx, command: Command) -> Result<ExitCode, String> {
@@ -80,7 +80,7 @@ fn init(force: bool, keep: bool) -> Result<ExitCode, String> {
         }
         return Err(format!(
             "this computer has a runner already, kept in {}; `ensemble-runner settings show` shows it. --force makes it anew.",
-            kept::source(&dir).display()
+            dir.database().display()
         ));
     }
     let name = host_name().unwrap_or_else(|| "runner".into());
@@ -89,7 +89,7 @@ fn init(force: bool, keep: bool) -> Result<ExitCode, String> {
     println!(
         "Made the runner '{name}', working for you in {}, kept in {}. `ensemble-runner login` signs it in to a hub, `ensemble-runner backend add` gives it LLM backends, and `ensemble-runner settings show` shows every setting.",
         setup::WORKSPACE,
-        kept::source(&dir).display()
+        dir.database().display()
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -125,7 +125,7 @@ fn status() -> Result<ExitCode, String> {
     match &runner.hub {
         Some(url) => {
             // The hub says whether the token kept for it still works.
-            let said = match ensemble_link::Tokens::load()?.get(url) {
+            let said = match crate::kept::Tokens::load()?.get(url) {
                 None => format!("not signed in: `ensemble-runner login {url}`"),
                 Some(token) => {
                     match ensemble_core::runtime::block_on(
@@ -181,6 +181,9 @@ fn status() -> Result<ExitCode, String> {
 /// its settings has it start again, in this process: running tasks start again
 /// from where their work was last pushed.
 fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
+    // A new runner, as `init` makes it, when there is none: what installs
+    // it only runs it.
+    init(false, true)?;
     local::stop_on_signals();
     if !signed_in(ctx)? {
         eprintln!("ensemble: stopped");
@@ -215,7 +218,7 @@ fn signed_in(ctx: &Ctx) -> Result<bool, String> {
         let Some(url) = runner.hub else {
             return Ok(true);
         };
-        if ensemble_link::Tokens::load()?.get(&url).is_some() {
+        if crate::kept::Tokens::load()?.get(&url).is_some() {
             return Ok(true);
         }
         if !said {
@@ -279,7 +282,6 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
     // What `ensemble-runner …` asks of it while it runs.
     let operations = operations();
     let daemon = daemon::Daemon::new(
-        ctx.env_file.clone(),
         runner.clone(),
         hub.clone(),
         team.clone(),
@@ -334,13 +336,10 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
 /// database.
 pub struct RunnerContext {
     settings: Kept<RunnerSettings>,
-    /// Its folder, where its database is.
-    dir: PathBuf,
+    /// Its folder.
+    dir: RunnerDir,
     /// In the running runner: read its hub's token again, and say what it did.
     relink: Option<Box<Relink>>,
-    /// The file its keys are read from when one is given (`--env-file`), in
-    /// place of its own `.env`.
-    env_file: Option<PathBuf>,
 }
 
 type Relink = dyn Fn() -> Result<String, String> + Send + Sync;
@@ -349,13 +348,12 @@ type Relink = dyn Fn() -> Result<String, String> + Send + Sync;
 /// written.
 fn runner_settings() -> Result<Kept<RunnerSettings>, String> {
     let dir = kept::dir()?;
-    let env_file = ensemble_ops::cli::env_file(None, &dir);
     let checked = dir.clone();
     Ok(Kept::new(
         kept::settings(&dir),
         kept::SETTINGS_NAME,
         "`ensemble-runner setup`",
-        move |s: &RunnerSettings| kept::resolve(s, &checked, env_file.as_deref()).map(|_| ()),
+        move |s: &RunnerSettings| kept::resolve(s, &checked).map(|_| ()),
     ))
 }
 
@@ -377,9 +375,7 @@ impl WithBackends for RunnerContext {
 
     fn variable(&self, name: &str) -> Option<String> {
         use ensemble_config::Env;
-        kept::variables(&self.dir, self.keys().as_deref())
-            .ok()?
-            .get(name)
+        kept::variables(&self.dir).ok()?.get(name)
     }
 
     fn kept_backends(&self) -> Result<KeptBackends, Error> {
@@ -405,7 +401,7 @@ impl WithBackends for RunnerContext {
             edit(&mut kept)?;
             s.backends = kept.backends;
             s.shares = kept.shares.unwrap_or_default();
-            let runner = kept::resolve(s, &self.dir, self.keys().as_deref())
+            let runner = kept::resolve(s, &self.dir)
                 .map_err(|e| Error::invalid(format!("nothing was changed: {e}")))?;
             teams::load_all(&runner.llm, None)
                 .map(|_| ())
@@ -430,24 +426,17 @@ impl WithBackends for RunnerContext {
 impl RunnerContext {
     /// This computer's runner, which does not run: its settings, checked as
     /// a runner before they are written.
-    pub fn new(env_file: Option<PathBuf>) -> Result<Self, String> {
+    pub fn new() -> Result<Self, String> {
         Ok(RunnerContext {
             settings: runner_settings()?,
             dir: kept::dir()?,
             relink: None,
-            env_file,
         })
-    }
-
-    /// The file its keys are read from now, besides those it keeps, if there
-    /// is one.
-    fn keys(&self) -> Option<PathBuf> {
-        ensemble_ops::cli::env_file(self.env_file.as_deref(), &self.dir)
     }
 
     /// Its settings as they are now, with the keys they name.
     fn runner(&self) -> Result<config::Runner, Error> {
-        kept::load(self.keys().as_deref())
+        kept::load()
             .map_err(|e| Error::new(Code::Unavailable, e))?
             .ok_or_else(|| {
                 Error::not_found("there is no runner yet").hint("`ensemble-runner setup` makes one")
@@ -457,7 +446,6 @@ impl RunnerContext {
     /// The runner, in the process that runs it, which reads its hub's token
     /// again with `relink`.
     pub fn running(
-        env_file: Option<PathBuf>,
         relink: impl Fn() -> Result<String, String> + Send + Sync + 'static,
     ) -> Result<Self, String> {
         let settings = runner_settings()?.on_change(|| {
@@ -468,7 +456,6 @@ impl RunnerContext {
             settings,
             dir: kept::dir()?,
             relink: Some(Box::new(relink)),
-            env_file,
         })
     }
 }
@@ -632,7 +619,7 @@ pub fn operations() -> Registry<RunnerContext> {
                 input: &[],
             },
             |c: &RunnerContext, _: &Caller, _: Nothing| {
-                let log = ensemble_store::kept::audit(&c.dir).map_err(Error::failed)?;
+                let log = ensemble_store::kept::audit(&c.dir.core()).map_err(Error::failed)?;
                 let said: Vec<String> = log
                     .iter()
                     .map(|a| format!("{}  {}  {}  {}", a.at, a.who, a.operation, a.input))
@@ -852,7 +839,7 @@ fn keep(
 ) -> Result<serde_json::Value, Error> {
     let hello = ensemble_core::runtime::block_on(ensemble_link::Link::new(url, token).hello())
         .map_err(|e| Error::new(Code::Unauthorized, e).on("token"))?;
-    let mut tokens = ensemble_link::Tokens::load()?;
+    let mut tokens = crate::kept::Tokens::load()?;
     tokens.set(url, token);
     tokens.save()?;
     let mut said = vec![format!(
@@ -907,7 +894,7 @@ fn keep(
 /// `logout`: forget a hub's token, and have the runner name no hub when it
 /// named that one.
 fn logout(c: &RunnerContext, url: &str, change: Change) -> Result<serde_json::Value, Error> {
-    let mut tokens = ensemble_link::Tokens::load()?;
+    let mut tokens = crate::kept::Tokens::load()?;
     let mut said = Vec::new();
     if tokens.remove(url) {
         tokens.save()?;
@@ -1054,7 +1041,7 @@ fn setup(
         store.write(&settings, &Change::by_this_computer("setup"))?;
         println!(
             "Made the runner '{name}', working in {workspace}, kept in {}.",
-            kept::source(&dir).display()
+            dir.database().display()
         );
     }
     println!();

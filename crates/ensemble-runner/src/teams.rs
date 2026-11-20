@@ -1,5 +1,5 @@
 //! The helper teams of this computer's runner, kept in one directory
-//! (`~/.config/ensemble/runner/teams/`), as the runner and the commands use them:
+//! (`~/.local/state/ensemble/runner/teams/`), as the runner and the commands use them:
 //! every team that is ready, combined into one helper team whose agents are
 //! named `<team>/<agent>`; and putting teams there, as a person makes, links
 //! or pulls them, or as an agent writes one for the person to approve.

@@ -1,6 +1,6 @@
 //! Finding notes by what they mean, with `knowledge.embed`. Each note's
-//! title and body is a vector from the embedding model, kept in a Turso file in
-//! the vault, `.ensemble/embeddings.db`, out of its history: a cache, made
+//! title and body is a vector from the embedding model, kept in a Turso file
+//! beside the vault, `knowledge/embeddings.db`, out of it: a cache, made
 //! again whenever a note or the model changes, as the notes are of the shares.
 //! The file compares a query's vector with them (`vector_distance_cos`),
 //! and the notes at least `min_similarity` alike are merged with the notes the
@@ -21,8 +21,6 @@ const BATCH: usize = 32;
 /// The most of a note's text embedded, in characters: embedding models read
 /// little.
 const MAX_TEXT: usize = 4000;
-/// The cache, in the vault's [`cache_dir`](crate::Vault::cache_dir).
-const CACHE_FILE: &str = "embeddings.db";
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS embeddings (
     slug TEXT PRIMARY KEY,
@@ -196,12 +194,16 @@ impl Memory {
         embed(backend, &e.model, texts).map_err(|e| e.to_string())
     }
 
-    /// Run `work` on the vault's cache of vectors.
+    /// Run `work` on the cache of the notes' vectors.
     fn cache<T>(
         &self,
         work: impl AsyncFnOnce(&store::Connection) -> Result<T, String>,
     ) -> Result<T, String> {
-        let path = self.vault().cache_dir()?.join(CACHE_FILE);
+        let path = self.knowledge().embeddings.clone();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        }
         store::open(&path, SCHEMA, work)
     }
 
@@ -270,7 +272,7 @@ mod tests {
     /// A new vault gets three notes: two about releases, in other words, and
     /// one about lunch.
     fn memory_with(tmp: &TempDir, url: &str) -> Memory {
-        let mut settings = crate::tests::settings_on(tmp, url);
+        let mut settings = crate::tests::settings_on(url);
         settings.embed = Some(ensemble_config::EmbedSetting {
             backend: "local".into(),
             model: "e".into(),
@@ -278,7 +280,7 @@ mod tests {
         });
         let hub = settings
             .resolve(
-                &tmp.0.join("hub/database.db"),
+                &ensemble_core::state::HubDir::new(tmp.0.join("hub")),
                 &std::collections::BTreeMap::new(),
             )
             .unwrap();
@@ -344,26 +346,9 @@ mod tests {
             .collect()
         };
         assert_eq!(kept(&m), vec!["deploy-day", "lunch", "release-train"]);
-        // In the vault, and out of its history.
-        let vault = m.vault();
-        assert!(vault.root().join(".ensemble/embeddings.db").exists());
-        vault.commit("notes").unwrap();
-        let tracked = std::process::Command::new("git")
-            .args(["ls-files"])
-            .current_dir(vault.root())
-            .output()
-            .unwrap();
-        let tracked = String::from_utf8_lossy(&tracked.stdout);
-        assert!(
-            tracked.contains(".gitignore") && !tracked.contains(".ensemble"),
-            "{tracked}"
-        );
-        vault.cache_dir().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(vault.root().join(".gitignore")).unwrap(),
-            "/.ensemble/\n",
-            "named once"
-        );
+        // Beside the vault, not in it.
+        assert!(m.knowledge().embeddings.exists());
+        assert!(!m.knowledge().embeddings.starts_with(m.vault().root()));
         // A changed note is embedded again; the others are not.
         let mut lunch = m.vault().note("lunch").unwrap();
         lunch.body = "Pizza on Fridays, and the ship's cook decides.".into();

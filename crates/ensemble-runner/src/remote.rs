@@ -244,7 +244,7 @@ fn verify(dir: &Path, sha: &str) -> Result<(), String> {
 
 /// What a person has trusted: pinned helper teams, one `<url>#<sha>` per line.
 fn trust_file() -> Result<PathBuf, String> {
-    Ok(state::root()?.join("trusted-orgs"))
+    Ok(state::runner_dir()?.join("trusted-orgs"))
 }
 
 /// Has the person trusted this exact commit of this repository?
@@ -312,7 +312,11 @@ pub fn use_source(source: &Source) -> Result<Resolved, String> {
             let dir = fetch(url, sha)?;
             Ok(Resolved {
                 dir,
-                usage: Some(state::root()?.join("orgs").join(state::labelled_text(url))),
+                usage: Some(
+                    state::runner_dir()?
+                        .join("orgs")
+                        .join(state::labelled_text(url)),
+                ),
                 remote: Some((url.clone(), sha.clone())),
             })
         }
@@ -678,7 +682,8 @@ mod tests {
                 .unwrap_err()
                 .contains("never follows a branch")
         );
-        let text = std::fs::read_to_string(tmp.0.join("state/ensemble/trusted-orgs")).unwrap();
+        let text =
+            std::fs::read_to_string(tmp.0.join("state/ensemble/runner/trusted-orgs")).unwrap();
         assert_eq!(text.lines().count(), 1, "{text}");
     }
 }

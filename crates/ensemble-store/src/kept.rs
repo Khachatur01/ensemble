@@ -1,23 +1,18 @@
-//! The settings and keys a hub or a runner keeps in its database, as a GitLab
-//! instance keeps its application settings: in typed tables, one row of
-//! settings and a table for each kind of thing there are several of
-//! (backends, roles, models, trackers), changed only through operations,
-//! each change kept in the audit log with who made it. A deployment, such as
-//! the NixOS module, only runs the hub or the runner.
+//! What a hub's core and a runner's both keep in their database, as a GitLab
+//! instance keeps its application settings: the LLM backends, the keys of
+//! those, sealed, and the audit log of every change of their settings, made
+//! only through operations. The rest of their settings, typed tables of
+//! their own, the hub and the runner each keep themselves.
 //!
 //! A key is kept sealed, AES-256-GCM, by a master key, `master.key`, a file
-//! beside the database made the first time a key is kept: the database alone
-//! gives no key away, and without the master key no key in it can be read.
-//! The backends name their keys by variable, and a variable is looked for in
-//! the environment, then among the keys kept, then in a file of `NAME=value`
-//! lines (`.env` or `--env-file`), where keys of a secrets manager are.
+//! beside the database made the first time a key is kept: without the
+//! master key no key in it can be read. The backends name their keys by
+//! variable, and a variable is looked for in the environment, then among the
+//! keys kept.
 
-use crate::{DB_FILE, Value, keep_secret, optional, rows, secrets, text, transaction};
-use ensemble_config::kept::{Change, Keep};
-use ensemble_config::{
-    BackendSetting, EmbedSetting, Env, HubSettings, ModelSetting, ModelsSetting, Permission,
-    RegistrationSetting, RunnerSettings, SourceFilterSetting, TrackerSetting, WhenNone, WorksFor,
-};
+use crate::{DB_FILE, Value, keep_secret, optional, rows, secrets, text};
+use ensemble_config::kept::Change;
+use ensemble_config::{BackendSetting, Env};
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::BTreeMap;
@@ -29,65 +24,6 @@ pub const MASTER_KEY_FILE: &str = "master.key";
 /// What a sealed key starts with: the way it was sealed.
 const SEALED: &str = "v1:";
 
-/// The tables of a hub's settings, besides the backends.
-pub(crate) const HUB_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS hub_settings (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    owner TEXT NOT NULL,
-    listen TEXT NOT NULL,
-    registration TEXT NOT NULL,
-    max_pending INTEGER,
-    session_hours INTEGER NOT NULL,
-    lockout_failures INTEGER NOT NULL,
-    lockout_minutes INTEGER NOT NULL,
-    vault TEXT NOT NULL,
-    distill_when_none TEXT NOT NULL,
-    distill_max_tokens INTEGER NOT NULL,
-    recall_max_notes INTEGER NOT NULL,
-    recall_max_chars INTEGER NOT NULL,
-    embed_backend TEXT,
-    embed_model TEXT,
-    embed_min_similarity REAL,
-    filter_when_none TEXT,
-    filter_max_tokens INTEGER,
-    filter_prompt TEXT
-);
-CREATE TABLE IF NOT EXISTS roles (
-    name TEXT PRIMARY KEY,
-    permissions TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS models (
-    purpose TEXT NOT NULL,
-    position INTEGER NOT NULL,
-    backend TEXT NOT NULL,
-    model TEXT NOT NULL,
-    PRIMARY KEY (purpose, position)
-);
-CREATE TABLE IF NOT EXISTS trackers (
-    name TEXT PRIMARY KEY,
-    type TEXT NOT NULL,
-    dir TEXT NOT NULL,
-    label TEXT NOT NULL,
-    poll_seconds INTEGER NOT NULL
-);
-";
-
-/// The table of a runner's settings, besides the backends.
-const RUNNER_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS runner_settings (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    name TEXT NOT NULL,
-    works_for TEXT NOT NULL,
-    workspace TEXT NOT NULL,
-    hub TEXT,
-    max_shared_calls INTEGER NOT NULL
-);
-";
-
-/// What the distiller's models are kept as, and the source filter's.
-const DISTILL: &str = "distill";
-const FILTER: &str = "source_filter";
-
 /// Where the settings in `dir` are said to be kept, for what is said of
 /// them, and what their relative paths are relative to: its database.
 pub fn source(dir: &Path) -> PathBuf {
@@ -98,34 +34,35 @@ fn now() -> String {
     ensemble_core::time::utc(SystemTime::now())
 }
 
-fn int(n: impl Into<i64>) -> Value {
+pub fn int(n: impl Into<i64>) -> Value {
     Value::Integer(n.into())
 }
 
-fn txt(s: &str) -> Value {
+pub fn txt(s: &str) -> Value {
     Value::Text(s.to_string())
 }
 
 /// A whole number kept, as the type wanted.
-fn num<T: TryFrom<i64>>(value: &Value, what: &str) -> Result<T, String> {
+pub fn num<T: TryFrom<i64>>(value: &Value, what: &str) -> Result<T, String> {
     match value {
         Value::Integer(n) => T::try_from(*n).map_err(|_| format!("{what}: {n} is out of range")),
         _ => Err(format!("{what}: is not a number")),
     }
 }
 
-fn some_text(value: &Value, what: &str) -> Result<String, String> {
+pub fn some_text(value: &Value, what: &str) -> Result<String, String> {
     text(value).ok_or_else(|| format!("{what}: is empty"))
 }
 
 /// A value kept as its JSON name, such as `wait` or `owner`.
-fn named<T: serde::de::DeserializeOwned>(value: &Value, what: &str) -> Result<T, String> {
+pub fn named<T: serde::de::DeserializeOwned>(value: &Value, what: &str) -> Result<T, String> {
     let name = some_text(value, what)?;
     serde_json::from_value(serde_json::Value::String(name.clone()))
         .map_err(|_| format!("{what}: '{name}' is unknown"))
 }
 
-fn name_of<T: serde::Serialize>(value: &T) -> String {
+/// What a value is kept as: its JSON name.
+pub fn name_of<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_value(value)
         .ok()
         .and_then(|v| v.as_str().map(String::from))
@@ -133,7 +70,7 @@ fn name_of<T: serde::Serialize>(value: &T) -> String {
 }
 
 /// The statement that keeps `change` in the audit log.
-fn audited(change: &Change) -> (&'static str, Vec<Value>) {
+pub fn audited(change: &Change) -> (&'static str, Vec<Value>) {
     (
         "INSERT INTO settings_audit (n, at, who, operation, input) SELECT COALESCE(MAX(n), 0) + 1, ?1, ?2, ?3, ?4 FROM settings_audit",
         vec![
@@ -147,7 +84,7 @@ fn audited(change: &Change) -> (&'static str, Vec<Value>) {
 
 /// The statements that keep `backends` in place of those kept, `shares`
 /// marked as shared.
-fn backend_rows(
+pub fn backend_rows(
     backends: &BTreeMap<String, BackendSetting>,
     shares: &[String],
 ) -> Vec<(&'static str, Vec<Value>)> {
@@ -194,7 +131,7 @@ fn backend_rows(
 }
 
 /// The backends kept, and the names of those shared.
-async fn read_backends(
+pub async fn read_backends(
     c: &turso::Connection,
 ) -> Result<(BTreeMap<String, BackendSetting>, Vec<String>), String> {
     let mut backends = BTreeMap::new();
@@ -240,282 +177,6 @@ async fn read_backends(
     Ok((backends, shares))
 }
 
-/// The settings of the hub in a folder, in its database.
-pub struct HubStore {
-    dir: PathBuf,
-}
-
-impl HubStore {
-    pub fn new(dir: &Path) -> Self {
-        HubStore {
-            dir: dir.to_path_buf(),
-        }
-    }
-}
-
-impl Keep<HubSettings> for HubStore {
-    fn read(&self) -> Result<Option<HubSettings>, String> {
-        crate::with(&self.dir, async |c| {
-            let found = rows(
-                c,
-                "SELECT owner, listen, registration, max_pending, session_hours, lockout_failures, lockout_minutes, vault, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_backend, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt FROM hub_settings WHERE id = 1",
-                vec![],
-            )
-            .await?;
-            let Some(r) = found.first() else {
-                return Ok(None);
-            };
-            let mut roles = BTreeMap::new();
-            for role in rows(c, "SELECT name, permissions FROM roles", vec![]).await? {
-                let name = some_text(&role[0], "roles.name")?;
-                let permissions: Vec<Permission> =
-                    serde_json::from_str(&some_text(&role[1], &name)?)
-                        .map_err(|e| format!("roles.{name}: {e}"))?;
-                roles.insert(name, permissions);
-            }
-            let mut models: BTreeMap<String, Vec<ModelSetting>> = BTreeMap::new();
-            for m in rows(
-                c,
-                "SELECT purpose, backend, model FROM models ORDER BY purpose, position",
-                vec![],
-            )
-            .await?
-            {
-                models
-                    .entry(some_text(&m[0], "models.purpose")?)
-                    .or_default()
-                    .push(ModelSetting {
-                        backend: some_text(&m[1], "models.backend")?,
-                        model: some_text(&m[2], "models.model")?,
-                    });
-            }
-            let mut trackers = BTreeMap::new();
-            for t in rows(
-                c,
-                "SELECT name, type, dir, label, poll_seconds FROM trackers",
-                vec![],
-            )
-            .await?
-            {
-                let name = some_text(&t[0], "trackers.name")?;
-                let at = format!("trackers.{name}");
-                let kind = some_text(&t[1], &at)?;
-                if kind != ensemble_config::hub::LOCAL_MARKDOWN_TRACKER {
-                    return Err(format!("{at}: the type '{kind}' is unknown"));
-                }
-                trackers.insert(
-                    name,
-                    TrackerSetting::LocalMarkdown {
-                        dir: some_text(&t[2], &at)?,
-                        label: some_text(&t[3], &at)?,
-                        poll_seconds: num(&t[4], &at)?,
-                    },
-                );
-            }
-            let (backends, _) = read_backends(c).await?;
-            let registration = match some_text(&r[2], "registration")?.as_str() {
-                "closed" => RegistrationSetting::Closed,
-                "approval" => RegistrationSetting::Approval {
-                    max_pending: num(&r[3], "registration.max_pending")?,
-                },
-                other => return Err(format!("registration: '{other}' is unknown")),
-            };
-            let embed = match text(&r[12]) {
-                Some(backend) => Some(EmbedSetting {
-                    backend,
-                    model: some_text(&r[13], "embed.model")?,
-                    min_similarity: match &r[14] {
-                        Value::Real(x) => *x,
-                        Value::Integer(n) => *n as f64,
-                        _ => return Err("embed.min_similarity: is not a number".into()),
-                    },
-                }),
-                None => None,
-            };
-            let source_filter = match text(&r[15]) {
-                Some(_) => Some(SourceFilterSetting {
-                    models: ModelsSetting {
-                        candidates: models.remove(FILTER).unwrap_or_default(),
-                        when_none: named(&r[15], "source_filter.when_none")?,
-                        max_tokens: num(&r[16], "source_filter.max_tokens")?,
-                    },
-                    prompt: some_text(&r[17], "source_filter.prompt")?,
-                }),
-                None => None,
-            };
-            Ok(Some(HubSettings {
-                owner: some_text(&r[0], "owner")?,
-                listen: some_text(&r[1], "listen")?,
-                registration,
-                session_hours: num(&r[4], "session_hours")?,
-                lockout_failures: num(&r[5], "lockout_failures")?,
-                lockout_minutes: num(&r[6], "lockout_minutes")?,
-                roles,
-                backends,
-                vault: some_text(&r[7], "vault")?,
-                distill: ModelsSetting {
-                    candidates: models.remove(DISTILL).unwrap_or_default(),
-                    when_none: named::<WhenNone>(&r[8], "distill.when_none")?,
-                    max_tokens: num(&r[9], "distill.max_tokens")?,
-                },
-                embed,
-                recall_max_notes: num(&r[10], "recall_max_notes")?,
-                recall_max_chars: num(&r[11], "recall_max_chars")?,
-                trackers,
-                source_filter,
-            }))
-        })
-    }
-
-    fn write(&self, s: &HubSettings, change: &Change) -> Result<(), String> {
-        let (registration, max_pending) = match s.registration {
-            RegistrationSetting::Closed => ("closed", Value::Null),
-            RegistrationSetting::Approval { max_pending } => ("approval", int(max_pending)),
-        };
-        let (embed_backend, embed_model, embed_min) = match &s.embed {
-            Some(e) => (
-                txt(&e.backend),
-                txt(&e.model),
-                Value::Real(e.min_similarity),
-            ),
-            None => (Value::Null, Value::Null, Value::Null),
-        };
-        let (filter_when_none, filter_max_tokens, filter_prompt) = match &s.source_filter {
-            Some(f) => (
-                txt(&name_of(&f.models.when_none)),
-                int(f.models.max_tokens),
-                txt(&f.prompt),
-            ),
-            None => (Value::Null, Value::Null, Value::Null),
-        };
-        let mut statements = vec![
-            ("DELETE FROM hub_settings", vec![]),
-            (
-                "INSERT INTO hub_settings (id, owner, listen, registration, max_pending, session_hours, lockout_failures, lockout_minutes, vault, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_backend, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-                vec![
-                    txt(&s.owner),
-                    txt(&s.listen),
-                    txt(registration),
-                    max_pending,
-                    int(s.session_hours),
-                    int(s.lockout_failures),
-                    int(s.lockout_minutes),
-                    txt(&s.vault),
-                    txt(&name_of(&s.distill.when_none)),
-                    int(s.distill.max_tokens),
-                    int(s.recall_max_notes),
-                    int(s.recall_max_chars),
-                    embed_backend,
-                    embed_model,
-                    embed_min,
-                    filter_when_none,
-                    filter_max_tokens,
-                    filter_prompt,
-                ],
-            ),
-            ("DELETE FROM roles", vec![]),
-            ("DELETE FROM models", vec![]),
-            ("DELETE FROM trackers", vec![]),
-        ];
-        for (name, permissions) in &s.roles {
-            let permissions = serde_json::to_string(permissions).map_err(|e| e.to_string())?;
-            statements.push((
-                "INSERT INTO roles (name, permissions) VALUES (?1, ?2)",
-                vec![txt(name), txt(&permissions)],
-            ));
-        }
-        let filter = s.source_filter.iter().map(|f| (FILTER, &f.models));
-        for (purpose, models) in std::iter::once((DISTILL, &s.distill)).chain(filter) {
-            for (i, m) in models.candidates.iter().enumerate() {
-                statements.push((
-                    "INSERT INTO models (purpose, position, backend, model) VALUES (?1, ?2, ?3, ?4)",
-                    vec![txt(purpose), int(i as i64), txt(&m.backend), txt(&m.model)],
-                ));
-            }
-        }
-        for (name, t) in &s.trackers {
-            let TrackerSetting::LocalMarkdown {
-                dir,
-                label,
-                poll_seconds,
-            } = t;
-            statements.push((
-                "INSERT INTO trackers (name, type, dir, label, poll_seconds) VALUES (?1, ?2, ?3, ?4, ?5)",
-                vec![
-                    txt(name),
-                    txt(ensemble_config::hub::LOCAL_MARKDOWN_TRACKER),
-                    txt(dir),
-                    txt(label),
-                    int(*poll_seconds),
-                ],
-            ));
-        }
-        statements.extend(backend_rows(&s.backends, &[]));
-        statements.push(audited(change));
-        crate::with(&self.dir, async |c| transaction(c, statements).await)
-    }
-}
-
-/// The settings of the runner in a folder, in its database.
-pub struct RunnerStore {
-    dir: PathBuf,
-}
-
-impl RunnerStore {
-    pub fn new(dir: &Path) -> Self {
-        RunnerStore {
-            dir: dir.to_path_buf(),
-        }
-    }
-}
-
-impl Keep<RunnerSettings> for RunnerStore {
-    fn read(&self) -> Result<Option<RunnerSettings>, String> {
-        crate::kept_with(&self.dir, RUNNER_SCHEMA, async |c| {
-            let found = rows(
-                c,
-                "SELECT name, works_for, workspace, hub, max_shared_calls FROM runner_settings WHERE id = 1",
-                vec![],
-            )
-            .await?;
-            let Some(r) = found.first() else {
-                return Ok(None);
-            };
-            let (backends, shares) = read_backends(c).await?;
-            Ok(Some(RunnerSettings {
-                name: some_text(&r[0], "name")?,
-                works_for: named::<WorksFor>(&r[1], "works_for")?,
-                workspace: some_text(&r[2], "workspace")?,
-                hub: text(&r[3]),
-                backends,
-                shares,
-                max_shared_calls: num(&r[4], "max_shared_calls")?,
-            }))
-        })
-    }
-
-    fn write(&self, s: &RunnerSettings, change: &Change) -> Result<(), String> {
-        let mut statements = vec![
-            ("DELETE FROM runner_settings", vec![]),
-            (
-                "INSERT INTO runner_settings (id, name, works_for, workspace, hub, max_shared_calls) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
-                vec![
-                    txt(&s.name),
-                    txt(s.works_for.as_str()),
-                    txt(&s.workspace),
-                    optional(s.hub.as_deref()),
-                    int(s.max_shared_calls),
-                ],
-            ),
-        ];
-        statements.extend(backend_rows(&s.backends, &s.shares));
-        statements.push(audited(change));
-        crate::kept_with(&self.dir, RUNNER_SCHEMA, async |c| {
-            transaction(c, statements).await
-        })
-    }
-}
-
 /// One change of the settings, as the audit log keeps it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Audited {
@@ -557,27 +218,15 @@ pub fn is_new(dir: &Path) -> Result<bool, String> {
     Ok(found.is_empty())
 }
 
-/// Where a variable is looked for: the environment, the keys kept in a
-/// folder, then a file of `NAME=value` lines.
+/// Where a variable is looked for: the environment, then the keys kept in a
+/// folder.
 pub struct Variables {
     keys: BTreeMap<String, String>,
-    file: BTreeMap<String, String>,
 }
 
 impl Variables {
-    pub fn new(keys: &Keys, env_file: Option<&Path>) -> Result<Self, String> {
-        let file = match env_file {
-            Some(path) => {
-                let text = std::fs::read_to_string(path)
-                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-                ensemble_config::parse_dotenv(&text, path).map_err(|e| e.to_string())?
-            }
-            None => BTreeMap::new(),
-        };
-        Ok(Variables {
-            keys: keys.all()?,
-            file,
-        })
+    pub fn new(keys: &Keys) -> Result<Self, String> {
+        Ok(Variables { keys: keys.all()? })
     }
 }
 
@@ -586,7 +235,6 @@ impl Env for Variables {
         std::env::var(key)
             .ok()
             .or_else(|| self.keys.get(key).cloned())
-            .or_else(|| self.file.get(key).cloned())
     }
 }
 
@@ -634,7 +282,9 @@ impl Keys {
         self.master(true).map(|_| ())
     }
 
-    fn seal(&self, name: &str, key: &str) -> Result<String, String> {
+    /// `key`, sealed by the master key for `name`, made when there is none:
+    /// it opens only as `name`'s.
+    pub fn seal(&self, name: &str, key: &str) -> Result<String, String> {
         let master = self.master(true)?;
         let mut nonce = [0u8; NONCE_LEN];
         SystemRandom::new()
@@ -651,6 +301,11 @@ impl Keys {
         let mut all = nonce.to_vec();
         all.extend(sealed);
         Ok(format!("{SEALED}{}", hex(&all)))
+    }
+
+    /// What `sealed` holds for `name`, opened by the master key.
+    pub fn unseal(&self, name: &str, sealed: &str) -> Result<String, String> {
+        self.open(&self.master(false)?, name, sealed)
     }
 
     /// The master key, made when there is none and `make`.
@@ -783,151 +438,13 @@ mod tests {
     }
 
     #[test]
-    fn a_hubs_settings_are_kept_in_tables_whole_and_each_change_in_the_audit_log() {
+    fn a_variable_is_the_environments_then_a_key_kept() {
         let tmp = TempDir::new();
-        let dir = tmp.0.join("hub");
-        let store = HubStore::new(&dir);
-        assert_eq!(store.read().unwrap(), None);
-        assert!(is_new(&dir).unwrap());
-        let mut hub = HubSettings::starting("Ana");
-        store
-            .write(&hub, &Change::by_this_computer("init"))
-            .unwrap();
-        assert_eq!(store.read().unwrap().as_ref(), Some(&hub), "as it starts");
-        hub.registration = RegistrationSetting::Approval { max_pending: 3 };
-        hub.backends.insert(
-            "local".into(),
-            BackendSetting::OpenAiCompatible {
-                base_url: "http://127.0.0.1:1/v1".into(),
-                api_key_env: Some("ENSEMBLE_BACKEND_LOCAL_KEY".into()),
-                timeout_seconds: 5,
-            },
-        );
-        hub.backends.insert(
-            "claude".into(),
-            BackendSetting::Anthropic {
-                base_url: "https://api.anthropic.com".into(),
-                api_key_env: None,
-                timeout_seconds: 9,
-            },
-        );
-        hub.backends.insert(
-            "gpu".into(),
-            BackendSetting::Runner {
-                runner: "kim/box".into(),
-                backend: "big".into(),
-            },
-        );
-        let model = |backend: &str, model: &str| ModelSetting {
-            backend: backend.into(),
-            model: model.into(),
-        };
-        hub.distill.candidates = vec![model("local", "small"), model("gpu", "big")];
-        hub.embed = Some(EmbedSetting {
-            backend: "local".into(),
-            model: "nomic".into(),
-            min_similarity: 0.45,
-        });
-        hub.source_filter = Some(SourceFilterSetting {
-            models: ModelsSetting {
-                candidates: vec![model("claude", "haiku")],
-                when_none: WhenNone::Fail,
-                max_tokens: 200,
-            },
-            prompt: "Salaries.".into(),
-        });
-        hub.trackers.insert(
-            "issues".into(),
-            TrackerSetting::LocalMarkdown {
-                dir: "issues".into(),
-                label: "ensemble".into(),
-                poll_seconds: 30,
-            },
-        );
-        hub.roles.remove("reader");
-        let caller = ensemble_ops::Caller::Account {
-            name: "ana".into(),
-            permissions: vec![],
-            session: true,
-            token: "t".into(),
-        };
-        const KEY: &[ensemble_ops::Field] = &[ensemble_ops::Field::secret("key", "")];
-        let spec = ensemble_ops::Spec {
-            name: "backend.key",
-            summary: "",
-            access: ensemble_ops::Access::Local,
-            input: KEY,
-        };
-        store
-            .write(
-                &hub,
-                &Change::new(&caller, &spec, serde_json::json!({ "key": "sk-1" })),
-            )
-            .unwrap();
-        assert_eq!(store.read().unwrap().as_ref(), Some(&hub), "every setting");
-        let log = audit(&dir).unwrap();
-        assert_eq!(log.len(), 2);
-        assert_eq!(
-            (log[0].who.as_str(), log[0].operation.as_str()),
-            ("local", "init")
-        );
-        assert_eq!(log[1].who, "ana");
-        assert_eq!(log[1].input, serde_json::json!({ "key": "(hidden)" }));
-        assert!(!is_new(&dir).unwrap());
-    }
-
-    #[test]
-    fn a_runners_settings_are_kept_with_its_shares_and_no_table_of_the_hub() {
-        let tmp = TempDir::new();
-        let dir = tmp.0.join("runner");
-        let store = RunnerStore::new(&dir);
-        assert_eq!(store.read().unwrap(), None);
-        let mut runner = RunnerSettings::starting("laptop", "~/ensemble");
-        runner.hub = Some("ws://127.0.0.1:7700".into());
-        runner.works_for = WorksFor::Hub;
-        runner.backends.insert(
-            "local".into(),
-            BackendSetting::OpenAiCompatible {
-                base_url: "http://127.0.0.1:1/v1".into(),
-                api_key_env: None,
-                timeout_seconds: 5,
-            },
-        );
-        runner.shares = vec!["local".into()];
-        store
-            .write(&runner, &Change::by_this_computer("init"))
-            .unwrap();
-        assert_eq!(store.read().unwrap(), Some(runner));
-        let tables = crate::open(&source(&dir), "", async |c| {
-            rows(
-                c,
-                "SELECT name FROM sqlite_master WHERE type = 'table'",
-                vec![],
-            )
-            .await
-        })
-        .unwrap();
-        let tables: Vec<String> = tables.iter().filter_map(|r| text(&r[0])).collect();
-        assert!(
-            tables.contains(&"runner_settings".to_string()),
-            "{tables:?}"
-        );
-        assert!(
-            !tables.iter().any(|t| t == "users" || t == "hub_settings"),
-            "{tables:?}"
-        );
-
-        let keys = Keys::new(&dir, "ensemble-runner");
-        keys.keep("ENSEMBLE_BACKEND_CENTRAL_KEY", Some("sk-1"))
-            .unwrap();
-        let env_file = dir.join(".env");
-        std::fs::write(&env_file, "OTHER=x\nENSEMBLE_BACKEND_CENTRAL_KEY=old\n").unwrap();
-        let env = Variables::new(&keys, Some(&env_file)).unwrap();
-        assert_eq!(env.get("OTHER").as_deref(), Some("x"));
-        assert_eq!(
-            env.get("ENSEMBLE_BACKEND_CENTRAL_KEY").as_deref(),
-            Some("sk-1"),
-            "a key kept comes before the file"
-        );
+        let keys = Keys::new(&tmp.0.join("runner"), "ensemble-runner");
+        keys.keep("ENSEMBLE_TEST_KEPT_KEY", Some("sk-1")).unwrap();
+        let env = Variables::new(&keys).unwrap();
+        assert_eq!(env.get("ENSEMBLE_TEST_KEPT_KEY").as_deref(), Some("sk-1"));
+        assert_eq!(env.get("ENSEMBLE_TEST_NO_KEY"), None);
+        assert_eq!(env.get("HOME"), std::env::var("HOME").ok());
     }
 }

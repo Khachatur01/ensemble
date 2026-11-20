@@ -1,26 +1,30 @@
 //! `ensemble-hub …`: a hub this computer runs: its settings, the server,
 //! its accounts, and its knowledge vault. Whoever can read the hub's folder
-//! administers it.
+//! administers it. The hub knows nothing of a runner on the same computer:
+//! a runner reaches it as any other does, over the link.
 
 use crate::Ctx;
 use crate::cli::{Command, KnowledgeCommand};
 use crate::kept;
 use ensemble_config::kept::{Change, Keep};
 use ensemble_config::{self as config, HubSettings, Permission};
-use ensemble_core::state;
+use ensemble_core::state::{self, HubDir};
 use ensemble_ops::cli::{ask, confirm};
 use ensemble_ops::local::{self, STOP};
 use serde_json::json;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::net::SocketAddr;
 use std::process::ExitCode;
 
 pub fn run(ctx: &Ctx, command: Command) -> Result<ExitCode, String> {
     match command {
-        Command::Init { force, keep, owner } => init(force, keep, owner),
+        Command::Init { force, keep, owner } => init(ctx, force, keep, owner),
         Command::Setup { owner, admin, yes } => setup(ctx, owner, admin, yes),
         Command::Check => check(ctx),
-        Command::Serve => serve(ctx),
+        Command::Serve {
+            http_host,
+            http_port,
+        } => serve(ctx, SocketAddr::new(http_host, http_port)),
         Command::Knowledge(c) => knowledge(ctx, c),
         Command::Completions { shell } => completions(shell),
     }
@@ -44,19 +48,15 @@ fn completions(shell: clap_complete::Shell) -> Result<ExitCode, String> {
 /// What the hub's operations are given, on this computer: its accounts, when
 /// its settings load, and its settings.
 pub fn context(ctx: &Ctx) -> Result<crate::accounts::HubContext, String> {
-    let dir = state::hub_config_dir()?;
-    let env_file = ctx.hub_env()?;
-    let at = dir.clone();
-    let context = crate::accounts::HubContext::new(&dir, move || {
-        kept::load(&at, env_file.as_deref()).map(|h| (h.accounts.roles, h.accounts.rules))
-    });
-    context.keys_from(ctx.env_file.clone());
-    Ok(context)
+    let at = ctx.dir.clone();
+    Ok(crate::accounts::HubContext::new(&ctx.dir, move || {
+        kept::load(&at).map(|h| (h.accounts.roles, h.accounts.rules))
+    }))
 }
 
 /// The hub this computer runs, loaded.
 fn load(ctx: &Ctx) -> Result<config::Hub, String> {
-    kept::load(&state::hub_config_dir()?, ctx.hub_env()?.as_deref())
+    kept::load(&ctx.dir)
 }
 
 /// Who runs this computer's hub, as its owner is named when nobody says.
@@ -71,21 +71,21 @@ fn this_user() -> Option<String> {
 /// `owner`'s, on this computer alone, closed to sign-ups, with no backend or
 /// model yet. Not when it has settings, unless `force`; with `keep`, that is
 /// no error: what the NixOS module runs before the hub starts.
-fn init(force: bool, keep: bool, owner: Option<String>) -> Result<ExitCode, String> {
-    let dir = state::hub_config_dir()?;
-    if !force && kept::settings(&dir).read()?.is_some() {
+fn init(ctx: &Ctx, force: bool, keep: bool, owner: Option<String>) -> Result<ExitCode, String> {
+    let dir = &ctx.dir;
+    if !force && kept::settings(dir).read()?.is_some() {
         if keep {
             return Ok(ExitCode::SUCCESS);
         }
         return Err(format!(
             "the hub in {} has its settings already; `ensemble-hub settings show` shows them. --force makes them anew.",
-            dir.display()
+            dir.path().display()
         ));
     }
     let owner = owner
         .or_else(this_user)
         .ok_or("init: name the hub with --owner <name>")?;
-    start(&dir, &owner)?;
+    start(dir, &owner)?;
     println!(
         "Next: `ensemble-hub setup` adds the first admin, or `ensemble-hub user add <name> --role admin`."
     );
@@ -94,17 +94,16 @@ fn init(force: bool, keep: bool, owner: Option<String>) -> Result<ExitCode, Stri
 
 /// Keep the settings a new hub of `owner`'s starts with in `dir`, and make its
 /// vault.
-fn start(dir: &Path, owner: &str) -> Result<(), String> {
+fn start(dir: &HubDir, owner: &str) -> Result<(), String> {
     let settings = HubSettings::starting(owner.trim());
     let hub = settings
-        .resolve(&kept::source(dir), &config::SystemEnv)
+        .resolve(dir, &config::SystemEnv)
         .map_err(|e| e.to_string())?;
     kept::settings(dir).write(&settings, &Change::by_this_computer("init"))?;
     println!(
-        "Made the hub {}: on this computer alone ({}), closed to sign-ups, with no LLM backend yet. Its settings are kept in {}.",
+        "Made the hub {}: closed to sign-ups, with no LLM backend yet. Its settings are kept in {}.",
         hub.owner,
-        hub.http.listen,
-        kept::source(dir).display()
+        dir.database().display()
     );
     ensemble_knowledge::Vault::new(&hub.connectors.knowledge.vault).init()?;
     println!(
@@ -125,8 +124,8 @@ fn setup(
 ) -> Result<ExitCode, String> {
     let interactive = std::io::stdin().is_terminal() && !yes;
     let me = this_user();
-    let dir = state::hub_config_dir()?;
-    let settings = match kept::settings(&dir).read()? {
+    let dir = &ctx.dir;
+    let settings = match kept::settings(dir).read()? {
         Some(settings) => {
             println!(
                 "The hub {} has its settings already; keeping them.",
@@ -142,8 +141,8 @@ fn setup(
                     .clone()
                     .ok_or("setup: name the hub with --owner <name>")?,
             };
-            start(&dir, &owner)?;
-            kept::settings(&dir)
+            start(dir, &owner)?;
+            kept::settings(dir)
                 .read()?
                 .ok_or("setup: the settings were not kept")?
         }
@@ -194,7 +193,7 @@ fn setup(
         }
     };
     if let Some(name) = &new_admin {
-        sign_in_runner(&settings, &route, name, &call);
+        connect_runner(name, &call);
     }
     println!(
         "Next: give it a model server with `ensemble-hub backend add <name> --type openai-compatible-api --url <url>`, choose the models that distill shares with `ensemble-hub knowledge models <backend>:<model>`, and watch a tracker with `ensemble-hub tracker add`. `ensemble-hub settings show` shows every setting."
@@ -202,54 +201,19 @@ fn setup(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Sign this computer's runner in to the hub as `admin`, when it has a
-/// runner that names no hub and the hub runs: with a join code, through
-/// `ensemble-runner join`.
-fn sign_in_runner(
-    settings: &HubSettings,
-    route: &local::Route<crate::accounts::HubContext>,
+/// Say how `admin` connects a runner of theirs, on any computer: with a
+/// join code, spent once.
+fn connect_runner(
     admin: &str,
     call: &dyn Fn(&str, serde_json::Value) -> Result<serde_json::Value, String>,
 ) {
-    let Ok(runner_dir) = state::runner_config_dir() else {
-        return;
-    };
-    let runner = ensemble_store::kept::RunnerStore::new(&runner_dir).read();
-    let Ok(Some(runner)) = runner else {
-        return;
-    };
-    if runner.hub.is_some() {
-        return;
-    }
-    let port = settings
-        .listen
-        .parse::<std::net::SocketAddr>()
-        .map(|a| a.port())
-        .unwrap_or(7700);
-    let url = format!("ws://127.0.0.1:{port}");
-    if !matches!(route, local::Route::Running(_)) {
-        println!(
-            "This computer's runner names no hub. Once the hub runs, sign it in: ensemble-runner login {url} --token <the token above>\n"
-        );
-        return;
-    }
-    let joined = call("user.join-code", json!({ "name": admin })).and_then(|made| {
-        let code = made["code"].as_str().unwrap_or_default().to_string();
-        std::process::Command::new("ensemble-runner")
-            .args(["join", &url, &code])
-            .status()
-            .map_err(|e| e.to_string())
-    });
-    match joined {
-        Ok(status) if status.success() => {
-            println!(
-                "This computer's runner '{}' is signed in to the hub as {admin}.\n",
-                runner.name
-            )
+    match call("user.join-code", json!({ "name": admin })) {
+        Ok(made) => {
+            if let Some(note) = made["note"].as_str() {
+                println!("{note}\n");
+            }
         }
-        _ => println!(
-            "This computer's runner names no hub. Sign it in: ensemble-runner login {url} --token <the token above>\n"
-        ),
+        Err(e) => println!("No join code for {admin}: {e}\n"),
     }
 }
 
@@ -332,17 +296,23 @@ fn check(ctx: &Ctx) -> Result<ExitCode, String> {
     })
 }
 
-/// `ensemble-hub serve`: the hub as a server for a team, until stopped. A
-/// change to its settings that cannot be used as it runs has it start again,
-/// in this process.
-fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
-    // One hub per computer; the lock also tells `ensemble-hub …` it runs.
-    let hub_dir = state::hub_dir()?;
-    let _lock = ensemble_core::lock::acquire(&hub_dir)
+/// `ensemble-hub serve`: the hub as a server for a team, until stopped; a
+/// new one, as `init` makes it, when its folder has none, so that what
+/// installs it only runs it. A change to its settings that cannot be used as
+/// it runs has it start again, in this process.
+fn serve(ctx: &Ctx, listen: SocketAddr) -> Result<ExitCode, String> {
+    // One hub per folder; the lock also tells `ensemble-hub …` it runs.
+    let _lock = ensemble_core::lock::acquire(ctx.dir.path())
         .map_err(|pid| format!("serve: process {pid} already runs the hub"))?;
+    if kept::settings(&ctx.dir).read()?.is_none() {
+        let owner = this_user()
+            .ok_or("serve: name the hub first with `ensemble-hub init --owner <name>`")?;
+        start(&ctx.dir, &owner)?;
+        println!("Next: `ensemble-hub setup` adds its first admin.");
+    }
     local::stop_on_signals();
     loop {
-        serve_once(ctx, &hub_dir)?;
+        serve_once(ctx, listen)?;
         if !local::restarting() {
             break;
         }
@@ -352,12 +322,11 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The hub, as its settings say now, until it stops or starts again.
-fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
-    let dir = state::hub_config_dir()?;
-    let env_file = ctx.hub_env()?;
-    let hub = kept::load(&dir, env_file.as_deref())?;
-    let listen = hub.http.listen;
+/// The hub, as its settings say now, listening on `listen`, until it stops
+/// or starts again.
+fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
+    let dir = ctx.dir.clone();
+    let hub = kept::load(&dir)?;
     // The backends of runners the hub uses, served on loopback, each call
     // relayed to its runner.
     let calls: std::sync::Arc<crate::calls::Calls> = std::sync::Arc::default();
@@ -373,27 +342,22 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
     };
     let loopback: &'static ensemble_link::loopback::Loopback = Box::leak(Box::new(loopback));
     let memory = ensemble_knowledge::Memory::new(&hub, None).with_relay(&hub, relay);
-    // A hub whose settings were changed to name another vault gets its vault
-    // here.
+    // A hub made without `init` gets its vault here.
     memory
         .vault()
         .init()
         .map_err(|e| format!("serve: the knowledge vault: {e}"))?;
-    let users = dir.clone();
     let listener = std::net::TcpListener::bind(listen)
         .map_err(|e| format!("serve: cannot listen on {listen}: {e}"))?;
     // `ensemble-hub …` reaches it on its socket, open before it says it
     // listens, so a command right after finds it.
-    let commands_at = state::hub_socket(hub_dir);
+    let commands_at = state::hub_socket(dir.path());
     let commands_listener = ensemble_core::runtime::shared()
         .block_on(async { local::listen(&commands_at) })
         .map_err(|e| format!("serve: {e}"))?;
     let say = |line: &str| eprintln!("ensemble: {line}");
-    say(&format!(
-        "hub {} listening on {}",
-        hub.owner,
-        listener.local_addr().unwrap_or(listen)
-    ));
+    let listen = listener.local_addr().unwrap_or(listen);
+    say(&format!("hub {} listening on {listen}", hub.owner));
     // The server and what it borrows live until the process ends: each
     // connection is a task of its own.
     let hub: &'static config::Hub = Box::leak(Box::new(hub));
@@ -409,15 +373,14 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
     // An inbox for each tracker the settings name.
     let mut inboxes: Vec<&'static crate::inbox::ServerInbox> = Vec::new();
     for (name, tracker) in &hub.connectors.tasks.trackers {
-        let inbox =
-            crate::inbox::ServerInbox::new(name, tracker, &hub.accounts.roles, users.clone())
-                .map_err(|e| format!("serve: {e}"))?
-                .with_notes(notes);
+        let inbox = crate::inbox::ServerInbox::new(name, tracker, &hub.accounts.roles, &dir)
+            .map_err(|e| format!("serve: {e}"))?
+            .with_notes(notes);
         inboxes.push(Box::leak(Box::new(inbox)));
     }
     // What a task's agent reported when it was done is shared, so the vault
     // learns from the work as from what people share.
-    let tasks = crate::board::Service::new(&users)
+    let tasks = crate::board::Service::new(&dir.tasks())
         .with_notes(notes)
         .on_done(|user, project, task| {
             let Some((title, text)) = crate::board::learned(project, task) else {
@@ -435,9 +398,10 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
             }
         });
     let tasks: &'static crate::board::Service = Box::leak(Box::new(tasks));
-    let server = crate::server::Server::new(memory, &hub.accounts.roles, hub.accounts.rules, users)
+    let server = crate::server::Server::new(memory, &hub.accounts.roles, hub.accounts.rules, &dir)
         .with_tasks(tasks)
         .with_calls(calls.clone());
+    server.operations().1.listening(listen);
     // `runner.backends` lists what the connected runners share.
     server.operations().1.when_serving(move || {
         serde_json::Value::Array(
@@ -457,21 +421,14 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
         )
     });
     let server: &'static crate::server::Server<'static> = Box::leak(Box::new(server));
-    server.operations().1.keys_from(ctx.env_file.clone());
     // A change to its settings, or to a key they name: used at once where it
-    // can be, else it starts again. Its .env is read again, made since it
-    // started too.
-    let given = ctx.env_file.clone();
+    // can be, else it starts again.
     server.operations().1.when_changed(move || {
-        let env_file = ensemble_ops::cli::env_file(given.as_deref(), &dir).or(env_file.clone());
-        let now = match kept::load(&dir, env_file.as_deref()) {
+        let now = match kept::load(&dir) {
             Ok(now) => now,
             Err(e) => return Some(format!("The running hub could not read it: {e}")),
         };
-        if now.http != hub.http
-            || now.connectors.knowledge.vault != hub.connectors.knowledge.vault
-            || now.connectors.tasks != hub.connectors.tasks
-        {
+        if now.connectors.tasks != hub.connectors.tasks {
             local::restart();
             return Some(
                 "The running hub starts again to use it; runners connect again by themselves."

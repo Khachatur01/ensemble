@@ -31,7 +31,6 @@ use futures_util::SinkExt;
 use futures_util::stream::{SplitSink, StreamExt};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -75,13 +74,13 @@ impl<'a> Server<'a> {
         memory: &'a Memory,
         roles: &'a BTreeMap<String, Vec<Permission>>,
         settings: ensemble_config::AccountRules,
-        users: PathBuf,
+        dir: &ensemble_core::state::HubDir,
     ) -> Self {
         Server {
             memory,
             hub: {
                 let roles = roles.clone();
-                HubContext::new(&users, move || Ok((roles.clone(), settings)))
+                HubContext::new(dir, move || Ok((roles.clone(), settings)))
             },
             operations: crate::accounts::operations(),
             tasks: None,
@@ -675,7 +674,6 @@ pub mod testing {
         let tmp = TempDir::new();
         use ensemble_config::Permission::*;
         let mut s = ensemble_config::HubSettings::starting("Acme");
-        s.listen = "127.0.0.1:0".into();
         s.backends.insert(
             "local".into(),
             ensemble_config::BackendSetting::OpenAiCompatible {
@@ -696,7 +694,6 @@ pub mod testing {
         .into_iter()
         .map(|(name, can)| (name.to_string(), can))
         .collect();
-        s.vault = tmp.0.join("vault").display().to_string();
         s.distill.candidates = vec![ensemble_config::ModelSetting {
             backend: "local".into(),
             model: "small".into(),
@@ -705,7 +702,7 @@ pub mod testing {
         s.recall_max_notes = 3;
         s.recall_max_chars = 1000;
         let hub = s
-            .resolve(std::path::Path::new("database.db"), &BTreeMap::new())
+            .resolve(&ensemble_core::state::HubDir::new(&tmp.0), &BTreeMap::new())
             .unwrap();
         let memory = Memory::new(&hub, None);
         memory.vault().init().unwrap();
@@ -725,7 +722,7 @@ pub mod testing {
                 related: Vec::new(),
             })
             .unwrap();
-        let mut users = Users::load(&tmp.0.join("state")).unwrap();
+        let mut users = Users::load(&tmp.0.join("state/core")).unwrap();
         let ana = users.add("ana", "member", &hub.accounts.roles).unwrap();
         let rex = users.add("rex", "reader", &hub.accounts.roles).unwrap();
         let root = users.add("root", "admin", &hub.accounts.roles).unwrap();
@@ -742,7 +739,7 @@ pub mod testing {
             memory,
             &hub.accounts.roles,
             hub.accounts.rules,
-            tmp.0.join("state"),
+            &ensemble_core::state::HubDir::new(tmp.0.join("state")),
         );
         if let Some(tasks) = tasks {
             server = server.with_tasks(tasks);
@@ -918,7 +915,7 @@ pub(crate) mod tests {
             json!({"title": "Ports", "text": "The shop listens on 8080.", "client": "claude-code", "project": "shop", "shared_by": "mallory"}),
         );
         assert!(reply.error.is_none(), "{reply:?}");
-        let shares = ensemble_knowledge::Vault::new(hub.tmp.0.join("vault")).shares();
+        let shares = ensemble_knowledge::Vault::new(hub.tmp.0.join("knowledge/vault")).shares();
         assert_eq!(shares.len(), 1);
         assert_eq!(shares[0].shared_by, "ana", "never a name the client sends");
         assert_eq!(shares[0].project.as_deref(), Some("shop"));
@@ -948,7 +945,7 @@ pub(crate) mod tests {
         let hub = start();
         let mut ana = connect(&hub.url, Some(&hub.ana)).unwrap();
         assert!(ask(&mut ana, 1, HELLO, json!({})).error.is_none());
-        let mut users = Users::load(&hub.tmp.0.join("state")).unwrap();
+        let mut users = Users::load(&hub.tmp.0.join("state/core")).unwrap();
         users.revoke("ana").unwrap();
         users.save().unwrap();
         let reply = ask(&mut ana, 2, RECALL, json!({"query": "deploy"}));

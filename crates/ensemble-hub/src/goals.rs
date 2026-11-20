@@ -7,9 +7,8 @@
 //! | `settings.show` | every setting |
 //! | `settings.history` | who changed the settings, when, and how |
 //! | `settings.import` | settings exported from a hub, whole, on its computer alone |
-//! | `settings.owner`, `settings.listen` | the hub's name, and the address it listens on |
+//! | `settings.owner` | the hub's name |
 //! | `settings.sessions`, `settings.lockout` | how long a login lasts, and when failed logins lock a name |
-//! | `knowledge.vault` | the knowledge vault's folder |
 //! | `knowledge.models` | the models that turn shares into notes, each asked whether it serves the model |
 //! | `knowledge.embedding` | the embedding model, asked to embed once, or none |
 //! | `knowledge.recall` | how much one recall returns |
@@ -240,11 +239,6 @@ struct Owner {
 }
 
 #[derive(Deserialize, Serialize)]
-struct Listen {
-    address: String,
-}
-
-#[derive(Deserialize, Serialize)]
 struct Sessions {
     hours: u64,
 }
@@ -256,11 +250,6 @@ struct Lockout {
 }
 
 #[derive(Deserialize, Serialize)]
-struct Vault {
-    dir: String,
-}
-
-#[derive(Deserialize, Serialize)]
 struct Import {
     settings: String,
 }
@@ -268,12 +257,6 @@ struct Import {
 const OWNER: &[Field] = &[Field::text(
     "name",
     "The hub's name, for its log and its listings, such as acme or ana.",
-)
-.required()
-.positional()];
-const LISTEN: &[Field] = &[Field::text(
-    "address",
-    "The address and port it listens on, such as 127.0.0.1:7700, or 0.0.0.0:7700 for other computers too.",
 )
 .required()
 .positional()];
@@ -294,12 +277,6 @@ const LOCKOUT: &[Field] = &[
     )
     .required(),
 ];
-const VAULT: &[Field] = &[Field::text(
-    "dir",
-    "The knowledge vault's folder, relative to the hub's or absolute; made when it is not there.",
-)
-.required()
-.positional()];
 const IMPORT: &[Field] = &[Field::text(
     "settings",
     "Settings as `settings show --json` prints them, whole.",
@@ -377,28 +354,6 @@ pub fn operations() -> Vec<Operation<HubContext>> {
         ),
         operation(
             Spec {
-                name: "settings.listen",
-                summary: "Say where the hub listens: its address and port.",
-                access: ADMIN,
-                input: LISTEN,
-            },
-            |c: &HubContext, caller: &Caller, input: Listen| {
-                let change = changed(caller, "settings.listen", &input);
-                let address = input.address.trim().to_string();
-                if address.parse::<std::net::SocketAddr>().is_err() {
-                    return Err(Error::invalid(format!(
-                        "'{address}' must be an address and a port, such as 127.0.0.1:7700"
-                    ))
-                    .on("address"));
-                }
-                edit(c, change, format!("the hub listens on {address}"), |s| {
-                    s.listen = address.clone();
-                    Ok(())
-                })
-            },
-        ),
-        operation(
-            Spec {
                 name: "settings.sessions",
                 summary: "Say how many hours a login lasts.",
                 access: ADMIN,
@@ -428,25 +383,6 @@ pub fn operations() -> Vec<Operation<HubContext>> {
                 edit(c, change, said, |s| {
                     s.lockout_failures = failures;
                     s.lockout_minutes = minutes;
-                    Ok(())
-                })
-            },
-        ),
-        operation(
-            Spec {
-                name: "knowledge.vault",
-                summary: "Say where the knowledge vault is: a folder, a git repository.",
-                access: ADMIN,
-                input: VAULT,
-            },
-            |c: &HubContext, caller: &Caller, input: Vault| {
-                let change = changed(caller, "knowledge.vault", &input);
-                let dir = input.dir.trim().to_string();
-                if dir.is_empty() {
-                    return Err(Error::invalid("name the folder").on("dir"));
-                }
-                edit(c, change, format!("the vault is {dir}"), |s| {
-                    s.vault = dir.clone();
                     Ok(())
                 })
             },
@@ -1028,7 +964,7 @@ fn shown(output: &Value) -> ensemble_ops::Said {
 
 /// Who changed the settings, when, and how.
 fn history(c: &HubContext) -> Result<Value, Error> {
-    let log = ensemble_store::kept::audit(c.dir()).map_err(Error::failed)?;
+    let log = ensemble_store::kept::audit(&c.dir().core()).map_err(Error::failed)?;
     let said: Vec<String> = log
         .iter()
         .map(|a| format!("{}  {}  {}  {}", a.at, a.who, a.operation, a.input))

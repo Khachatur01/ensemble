@@ -2,8 +2,9 @@
 //! database (`ensemble_store::kept`) and changed only through its operations,
 //! as a GitLab instance keeps its application settings. A hub is always a
 //! server (`ensemble-hub serve`), for a team or for one person on their own
-//! computer. Its core is its accounts, their roles and what each may do, the
-//! address it listens on and the LLM backends it uses. Everything else
+//! computer; where it listens is what `serve` is given, not a setting. Its
+//! core is its accounts, their roles and what each may do, and the LLM
+//! backends it uses. Everything else
 //! reaches it through a **connector**, each always on: the REST API, MCP, the
 //! runners' link, knowledge, tasks and sources.
 //!
@@ -15,6 +16,7 @@ use super::llm::BackendSetting;
 use super::raw::{self, RawDirectAdapter};
 use super::validate::{check_candidates, direct_adapter};
 use super::*;
+use ensemble_core::state::HubDir;
 use serde::{Deserialize, Serialize};
 
 /// The hub's settings, resolved.
@@ -22,7 +24,6 @@ use serde::{Deserialize, Serialize};
 pub struct Hub {
     /// The hub's name, for its log and its listings.
     pub owner: String,
-    pub http: Http,
     /// The LLM backends the hub uses: its own, and runners' it reaches over
     /// their links.
     pub llm: HubLlm,
@@ -30,13 +31,6 @@ pub struct Hub {
     pub connectors: Connectors,
     /// Where it was loaded from, for error messages.
     pub source: PathBuf,
-}
-
-/// The port every connector over HTTP is served on: the REST API at
-/// `/api/v1/`, MCP at `/mcp`, and the runners' link at `/link` and `/relay`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Http {
-    pub listen: std::net::SocketAddr,
 }
 
 /// The hub's accounts: what each role may do, and how people join and sign
@@ -89,8 +83,11 @@ pub struct SourceFilter {
 /// The knowledge vault, and how shares become notes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Knowledge {
-    /// The vault's directory, made absolute against the hub's directory.
+    /// The vault's directory, in the hub's folder (`knowledge/vault`).
     pub vault: PathBuf,
+    /// The notes' vectors, a cache beside the vault
+    /// (`knowledge/embeddings.db`).
+    pub embeddings: PathBuf,
     /// The embedding model: each note's vector when it is written, and
     /// finding notes by what they mean, for the distiller and for recall.
     /// Absent: notes are found by their words alone.
@@ -208,8 +205,6 @@ impl Embed {
 pub struct HubSettings {
     /// The hub's name, for its log and its listings.
     pub owner: String,
-    /// The address and port every connector over HTTP is served on.
-    pub listen: String,
     pub registration: RegistrationSetting,
     /// Hours a login lasts.
     pub session_hours: u32,
@@ -220,8 +215,6 @@ pub struct HubSettings {
     pub roles: BTreeMap<String, Vec<Permission>>,
     /// The LLM backends the hub uses, by name.
     pub backends: BTreeMap<String, BackendSetting>,
-    /// The knowledge vault's folder; a relative path is in the hub's folder.
-    pub vault: String,
     /// The models that turn shares into notes. An empty `try` keeps shares
     /// waiting until one is chosen.
     pub distill: ModelsSetting,
@@ -277,7 +270,8 @@ pub struct EmbedSetting {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TrackerSetting {
     LocalMarkdown {
-        /// The folder of issues; a relative path is in the hub's folder.
+        /// The folder of issues; a relative path is in the hub's
+        /// `trackers/`.
         dir: String,
         label: String,
         poll_seconds: u32,
@@ -323,7 +317,6 @@ impl HubSettings {
         ];
         HubSettings {
             owner: owner.to_string(),
-            listen: "127.0.0.1:7700".into(),
             registration: RegistrationSetting::Closed,
             session_hours: 12,
             lockout_failures: 5,
@@ -333,7 +326,6 @@ impl HubSettings {
                 .map(|(name, can)| (name.to_string(), can))
                 .collect(),
             backends: BTreeMap::new(),
-            vault: "vault".into(),
             distill: ModelsSetting {
                 candidates: Vec::new(),
                 when_none: WhenNone::Wait,
@@ -347,24 +339,14 @@ impl HubSettings {
         }
     }
 
-    /// The hub these settings make, checked, with the keys they name from
-    /// `env`. `source` is where they are kept, the hub's database: relative
-    /// paths are in its folder.
-    pub fn resolve(&self, source: &Path, env: &dyn Env) -> Result<Hub, ConfigError> {
+    /// The hub in `dir` these settings make, checked, with the keys they name
+    /// from `env`.
+    pub fn resolve(&self, dir: &HubDir, env: &dyn Env) -> Result<Hub, ConfigError> {
+        let source = &dir.database();
         let mut problems = Vec::new();
         if self.owner.trim().is_empty() {
             problems.push("owner: is empty; name the hub, such as acme or ana".into());
         }
-        let http = match self.listen.trim().parse() {
-            Ok(listen) => Some(Http { listen }),
-            Err(_) => {
-                problems.push(format!(
-                    "listen: '{}' must be an address and a port, such as 127.0.0.1:7700",
-                    self.listen
-                ));
-                None
-            }
-        };
         let (direct, runners) = crate::llm::backends(&self.backends, env, &mut problems);
         let llm = HubLlm { direct, runners };
         let kinds = crate::llm::kept_kinds(&self.backends);
@@ -400,10 +382,6 @@ impl HubSettings {
             },
             roles: self.roles.clone(),
         };
-        let base = source.parent().unwrap_or(Path::new("."));
-        if self.vault.trim().is_empty() {
-            problems.push("vault: is empty".into());
-        }
         let distill = models("distill", &self.distill, true, &kinds, &mut problems);
         if self.recall_max_notes == 0 || self.recall_max_chars == 0 {
             problems.push("recall: the most notes and characters must be greater than 0".into());
@@ -434,7 +412,8 @@ impl HubSettings {
             }
         });
         let knowledge = Knowledge {
-            vault: base.join(self.vault.trim()),
+            vault: dir.vault(),
+            embeddings: dir.knowledge().join("embeddings.db"),
             embed,
             distill,
             recall: Recall {
@@ -442,6 +421,7 @@ impl HubSettings {
                 max_chars: self.recall_max_chars,
             },
         };
+        let trackers_dir = dir.trackers();
         let mut trackers = BTreeMap::new();
         for (name, t) in &self.trackers {
             let at = format!("trackers.{name}");
@@ -469,7 +449,7 @@ impl HubSettings {
             }
             let tracker = Tracker {
                 kind: IssueTracker::LocalMarkdown {
-                    dir: base.join(dir.trim()),
+                    dir: trackers_dir.join(dir.trim()),
                 },
                 label: label.to_string(),
                 poll_seconds: *poll_seconds,
@@ -502,10 +482,9 @@ impl HubSettings {
                 }
             }),
         };
-        match (problems.is_empty(), http) {
-            (true, Some(http)) => Ok(Hub {
+        match problems.is_empty() {
+            true => Ok(Hub {
                 owner: self.owner.trim().to_string(),
-                http,
                 llm,
                 accounts,
                 connectors: Connectors {

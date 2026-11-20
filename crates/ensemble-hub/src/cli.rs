@@ -6,26 +6,28 @@ use ensemble_ops::cli::mount;
 use std::path::PathBuf;
 
 const AFTER_HELP: &str = "\
-Files:
-  ~/.config/ensemble/hub/  database.db, master.key, .env, vault/
+Files, in --config-dir (by default ~/.local/state/ensemble):
+  hub/core/        database.db (settings, accounts, sealed keys), master.key
+  hub/knowledge/   vault/ (the notes, a git repository), embeddings.db
+  hub/tasks/       database.db (the tasks it keeps)
+  hub/trackers/    database.db (which issue became which task)
 
-The hub's settings are kept in database.db, and changed with its commands, its
-REST API or a web UI; `settings show` shows them, `settings history` who
-changed what. `backend add` and `backend key` keep a backend's key
-sealed there by master.key: back up both, as without master.key no key can be
-read. A key a secrets manager keeps is read from the environment, or from the
-hub's .env (or --env-file). Client agents reach the hub over MCP, with an
-account's token.";
+The hub's settings are kept in its core's database, and changed with its
+commands, its REST API or a web UI; `settings show` shows them, `settings
+history` who changed what. `backend add` and `backend key` keep a backend's
+key sealed there by master.key: back up both, as without master.key no key can
+be read. A key a secrets manager keeps is read from the environment. Client
+agents reach the hub over MCP, with an account's token.";
 
 /// An Ensemble hub, run by this computer: accounts, tasks, knowledge, MCP for
 /// client agents, and the link runners connect to.
 #[derive(Debug, Parser)]
 #[command(name = "ensemble-hub", version, after_help = AFTER_HELP, max_term_width = 100)]
 pub struct Cli {
-    /// A file of NAME=value lines read for variables the environment does not
-    /// set, instead of the hub's .env.
-    #[arg(long, global = true, value_name = "PATH")]
-    pub env_file: Option<PathBuf>,
+    /// The folder everything is kept in, the hub in its hub/; by default
+    /// ~/.local/state/ensemble.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub config_dir: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -54,8 +56,8 @@ pub fn command<H>(hub: &Registry<H>) -> clap::Command {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Make the hub, asking what it is called and who its first admin is,
-    /// and sign this computer's runner in to it; what is done already is kept.
+    /// Make the hub, asking what it is called and who its first admin is;
+    /// what is done already is kept.
     Setup {
         /// The hub's name; asked, or your user name.
         #[arg(long)]
@@ -85,7 +87,15 @@ pub enum Command {
     /// distill now.
     Check,
     /// Run the hub until Ctrl-C or SIGTERM.
-    Serve,
+    Serve {
+        /// The address every connector over HTTP is served on: 0.0.0.0 for
+        /// other computers too.
+        #[arg(long, value_name = "ADDRESS", default_value = "127.0.0.1")]
+        http_host: std::net::IpAddr,
+        /// The port of the REST API, MCP and the runners' link.
+        #[arg(long, value_name = "PORT", default_value_t = 7700)]
+        http_port: u16,
+    },
     /// The hub's knowledge vault.
     #[command(subcommand)]
     Knowledge(KnowledgeCommand),
