@@ -7,11 +7,14 @@ use std::path::PathBuf;
 
 const AFTER_HELP: &str = "\
 Files:
-  ~/.config/ensemble/hub/  hub.yaml, .env, database.db, vault/
+  ~/.config/ensemble/hub/  database.db, master.key, .env, vault/
 
-API keys are never written in a config file: a backend names the variable that
-holds its key, read from the environment, or from the hub's .env (or
---env-file). Client agents reach the hub over MCP, with an account's token.";
+The hub's settings are kept in database.db, and changed with its commands, its
+REST API or a web UI. `backend add` and `backend key` keep a backend's key
+sealed there by master.key: back up both, as without master.key no key can be
+read. A key a secrets manager keeps is read from the environment, or from the
+hub's .env (or --env-file). Client agents reach the hub over MCP, with an
+account's token.";
 
 /// An Ensemble hub, run by this computer: accounts, tasks, knowledge, MCP for
 /// client agents, and the link runners connect to.
@@ -42,24 +45,30 @@ pub fn command<H>(hub: &Registry<H>) -> clap::Command {
         ),
         (
             "config",
-            "The hub's settings, hub.yaml, by their keys joined by dots, such as http.listen",
+            "The hub's settings, kept in its database, by their keys joined by dots, such as http.listen",
         ),
     ];
-    config_extras(mount(Cli::command(), hub, &groups))
+    config_extras(mount(Cli::command(), hub, &groups), false)
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Write a sample hub: hub.yaml with every setting, and its vault.
+    /// Write a sample hub: its settings, every one of them, in its database,
+    /// and its vault.
     Init {
-        /// Overwrite one that exists.
-        #[arg(long)]
+        /// Write the sample in place of the settings there are.
+        #[arg(long, conflicts_with = "keep")]
         force: bool,
+        /// Keep the settings there are, and write the sample only when there
+        /// are none: what the NixOS module runs before the hub starts.
+        #[arg(long)]
+        keep: bool,
         /// Print the sample instead.
         #[arg(long)]
         stdout: bool,
     },
-    /// Load and validate hub.yaml, and say which model would distill now.
+    /// Load and validate the hub's settings, and say which model would
+    /// distill now.
     Check,
     /// Run the hub until Ctrl-C or SIGTERM.
     Serve,

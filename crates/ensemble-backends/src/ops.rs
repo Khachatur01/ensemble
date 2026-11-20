@@ -4,10 +4,11 @@
 //! runner, `backend.share` and `backend.unshare`.
 //!
 //! A person gives what a backend is and its key, never the name of a
-//! variable: the key goes into the `.env` beside the settings file, under a
-//! variable Ensemble names after the backend
-//! ([`backend_key_variable`](ensemble_config::backend_key_variable)), and the
-//! backend names that variable. One who keeps the key elsewhere already, such
+//! variable: the key is kept under a variable Ensemble names after the
+//! backend ([`backend_key_variable`](ensemble_config::backend_key_variable)),
+//! and the backend names that variable. Where it is kept is the context's
+//! ([`WithBackends::keep_key`]): sealed in the hub's database, or in the
+//! runner's `.env`. One who keeps the key elsewhere already, such
 //! as a secrets manager that sets a variable, names that variable instead
 //! (`key_env`). A backend is asked which models it serves before it is added,
 //! so a wrong address or key is said at once, and an answer that wants a key
@@ -17,19 +18,22 @@ use ensemble_config::settings::{self, inline};
 use ensemble_config::settings_file::WithSettings;
 use ensemble_config::{
     ANTHROPIC_API, BackendSettings, LlmBackend, OPENAI_COMPATIBLE_API, Relayed,
-    backend_key_variable, set_dotenv,
+    backend_key_variable,
 };
 use ensemble_ops::{Access, Caller, Code, Error, Field, Kind, Operation, Spec, operation};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 /// A context whose settings file names LLM backends: a hub's or a runner's.
 pub trait WithBackends: WithSettings {
-    /// The `.env` file the keys Ensemble keeps go in, or why it may keep none,
-    /// such as when its keys come from a file a secrets manager writes.
-    fn key_file(&self) -> Result<PathBuf, Error>;
+    /// Why it may keep no key, if it may not, such as when its keys come from
+    /// a file a secrets manager writes.
+    fn can_keep_keys(&self) -> Result<(), Error>;
+
+    /// Keep `key` as the value of the variable `name`, or with none, forget
+    /// it.
+    fn keep_key(&self, name: &str, key: Option<&str>) -> Result<(), Error>;
 
     /// The backends the file names now, with their keys.
     fn backends(&self) -> Result<Backends, Error>;
@@ -40,16 +44,8 @@ pub trait WithBackends: WithSettings {
         Ok(())
     }
 
-    /// The value of the variable `name`: the environment's, else its `.env`'s.
-    fn variable(&self, name: &str) -> Option<String> {
-        std::env::var(name).ok().or_else(|| {
-            let file = self.key_file().ok()?;
-            let text = std::fs::read_to_string(&file).ok()?;
-            ensemble_config::parse_dotenv(&text, &file)
-                .ok()?
-                .remove(name)
-        })
-    }
+    /// The value of the variable `name`, wherever it looks for one.
+    fn variable(&self, name: &str) -> Option<String>;
 }
 
 /// The backends of a settings file.
@@ -391,7 +387,7 @@ fn add<C: WithBackends>(c: &C, side: Side, input: Add) -> Result<Value, Error> {
         let key = given_key(c, input.key.as_deref(), input.key_env.as_deref())?;
         // Where a key given would go, before the backend is asked anything.
         if input.key.as_deref().is_some_and(|k| !k.is_empty()) {
-            c.key_file()?;
+            c.can_keep_keys()?;
         }
         let backend = backend_of(&name, &input.kind, &url, timeout, key.clone());
         if input.kind == ANTHROPIC_API && key.is_none() && input.key.is_none() {
@@ -429,8 +425,7 @@ fn add<C: WithBackends>(c: &C, side: Side, input: Add) -> Result<Value, Error> {
     let text = file.plan(&edits)?;
     c.check_users(&text)?;
     if let Some((var, key)) = &keep {
-        let at = c.key_file()?;
-        set_dotenv(&at, var, Some(key)).map_err(Error::failed)?;
+        c.keep_key(var, Some(key))?;
     }
     let note = file.commit(&text)?;
     let serves = match &models {
@@ -471,9 +466,9 @@ fn remove<C: WithBackends>(c: &C, side: Side, name: &str) -> Result<Value, Error
     c.check_users(&text)?;
     let note = file.commit(&text)?;
     if let Some(var) = kept
-        && let Ok(at) = c.key_file()
+        && c.can_keep_keys().is_ok()
     {
-        set_dotenv(&at, &var, None).map_err(Error::failed)?;
+        c.keep_key(&var, None)?;
     }
     Ok(json!({ "said": format!("removed backend {name}"), "note": note }))
 }
@@ -546,11 +541,10 @@ fn set_key<C: WithBackends>(c: &C, side: Side, input: SetKey) -> Result<Value, E
             return Err(Error::invalid("give the new key, or empty to take it out").on("key"));
         }
     };
-    // Where the key would go, before the backend is asked anything.
-    let at = match &keep {
-        Some(_) => Some(c.key_file()?),
-        None => None,
-    };
+    // Whether the key can be kept, before the backend is asked anything.
+    if keep.is_some() {
+        c.can_keep_keys()?;
+    }
     let key = match (&keep, &env) {
         (Some(k), _) => Some(k.clone()),
         (None, Some(var)) => c.variable(var),
@@ -564,8 +558,8 @@ fn set_key<C: WithBackends>(c: &C, side: Side, input: SetKey) -> Result<Value, E
         };
         models = Some(ask(&tried, false)?);
     }
-    if let (Some(k), Some(at)) = (&keep, &at) {
-        set_dotenv(at, &ours, Some(k)).map_err(Error::failed)?;
+    if let Some(k) = &keep {
+        c.keep_key(&ours, Some(k))?;
     }
     let note = if env != now {
         let mut value = backend_map(&before, DIRECT, name)?;
@@ -583,9 +577,9 @@ fn set_key<C: WithBackends>(c: &C, side: Side, input: SetKey) -> Result<Value, E
     };
     if now.as_deref() == Some(ours.as_str())
         && env.as_deref() != Some(ours.as_str())
-        && let Ok(at) = c.key_file()
+        && c.can_keep_keys().is_ok()
     {
-        set_dotenv(&at, &ours, None).map_err(Error::failed)?;
+        c.keep_key(&ours, None)?;
     }
     let what = match (&env, &keep) {
         (None, _) => "has no key now".to_string(),

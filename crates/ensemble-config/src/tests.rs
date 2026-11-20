@@ -1599,14 +1599,6 @@ fn a_hub_listens_somewhere_and_its_accounts_name_their_roles() {
 }
 
 #[test]
-fn a_missing_hub_file_says_how_to_make_one() {
-    let err = load_hub(Path::new("/nonexistent/hub.yaml"), None, &env(&[]))
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("ensemble-hub init"), "{err}");
-}
-
-#[test]
 fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
     let schema = hub_schema();
     let defs = &schema["definitions"];

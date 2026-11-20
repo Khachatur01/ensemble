@@ -17,8 +17,9 @@
 //!   ensemble-runner serve                  (ensemble-runner)
 //! ```
 //!
-//! The hub's users and their tokens are kept in `users`, and its operations
-//! in `accounts`: state, not config. `server` is the hub's side of the link.
+//! The hub's settings and the keys of its backends are kept in its database
+//! (`kept`), its users and their tokens in `users`, and its operations in
+//! `accounts`. `server` is the hub's side of the link.
 //! The same port serves a REST API (`api`, over a little `http`) for signing
 //! up and for admins. Issues of the hub's tracker become tasks (`inbox`).
 //!
@@ -34,6 +35,7 @@ mod cmd;
 mod goals;
 mod http;
 pub mod inbox;
+pub mod kept;
 #[cfg(test)]
 mod link_tests;
 mod mcp;
@@ -96,10 +98,8 @@ fn dispatch(matches: &clap::ArgMatches, hub: &Registry<HubContext>) -> Result<Ex
         if let Some((name, leaf)) = matched(hub, matches) {
             return ensemble_ops::cli::run(hub, &call, name, leaf);
         }
-        let merge = |from: &Path| {
-            let file = cmd::context(&ctx)?.into_settings();
-            file.merge(from).map_err(|e| e.to_string())
-        };
+        // The hub's settings are in its database, which Nix declares none of.
+        let merge = |_: &Path| Err("the hub's settings are not declared in Nix".to_string());
         if let Some(done) = run_config_extra(matches, &call, merge) {
             return done;
         }
@@ -114,8 +114,8 @@ struct Ctx {
 }
 
 impl Ctx {
-    /// The hub's file of `NAME=value` lines, such as API keys:
-    /// `~/.config/ensemble/hub/.env`, or `--env-file`.
+    /// The hub's file of `NAME=value` lines, such as keys a secrets manager
+    /// keeps: `~/.config/ensemble/hub/.env`, or `--env-file`.
     fn hub_env(&self) -> Result<Option<PathBuf>, String> {
         Ok(ensemble_ops::cli::env_file(
             self.env_file.as_deref(),

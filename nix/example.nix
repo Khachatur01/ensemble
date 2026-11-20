@@ -1,6 +1,7 @@
 # An example NixOS configuration: one person's computer that runs a hub for
-# themselves and a runner that names it, both written in Nix, with one helper
-# team. She manages them with `ensemble-hub` and `ensemble-runner` as herself.
+# themselves, whose settings are kept in its database, and a runner that names
+# it, written in Nix, with one helper team. They manage both with
+# `ensemble-hub` and `ensemble-runner` as themselves.
 # The flake's `checks` evaluate it, so it stays a configuration that works.
 { pkgs, ... }:
 {
@@ -8,56 +9,6 @@
     enable = true;
     user = "ana";
     environmentFile = "/run/secrets/ensemble-hub.env";
-    settings = {
-      version = 1;
-      owner = "ana";
-      llm.direct.backends.local = {
-        type = "openai-compatible-api";
-        base_url = "http://127.0.0.1:11434/v1";
-        timeout_seconds = 300;
-      };
-      http.listen = "127.0.0.1:7700";
-      accounts = {
-        registration.type = "closed";
-        sessions.hours = 12;
-        lockout = {
-          failures = 5;
-          minutes = 15;
-        };
-        roles.admin = [
-          "admin"
-          "share"
-          "recall"
-          "tasks"
-          "compute"
-          "host"
-        ];
-      };
-      connectors = {
-        rest = { };
-        mcp = { };
-        runners = { };
-        knowledge = {
-          vault = "vault";
-          distill = {
-            try = [
-              {
-                backend = "local";
-                model = "qwen3.5:9b";
-              }
-            ];
-            when_none = "wait";
-            max_tokens = 4000;
-          };
-          recall = {
-            max_notes = 8;
-            max_chars = 6000;
-          };
-        };
-        tasks.trackers = { };
-        sources.adapters = { };
-      };
-    };
   };
 
   services.ensemble.runner = {

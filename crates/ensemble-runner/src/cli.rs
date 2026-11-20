@@ -46,7 +46,7 @@ pub fn command<R>(runner: &Registry<R>) -> clap::Command {
             "The LLM backends the runner's teams run on, their keys, and which it shares.",
         ),
     ];
-    config_extras(mount(Cli::command(), runner, &groups))
+    config_extras(mount(Cli::command(), runner, &groups), true)
 }
 
 #[derive(Debug, Subcommand)]

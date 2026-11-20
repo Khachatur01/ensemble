@@ -146,7 +146,7 @@ impl<'a> Server<'a> {
         (&self.operations, &self.hub)
     }
 
-    /// Its roles, as hub.yaml says them now.
+    /// Its roles, as the hub's settings say them now.
     pub(crate) fn roles(&self) -> BTreeMap<String, Vec<Permission>> {
         self.hub.accounts().map(|a| a.roles()).unwrap_or_default()
     }

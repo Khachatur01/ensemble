@@ -1,4 +1,6 @@
-//! `hub.yaml`: a hub's settings, in `~/.config/ensemble/hub/`. A hub is always
+//! A hub's settings, one YAML document kept in its database
+//! (`ensemble_hub::kept`); `hub.yaml` in `~/.config/ensemble/hub/` before
+//! that, which a hub takes in the first time it reads them. A hub is always
 //! a server (`ensemble-hub serve`), for a team or for one person on their own
 //! computer. Its core is its accounts, their roles and what each may do, the
 //! port it listens on (`http`) and the LLM backends it uses (`llm`).
@@ -12,18 +14,19 @@
 
 use super::llm::{RawHubLlm, hub_llm, kinds};
 use super::raw::RawDirectAdapter;
-use super::validate::{check_candidates, direct_adapter, explain, read_env_file};
+use super::validate::{check_candidates, direct_adapter, explain};
 use super::*;
 use serde::Deserialize;
 
+/// The file a hub kept its settings in before its database did.
 pub const HUB_FILENAME: &str = "hub.yaml";
 pub const HUB_SUPPORTED_VERSION: u32 = 1;
 
-/// The JSON Schema for `hub.yaml`, for editors. The tests keep it in step with
+/// The JSON Schema for the hub's settings, for editors. The tests keep it in step with
 /// the structs below.
 pub const HUB_SCHEMA: &str = include_str!("../../../hub.schema.json");
 
-/// The hub file `ensemble-hub init` writes, with what each setting does.
+/// The settings `ensemble-hub init` writes, with what each setting does.
 pub const HUB_SAMPLE: &str = include_str!("hub_sample.yaml");
 
 /// The hub's settings, resolved.
@@ -209,12 +212,6 @@ impl Embed {
     }
 }
 
-/// The hub file in directory `hub`. Like the helper team, the hub is named,
-/// never found.
-pub fn hub_path(hub: &Path) -> PathBuf {
-    hub.join(HUB_FILENAME)
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawHub {
@@ -365,29 +362,6 @@ pub(crate) struct RawEmbed {
     pub(crate) backend: String,
     pub(crate) model: String,
     pub(crate) min_similarity: f64,
-}
-
-/// Load the hub file at `path`, with variables the environment does not set
-/// taken from `env_file`.
-pub fn load_hub(path: &Path, env_file: Option<&Path>, env: &dyn Env) -> Result<Hub, ConfigError> {
-    if !path.exists() {
-        return Err(ConfigError::HubNotFound {
-            path: path.to_path_buf(),
-        });
-    }
-    let text = std::fs::read_to_string(path).map_err(|e| ConfigError::Unreadable {
-        path: path.to_path_buf(),
-        detail: e.to_string(),
-    })?;
-    let file_vars = read_env_file(env_file)?;
-    parse_hub(
-        &text,
-        path,
-        &env::Layered {
-            first: env,
-            then: &file_vars,
-        },
-    )
 }
 
 pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigError> {

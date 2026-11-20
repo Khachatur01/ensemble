@@ -363,7 +363,9 @@ impl WithSettings for RunnerContext {
     }
 }
 
-impl WithBackends for RunnerContext {
+impl RunnerContext {
+    /// The `.env` file the keys Ensemble keeps go in, or why it may keep none,
+    /// such as when its keys come from a file a secrets manager writes.
     fn key_file(&self) -> Result<std::path::PathBuf, Error> {
         let own = state::runner_config_dir()?.join(state::ENV_FILE);
         match &self.env_file {
@@ -377,6 +379,25 @@ impl WithBackends for RunnerContext {
             .hint("put the key there, as a variable, and name it with `key_env`")),
             _ => Ok(own),
         }
+    }
+}
+
+impl WithBackends for RunnerContext {
+    fn can_keep_keys(&self) -> Result<(), Error> {
+        self.key_file().map(|_| ())
+    }
+
+    fn keep_key(&self, name: &str, key: Option<&str>) -> Result<(), Error> {
+        config::set_dotenv(&self.key_file()?, name, key).map_err(Error::failed)
+    }
+
+    /// The environment's, else its `.env`'s.
+    fn variable(&self, name: &str) -> Option<String> {
+        std::env::var(name).ok().or_else(|| {
+            let file = self.key_file().ok()?;
+            let text = std::fs::read_to_string(&file).ok()?;
+            config::parse_dotenv(&text, &file).ok()?.remove(name)
+        })
     }
 
     fn backends(&self) -> Result<Backends, Error> {

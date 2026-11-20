@@ -107,7 +107,7 @@ impl KnowledgeAccess for Memory {
 /// The knowledge of one hub, as one session uses it.
 pub struct Memory {
     /// The hub's owner, its knowledge settings and its model endpoints, as
-    /// its hub.yaml says now: replaced when that changes ([`Memory::apply`]).
+    /// its settings say now: replaced when they change ([`Memory::apply`]).
     owner: RwLock<String>,
     knowledge: RwLock<Arc<Knowledge>>,
     /// How what sources bring in is collected and filtered, when it is.
@@ -176,7 +176,7 @@ impl Memory {
             .clone()
     }
 
-    /// The hub's name, as hub.yaml's `owner` says it now.
+    /// The hub's name, as its settings' `owner` says it now.
     pub fn owner(&self) -> String {
         self.owner.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -185,7 +185,7 @@ impl Memory {
         &self.meaning
     }
 
-    /// The source filter, as hub.yaml says now.
+    /// The source filter, as the hub's settings say now.
     pub(crate) fn filter(&self) -> Option<Arc<SourceFilter>> {
         self.filter
             .read()

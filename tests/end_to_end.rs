@@ -1620,7 +1620,7 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
 
     let out = ensemble_hub(&scratch, &["init"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(hub.join("hub.yaml").exists());
+    assert!(read_hub(&hub).contains("connectors:"));
     assert!(
         hub.join("vault/.git").exists(),
         "the vault is a git repository"
@@ -1630,9 +1630,19 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
         !again.status.success(),
         "it does not overwrite without --force"
     );
+    // What the NixOS module runs before each start: the settings stay.
+    let kept = ensemble_hub(&scratch, &["init", "--keep"]);
+    assert!(kept.status.success(), "{}", stderr_of(&kept));
+    assert!(stdout_of(&kept).is_empty(), "{}", stdout_of(&kept));
+    let at = stdout_of(&ensemble_hub(&scratch, &["config", "path"]));
+    assert!(
+        at.contains("the hub's settings, in") && at.contains("database.db"),
+        "{at}"
+    );
+    assert!(!hub.join("hub.yaml").exists());
 
     let url = models_stub(r#"{"data":[{"id":"small"}]}"#);
-    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    let text = read_hub(&hub);
     let (head, tail) = text.split_once("\nllm:\n").unwrap();
     let (_, rest) = tail.split_once("# ---").unwrap();
     let (_, try_and_on) = rest.split_once("      try:").unwrap();
@@ -1647,8 +1657,8 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
         .unwrap()
         .0
         .replace("backend: central", "backend: up");
-    std::fs::write(
-        hub.join("hub.yaml"),
+    write_hub(
+        &hub,
         format!(
             "{head}\nllm:\n  direct:\n    backends:\n      down: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}\n      up: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\n\n# ---{accounts_to_try}      try:\n        - {{ backend: down, model: small }}\n        - {{ backend: up, model: small }}\n      when_none:{after_try}"
         ),
@@ -1703,14 +1713,10 @@ fn items_stub(items: &str) -> String {
 
 /// Point the scratch hub's distilling models at `url`, the first of them.
 fn distill_on(hub: &Path, url: &str) {
-    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    let text = read_hub(hub);
     let start = text.find("base_url: ").unwrap() + "base_url: ".len();
     let end = start + text[start..].find('\n').unwrap();
-    std::fs::write(
-        hub.join("hub.yaml"),
-        format!("{}\"{url}\"{}", &text[..start], &text[end..]),
-    )
-    .unwrap();
+    write_hub(hub, format!("{}\"{url}\"{}", &text[..start], &text[end..])).unwrap();
 }
 
 #[test]
@@ -1838,6 +1844,22 @@ fn hub_dir(scratch: &Scratch) -> PathBuf {
     scratch.0.with_extension("xdg-config").join("ensemble/hub")
 }
 
+/// The settings of the hub in `hub`, as its database keeps them.
+fn read_hub(hub: &Path) -> String {
+    use ensemble_config::settings_file::Store;
+    ensemble_hub::kept::Settings::new(hub)
+        .read()
+        .unwrap()
+        .expect("the hub has its settings")
+}
+
+/// Keep `text` as the settings of the hub in `hub`, as a change by hand
+/// would, which the running hub does not hear of.
+fn write_hub(hub: &Path, text: impl AsRef<str>) -> Result<(), String> {
+    use ensemble_config::settings_file::Store;
+    ensemble_hub::kept::Settings::new(hub).write(text.as_ref())
+}
+
 /// A hub made by `ensemble-hub init` on the scratch computer.
 fn hub_server_of(scratch: &Scratch) -> PathBuf {
     let out = hub_command(scratch).args(["init"]).output().unwrap();
@@ -1845,7 +1867,7 @@ fn hub_server_of(scratch: &Scratch) -> PathBuf {
     // No test reaches a hosted model or another runner's: the sample's
     // Anthropic backend and those of runners go.
     let hub = hub_dir(scratch);
-    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    let text = read_hub(&hub);
     let cut = |text: &str, from: &str, to: &str| {
         let start = text.find(from).unwrap();
         let end = start + text[start..].find(to).unwrap();
@@ -1859,7 +1881,7 @@ fn hub_server_of(scratch: &Scratch) -> PathBuf {
             "",
         )
         .replace("        - backend: gpu\n          model: qwen3.5:9b\n", "");
-    std::fs::write(hub.join("hub.yaml"), text).unwrap();
+    write_hub(&hub, text).unwrap();
     hub
 }
 
@@ -1912,12 +1934,8 @@ fn hub_server(scratch: &Scratch) -> (PathBuf, String, String) {
     let hub = hub_server_of(scratch);
     let port = free_port();
     let address = format!("127.0.0.1:{port}");
-    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
-    std::fs::write(
-        hub.join("hub.yaml"),
-        text.replace("127.0.0.1:7700", &address),
-    )
-    .unwrap();
+    let text = read_hub(&hub);
+    write_hub(&hub, text.replace("127.0.0.1:7700", &address)).unwrap();
     let out = hub_command(scratch)
         .args(["user", "add", "ana", "--role", "member"])
         .output()
@@ -2287,13 +2305,13 @@ fn someone_signs_up_is_let_in_and_logs_in_from_a_runner_with_a_password() {
     drop(child);
 
     // A closed hub takes no sign-ups.
-    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    let text = read_hub(&hub);
     let closed = text.replace(
         "    type: approval               # anyone may sign up; an admin approves. Or: { type: closed }\n    max_pending: 20              # sign-ups waiting at once\n",
         "    type: closed\n",
     );
     assert_ne!(closed, text);
-    std::fs::write(hub.join("hub.yaml"), closed).unwrap();
+    write_hub(&hub, closed).unwrap();
     let _child = serve_hub(&s, &hub);
     let (status, _) = post_json(
         &address,
@@ -2399,9 +2417,9 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_runner_and_reported_back() 
     let shop = s.repo("shop");
     std::fs::write(shop.join("a.txt"), "foo\n").unwrap();
     let (hub, address, token) = hub_server(&s);
-    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
-    std::fs::write(
-        hub.join("hub.yaml"),
+    let text = read_hub(&hub);
+    write_hub(
+        &hub,
         text.replace("  poll_seconds: 30\n", "  poll_seconds: 1\n"),
     )
     .unwrap();
@@ -2556,7 +2574,7 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
     );
     let (hub, address, ana) = hub_server(&s);
     // The hub distills on the backend the gpu box shares, and nothing else.
-    let text = std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    let text = read_hub(&hub);
     let end_of_llm = text.find("\nllm:\n").unwrap()
         + text[text.find("\nllm:\n").unwrap()..].find("\n\n").unwrap();
     let text = format!(
@@ -2568,7 +2586,7 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
         "        - backend: central\n          model: qwen3.5-72b\n",
         "        - backend: gpu\n          model: small\n",
     );
-    std::fs::write(hub.join("hub.yaml"), text).unwrap();
+    write_hub(&hub, text).unwrap();
     let _hub = serve_hub(&s, &hub);
     let url = format!("ws://{address}");
     let login = |machine: &str, yaml: &str| {
@@ -3357,7 +3375,7 @@ fn a_running_runner_makes_a_change_to_its_settings_itself() {
 }
 
 #[test]
-fn a_running_hub_uses_a_changed_hub_yaml_at_once_or_starts_again() {
+fn a_running_hub_uses_changed_settings_at_once_or_starts_again() {
     let s = Scratch::new("hub-live");
     let (hub, _address, _token) = hub_server(&s);
     let _served = serve_hub(&s, &hub);
@@ -3410,18 +3428,9 @@ fn hub_with_stdin(scratch: &Scratch, args: &[&str], stdin: &str) -> std::process
 fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
     let s = Scratch::new("hub-backends");
     let hub = hub_server_of(&s);
-    let env = hub.join(".env");
-    let yaml = || std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
-    let vars = || {
-        std::fs::read_to_string(&env)
-            .map(|t| {
-                t.lines()
-                    .filter_map(|l| l.split_once('='))
-                    .map(|(n, v)| (n.to_string(), v.to_string()))
-                    .collect::<std::collections::BTreeMap<_, _>>()
-            })
-            .unwrap_or_default()
-    };
+    let yaml = || read_hub(&hub);
+    // The keys the hub keeps, sealed in its database.
+    let vars = || ensemble_hub::kept::Keys::new(&hub).all().unwrap();
     let server = models_stub(r#"{"data":[{"id":"small"}]}"#);
 
     // It answers without a key: added, with none.
@@ -3450,7 +3459,8 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
         yaml()
     );
 
-    // A key, given as a secret, is kept in .env under a name of Ensemble's.
+    // A key, given as a secret, is kept sealed in the database under a name
+    // of Ensemble's, by a master key only the hub's user may read.
     let out = hub_with_stdin(&s, &["backend", "key", "local"], "sk-local\n");
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(vars()["ENSEMBLE_BACKEND_LOCAL_KEY"], "sk-local");
@@ -3459,11 +3469,18 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
         "{}",
         yaml()
     );
-    assert!(!yaml().contains("sk-local"), "the key is never in hub.yaml");
+    assert!(
+        !yaml().contains("sk-local"),
+        "the key is never in the settings"
+    );
+    assert!(!hub.join(".env").exists(), "nor in a .env");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&env).unwrap().permissions().mode();
+        let mode = std::fs::metadata(hub.join("master.key"))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
     let list = stdout_of(&hub_with_stdin(&s, &["backend", "list"], ""));
@@ -3521,25 +3538,36 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
     assert!(!vars().contains_key("ENSEMBLE_BACKEND_LOCAL_KEY"));
     assert!(!yaml().contains("local: {"));
 
-    // Keys read from a file of their own are not written by Ensemble.
+    // A file a secrets manager writes is read for its variables, and left
+    // alone: a key given is kept in the database still.
     let other = s.path().join("secrets.env");
-    std::fs::write(&other, "").unwrap();
-    let out = hub_with_stdin(
-        &s,
+    std::fs::write(&other, "MANAGED_KEY=sk-managed\n").unwrap();
+    let with_file = |args: &[&str], stdin: &str| {
+        let mut all = vec!["--env-file", other.to_str().unwrap()];
+        all.extend_from_slice(args);
+        hub_with_stdin(&s, &all, stdin)
+    };
+    let out = with_file(&["backend", "key", "down", "--no-check"], "sk-x\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(vars()["ENSEMBLE_BACKEND_DOWN_KEY"], "sk-x");
+    let out = with_file(
         &[
-            "--env-file",
-            other.to_str().unwrap(),
             "backend",
             "key",
             "down",
+            "--key-env",
+            "MANAGED_KEY",
+            "--no-check",
         ],
-        "sk-x\n",
+        "",
     );
-    assert!(!out.status.success());
-    assert!(
-        stderr_of(&out).contains("which Ensemble does not write"),
-        "{}",
-        stderr_of(&out)
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!vars().contains_key("ENSEMBLE_BACKEND_DOWN_KEY"));
+    let list = stdout_of(&with_file(&["backend", "list"], ""));
+    assert!(list.contains("key from $MANAGED_KEY"), "{list}");
+    assert_eq!(
+        std::fs::read_to_string(&other).unwrap(),
+        "MANAGED_KEY=sk-managed\n"
     );
 }
 
@@ -3608,7 +3636,7 @@ fn a_runners_owner_adds_shares_and_removes_backends_its_teams_do_not_use() {
 fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean() {
     let s = Scratch::new("hub-goals");
     let hub = hub_server_of(&s);
-    let yaml = || std::fs::read_to_string(hub.join("hub.yaml")).unwrap();
+    let yaml = || read_hub(&hub);
     let run = |args: &[&str]| hub_with_stdin(&s, args, "");
     // One server for every model: it lists `small`, and embeds.
     let server = models_stub(r#"{"data":[{"id":"small","embedding":[0.1,0.2]}]}"#);

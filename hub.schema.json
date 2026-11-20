@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/hub.schema.json",
-  "title": "Ensemble hub: hub.yaml",
-  "description": "A hub, in ~/.config/ensemble/hub/hub.yaml, run by `ensemble-hub serve`. Its core is its accounts, their roles and what each may do, the port it listens on (`http`) and the LLM backends it uses (`llm`); everything else reaches it through a connector, each always on and each written in `connectors`: the REST API, MCP, the runners' link, knowledge, tasks and sources. A connector may hold adapters the admin picks, in a map that may be empty. Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (`llm.runners`, `connectors.knowledge.embed`, and a backend's `api_key_env`).",
+  "title": "Ensemble hub: its settings",
+  "description": "A hub's settings, kept in its database (~/.config/ensemble/hub/database.db) and opened by `ensemble-hub config edit`; run by `ensemble-hub serve`. Its core is its accounts, their roles and what each may do, the port it listens on (`http`) and the LLM backends it uses (`llm`); everything else reaches it through a connector, each always on and each written in `connectors`: the REST API, MCP, the runners' link, knowledge, tasks and sources. A connector may hold adapters the admin picks, in a map that may be empty. Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (`llm.runners`, `connectors.knowledge.embed`, and a backend's `api_key_env`).",
   "type": "object",
   "required": ["version", "owner", "http", "llm", "accounts", "connectors"],
   "additionalProperties": false,

@@ -71,7 +71,7 @@ impl Loopback {
         })
     }
 
-    /// Serve `names` from now on, as a changed hub.yaml says.
+    /// Serve `names` from now on, as the hub's changed settings say.
     pub fn set_names(&self, names: Names) {
         *self.names.write().unwrap_or_else(|e| e.into_inner()) = names;
     }

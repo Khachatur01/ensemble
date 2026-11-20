@@ -10,8 +10,8 @@
 //!
 //! A settings file's `config` group gets what only a command line does with
 //! it ([`config_extras`]): `edit`, in $VISUAL or $EDITOR, which reads and
-//! writes through the `config.*` operations, and `merge`, what the Nix modules
-//! run before the service starts.
+//! writes through the `config.*` operations, and, for a file Nix declares
+//! settings of, `merge`, what the Nix modules run before the service starts.
 
 use crate::{Access, Code, Error, Field, Kind, Registry};
 use serde_json::{Map, Value, json};
@@ -180,17 +180,18 @@ fn line(text: &'static str) -> &'static str {
 /// How an operation is run, where it runs.
 pub type Call<'a> = &'a dyn Fn(&str, Value) -> Result<Value, Error>;
 
-/// `command`'s `config` group with `edit` and `merge`, which only a command
-/// line has.
-pub fn config_extras(command: clap::Command) -> clap::Command {
+/// `command`'s `config` group with `edit` and, when Nix may declare its
+/// settings, `merge`, which only a command line has.
+pub fn config_extras(command: clap::Command, merge: bool) -> clap::Command {
     command.mut_subcommand("config", |config| {
-        config
-            .subcommand(
-                clap::Command::new("edit").about(
-                    "Open the file in $VISUAL or $EDITOR, and keep the change only if it loads",
-                ),
-            )
-            .subcommand(
+        let config = config.subcommand(
+            clap::Command::new("edit")
+                .about("Open the settings in $VISUAL or $EDITOR, and keep the change only if it loads"),
+        );
+        if !merge {
+            return config;
+        }
+        config.subcommand(
                 clap::Command::new("merge")
                     .about("Merge the settings of a YAML file into it and keep them as declared in Nix: what the Nix modules run")
                     .hide(true)
@@ -251,11 +252,13 @@ pub fn edit(call: Call<'_>) -> Result<(), String> {
         &call("config.get", json!({})).map_err(|e| e.to_string())?,
         "text",
     );
+    // A YAML file, for the editor, beside the file or the database that keeps
+    // the settings.
     let name = path
-        .file_name()
+        .file_stem()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let copy = path.with_file_name(format!(".{name}.edit"));
+    let copy = path.with_file_name(format!(".{name}.edit.yaml"));
     if let Some(dir) = copy.parent() {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;

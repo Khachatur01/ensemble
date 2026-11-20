@@ -4,6 +4,7 @@
 
 use crate::Ctx;
 use crate::cli::{Command, KnowledgeCommand};
+use crate::kept;
 use ensemble_config::{self as config, SystemEnv};
 use ensemble_core::state;
 use ensemble_ops::cli::confirm;
@@ -12,7 +13,11 @@ use std::process::ExitCode;
 
 pub fn run(ctx: &Ctx, command: Command) -> Result<ExitCode, String> {
     match command {
-        Command::Init { force, stdout } => init(force, stdout),
+        Command::Init {
+            force,
+            keep,
+            stdout,
+        } => init(force, keep, stdout),
         Command::Check => check(ctx),
         Command::Serve => serve(ctx),
         Command::Knowledge(c) => knowledge(ctx, c),
@@ -36,15 +41,13 @@ fn completions(shell: clap_complete::Shell) -> Result<ExitCode, String> {
 }
 
 /// What the hub's operations are given, on this computer: its accounts, when
-/// hub.yaml loads, and hub.yaml.
+/// its settings load, and its settings.
 pub fn context(ctx: &Ctx) -> Result<crate::accounts::HubContext, String> {
     let dir = state::hub_config_dir()?;
     let env_file = ctx.hub_env()?;
-    let path = config::hub_path(&dir);
+    let at = dir.clone();
     let context = crate::accounts::HubContext::new(&dir, move || {
-        config::load_hub(&path, env_file.as_deref(), &SystemEnv)
-            .map(|h| (h.accounts.roles, h.accounts.rules))
-            .map_err(|e| e.to_string())
+        kept::load(&at, env_file.as_deref()).map(|h| (h.accounts.roles, h.accounts.rules))
     });
     context.keys_from(ctx.env_file.clone());
     Ok(context)
@@ -52,32 +55,32 @@ pub fn context(ctx: &Ctx) -> Result<crate::accounts::HubContext, String> {
 
 /// The hub this computer runs, loaded.
 fn load(ctx: &Ctx) -> Result<config::Hub, String> {
-    config::load_hub(
-        &config::hub_path(&state::hub_config_dir()?),
-        ctx.hub_env()?.as_deref(),
-        &SystemEnv,
-    )
-    .map_err(|e| e.to_string())
+    kept::load(&state::hub_config_dir()?, ctx.hub_env()?.as_deref())
 }
 
-fn init(force: bool, stdout: bool) -> Result<ExitCode, String> {
+fn init(force: bool, keep: bool, stdout: bool) -> Result<ExitCode, String> {
     if stdout {
         print!("{}", config::hub::HUB_SAMPLE);
         return Ok(ExitCode::SUCCESS);
     }
     let dir = state::hub_config_dir()?;
-    let path = config::hub_path(&dir);
-    if path.exists() && !force {
+    let sample = config::hub::HUB_SAMPLE;
+    if !kept::init(&dir, sample, force)? {
+        if keep {
+            return Ok(ExitCode::SUCCESS);
+        }
         return Err(format!(
-            "{} already exists. Pass --force to overwrite it.",
-            path.display()
+            "the hub in {} has its settings already. Pass --force to write the sample in their place.",
+            dir.display()
         ));
     }
-    let (sample, what) = (config::hub::HUB_SAMPLE, "a sample hub");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    std::fs::write(&path, sample).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    println!("wrote {}: {what}, with every setting", path.display());
-    let hub = config::parse_hub(sample, &path, &SystemEnv).map_err(|e| e.to_string())?;
+    println!(
+        "wrote {} in {}: a sample hub, with every setting",
+        kept::SETTINGS_NAME,
+        kept::source(&dir).display()
+    );
+    let hub =
+        config::parse_hub(sample, &kept::source(&dir), &SystemEnv).map_err(|e| e.to_string())?;
     ensemble_knowledge::Vault::new(&hub.connectors.knowledge.vault).init()?;
     println!(
         "made the knowledge vault, a git repository: {}",
@@ -90,14 +93,8 @@ fn init(force: bool, stdout: bool) -> Result<ExitCode, String> {
 }
 
 fn check(ctx: &Ctx) -> Result<ExitCode, String> {
-    let dir = state::hub_config_dir()?;
-    let hub = config::load_hub(
-        &config::hub_path(&dir),
-        ctx.hub_env()?.as_deref(),
-        &SystemEnv,
-    )
-    .map_err(|e| e.to_string())?;
-    println!("{}: valid, for {}", hub.source.display(), hub.owner);
+    let hub = load(ctx)?;
+    println!("{}: valid, for {}", kept::SETTINGS_NAME, hub.owner);
     let knowledge = &hub.connectors.knowledge;
     println!("knowledge vault: {}", knowledge.vault.display());
     if !ensemble_knowledge::Vault::new(&knowledge.vault).exists() {
@@ -168,8 +165,8 @@ fn check(ctx: &Ctx) -> Result<ExitCode, String> {
 }
 
 /// `ensemble-hub serve`: the hub as a server for a team, until stopped. A
-/// change to hub.yaml that cannot be used as it runs has it start again, in
-/// this process.
+/// change to its settings that cannot be used as it runs has it start again,
+/// in this process.
 fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
     // One hub per computer; the lock also tells `ensemble-hub …` it runs.
     let hub_dir = state::hub_dir()?;
@@ -181,19 +178,17 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
         if !local::restarting() {
             break;
         }
-        eprintln!("ensemble: starting again with hub.yaml as it is now");
+        eprintln!("ensemble: starting again with the hub's settings as they are now");
     }
     eprintln!("ensemble: stopped");
     Ok(ExitCode::SUCCESS)
 }
 
-/// The hub, as hub.yaml says now, until it stops or starts again.
+/// The hub, as its settings say now, until it stops or starts again.
 fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
     let dir = state::hub_config_dir()?;
     let env_file = ctx.hub_env()?;
-    let path = config::hub_path(&dir);
-    let hub =
-        config::load_hub(&path, env_file.as_deref(), &SystemEnv).map_err(|e| e.to_string())?;
+    let hub = kept::load(&dir, env_file.as_deref())?;
     let listen = hub.http.listen;
     // The backends of runners the hub uses, served on loopback, each call
     // relayed to its runner.
@@ -210,7 +205,8 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
     };
     let loopback: &'static ensemble_link::loopback::Loopback = Box::leak(Box::new(loopback));
     let memory = ensemble_knowledge::Memory::new(&hub, None).with_relay(&hub, relay);
-    // A hub written by hand, or by a NixOS module, gets its vault here.
+    // A hub whose settings were taken in from a hub.yaml, or changed to name
+    // another vault, gets its vault here.
     memory
         .vault()
         .init()
@@ -242,7 +238,7 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
             .starts_with(ensemble_knowledge::RECALL_HEADER)
             .then_some(found)
     };
-    // An inbox for each tracker hub.yaml names.
+    // An inbox for each tracker the settings name.
     let mut inboxes: Vec<&'static crate::inbox::ServerInbox> = Vec::new();
     for (name, tracker) in &hub.connectors.tasks.trackers {
         let inbox =
@@ -294,13 +290,13 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
     });
     let server: &'static crate::server::Server<'static> = Box::leak(Box::new(server));
     server.operations().1.keys_from(ctx.env_file.clone());
-    // A change to hub.yaml, or to a key it names: used at once where it can
-    // be, else it starts again. Its .env is read again, made since it started
-    // too.
+    // A change to its settings, or to a key they name: used at once where it
+    // can be, else it starts again. Its .env is read again, made since it
+    // started too.
     let given = ctx.env_file.clone();
     server.operations().1.when_changed(move || {
         let env_file = ensemble_ops::cli::env_file(given.as_deref(), &dir).or(env_file.clone());
-        let now = match config::load_hub(&path, env_file.as_deref(), &SystemEnv) {
+        let now = match kept::load(&dir, env_file.as_deref()) {
             Ok(now) => now,
             Err(e) => return Some(format!("The running hub could not read it: {e}")),
         };

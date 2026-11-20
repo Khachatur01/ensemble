@@ -3,12 +3,18 @@
 # hub's lingering so it runs from boot without a login. Each runs as the
 # person it is for, with their `XDG_RUNTIME_DIR`, where `ensemble-hub …` and
 # `ensemble-runner …` find its socket, from their `~/.config/ensemble/`, so they manage it with
-# `ensemble-hub` and `ensemble-runner` as on any platform. What should always
-# hold is written in Nix: the settings declared here are merged into
-# `hub.yaml` and `runner.yaml` when each starts, and teams are linked in. The
-# rest is made and changed with `ensemble-hub init`, `ensemble-runner setup`,
-# `… config set` and `ensemble-runner team …`, which refuse to change what Nix
-# declares. Each process starts once its file is there.
+# `ensemble-hub` and `ensemble-runner` as on any platform.
+#
+# The hub is only run from here, as a GitLab instance is: its settings and the
+# keys of its backends are kept in its database, and changed with
+# `ensemble-hub …`, its REST API or a web UI. It writes the sample settings the
+# first time it starts. Only a key a secrets manager keeps comes from here,
+# through `environmentFile`.
+#
+# The runner's settings declared here are merged into `runner.yaml` when it
+# starts, and teams are linked in. The rest is made and changed with
+# `ensemble-runner setup`, `… config set` and `ensemble-runner team …`, which
+# refuse to change what Nix declares. It starts once its file is there.
 { self }:
 {
   config,
@@ -29,8 +35,6 @@ let
   runner = import ./runner.nix { inherit self lib; };
 
   hub = cfg.hub;
-  hubDir = "${config.users.users.${hub.user}.home}/.config/ensemble/hub";
-  hubYaml = if hub.settings == null then null else yaml.generate "hub.yaml" hub.settings;
 
   runnerCfg = cfg.runner;
   runnerFiles = runner.files {
@@ -59,82 +63,46 @@ in
         type = types.str;
         description = ''
           Whose hub it is: it runs as them, and its files are in their
-          `~/.config/ensemble/hub/`. For a hub of an account of its own, make
-          that user, and run `ensemble-hub …` as it.
+          `~/.config/ensemble/hub/`: its database, with its settings and the
+          keys of its backends, sealed by `master.key` beside it. Back up
+          both. For a hub of an account of its own, make that user, and run
+          `ensemble-hub …` as it.
         '';
         example = "ana";
-      };
-
-      settings = mkOption {
-        type = types.nullOr yaml.type;
-        default = null;
-        description = ''
-          Settings of the hub's `hub.yaml`, as Nix: any of `version`, `owner`,
-          `http`, `llm`, `accounts` and `connectors`, down to one setting
-          such as `http.listen`. They are merged into the hub's
-          `hub.yaml` whenever it starts; the rest is made and changed with
-          `ensemble-hub init` and `ensemble-hub config set`, which refuse to
-          change those declared here. `ensemble-hub init --stdout` prints every
-          setting. Null leaves the whole file to `ensemble-hub`, and the hub
-          starts once `ensemble-hub init` has written it.
-        '';
-        example = lib.literalExpression ''
-          {
-            version = 1;
-            owner = "acme";
-            llm.direct.backends.central = {
-              type = "openai-compatible-api";
-              base_url = "http://127.0.0.1:8000/v1";
-              timeout_seconds = 300;
-            };
-            http.listen = "127.0.0.1:7700";
-            accounts = {
-              registration = { type = "approval"; max_pending = 20; };
-              sessions.hours = 12;
-              lockout = { failures = 5; minutes = 15; };
-              roles = {
-                admin = [ "admin" "share" "recall" "tasks" "compute" "host" ];
-                member = [ "share" "recall" "tasks" "compute" ];
-              };
-            };
-            connectors = {
-              rest = { };
-              mcp = { };
-              runners = { };
-              knowledge = {
-                vault = "vault";
-                distill = {
-                  try = [ { backend = "central"; model = "qwen3.5-72b"; } ];
-                  when_none = "wait";
-                  max_tokens = 4000;
-                };
-                recall = { max_notes = 8; max_chars = 6000; };
-              };
-              tasks.trackers = { };
-              sources.adapters = { };
-            };
-          }
-        '';
       };
 
       environmentFile = mkOption {
         type = types.nullOr types.str;
         default = null;
         description = ''
-          A file of NAME=value lines, the API keys the hub's backends name in
-          `api_key_env`, given to `ensemble-hub serve` as `--env-file`, such
-          as a secret sops-nix or agenix puts in /run. A path as a string, so
-          the keys never enter the Nix store. Null reads the hub's own
-          `~/.config/ensemble/hub/.env`, when there is one.
+          A file of NAME=value lines, given to `ensemble-hub serve` as
+          `--env-file`, such as a secret sops-nix or agenix puts in /run: the
+          keys a secrets manager keeps, which a backend names with
+          `ensemble-hub backend key <name> --key-env <NAME>`. A path as a
+          string, so the keys never enter the Nix store. A key given to
+          `ensemble-hub backend key` is kept in the hub's database instead.
+          Null reads the hub's own `~/.config/ensemble/hub/.env`, when there
+          is one.
         '';
+      };
+
+      port = mkOption {
+        type = types.nullOr types.port;
+        default = null;
+        description = ''
+          The port of the hub's `http.listen`, one of its settings, for
+          `openFirewall` to open. Set `http.listen` to an address on it with
+          `ensemble-hub config set http.listen 0.0.0.0:<port>`.
+        '';
+        example = 7700;
       };
 
       openFirewall = mkOption {
         type = types.bool;
         default = false;
         description = ''
-          Open the port `settings.http.listen` names. Without a TLS proxy in
-          front, only on a network you trust. Needs `settings.http.listen`.
+          Open `port` in the firewall. Without a TLS proxy in front, only on a
+          network you trust. Needs `port`.
         '';
       };
     };
@@ -164,14 +132,12 @@ in
     (mkIf hub.enable {
       assertions = [
         {
-          assertion = hub.openFirewall -> (hub.settings.http.listen or null) != null;
-          message = "services.ensemble.hub.openFirewall needs services.ensemble.hub.settings.http.listen, which names the port";
+          assertion = hub.openFirewall -> hub.port != null;
+          message = "services.ensemble.hub.openFirewall needs services.ensemble.hub.port, the port of the hub's http.listen";
         }
       ];
 
-      networking.firewall.allowedTCPPorts = lib.optional hub.openFirewall (
-        lib.toInt (lib.last (lib.splitString ":" hub.settings.http.listen))
-      );
+      networking.firewall.allowedTCPPorts = lib.optional hub.openFirewall hub.port;
 
       # A user service, so it has its user's runtime directory, where
       # `ensemble-hub …` finds its socket; lingering, so it starts at boot.
@@ -180,27 +146,14 @@ in
       systemd.user.services.ensemble-hub = {
         description = "Ensemble hub";
         wantedBy = [ "default.target" ];
-        restartTriggers = lib.optional (hubYaml != null) hubYaml;
-        unitConfig = {
-          ConditionUser = hub.user;
-        }
-        # Without settings, it waits for `ensemble-hub init`.
-        // lib.optionalAttrs (hubYaml == null) {
-          ConditionPathExists = "${hubDir}/hub.yaml";
-        };
+        unitConfig.ConditionUser = hub.user;
         # The vault is a git repository.
         path = [ pkgs.git ];
-        preStart =
-          if hubYaml != null then
-            ''
-              # A hub to merge into: the sample, with its vault.
-              [ -e ${hubDir}/hub.yaml ] || ${lib.getExe hub.package} init
-              ${lib.getExe hub.package} config merge ${hubYaml}
-            ''
-          else
-            ''
-              rm -f ${hubDir}/.nix-managed
-            '';
+        # The sample settings, with its vault, the first time it starts; a hub
+        # that has a hub.yaml still takes it in.
+        preStart = ''
+          ${lib.getExe hub.package} init --keep
+        '';
         serviceConfig = {
           ExecStart = lib.escapeShellArgs (
             [

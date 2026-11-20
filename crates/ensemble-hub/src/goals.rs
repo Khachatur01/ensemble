@@ -1,6 +1,6 @@
 //! The hub's goal operations beside its backends (`ensemble_backends::ops`):
 //! what a person means to change, each checked as it is made, so nobody edits
-//! hub.yaml by hand nor knows its keys.
+//! the hub's settings by hand nor knows its keys.
 //!
 //! | Operation | Does |
 //! |---|---|
@@ -13,9 +13,11 @@
 //! | `source.filter` | the model that collects and filters what sources bring in, and what is confidential, or none |
 //! | `source.try` | what the filter would leave of a text, shared nowhere |
 //!
-//! Each writes hub.yaml through its settings file, so a change is loaded
-//! before it is written, what Nix declares is refused, and the running hub
+//! Each writes the hub's settings through their [`SettingsFile`], kept in its
+//! database, so a change is loaded before it is written, and the running hub
 //! uses it at once.
+//!
+//! [`SettingsFile`]: ensemble_config::SettingsFile
 
 use crate::accounts::HubContext;
 use ensemble_backends::ops::WithBackends;
@@ -720,13 +722,13 @@ fn registration(c: &HubContext, input: Registration) -> Result<Value, Error> {
     Ok(json!({ "said": said, "note": note }))
 }
 
-/// What hub.yaml names, for an operation to find what it is about.
+/// What the hub's settings name, for an operation to find what it is about.
 struct Names {
     trackers: Vec<String>,
     roles: Vec<String>,
 }
 
-/// Make `edits`, once `there` finds `name` in what hub.yaml names.
+/// Make `edits`, once `there` finds `name` in what the settings name.
 fn change(
     c: &HubContext,
     edits: Vec<(String, Option<String>)>,
@@ -746,7 +748,7 @@ fn change(
     Ok(json!({ "said": said, "note": note }))
 }
 
-/// Write `edits` to hub.yaml, and say what the running hub did.
+/// Write `edits` to the hub's settings, and say what the running hub did.
 fn commit(c: &HubContext, edits: &[(String, Option<String>)]) -> Result<Option<String>, Error> {
     let file = c.settings_file()?;
     let text = file.plan(edits)?;
@@ -818,7 +820,7 @@ fn no_backend(backend: &str, field: &str) -> Error {
         .hint("`backend list` lists them; `backend add` adds one")
 }
 
-/// Refuse a name hub.yaml could not hold as one key.
+/// Refuse a name the settings could not hold as one key.
 fn word(name: &str, field: &str) -> Result<(), Error> {
     let fits = !name.is_empty()
         && name

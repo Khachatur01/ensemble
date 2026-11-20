@@ -189,8 +189,8 @@ pub fn parse_runner(text: &str, path: &Path, env: &dyn Env) -> Result<Runner, Co
 }
 
 /// The folder `workspace` names in the runner file at `path`: `~/…` in the
-/// home directory, and a relative path beside the file, as hub.yaml's paths
-/// are.
+/// home directory, and a relative path beside the file, as the hub's paths
+/// are beside its database.
 fn workspace_path(workspace: &str, path: &Path) -> Result<PathBuf, String> {
     if workspace.is_empty() {
         return Err("is empty: name the folder the runner works in, such as ~/ensemble".into());

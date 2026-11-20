@@ -40,7 +40,7 @@ pub struct Accounts {
     /// The hub's folder, with its database.
     dir: PathBuf,
     /// The roles, and how people join, how long a login lasts and when failed
-    /// logins lock a name: as hub.yaml says now ([`Accounts::apply`]).
+    /// logins lock a name: as the hub's settings say now ([`Accounts::apply`]).
     roles: RwLock<Roles>,
     rules: RwLock<ensemble_config::AccountRules>,
     /// Held while the accounts are read, changed and written, so two requests
@@ -61,7 +61,7 @@ impl Accounts {
         }
     }
 
-    /// Use `roles` and `rules`, as hub.yaml says them now.
+    /// Use `roles` and `rules`, as the hub's settings say them now.
     pub fn apply(&self, roles: Roles, rules: ensemble_config::AccountRules) {
         *self.roles.write().unwrap_or_else(|e| e.into_inner()) = roles;
         *self.rules.write().unwrap_or_else(|e| e.into_inner()) = rules;
@@ -122,22 +122,22 @@ impl From<UsersError> for Error {
     }
 }
 
-/// What the hub's operations are given: its accounts, when its hub.yaml
-/// loads, and its settings file, which may be changed even when it does not.
+/// What the hub's operations are given: its accounts, when its settings
+/// load, and its settings, which may be changed even when they do not.
 pub struct HubContext {
     dir: PathBuf,
     /// Its accounts, made the first time an operation asks for them.
     accounts: OnceLock<Result<Accounts, String>>,
-    /// hub.yaml, loaded: its roles and account rules, or why not.
+    /// Its settings, loaded: its roles and account rules, or why not.
     load: Box<Load>,
     settings: SettingsFile,
-    /// What the running hub does once its hub.yaml changed, and says of it:
+    /// What the running hub does once its settings changed, and says of it:
     /// set by the hub ([`HubContext::when_changed`]); nothing otherwise.
     changed: Arc<OnceLock<Box<Changed>>>,
     /// The backends the connected runners share, as the running hub lists
     /// them ([`HubContext::when_serving`]); nothing otherwise.
     offered: OnceLock<Box<Offered>>,
-    /// The file its keys are read from when one is given (`--env-file`), in
+    /// The file variables are read from when one is given (`--env-file`), in
     /// place of its own `.env` ([`HubContext::keys_from`]).
     env_file: OnceLock<PathBuf>,
 }
@@ -147,8 +147,8 @@ type Load = dyn Fn() -> Result<(Roles, ensemble_config::AccountRules), String> +
 type Changed = dyn Fn() -> Option<String> + Send + Sync;
 
 impl HubContext {
-    /// The hub in `dir`: its accounts, from what `load` reads of hub.yaml when
-    /// an operation first needs them, and its settings file, hub.yaml.
+    /// The hub in `dir`: its accounts, from what `load` reads of its settings
+    /// when an operation first needs them, and its settings, in its database.
     pub fn new(
         dir: &Path,
         load: impl Fn() -> Result<(Roles, ensemble_config::AccountRules), String>
@@ -156,14 +156,19 @@ impl HubContext {
         + Sync
         + 'static,
     ) -> Self {
-        let path = ensemble_config::hub_path(dir);
-        let checked = path.clone();
+        let checked = crate::kept::source(dir);
         let changed: Arc<OnceLock<Box<Changed>>> = Arc::default();
-        let settings = SettingsFile::new(path, "`ensemble-hub init`", move |text| {
-            ensemble_config::parse_hub(text, &checked, &ensemble_config::SystemEnv)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        })
+        let settings = SettingsFile::kept_in(
+            crate::kept::Settings::new(dir),
+            crate::kept::SETTINGS_NAME,
+            crate::kept::source(dir),
+            "`ensemble-hub init`",
+            move |text| {
+                ensemble_config::parse_hub(text, &checked, &ensemble_config::SystemEnv)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            },
+        )
         .on_change({
             let changed = changed.clone();
             move || changed.get().and_then(|apply| apply())
@@ -179,29 +184,23 @@ impl HubContext {
         }
     }
 
-    /// Read its keys from `given` (`--env-file`) in place of its own `.env`,
-    /// which Ensemble then does not write.
+    /// Read variables from `given` (`--env-file`) in place of its own `.env`.
     pub fn keys_from(&self, given: Option<PathBuf>) {
         if let Some(file) = given {
             let _ = self.env_file.set(file);
         }
     }
 
-    /// The file its keys are read from now, if there is one.
+    /// The file variables are read from now, if there is one.
     fn keys_file(&self) -> Option<PathBuf> {
         ensemble_ops::cli::env_file(self.env_file.get().map(PathBuf::as_path), &self.dir)
     }
 
-    /// hub.yaml as it is now, with the keys it names.
+    /// Its settings as they are now, with the keys they name.
     pub(crate) fn hub(&self) -> Result<ensemble_config::Hub, Error> {
-        ensemble_config::load_hub(
-            &self.settings.path,
-            self.keys_file().as_deref(),
-            &ensemble_config::SystemEnv,
-        )
-        .map_err(|e| {
-            Error::new(Code::Unavailable, e.to_string())
-                .hint("fix hub.yaml with `ensemble-hub config`")
+        crate::kept::load(&self.dir, self.keys_file().as_deref()).map_err(|e| {
+            Error::new(Code::Unavailable, e)
+                .hint("fix the hub's settings with `ensemble-hub config`")
         })
     }
 
@@ -211,15 +210,10 @@ impl HubContext {
         let _ = self.offered.set(Box::new(offered));
     }
 
-    /// Have `apply` run once hub.yaml changed, and say what it returns: what
-    /// the running hub does with the change.
+    /// Have `apply` run once its settings changed, and say what it returns:
+    /// what the running hub does with the change.
     pub fn when_changed(&self, apply: impl Fn() -> Option<String> + Send + Sync + 'static) {
         let _ = self.changed.set(Box::new(apply));
-    }
-
-    /// Its settings file alone, for what only a command line does with it.
-    pub fn into_settings(self) -> SettingsFile {
-        self.settings
     }
 
     pub fn accounts(&self) -> Result<&Accounts, Error> {
@@ -228,7 +222,7 @@ impl HubContext {
         });
         made.as_ref().map_err(|why| {
             Error::new(Code::Unavailable, format!("the hub's accounts: {why}"))
-                .hint("fix hub.yaml with `ensemble-hub config`")
+                .hint("fix the hub's settings with `ensemble-hub config`")
         })
     }
 }
@@ -239,20 +233,25 @@ impl WithSettings for HubContext {
     }
 }
 
+/// Its keys are kept sealed in its database ([`crate::kept`]).
 impl WithBackends for HubContext {
-    fn key_file(&self) -> Result<PathBuf, Error> {
-        let own = self.dir.join(ensemble_core::state::ENV_FILE);
-        match self.env_file.get() {
-            Some(given) if *given != own => Err(Error::new(
-                Code::Conflict,
-                format!(
-                    "the hub reads its keys from {}, which Ensemble does not write",
-                    given.display()
-                ),
-            )
-            .hint("put the key there, as a variable, and name it with `key_env`")),
-            _ => Ok(own),
-        }
+    fn can_keep_keys(&self) -> Result<(), Error> {
+        crate::kept::Keys::new(&self.dir)
+            .ready()
+            .map_err(Error::failed)
+    }
+
+    fn keep_key(&self, name: &str, key: Option<&str>) -> Result<(), Error> {
+        crate::kept::Keys::new(&self.dir)
+            .keep(name, key)
+            .map_err(Error::failed)
+    }
+
+    fn variable(&self, name: &str) -> Option<String> {
+        use ensemble_config::Env;
+        crate::kept::Variables::new(&self.dir, self.keys_file().as_deref())
+            .ok()?
+            .get(name)
     }
 
     fn backends(&self) -> Result<Backends, Error> {
@@ -361,12 +360,12 @@ fn join_note(c: &HubContext, name: &str, code: &str) -> String {
     )
 }
 
-/// hub.yaml as it is now, when it loads.
+/// Its settings as they are now, when they load.
 fn hub_file(c: &HubContext) -> Option<ensemble_config::Hub> {
     let text = c.settings.read().ok()?;
     ensemble_config::parse_hub(
         &text,
-        &ensemble_config::hub_path(&c.dir),
+        &crate::kept::source(&c.dir),
         &ensemble_config::SystemEnv,
     )
     .ok()
@@ -970,7 +969,7 @@ fn runner_operations() -> Vec<Operation<HubContext>> {
         operation(
             Spec {
                 name: "runner.backends",
-                summary: "The backends the connected runners share, with their models: what hub.yaml's `llm.runners` may name.",
+                summary: "The backends the connected runners share, with their models: what the hub's `llm.runners` may name.",
                 access: ADMIN,
                 input: &[],
             },

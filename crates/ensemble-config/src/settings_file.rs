@@ -1,12 +1,13 @@
-//! One settings file (runner.yaml, hub.yaml, or a team's config.yaml) changed
-//! by its settings, as text, so that comments and order survive
+//! One settings document (runner.yaml, a team's config.yaml, or the hub's
+//! settings, kept in its database through a [`Store`]) changed by its
+//! settings, as text, so that comments and order survive
 //! ([`settings`](crate::settings)), and the `config.*` operations on it. A
 //! change is loaded before it is written, and refused when it would not load.
 //!
-//! The settings declared in Nix (`services.ensemble.runner.settings`,
-//! `services.ensemble.hub.settings`) are merged into the file by the Nix
-//! module whenever the service starts, which notes them in `.nix-managed`
-//! beside it: a change to one of them would be undone, so it is refused.
+//! The settings declared in Nix (`services.ensemble.runner.settings`) are
+//! merged into the runner's file by the Nix module whenever the service
+//! starts, which notes them in `.nix-managed` beside it: a change to one of
+//! them would be undone, so it is refused.
 
 use crate::settings;
 use ensemble_ops::{Access, Caller, Code, Error, Field, Operation, Spec, operation};
@@ -21,9 +22,24 @@ pub const MANAGED_FILE: &str = ".nix-managed";
 type Check = dyn Fn(&str) -> Result<(), String> + Send + Sync;
 type Changed = dyn Fn() -> Option<String> + Send + Sync;
 
-/// One settings file.
+/// Where settings are kept when not in a file of their own, such as a table
+/// of the hub's database.
+pub trait Store: Send + Sync {
+    /// The text kept, or none when nothing is yet.
+    fn read(&self) -> Result<Option<String>, String>;
+    /// Keep `text` in place of what was kept.
+    fn write(&self, text: &str) -> Result<(), String>;
+}
+
+/// One settings file, or the settings a [`Store`] keeps.
 pub struct SettingsFile {
+    /// The file; for settings a store keeps, where it keeps them, such as the
+    /// database's file.
     pub path: PathBuf,
+    /// What it is called in what is said: the file's path, or what the store
+    /// keeps.
+    name: String,
+    store: Option<Box<dyn Store>>,
     /// What makes it when there is none, for the message.
     made_by: String,
     /// What is wrong with a text as this file, if anything.
@@ -41,11 +57,34 @@ impl SettingsFile {
         check: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static,
     ) -> Self {
         SettingsFile {
+            name: path.display().to_string(),
             path,
+            store: None,
             made_by: made_by.to_string(),
             check: Box::new(check),
             changed: Box::new(|| None),
         }
+    }
+
+    /// The settings `store` keeps, `name` in what is said, at `path`, made by
+    /// `made_by` when there are none, whose text `check` loads.
+    pub fn kept_in(
+        store: impl Store + 'static,
+        name: &str,
+        path: PathBuf,
+        made_by: &str,
+        check: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
+        SettingsFile {
+            name: name.to_string(),
+            store: Some(Box::new(store)),
+            ..SettingsFile::new(path, made_by, check)
+        }
+    }
+
+    /// What it is called in what is said.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Do `changed` once a change is written; what it returns is said.
@@ -58,13 +97,34 @@ impl SettingsFile {
     }
 
     pub fn read(&self) -> Result<String, Error> {
+        let missing = || {
+            Error::not_found(format!("there is no {}", self.name))
+                .hint(format!("{} writes it", self.made_by))
+        };
+        if let Some(store) = &self.store {
+            return store.read().map_err(Error::failed)?.ok_or_else(missing);
+        }
         std::fs::read_to_string(&self.path).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => {
-                Error::not_found(format!("there is no {}", self.path.display()))
-                    .hint(format!("{} writes it", self.made_by))
-            }
-            _ => Error::failed(format!("cannot read {}: {e}", self.path.display())),
+            std::io::ErrorKind::NotFound => missing(),
+            _ => Error::failed(format!("cannot read {}: {e}", self.name)),
         })
+    }
+
+    /// Whether there is any yet.
+    pub fn exists(&self) -> Result<bool, Error> {
+        match &self.store {
+            Some(store) => Ok(store.read().map_err(Error::failed)?.is_some()),
+            None => Ok(self.path.exists()),
+        }
+    }
+
+    /// Keep `text` as it is, loaded or not.
+    fn keep(&self, text: &str) -> Result<(), Error> {
+        match &self.store {
+            Some(store) => store.write(text),
+            None => write_atomically(&self.path, text),
+        }
+        .map_err(Error::failed)
     }
 
     /// What is wrong with `text` as this file, if anything.
@@ -76,11 +136,14 @@ impl SettingsFile {
     fn write(&self, text: &str, field: &str) -> Result<(), Error> {
         self.check(text)
             .map_err(|e| Error::invalid(format!("nothing was changed: {e}")).on(field))?;
-        write_atomically(&self.path, text).map_err(Error::failed)
+        self.keep(text)
     }
 
-    /// The settings declared in Nix.
+    /// The settings declared in Nix: none of those a store keeps.
     pub fn managed(&self) -> Vec<String> {
+        if self.store.is_some() {
+            return Vec::new();
+        }
         let Some(dir) = self.path.parent() else {
             return Vec::new();
         };
@@ -145,7 +208,7 @@ impl SettingsFile {
     /// Write `text`, as [`SettingsFile::plan`] made it, and say what the running
     /// process did with it.
     pub fn commit(&self, text: &str) -> Result<Option<String>, Error> {
-        write_atomically(&self.path, text).map_err(Error::failed)?;
+        self.keep(text)?;
         Ok((self.changed)())
     }
 
@@ -163,7 +226,7 @@ impl SettingsFile {
         if before.is_some_and(|b| b != now) {
             return Err(Error::new(
                 Code::Conflict,
-                format!("{} changed since it was read", self.path.display()),
+                format!("{} changed since it was read", self.name),
             )
             .hint("read it again, and make the change on what it is now"));
         }
@@ -186,6 +249,12 @@ impl SettingsFile {
     /// incomplete: the settings not in Nix are made with `ensemble-hub` or
     /// `ensemble-runner`. What is missing is said.
     pub fn merge(&self, from: &Path) -> Result<Option<String>, Error> {
+        if self.store.is_some() {
+            return Err(Error::invalid(format!(
+                "{} is not declared in Nix",
+                self.name
+            )));
+        }
         let doc = std::fs::read_to_string(from)
             .map_err(|e| Error::failed(format!("{}: {e}", from.display())))?;
         let text = match std::fs::read_to_string(&self.path) {
@@ -296,7 +365,7 @@ pub fn operations<C: WithSettings + 'static>(access: Access) -> Vec<Operation<C>
                         let value = settings::get(&text, &key)
                             .map_err(|e| Error::invalid(e).on("key"))?
                             .ok_or_else(|| {
-                                Error::not_found(format!("{} sets no `{key}`", file.path.display()))
+                                Error::not_found(format!("{} sets no `{key}`", file.name()))
                                     .on("key")
                             })?;
                         json!({ "said": value, "key": key, "value": value })
@@ -315,7 +384,7 @@ pub fn operations<C: WithSettings + 'static>(access: Access) -> Vec<Operation<C>
                 let file = c.settings_file()?;
                 let note = file.set(&input.key, &input.value)?;
                 Ok(json!({
-                    "said": format!("{}: set in {}", input.key, file.path.display()),
+                    "said": format!("{}: set in {}", input.key, file.name()),
                     "note": note,
                 }))
             },
@@ -331,7 +400,7 @@ pub fn operations<C: WithSettings + 'static>(access: Access) -> Vec<Operation<C>
                 let file = c.settings_file()?;
                 let note = file.unset(&input.key)?;
                 Ok(json!({
-                    "said": format!("{}: taken out of {}", input.key, file.path.display()),
+                    "said": format!("{}: taken out of {}", input.key, file.name()),
                     "note": note,
                 }))
             },
@@ -346,11 +415,11 @@ pub fn operations<C: WithSettings + 'static>(access: Access) -> Vec<Operation<C>
             |c: &C, _: &Caller, input: Replace| {
                 let file = c.settings_file()?;
                 if input.before.as_deref() == Some(input.text.as_str()) {
-                    return Ok(json!({ "said": format!("{} is unchanged", file.path.display()) }));
+                    return Ok(json!({ "said": format!("{} is unchanged", file.name()) }));
                 }
                 let note = file.replace(&input.text, input.before.as_deref())?;
                 Ok(json!({
-                    "said": format!("{} is changed", file.path.display()),
+                    "said": format!("{} is changed", file.name()),
                     "note": note,
                 }))
             },
@@ -358,13 +427,18 @@ pub fn operations<C: WithSettings + 'static>(access: Access) -> Vec<Operation<C>
         operation(
             Spec {
                 name: "config.path",
-                summary: "Print where the file is.",
+                summary: "Print where the settings are kept.",
                 access,
                 input: &[],
             },
             |c: &C, _: &Caller, _: Nothing| {
-                let path = c.settings_file()?.path.display().to_string();
-                Ok(json!({ "said": path, "path": path }) as Value)
+                let file = c.settings_file()?;
+                let path = file.path.display().to_string();
+                let said = match file.name() == path {
+                    true => path.clone(),
+                    false => format!("{}, in {path}", file.name()),
+                };
+                Ok(json!({ "said": said, "path": path }) as Value)
             },
         ),
     ]

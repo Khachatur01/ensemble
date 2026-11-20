@@ -589,10 +589,6 @@ pub enum ConfigError {
     NotFound {
         path: PathBuf,
     },
-    /// No `hub.yaml` in the hub's folder.
-    HubNotFound {
-        path: PathBuf,
-    },
     Unreadable {
         path: PathBuf,
         detail: String,
@@ -616,11 +612,6 @@ impl fmt::Display for ConfigError {
             ConfigError::NotFound { path } => write!(
                 f,
                 "no {CONFIG_FILENAME} at {}. `ensemble-runner team list` lists the teams; `ensemble-runner team new <name>` makes one.",
-                path.display()
-            ),
-            ConfigError::HubNotFound { path } => write!(
-                f,
-                "no {HUB_FILENAME} at {}. Make one with `ensemble-hub init`, or run the hub on the computer that has it.",
                 path.display()
             ),
             ConfigError::Unreadable { path, detail } => {
@@ -656,8 +647,7 @@ mod validate;
 pub use env::*;
 pub use hub::{
     AccountRules, Accounts, Connectors, Embed, HUB_FILENAME, Http, Hub, IssueTracker, Knowledge,
-    Permission, Recall, Registration, SourceFilter, Sources, Tasks, Tracker, hub_path, load_hub,
-    parse_hub,
+    Permission, Recall, Registration, SourceFilter, Sources, Tasks, Tracker, parse_hub,
 };
 pub use llm::{HubLlm, RelayAt, Relayed, RunnerLlm};
 pub use runner::{

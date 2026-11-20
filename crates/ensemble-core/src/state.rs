@@ -65,9 +65,10 @@ pub fn teams_dir() -> Result<PathBuf, String> {
     Ok(runner_config_dir()?.join("teams"))
 }
 
-/// A hub this computer runs (`ensemble-hub serve`): `hub.yaml`, its secrets
-/// in `.env`, its `database.db` of accounts and deliveries, and its knowledge
-/// vault.
+/// A hub this computer runs (`ensemble-hub serve`): its `database.db` of
+/// settings, sealed keys, accounts and deliveries, the `master.key` that
+/// seals the keys, a `.env` of keys a secrets manager keeps, and its
+/// knowledge vault.
 pub fn hub_config_dir() -> Result<PathBuf, String> {
     Ok(config_root()?.join("hub"))
 }

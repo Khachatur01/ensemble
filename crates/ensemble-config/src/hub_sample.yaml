@@ -1,7 +1,9 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/hub.schema.json
 
-# hub.yaml — a hub, written by `ensemble-hub init` in ~/.config/ensemble/hub/.
-# Run it with `ensemble-hub serve`. A hub may serve a team, or one person on
+# A hub's settings, written by `ensemble-hub init` in its database,
+# database.db in ~/.config/ensemble/hub/, and changed with `ensemble-hub …`
+# (`config edit` for the whole of them), its REST API or a web UI. Run it with
+# `ensemble-hub serve`. A hub may serve a team, or one person on
 # their own computer. Its core is its accounts, their roles and what each may
 # do; the port it listens on; and the LLM backends it uses. Everything else
 # reaches it through a connector: the REST API, MCP for client agents, the
@@ -10,15 +12,17 @@
 # of `tasks`. `ensemble-hub …` on this computer is always on too, and has no
 # settings.
 #
-# API keys never go here: they come from the environment, or from a file
-# passed with --env-file. Accounts are not here either: they are kept in
-# database.db beside it (`ensemble-hub user`, or the REST API under /api/v1/).
+# API keys never go here: a backend names the variable that holds its key.
+# `ensemble-hub backend key` keeps a key under a variable of its own, sealed
+# in the database by master.key; a key a secrets manager keeps comes from the
+# environment, or from a file passed with --env-file. Accounts are not here
+# either: `ensemble-hub user`, or the REST API under /api/v1/.
 #
 # Nothing has a default value: every setting is written here, and one that is
 # missing is refused by name. Only these may be left out, because leaving them
 # out means "not used": `llm.runners`, `connectors.knowledge.embed`, and
 # a backend's `api_key_env`. A map of adapters may be empty: `{}`.
-# Check the file with `ensemble-hub check`.
+# Check them with `ensemble-hub check`.
 
 version: 1
 
