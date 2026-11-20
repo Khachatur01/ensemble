@@ -18,8 +18,6 @@ use super::validate::{check_candidates, direct_adapter, explain};
 use super::*;
 use serde::Deserialize;
 
-/// The file a hub kept its settings in before its database did.
-pub const HUB_FILENAME: &str = "hub.yaml";
 pub const HUB_SUPPORTED_VERSION: u32 = 1;
 
 /// The JSON Schema for the hub's settings, for editors. The tests keep it in step with

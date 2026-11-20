@@ -3,7 +3,7 @@
 //! what they need as arguments, so tests can run them without a terminal or a
 //! network.
 
-use ensemble_config::runner::{RUNNER_FILENAME, RUNNER_SCHEMA_URL_LINE, RUNNER_SUPPORTED_VERSION};
+use ensemble_config::runner::{RUNNER_SCHEMA_URL_LINE, RUNNER_SUPPORTED_VERSION};
 use ensemble_config::{Adapter, Budget, CLAUDE_CODE_AGENT, Config, OPENCODE_AGENT};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -74,7 +74,7 @@ pub fn detect(probe: bool) -> Detected {
 /// The workspace `setup` offers: a folder in the home directory.
 pub const WORKSPACE: &str = "~/ensemble";
 
-/// The text of a runner file: the runner `name`, working for its owner, in
+/// The settings of a runner: the runner `name`, working for its owner, in
 /// `workspace`, offering nothing. Checked by loading it.
 pub fn runner_file(name: &str, workspace: &str) -> Result<String, String> {
     let quoted = |s: &str| serde_json::Value::String(s.to_string()).to_string();
@@ -86,7 +86,7 @@ pub fn runner_file(name: &str, workspace: &str) -> Result<String, String> {
     text.push_str("\n# The LLM backends its teams' agents run on, which a team names by name.\n# `ensemble-runner init --stdout` shows how each is written.\nllm:\n  direct:\n    backends: {}\n    shares: []             # those it offers through the hub\n    max_shared_calls: 1    # the most calls of others to them at once\n");
     ensemble_config::parse_runner(
         &text,
-        Path::new(RUNNER_FILENAME),
+        &crate::kept::source(Path::new("")),
         &ensemble_config::SystemEnv,
     )
     .map_err(|e| e.to_string())?;

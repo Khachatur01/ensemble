@@ -1,13 +1,8 @@
-//! One settings document (runner.yaml, a team's config.yaml, or the hub's
-//! settings, kept in its database through a [`Store`]) changed by its
+//! One settings document (a team's config.yaml, or the settings of a hub or
+//! a runner, kept in its database through a [`Store`]) changed by its
 //! settings, as text, so that comments and order survive
 //! ([`settings`](crate::settings)), and the `config.*` operations on it. A
 //! change is loaded before it is written, and refused when it would not load.
-//!
-//! The settings declared in Nix (`services.ensemble.runner.settings`) are
-//! merged into the runner's file by the Nix module whenever the service
-//! starts, which notes them in `.nix-managed` beside it: a change to one of
-//! them would be undone, so it is refused.
 
 use crate::settings;
 use ensemble_ops::{Access, Caller, Code, Error, Field, Operation, Spec, operation};
@@ -15,15 +10,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-/// The file the settings of the Nix configuration are noted in, beside the
-/// settings file.
-pub const MANAGED_FILE: &str = ".nix-managed";
-
 type Check = dyn Fn(&str) -> Result<(), String> + Send + Sync;
 type Changed = dyn Fn() -> Option<String> + Send + Sync;
 
 /// Where settings are kept when not in a file of their own, such as a table
-/// of the hub's database.
+/// of a hub's or a runner's database.
 pub trait Store: Send + Sync {
     /// The text kept, or none when nothing is yet.
     fn read(&self) -> Result<Option<String>, String>;
@@ -139,61 +130,28 @@ impl SettingsFile {
         self.keep(text)
     }
 
-    /// The settings declared in Nix: none of those a store keeps.
-    pub fn managed(&self) -> Vec<String> {
-        if self.store.is_some() {
-            return Vec::new();
-        }
-        let Some(dir) = self.path.parent() else {
-            return Vec::new();
-        };
-        std::fs::read_to_string(dir.join(MANAGED_FILE))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
-    }
-
-    /// Refuse a change of `key` when Nix declares it, or something in it.
-    fn not_managed(&self, key: &str) -> Result<(), Error> {
-        match self.managed().iter().find(|m| settings::overlaps(key, m)) {
-            Some(m) => Err(Error::new(
-                Code::Conflict,
-                format!(
-                    "`{m}` is set in your Nix configuration, which sets it again whenever the service starts"
-                ),
-            )
-            .on("key")
-            .hint("change it there")),
-            None => Ok(()),
-        }
-    }
-
-    /// Set `key` to `value`, unless Nix declares it, and say what changed.
+    /// Set `key` to `value`, and say what changed.
     pub fn set(&self, key: &str, value: &str) -> Result<Option<String>, Error> {
-        self.not_managed(key)?;
         let text =
             settings::set(&self.read()?, key, value).map_err(|e| Error::invalid(e).on("key"))?;
         self.write(&text, "value")?;
         Ok((self.changed)())
     }
 
-    /// Take `key` out, unless Nix declares it, and say what changed.
+    /// Take `key` out, and say what changed.
     pub fn unset(&self, key: &str) -> Result<Option<String>, Error> {
-        self.not_managed(key)?;
         let text = settings::unset(&self.read()?, key).map_err(|e| Error::invalid(e).on("key"))?;
         self.write(&text, "key")?;
         Ok((self.changed)())
     }
 
     /// The file's text with `edits` made in order, each a setting set to a
-    /// value (YAML) or, with none, taken out: refused when Nix declares one of
-    /// them, or when the text would not load. Nothing is written yet:
-    /// [`SettingsFile::commit`] writes it, so what goes with it, such as a key
-    /// in `.env`, can be written in between.
+    /// value (YAML) or, with none, taken out: refused when the text would not
+    /// load. Nothing is written yet: [`SettingsFile::commit`] writes it, so
+    /// what goes with it, such as a sealed key, can be written in between.
     pub fn plan(&self, edits: &[(String, Option<String>)]) -> Result<String, Error> {
         let mut text = self.read()?;
         for (key, value) in edits {
-            self.not_managed(key)?;
             text = match value {
                 Some(value) => settings::set(&text, key, value),
                 None => settings::unset(&text, key),
@@ -219,8 +177,8 @@ impl SettingsFile {
     }
 
     /// Write `text` in place of the file, as an edit of it: refused when it
-    /// would not load or changes what Nix declares, and, given `before`, the
-    /// text it was made from, when the file changed since. What to say of it.
+    /// would not load and, given `before`, the text it was made from, when the
+    /// file changed since. What to say of it.
     pub fn replace(&self, text: &str, before: Option<&str>) -> Result<Option<String>, Error> {
         let now = self.read()?;
         if before.is_some_and(|b| b != now) {
@@ -230,57 +188,8 @@ impl SettingsFile {
             )
             .hint("read it again, and make the change on what it is now"));
         }
-        for m in self.managed() {
-            let get = |t: &str| settings::get(t, &m).map_err(Error::invalid);
-            if get(&now)? != get(text)? {
-                return Err(Error::new(
-                    Code::Conflict,
-                    format!("`{m}` is set in your Nix configuration"),
-                )
-                .hint("change it there"));
-            }
-        }
         self.write(text, "text")?;
         Ok((self.changed)())
-    }
-
-    /// Merge the settings of the YAML file `from` into the file, and note them
-    /// as declared in Nix. The file is written even when the merge leaves it
-    /// incomplete: the settings not in Nix are made with `ensemble-hub` or
-    /// `ensemble-runner`. What is missing is said.
-    pub fn merge(&self, from: &Path) -> Result<Option<String>, Error> {
-        if self.store.is_some() {
-            return Err(Error::invalid(format!(
-                "{} is not declared in Nix",
-                self.name
-            )));
-        }
-        let doc = std::fs::read_to_string(from)
-            .map_err(|e| Error::failed(format!("{}: {e}", from.display())))?;
-        let text = match std::fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => {
-                return Err(Error::failed(format!(
-                    "cannot read {}: {e}",
-                    self.path.display()
-                )));
-            }
-        };
-        let (merged, paths) = settings::merge(&text, &doc).map_err(Error::invalid)?;
-        if merged != text {
-            write_atomically(&self.path, &merged).map_err(Error::failed)?;
-        }
-        let dir = self
-            .path
-            .parent()
-            .ok_or_else(|| Error::failed("the file has no folder"))?;
-        let paths = serde_json::to_string(&paths).map_err(|e| Error::failed(e.to_string()))?;
-        write_atomically(&dir.join(MANAGED_FILE), &paths).map_err(Error::failed)?;
-        Ok(self
-            .check(&merged)
-            .err()
-            .map(|e| format!("{} does not load yet: {e}", self.path.display())))
     }
 }
 
@@ -408,7 +317,7 @@ pub fn operations<C: WithSettings + 'static>(access: Access) -> Vec<Operation<C>
         operation(
             Spec {
                 name: "config.replace",
-                summary: "Write the whole file, as an edit of it: refused when it would not load, changes what Nix declares, or the file changed since `before` was read.",
+                summary: "Write the whole file, as an edit of it: refused when it would not load, or the file changed since `before` was read.",
                 access,
                 input: REPLACE,
             },
@@ -500,18 +409,11 @@ mod tests {
         );
         let err = run("config.get", json!({ "key": "works_for" })).unwrap_err();
         assert_eq!(err.code, Code::NotFound);
-        std::fs::write(dir.join(MANAGED_FILE), r#"["hub"]"#).unwrap();
-        let err = run("config.unset", json!({ "key": "hub" })).unwrap_err();
-        assert_eq!(
-            (err.code, err.hint.as_deref()),
-            (Code::Conflict, Some("change it there"))
-        );
         assert_eq!(
             run("config.path", json!({})).unwrap()["path"],
             path.display().to_string()
         );
         // A whole file, as an edit of what was read; not of what was before.
-        std::fs::remove_file(dir.join(MANAGED_FILE)).unwrap();
         let read = run("config.get", json!({})).unwrap()["text"]
             .as_str()
             .unwrap()

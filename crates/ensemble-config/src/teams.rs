@@ -14,7 +14,7 @@
 //! The runner runs every team that is ready at once, as one [`Config`]: each
 //! name of a team (its agents, limits and gates) becomes `<team>/<name>`, so
 //! agents are named `web/coder`. A team names the LLM backends its agents run
-//! on by their names alone: the runner defines them, in runner.yaml's `llm`,
+//! on by their names alone: the runner defines them, in the runner's `llm`,
 //! so a team runs on any runner that defines the backends it names.
 
 use super::*;
@@ -291,7 +291,7 @@ mod tests {
         let err = loads(&elsewhere).with_backends(backends()).unwrap_err();
         assert!(
             err.to_string().contains(
-                "agents.coder.adapter.try[0]: LLM backend 'gpu' is not defined in runner.yaml's `llm`. Defined LLM backends: claude, local."
+                "agents.coder.adapter.try[0]: LLM backend 'gpu' is not defined in the runner's `llm`. Defined LLM backends: claude, local."
             ),
             "{err}"
         );

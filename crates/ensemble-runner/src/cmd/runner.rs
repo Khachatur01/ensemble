@@ -2,18 +2,18 @@
 //! hub with your helper teams, in the git repositories of its workspace.
 
 use crate::cli::Command;
-use crate::{Ctx, daemon, host_name, runner_file, runner_hub, this_runner};
-use crate::{setup, teams};
+use crate::{Ctx, daemon, host_name, runner_hub, this_runner};
+use crate::{kept, setup, teams};
 use ensemble_agents::router::Ensemble;
 use ensemble_backends::ops::{Backends, Side, WithBackends};
-use ensemble_config::settings_file::{self, SettingsFile, WithSettings};
-use ensemble_config::{self as config, Config, SystemEnv};
+use ensemble_config::settings_file::{self, SettingsFile, Store, WithSettings};
+use ensemble_config::{self as config, Config};
 use ensemble_core::state;
 use ensemble_ops::cli::ask;
 use ensemble_ops::local;
 use ensemble_ops::{Access, Caller, Code, Error, Field, Registry, Spec, operation};
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 pub fn run(ctx: &Ctx, command: Command) -> Result<ExitCode, String> {
@@ -23,7 +23,11 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<ExitCode, String> {
             workspace,
             yes,
         } => setup(ctx, name, workspace, yes),
-        Command::Init { force, stdout } => init(force, stdout),
+        Command::Init {
+            force,
+            keep,
+            stdout,
+        } => init(force, keep, stdout),
         Command::Serve => serve(ctx),
         Command::Reload => {
             let said = ensemble_core::runtime::block_on(daemon::reload(&state::runner_socket(
@@ -67,28 +71,31 @@ fn completions(shell: clap_complete::Shell) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `ensemble-runner init`: write this computer's runner file.
-fn init(force: bool, stdout: bool) -> Result<ExitCode, String> {
+/// `ensemble-runner init`: make this computer's runner as `setup` does
+/// without asking: named for this computer, working for its owner in
+/// ~/ensemble, offering nothing. Not when it has one, unless `force`; with
+/// `keep`, that is no error: what the NixOS module runs before each start.
+fn init(force: bool, keep: bool, stdout: bool) -> Result<ExitCode, String> {
     if stdout {
         print!("{}", config::runner::RUNNER_SAMPLE);
         return Ok(ExitCode::SUCCESS);
     }
-    let path = runner_file()?;
-    if path.exists() && !force {
+    let dir = kept::dir()?;
+    let name = host_name().unwrap_or_else(|| "runner".into());
+    let text = setup::runner_file(&name, setup::WORKSPACE)?;
+    if !kept::settings(&dir).init(&text, force)? {
+        if keep {
+            return Ok(ExitCode::SUCCESS);
+        }
         return Err(format!(
-            "{} already exists. Pass --force to overwrite it.",
-            path.display()
+            "this computer has a runner already, kept in {}. `ensemble-runner config` changes its settings; --force makes it anew.",
+            kept::source(&dir).display()
         ));
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    }
-    std::fs::write(&path, config::runner::RUNNER_SAMPLE)
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     println!(
-        "wrote {}: name the runner, say whom it works for, where it works and what it offers",
-        path.display()
+        "Made the runner '{name}', working for you in {}, kept in {}. `ensemble-runner config set` changes its settings, `ensemble-runner backend add` gives it LLM backends, and `ensemble-runner init --stdout` shows every setting.",
+        setup::WORKSPACE,
+        kept::source(&dir).display()
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -177,7 +184,7 @@ fn status() -> Result<ExitCode, String> {
 /// hub, it runs the tasks the hub keeps for it with its teams, in the
 /// repositories of its workspace or those it clones there, and tells the hub
 /// it is connected, with its agents and what it offers. A change to
-/// runner.yaml has it start again, in this process: running tasks start again
+/// its settings has it start again, in this process: running tasks start again
 /// from where their work was last pushed.
 fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
     local::stop_on_signals();
@@ -195,13 +202,13 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
         if !local::restarting() {
             break;
         }
-        eprintln!("ensemble: starting again with runner.yaml as it is now");
+        eprintln!("ensemble: starting again with its settings as they are now");
     }
     eprintln!("ensemble: stopped");
     Ok(ExitCode::SUCCESS)
 }
 
-/// Wait until the hub runner.yaml names has a token, as a runner that starts
+/// Wait until the hub its settings name has a token, as a runner that starts
 /// before anyone signed it in does, such as a service at boot: true once it
 /// has, or when it names no hub; false when it is stopped first. It holds
 /// nothing meanwhile, so `ensemble-runner login` and `join` run as they would
@@ -233,7 +240,7 @@ fn signed_in(ctx: &Ctx) -> Result<bool, String> {
     }
 }
 
-/// The runner, as runner.yaml says now, until it stops or starts again.
+/// The runner, as its settings say now, until it stops or starts again.
 fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
     let runner = ctx.runner().map_err(|e| format!("serve: {e}"))?;
     let say = |line: &str| eprintln!("ensemble: {line}");
@@ -329,31 +336,33 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// What the runner's operations are given: its settings file, runner.yaml.
+/// What the runner's operations are given: its settings, kept in its
+/// database.
 pub struct RunnerContext {
     settings: SettingsFile,
+    /// Its folder, where its database is.
+    dir: PathBuf,
     /// In the running runner: read its hub's token again, and say what it did.
     relink: Option<Box<Relink>>,
     /// The file its keys are read from when one is given (`--env-file`), in
-    /// place of its own `.env`, which Ensemble then does not write.
-    env_file: Option<std::path::PathBuf>,
+    /// place of its own `.env`.
+    env_file: Option<PathBuf>,
 }
 
 type Relink = dyn Fn() -> Result<String, String> + Send + Sync;
 
-/// runner.yaml, checked as a runner before it is written.
+/// The runner's settings, in its database, checked as a runner before they are
+/// written.
 fn runner_settings() -> Result<SettingsFile, String> {
-    let path = runner_file()?;
-    let env_file = ensemble_ops::cli::env_file(None, &state::runner_config_dir()?);
-    let checked = path.clone();
-    Ok(SettingsFile::new(
-        path,
+    let dir = kept::dir()?;
+    let env_file = ensemble_ops::cli::env_file(None, &dir);
+    let checked = dir.clone();
+    Ok(SettingsFile::kept_in(
+        kept::settings(&dir),
+        kept::SETTINGS_NAME,
+        kept::source(&dir),
         "`ensemble-runner setup`",
-        move |text| {
-            config::parse_runner_with(text, &checked, env_file.as_deref(), &SystemEnv)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        },
+        move |text| kept::parse(text, &checked, env_file.as_deref()).map(|_| ()),
     ))
 }
 
@@ -363,41 +372,21 @@ impl WithSettings for RunnerContext {
     }
 }
 
-impl RunnerContext {
-    /// The `.env` file the keys Ensemble keeps go in, or why it may keep none,
-    /// such as when its keys come from a file a secrets manager writes.
-    fn key_file(&self) -> Result<std::path::PathBuf, Error> {
-        let own = state::runner_config_dir()?.join(state::ENV_FILE);
-        match &self.env_file {
-            Some(given) if *given != own => Err(Error::new(
-                Code::Conflict,
-                format!(
-                    "the runner reads its keys from {}, which Ensemble does not write",
-                    given.display()
-                ),
-            )
-            .hint("put the key there, as a variable, and name it with `key_env`")),
-            _ => Ok(own),
-        }
-    }
-}
-
+/// Its keys are kept sealed in its database ([`crate::kept`]).
 impl WithBackends for RunnerContext {
     fn can_keep_keys(&self) -> Result<(), Error> {
-        self.key_file().map(|_| ())
+        kept::keys(&self.dir).ready().map_err(Error::failed)
     }
 
     fn keep_key(&self, name: &str, key: Option<&str>) -> Result<(), Error> {
-        config::set_dotenv(&self.key_file()?, name, key).map_err(Error::failed)
+        kept::keys(&self.dir).keep(name, key).map_err(Error::failed)
     }
 
-    /// The environment's, else its `.env`'s.
     fn variable(&self, name: &str) -> Option<String> {
-        std::env::var(name).ok().or_else(|| {
-            let file = self.key_file().ok()?;
-            let text = std::fs::read_to_string(&file).ok()?;
-            config::parse_dotenv(&text, &file).ok()?.remove(name)
-        })
+        use ensemble_config::Env;
+        kept::variables(&self.dir, self.keys().as_deref())
+            .ok()?
+            .get(name)
     }
 
     fn backends(&self) -> Result<Backends, Error> {
@@ -412,13 +401,8 @@ impl WithBackends for RunnerContext {
     /// The teams name the runner's backends: a change that would leave one
     /// naming a backend that is not there is refused.
     fn check_users(&self, text: &str) -> Result<(), Error> {
-        let runner = config::parse_runner_with(
-            text,
-            &self.settings.path,
-            self.keys().as_deref(),
-            &SystemEnv,
-        )
-        .map_err(|e| Error::invalid(e.to_string()))?;
+        let runner =
+            kept::parse(text, &self.dir, self.keys().as_deref()).map_err(Error::invalid)?;
         teams::load_all(&runner.llm, None)
             .map(|_| ())
             .map_err(|e| Error::new(Code::Conflict, format!("nothing was changed: {e}")))
@@ -426,27 +410,27 @@ impl WithBackends for RunnerContext {
 }
 
 impl RunnerContext {
-    /// This computer's runner, which does not run: runner.yaml, checked as a
-    /// runner before it is written.
-    pub fn new(env_file: Option<std::path::PathBuf>) -> Result<Self, String> {
+    /// This computer's runner, which does not run: its settings, checked as
+    /// a runner before they are written.
+    pub fn new(env_file: Option<PathBuf>) -> Result<Self, String> {
         Ok(RunnerContext {
             settings: runner_settings()?,
+            dir: kept::dir()?,
             relink: None,
             env_file,
         })
     }
 
-    /// The file its keys are read from now, if there is one.
-    fn keys(&self) -> Option<std::path::PathBuf> {
-        state::runner_config_dir()
-            .ok()
-            .and_then(|dir| ensemble_ops::cli::env_file(self.env_file.as_deref(), &dir))
+    /// The file its keys are read from now, besides those it keeps, if there
+    /// is one.
+    fn keys(&self) -> Option<PathBuf> {
+        ensemble_ops::cli::env_file(self.env_file.as_deref(), &self.dir)
     }
 
-    /// runner.yaml as it is now, with the keys it names.
+    /// Its settings as they are now, with the keys they name.
     fn runner(&self) -> Result<config::Runner, Error> {
-        config::load_runner(&self.settings.path, self.keys().as_deref(), &SystemEnv)
-            .map_err(|e| Error::new(Code::Unavailable, e.to_string()))?
+        kept::load(self.keys().as_deref())
+            .map_err(|e| Error::new(Code::Unavailable, e))?
             .ok_or_else(|| {
                 Error::not_found("there is no runner yet").hint("`ensemble-runner setup` makes one")
             })
@@ -455,7 +439,7 @@ impl RunnerContext {
     /// The runner, in the process that runs it, which reads its hub's token
     /// again with `relink`.
     pub fn running(
-        env_file: Option<std::path::PathBuf>,
+        env_file: Option<PathBuf>,
         relink: impl Fn() -> Result<String, String> + Send + Sync + 'static,
     ) -> Result<Self, String> {
         let settings = runner_settings()?.on_change(|| {
@@ -464,14 +448,10 @@ impl RunnerContext {
         });
         Ok(RunnerContext {
             settings,
+            dir: kept::dir()?,
             relink: Some(Box::new(relink)),
             env_file,
         })
-    }
-
-    /// Its settings file alone, for what only a command line does with it.
-    pub fn into_settings(self) -> SettingsFile {
-        self.settings
     }
 }
 
@@ -788,9 +768,10 @@ fn setup(
             "No agent CLI is on PATH: agents of type claude-code, opencode or codex need theirs installed (`claude`, `opencode`, `codex`); builtin and direct agents need none."
         );
     }
-    let path = runner_file()?;
-    if path.exists() {
-        println!("{} exists; keeping it.", path.display());
+    let dir = kept::dir()?;
+    let settings = kept::settings(&dir);
+    if settings.read()?.is_some() {
+        println!("This computer has a runner already; keeping it.");
     } else {
         let name = match name {
             Some(name) => name,
@@ -811,14 +792,10 @@ fn setup(
             None => setup::WORKSPACE.to_string(),
         };
         let text = setup::runner_file(&name, &workspace)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-        }
-        std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        settings.write(&text)?;
         println!(
-            "Wrote {}: the runner '{name}', working in {workspace}.",
-            path.display()
+            "Made the runner '{name}', working in {workspace}, kept in {}.",
+            kept::source(&dir).display()
         );
     }
     println!();

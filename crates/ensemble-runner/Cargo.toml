@@ -14,6 +14,7 @@ ensemble-config.workspace = true
 ensemble-core.workspace = true
 ensemble-link.workspace = true
 ensemble-ops.workspace = true
+ensemble-store.workspace = true
 ensemble-tasks.workspace = true
 serde.workspace = true
 serde_json.workspace = true

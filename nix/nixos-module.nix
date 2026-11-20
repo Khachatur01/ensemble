@@ -11,10 +11,10 @@
 # first time it starts. Only a key a secrets manager keeps comes from here,
 # through `environmentFile`.
 #
-# The runner's settings declared here are merged into `runner.yaml` when it
-# starts, and teams are linked in. The rest is made and changed with
-# `ensemble-runner setup`, `… config set` and `ensemble-runner team …`, which
-# refuse to change what Nix declares. It starts once its file is there.
+# The runner is only run from here, too: its settings, the keys of its
+# backends and its teams are made and changed with `ensemble-runner setup`,
+# `… config set`, `… backend …` and `ensemble-runner team …`. It makes a
+# runner named for the computer the first time it starts.
 { self }:
 {
   config,
@@ -31,16 +31,11 @@ let
     types
     ;
   cfg = config.services.ensemble;
-  yaml = pkgs.formats.yaml { };
   runner = import ./runner.nix { inherit self lib; };
 
   hub = cfg.hub;
 
   runnerCfg = cfg.runner;
-  runnerFiles = runner.files {
-    inherit pkgs yaml;
-    cfg = runnerCfg;
-  };
 in
 {
   options.services.ensemble = {
@@ -120,7 +115,7 @@ in
         example = "ana";
       };
     }
-    // runner.options { inherit pkgs yaml; };
+    // runner.options { inherit pkgs; };
   };
 
   config = mkMerge [
@@ -149,8 +144,7 @@ in
         unitConfig.ConditionUser = hub.user;
         # The vault is a git repository.
         path = [ pkgs.git ];
-        # The sample settings, with its vault, the first time it starts; a hub
-        # that has a hub.yaml still takes it in.
+        # The sample settings, with its vault, the first time it starts.
         preStart = ''
           ${lib.getExe hub.package} init --keep
         '';
@@ -175,37 +169,16 @@ in
       systemd.user.services.ensemble-runner = {
         description = "Ensemble runner";
         wantedBy = [ "default.target" ];
-        unitConfig = {
-          ConditionUser = runnerCfg.user;
-        }
-        # Without settings, it waits for `ensemble-runner setup`.
-        // lib.optionalAttrs (runnerFiles.runnerYaml == null) {
-          ConditionPathExists = "%h/.config/ensemble/runner/runner.yaml";
-        };
-        restartTriggers =
-          lib.optional (runnerFiles.runnerYaml != null) runnerFiles.runnerYaml
-          ++ lib.attrValues runnerFiles.teams;
+        unitConfig.ConditionUser = runnerCfg.user;
         path = [
           runnerCfg.package
           pkgs.git
         ]
         ++ runnerCfg.extraPackages;
+        # A runner named for this computer, the first time it starts.
+        preStart = runner.init runnerCfg;
         serviceConfig = {
-          ExecStartPre = runner.linkScript {
-            inherit pkgs;
-            inherit (runnerCfg) package;
-            files = runnerFiles;
-          };
-          ExecStart = lib.escapeShellArgs (
-            [
-              (lib.getExe runnerCfg.package)
-              "serve"
-            ]
-            ++ lib.optionals (runnerCfg.environmentFile != null) [
-              "--env-file"
-              runnerCfg.environmentFile
-            ]
-          );
+          ExecStart = lib.escapeShellArgs (runner.command runnerCfg);
           Restart = "on-failure";
         };
       };

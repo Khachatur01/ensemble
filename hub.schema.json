@@ -329,7 +329,7 @@
       "properties": {
         "direct": { "$ref": "#/definitions/direct" },
         "runners": {
-          "description": "Backends runners offer (`shares` in their runner.yaml), which the hub calls through their links; it never learns their address or key. `ensemble-hub runner backends` lists what runners offer now. Left out: none.",
+          "description": "Backends runners offer (`shares` in their settings), which the hub calls through their links; it never learns their address or key. `ensemble-hub runner backends` lists what runners offer now. Left out: none.",
           "$ref": "#/definitions/relayed_group"
         }
       }

@@ -10,8 +10,7 @@
 //!
 //! A settings file's `config` group gets what only a command line does with
 //! it ([`config_extras`]): `edit`, in $VISUAL or $EDITOR, which reads and
-//! writes through the `config.*` operations, and, for a file Nix declares
-//! settings of, `merge`, what the Nix modules run before the service starts.
+//! writes through the `config.*` operations.
 
 use crate::{Access, Code, Error, Field, Kind, Registry};
 use serde_json::{Map, Value, json};
@@ -180,68 +179,42 @@ fn line(text: &'static str) -> &'static str {
 /// How an operation is run, where it runs.
 pub type Call<'a> = &'a dyn Fn(&str, Value) -> Result<Value, Error>;
 
-/// `command`'s `config` group with `edit` and, when Nix may declare its
-/// settings, `merge`, which only a command line has.
-pub fn config_extras(command: clap::Command, merge: bool) -> clap::Command {
+/// `command`'s `config` group with `edit`, which only a command line has.
+pub fn config_extras(command: clap::Command) -> clap::Command {
     command.mut_subcommand("config", |config| {
-        let config = config.subcommand(
-            clap::Command::new("edit")
-                .about("Open the settings in $VISUAL or $EDITOR, and keep the change only if it loads"),
-        );
-        if !merge {
-            return config;
-        }
         config.subcommand(
-                clap::Command::new("merge")
-                    .about("Merge the settings of a YAML file into it and keep them as declared in Nix: what the Nix modules run")
-                    .hide(true)
-                    .arg(
-                        clap::Arg::new("file")
-                            .required(true)
-                            .value_parser(clap::value_parser!(PathBuf)),
-                    ),
-            )
+            clap::Command::new("edit").about(
+                "Open the settings in $VISUAL or $EDITOR, and keep the change only if it loads",
+            ),
+        )
     })
 }
 
-/// Whether `matches` names `config edit` or `config merge`, which only the
-/// command line has.
+/// Whether `matches` names `config edit`, which only the command line has.
 pub fn is_config_extra(matches: &clap::ArgMatches) -> bool {
     matches!(
         matches.subcommand(),
-        Some(("config", c)) if matches!(c.subcommand_name(), Some("edit" | "merge"))
+        Some(("config", c)) if c.subcommand_name() == Some("edit")
     )
 }
 
-/// `config edit` or `config merge`, when `matches` names one: `edit` through
-/// `call`, `merge` of the file it names by `merge`, before the service starts,
-/// which says what is missing still.
+/// `config edit`, when `matches` names it, through `call`.
 pub fn run_config_extra(
     matches: &clap::ArgMatches,
     call: Call<'_>,
-    merge: impl FnOnce(&Path) -> Result<Option<String>, String>,
 ) -> Option<Result<ExitCode, String>> {
     let ("config", config) = matches.subcommand()? else {
         return None;
     };
     match config.subcommand()? {
         ("edit", _) => Some(edit(call).map(|()| ExitCode::SUCCESS)),
-        ("merge", m) => {
-            let from = m.get_one::<PathBuf>("file")?;
-            Some(merge(from).map(|missing| {
-                if let Some(note) = missing {
-                    eprintln!("ensemble: note: {note}");
-                }
-                ExitCode::SUCCESS
-            }))
-        }
         _ => None,
     }
 }
 
 /// Edit a copy of the settings file in $VISUAL or $EDITOR, and keep it
-/// through `config.replace`, which refuses it when it would not load, changes
-/// what Nix declares, or the file changed meanwhile; then the copy stays.
+/// through `config.replace`, which refuses it when it would not load, or the
+/// file changed meanwhile; then the copy stays.
 pub fn edit(call: Call<'_>) -> Result<(), String> {
     let text = |out: &Value, key: &str| out[key].as_str().unwrap_or_default().to_string();
     let path = PathBuf::from(text(

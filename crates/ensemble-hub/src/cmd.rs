@@ -65,7 +65,7 @@ fn init(force: bool, keep: bool, stdout: bool) -> Result<ExitCode, String> {
     }
     let dir = state::hub_config_dir()?;
     let sample = config::hub::HUB_SAMPLE;
-    if !kept::init(&dir, sample, force)? {
+    if !kept::settings(&dir).init(sample, force)? {
         if keep {
             return Ok(ExitCode::SUCCESS);
         }
@@ -205,8 +205,8 @@ fn serve_once(ctx: &Ctx, hub_dir: &std::path::Path) -> Result<(), String> {
     };
     let loopback: &'static ensemble_link::loopback::Loopback = Box::leak(Box::new(loopback));
     let memory = ensemble_knowledge::Memory::new(&hub, None).with_relay(&hub, relay);
-    // A hub whose settings were taken in from a hub.yaml, or changed to name
-    // another vault, gets its vault here.
+    // A hub whose settings were changed to name another vault gets its vault
+    // here.
     memory
         .vault()
         .init()

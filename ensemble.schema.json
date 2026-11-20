@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json",
   "title": "Ensemble helper team: config.yaml",
-  "description": "A helper team: the agents that work on tasks. They name the LLM backends they run on by their names alone, which each runner defines in its runner.yaml (`llm`). Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (an agent's `prompt`).",
+  "description": "A helper team: the agents that work on tasks. They name the LLM backends they run on by their names alone, which each runner defines in its settings (`llm`). Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (an agent's `prompt`).",
   "type": "object",
   "required": [
     "version",
@@ -389,7 +389,7 @@
       "additionalProperties": false,
       "properties": {
         "backend": {
-          "description": "The name of an LLM backend the runner defines in runner.yaml's `llm`.",
+          "description": "The name of an LLM backend the runner defines in its `llm`.",
           "type": "string",
           "minLength": 1
         },
@@ -455,7 +455,7 @@
       "additionalProperties": false,
       "properties": {
         "backend": {
-          "description": "The name of an LLM backend the runner defines in runner.yaml's `llm`.",
+          "description": "The name of an LLM backend the runner defines in its `llm`.",
           "type": "string",
           "minLength": 1
         },
@@ -548,7 +548,7 @@
       "additionalProperties": false,
       "properties": {
         "backend": {
-          "description": "The name of an LLM backend the runner defines in runner.yaml's `llm`.",
+          "description": "The name of an LLM backend the runner defines in its `llm`.",
           "type": "string",
           "minLength": 1
         },

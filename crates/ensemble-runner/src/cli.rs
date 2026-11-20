@@ -9,12 +9,16 @@ use std::path::PathBuf;
 
 const AFTER_HELP: &str = "\
 Files:
-  ~/.config/ensemble/runner/ runner.yaml, teams/ (one folder per team), .env, hubs.json
+  ~/.config/ensemble/runner/ database.db (its settings, and the keys of its
+                             backends), master.key, teams/ (one folder per
+                             team), hubs.json, .env
   ~/.local/state/ensemble/   run logs and worktrees, per repository
 
-API keys are never written in a config file: a backend names the variable that
-holds its key, read from the environment, or from the runner's .env (or
---env-file).";
+Its settings are kept in its database, and changed with `config`, `backend`
+and `login`. A key given to `backend add` or `backend key` is kept there,
+sealed by master.key: back up both. A key a secrets manager keeps is read from
+the environment, or from the runner's .env (or --env-file), and named with
+`backend key --key-env`.";
 
 /// This computer's Ensemble runner: it runs the tasks of your hub with your
 /// helper teams.
@@ -39,14 +43,14 @@ pub fn command<R>(runner: &Registry<R>) -> clap::Command {
     let groups = [
         (
             "config",
-            "The runner's settings, runner.yaml, by their keys joined by dots, such as hub",
+            "The runner's settings, kept in its database, by their keys joined by dots, such as hub",
         ),
         (
             "backend",
             "The LLM backends the runner's teams run on, their keys, and which it shares.",
         ),
     ];
-    config_extras(mount(Cli::command(), runner, &groups), true)
+    config_extras(mount(Cli::command(), runner, &groups))
 }
 
 #[derive(Debug, Subcommand)]
@@ -64,12 +68,16 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Write the runner, ~/.config/ensemble/runner/runner.yaml: its name, whom
-    /// it works for, its workspace, its hub, and what it offers.
+    /// Make the runner as `setup` does, asking nothing: named for this
+    /// computer, working for you in ~/ensemble, offering nothing.
     Init {
-        /// Overwrite one that exists.
-        #[arg(long)]
+        /// Make it anew when there is one.
+        #[arg(long, conflicts_with = "keep")]
         force: bool,
+        /// When there is one, keep it and say nothing: what the NixOS module
+        /// runs before each start.
+        #[arg(long)]
+        keep: bool,
         /// Print the sample instead, with every setting.
         #[arg(long)]
         stdout: bool,
@@ -217,8 +225,7 @@ pub enum AgentCommand {
 
 /// A team's settings file, changed by its settings: each named by its keys
 /// joined by dots, such as `agents.coder.max_concurrent`. Comments and order
-/// are kept, and a change that would not load is refused. Settings declared in
-/// Nix are kept by the Nix module, and refused here.
+/// are kept, and a change that would not load is refused.
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
     /// Print a setting, or the whole file.
@@ -233,10 +240,6 @@ pub enum ConfigCommand {
     Edit,
     /// Print where the file is.
     Path,
-    /// Merge the settings of a YAML file into it and keep them as declared in
-    /// Nix: what the Nix modules run.
-    #[command(hide = true)]
-    Merge { file: PathBuf },
 }
 
 #[cfg(test)]

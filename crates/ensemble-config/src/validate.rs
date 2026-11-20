@@ -19,22 +19,6 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
     parse(&text, path)
 }
 
-/// The variables of the `--env-file` the caller named, or none.
-pub(super) fn read_env_file(
-    env_file: Option<&Path>,
-) -> Result<BTreeMap<String, String>, ConfigError> {
-    match env_file {
-        Some(dotenv) => {
-            let vars = std::fs::read_to_string(dotenv).map_err(|e| ConfigError::Unreadable {
-                path: dotenv.to_path_buf(),
-                detail: e.to_string(),
-            })?;
-            parse_dotenv(&vars, dotenv)
-        }
-        None => Ok(BTreeMap::new()),
-    }
-}
-
 pub fn parse(text: &str, path: &Path) -> Result<Config, ConfigError> {
     let raw: RawConfig = serde_norway::from_str(text).map_err(|e| ConfigError::Syntax {
         path: path.to_path_buf(),
@@ -627,7 +611,7 @@ impl Config {
                 &fallback.candidates,
                 opencode,
                 kinds,
-                " in runner.yaml's `llm`",
+                " in the runner's `llm`",
                 &mut problems,
             );
         }

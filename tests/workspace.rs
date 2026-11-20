@@ -1,6 +1,7 @@
 //! The crates of the workspace depend on each other in one direction only, so a
 //! later module (memory, the hub, the link) is added as a crate on top, never
-//! woven back into one below; and the runner is built of none of the hub's.
+//! woven back into one below; and the runner is built of none of the hub's
+//! own: it shares only the store of settings and sealed keys.
 //! This reads each crate's `Cargo.toml` rather than asking cargo, so it needs
 //! nothing but the files.
 
@@ -22,8 +23,9 @@ const ORDER: [&str; 11] = [
 ];
 
 /// The crates only the hub has, which the runner never builds, by itself or
-/// through another crate: the hub, its knowledge and its database.
-const HUB_ONLY: [&str; 3] = ["ensemble-hub", "ensemble-knowledge", "ensemble-store"];
+/// through another crate: the hub and its knowledge. The store, where both
+/// keep their settings and sealed keys, they share.
+const HUB_ONLY: [&str; 2] = ["ensemble-hub", "ensemble-knowledge"];
 
 /// The workspace crates a manifest names, in any dependency table.
 fn ensemble_dependencies(manifest: &str) -> Vec<String> {
@@ -97,12 +99,6 @@ fn the_runner_depends_on_nothing_of_the_hub() {
         assert!(
             !HUB_ONLY.contains(&name.as_str()),
             "the runner depends on {name}, which only the hub has: {reached:?}"
-        );
-        assert!(
-            !manifest(name)
-                .lines()
-                .any(|line| line.trim_start().starts_with("turso")),
-            "{name}, which the runner depends on, depends on Turso, the hub's database"
         );
     }
 }

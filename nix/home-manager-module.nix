@@ -1,8 +1,7 @@
 # The Home Manager module: this computer's runner, `ensemble-runner serve`,
 # for the person whose home it is, on Linux (a systemd user service) and on
-# macOS (a launchd agent). What its settings and teams should always be may be
-# written in Nix, like the NixOS module's runner; the rest is made with
-# `ensemble-runner`, as on any platform. It runs once there is a runner.
+# macOS (a launchd agent). It only runs the runner: its settings, keys and
+# teams are made and changed with `ensemble-runner`, as on any platform.
 { self }:
 {
   config,
@@ -13,24 +12,9 @@
 let
   inherit (lib) mkEnableOption mkIf;
   cfg = config.services.ensemble.runner;
-  yaml = pkgs.formats.yaml { };
   runner = import ./runner.nix { inherit self lib; };
-  files = runner.files { inherit pkgs yaml cfg; };
-  links = runner.linkScript {
-    inherit pkgs files;
-    inherit (cfg) package;
-  };
   path = lib.makeBinPath ([ cfg.package pkgs.git ] ++ cfg.extraPackages);
-  # Written by `ensemble-runner setup`, with what `settings` declares merged in.
-  runnerYaml = "${config.xdg.configHome}/ensemble/runner/runner.yaml";
-  command = [
-    (lib.getExe cfg.package)
-    "serve"
-  ]
-  ++ lib.optionals (cfg.environmentFile != null) [
-    "--env-file"
-    cfg.environmentFile
-  ];
+  command = runner.command cfg;
 in
 {
   options.services.ensemble.runner = {
@@ -39,22 +23,15 @@ in
       tasks of its hub in the git repositories of its workspace
     '';
   }
-  // runner.options { inherit pkgs yaml; };
+  // runner.options { inherit pkgs; };
 
   config = mkIf cfg.enable {
     home.packages = [ cfg.package ];
 
-    # The runner file and the teams, linked in on every switch.
-    home.activation.ensembleRunner = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-      run ${links}
-    '';
-
     systemd.user.services.ensemble-runner = mkIf pkgs.stdenv.hostPlatform.isLinux {
-      Unit = {
-        Description = "Ensemble runner";
-        ConditionPathExists = runnerYaml;
-      };
+      Unit.Description = "Ensemble runner";
       Service = {
+        ExecStartPre = runner.init cfg;
         ExecStart = lib.escapeShellArgs command;
         Environment = [ "PATH=${path}" ];
         Restart = "on-failure";
@@ -65,10 +42,13 @@ in
     launchd.agents.ensemble-runner = mkIf pkgs.stdenv.hostPlatform.isDarwin {
       enable = true;
       config = {
-        ProgramArguments = command;
+        ProgramArguments = [
+          "/bin/sh"
+          "-c"
+          "${runner.init cfg} && exec ${lib.escapeShellArgs command}"
+        ];
         EnvironmentVariables.PATH = "${path}:/usr/bin:/bin";
-        # Kept running while there is a runner to run.
-        KeepAlive.PathState.${runnerYaml} = true;
+        KeepAlive = true;
         RunAtLoad = true;
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/ensemble-runner.log";
       };

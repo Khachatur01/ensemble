@@ -791,6 +791,7 @@ dependencies = [
  "ensemble-core",
  "ensemble-link",
  "ensemble-ops",
+ "ensemble-store",
  "ensemble-tasks",
  "futures-util",
  "reqwest",
@@ -803,7 +804,9 @@ dependencies = [
 name = "ensemble-store"
 version = "0.1.0"
 dependencies = [
+ "ensemble-config",
  "ensemble-core",
+ "ring",
  "tokio",
  "turso",
 ]

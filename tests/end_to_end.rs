@@ -66,42 +66,38 @@ impl Scratch {
         .unwrap()
     }
 
-    /// This scratch computer's runner file, `runner.yaml`: the runner `desk`,
-    /// working in [`Scratch::workspace`], with no LLM backend, when it has
-    /// none yet.
-    fn runner_yaml(&self) -> PathBuf {
-        let path = self.runner_dir().join("runner.yaml");
-        if !path.exists() {
+    /// This scratch computer's runner: `desk`, working in
+    /// [`Scratch::workspace`], with no LLM backend, when it has none yet. Its
+    /// folder, where its database is.
+    fn runner(&self) -> PathBuf {
+        if runner_settings(&self.runner_dir()).is_none() {
             self.runner_with("{}");
         }
-        path
+        self.runner_dir()
     }
 
     /// The runner `desk`, working in [`Scratch::workspace`], with `backends`
     /// as its own LLM backends: the lines of a mapping indented six spaces,
     /// or `{}`.
     fn runner_with(&self, backends: &str) -> PathBuf {
-        std::fs::create_dir_all(self.runner_dir()).unwrap();
-        let path = self.runner_dir().join("runner.yaml");
+        let dir = self.runner_dir();
         // The hub it names, if it names one, it keeps.
-        let hub = std::fs::read_to_string(&path)
-            .ok()
+        let hub = runner_settings(&dir)
             .and_then(|t| {
                 t.lines()
                     .find(|l| l.starts_with("hub:"))
                     .map(|l| format!("{l}\n"))
             })
             .unwrap_or_default();
-        std::fs::write(
-            &path,
+        write_runner(
+            &dir,
             format!(
                 "version: 1\nname: desk\nworks_for: owner\nworkspace: \"{}\"\n{hub}{}",
                 self.workspace().display(),
                 llm_block(backends)
             ),
-        )
-        .unwrap();
-        path
+        );
+        dir
     }
 
     /// The runner `desk` with `openai-local`, the backend [`config_yaml`]'s
@@ -224,6 +220,27 @@ fn llm_block(backends: &str) -> String {
 
 /// `openai-local`, the backend [`config_yaml`]'s coder runs on, at `url`, as
 /// a line of [`llm_block`].
+/// The settings of the runner in `dir`, as its database keeps them, if it
+/// has any.
+fn runner_settings(dir: &Path) -> Option<String> {
+    use ensemble_config::settings_file::Store;
+    ensemble_runner::kept::settings(dir).read().unwrap()
+}
+
+/// The settings of the runner in `dir`.
+fn read_runner(dir: &Path) -> String {
+    runner_settings(dir).expect("the runner has its settings")
+}
+
+/// Keep `text` as the settings of the runner in `dir`, as a change by hand
+/// would, which a running runner does not hear of.
+fn write_runner(dir: &Path, text: impl AsRef<str>) {
+    use ensemble_config::settings_file::Store;
+    ensemble_runner::kept::settings(dir)
+        .write(text.as_ref())
+        .unwrap();
+}
+
 fn local_backend(url: &str) -> String {
     format!(
         "      openai-local: {{ type: openai-compatible-api, base_url: \"{url}\", api_key_env: ENSEMBLE_TEST_LOCAL_KEY, timeout_seconds: 20 }}"
@@ -676,7 +693,7 @@ fn an_invalid_team_stops_the_runner_before_it_runs_anything() {
     // fail it.
     let s = Scratch::new("runner-bad-config");
     s.write("@team/config.yaml", "version: 1\nbackends: {}\n");
-    s.runner_yaml();
+    s.runner();
     let out = bare_command(&s).args(["serve"]).output().unwrap();
     assert!(!out.status.success());
     assert!(stderr_of(&out).contains("backend"), "{}", stderr_of(&out));
@@ -927,10 +944,8 @@ fn setup_writes_the_runner_and_checks_its_teams() {
             && said.contains("ensemble-runner serve"),
         "{said}"
     );
-    let runner =
-        s.0.with_extension("xdg-config")
-            .join("ensemble/runner/runner.yaml");
-    let written = std::fs::read_to_string(&runner).unwrap();
+    let runner = s.runner_dir();
+    let written = read_runner(&runner);
     assert!(
         written.contains("name: \"desk\"")
             && written.contains("workspace: \"~/code\"")
@@ -952,7 +967,7 @@ fn setup_writes_the_runner_and_checks_its_teams() {
         "{}",
         stdout_of(&again)
     );
-    assert_eq!(std::fs::read_to_string(&runner).unwrap(), written);
+    assert_eq!(read_runner(&runner), written);
 }
 
 #[test]
@@ -969,11 +984,7 @@ fn setup_without_any_agent_cli_says_so_and_writes_the_runner() {
         "{}",
         stdout_of(&out)
     );
-    let written = std::fs::read_to_string(
-        s.0.with_extension("xdg-config")
-            .join("ensemble/runner/runner.yaml"),
-    )
-    .unwrap();
+    let written = read_runner(&s.runner_dir());
     assert!(written.contains("workspace: \"~/ensemble\""), "{written}");
 }
 
@@ -1847,7 +1858,7 @@ fn hub_dir(scratch: &Scratch) -> PathBuf {
 /// The settings of the hub in `hub`, as its database keeps them.
 fn read_hub(hub: &Path) -> String {
     use ensemble_config::settings_file::Store;
-    ensemble_hub::kept::Settings::new(hub)
+    ensemble_hub::kept::settings(hub)
         .read()
         .unwrap()
         .expect("the hub has its settings")
@@ -1857,7 +1868,7 @@ fn read_hub(hub: &Path) -> String {
 /// would, which the running hub does not hear of.
 fn write_hub(hub: &Path, text: impl AsRef<str>) -> Result<(), String> {
     use ensemble_config::settings_file::Store;
-    ensemble_hub::kept::Settings::new(hub).write(text.as_ref())
+    ensemble_hub::kept::settings(hub).write(text.as_ref())
 }
 
 /// A hub made by `ensemble-hub init` on the scratch computer.
@@ -1891,16 +1902,14 @@ fn runner_names_hub(scratch: &Scratch, url: &str) {
         .0
         .with_extension("xdg-config")
         .join("ensemble/runner");
-    std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("runner.yaml"),
+    write_runner(
+        &config,
         format!(
             "version: 1\nname: desk\nworks_for: owner\nworkspace: \"{}\"\nhub: \"{url}\"\n{}",
             scratch.workspace().display(),
             llm_block(&local_backend(NOWHERE))
         ),
-    )
-    .unwrap();
+    );
 }
 
 /// The scratch computer's runner, naming the hub at `url` and signed in to
@@ -2016,7 +2025,7 @@ impl Drop for Served {
 
 /// This scratch computer's runner, running its helper team until dropped.
 fn start_runner(s: &Scratch) -> Served {
-    s.runner_yaml();
+    s.runner();
     let mut runner = bare_command(s)
         .args(["serve"])
         .stdin(Stdio::null())
@@ -2326,7 +2335,7 @@ fn a_runner_joins_a_hub_with_a_code_an_admin_made_and_spends_it() {
     let s = Scratch::new("hub-join");
     let (hub, address, _) = hub_server(&s);
     let _child = serve_hub(&s, &hub);
-    s.runner_yaml();
+    s.runner();
     let url = format!("ws://{address}");
     let out = ensemble_hub(&s, &["user", "join-code", "ana"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2369,23 +2378,31 @@ fn a_runner_joins_a_hub_with_a_code_an_admin_made_and_spends_it() {
 }
 
 #[test]
-fn a_runner_file_is_written_once_and_an_account_names_itself_in_the_tracker() {
+fn a_runner_is_made_once_and_an_account_names_itself_in_the_tracker() {
     let s = Scratch::new("runner-init");
     let out = runner_command(&s).args(["init"]).output().unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let runner =
-        s.0.with_extension("xdg-config")
-            .join("ensemble/runner/runner.yaml");
-    let written = std::fs::read_to_string(&runner).unwrap();
+    let written = read_runner(&s.runner_dir());
     assert!(
-        written.contains("llm:") && written.contains("workspace: ~/ensemble"),
+        written.contains("llm:") && written.contains("workspace: \"~/ensemble\""),
         "{written}"
+    );
+    assert!(
+        !s.runner_dir().join("runner.yaml").exists(),
+        "its settings are kept in its database"
     );
     let again = runner_command(&s).args(["init"]).output().unwrap();
     assert!(
         !again.status.success(),
-        "it does not overwrite without --force"
+        "it does not make it anew without --force"
     );
+    // What the NixOS module runs before each start: no error, nothing changed.
+    let kept = runner_command(&s)
+        .args(["init", "--keep"])
+        .output()
+        .unwrap();
+    assert!(kept.status.success(), "{}", stderr_of(&kept));
+    assert_eq!(read_runner(&s.runner_dir()), written);
 
     hub_server_of(&s);
     let run = |args: &[&str]| hub_command(&s).args(args).output().unwrap();
@@ -2482,7 +2499,7 @@ fn on_machine(scratch: &Scratch, machine: &str, runner_yaml: &str) -> Command {
             1,
         )
     };
-    std::fs::write(config.join("runner.yaml"), runner_yaml).unwrap();
+    write_runner(&config, runner_yaml);
     let tokens = scratch
         .0
         .with_extension("xdg-config")
@@ -3227,9 +3244,9 @@ fn a_runner_that_works_for_the_hub_never_lends_an_agent_on_its_clis_own_login() 
 }
 
 #[test]
-fn settings_are_changed_from_the_command_line_and_those_nix_declares_are_kept() {
+fn settings_are_changed_from_the_command_line() {
     let s = Scratch::new("config");
-    let runner = s.runner_yaml();
+    let runner = s.runner();
     let get = |key: &str| {
         stdout_of(&ensemble_runner(&s, &["config", "get", key]))
             .trim()
@@ -3261,32 +3278,13 @@ fn settings_are_changed_from_the_command_line_and_those_nix_declares_are_kept() 
     assert_eq!(get("name"), "desk");
     let out = ensemble_runner(&s, &["config", "unset", "name"]);
     assert!(!out.status.success(), "a runner needs a name");
-    assert_eq!(
-        stdout_of(&ensemble_runner(&s, &["config", "path"])).trim(),
-        runner.display().to_string()
-    );
-
-    // What Nix declares is merged in, kept, and refused here.
-    let declared = s.write(
-        "declared.yaml",
-        "works_for: owner\nllm: { direct: { backends: {}, shares: [], max_shared_calls: 1 } }\n",
-    );
-    let out = ensemble_runner(&s, &["config", "merge", declared.to_str().unwrap()]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(get("works_for"), "owner");
-    let out = ensemble_runner(&s, &["config", "set", "works_for", "hub"]);
-    assert!(!out.status.success());
+    let path = stdout_of(&ensemble_runner(&s, &["config", "path"]));
     assert!(
-        stderr_of(&out).contains("`works_for` is set in your Nix configuration"),
-        "{}",
-        stderr_of(&out)
+        path.contains("the runner's settings")
+            && path.contains(&runner.join("database.db").display().to_string()),
+        "{path}"
     );
-    let out = ensemble_runner(&s, &["config", "set", "name", "rogstrix"]);
-    assert!(
-        out.status.success(),
-        "the rest stays the CLI's: {}",
-        stderr_of(&out)
-    );
+    assert!(read_runner(&runner).contains("works_for: hub"));
 
     // A team made here, too; the running runner would reload it.
     let out = ensemble_runner(&s, &["team", "new", "web"]);
@@ -3316,7 +3314,7 @@ fn signing_in_to_a_hub_names_it_in_the_runner_and_signing_out_takes_it_out() {
     let s = Scratch::new("login-names-hub");
     let (hub, address, token) = hub_server(&s);
     let _hub = serve_hub(&s, &hub);
-    s.runner_yaml();
+    s.runner();
     let url = format!("ws://{address}");
     let out = ensemble_runner(&s, &["login", &url, "--token", &token]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -3350,7 +3348,7 @@ fn signing_in_to_a_hub_names_it_in_the_runner_and_signing_out_takes_it_out() {
 #[test]
 fn a_running_runner_makes_a_change_to_its_settings_itself() {
     let s = Scratch::new("config-running");
-    s.runner_yaml();
+    s.runner();
     // Not running: the command makes it, and nothing needs saying.
     let out = ensemble_runner(&s, &["config", "set", "name", "desk-2"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -3430,7 +3428,7 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
     let hub = hub_server_of(&s);
     let yaml = || read_hub(&hub);
     // The keys the hub keeps, sealed in its database.
-    let vars = || ensemble_hub::kept::Keys::new(&hub).all().unwrap();
+    let vars = || ensemble_hub::kept::keys(&hub).all().unwrap();
     let server = models_stub(r#"{"data":[{"id":"small"}]}"#);
 
     // It answers without a key: added, with none.
@@ -3587,7 +3585,7 @@ fn a_runners_owner_adds_shares_and_removes_backends_its_teams_do_not_use() {
         drop(child.stdin.take());
         child.wait_with_output().unwrap()
     };
-    let yaml = || std::fs::read_to_string(&runner_yaml).unwrap();
+    let yaml = || read_runner(&runner_yaml);
 
     // The team's coder runs on openai-local: it stays.
     let out = run(&["backend", "remove", "openai-local"]);
@@ -3621,6 +3619,25 @@ fn a_runners_owner_adds_shares_and_removes_backends_its_teams_do_not_use() {
     let out = run(&["backend", "unshare", "gpu"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(yaml().contains("shares: []"), "{}", yaml());
+
+    // Its key is kept sealed in the runner's database, as the hub keeps its own.
+    let mut child = runner_command(&s)
+        .args(["backend", "key", "gpu"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"sk-gpu\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let dir = s.runner_dir();
+    assert_eq!(
+        ensemble_runner::kept::keys(&dir).all().unwrap()["ENSEMBLE_BACKEND_GPU_KEY"],
+        "sk-gpu"
+    );
+    assert!(!yaml().contains("sk-gpu") && !dir.join(".env").exists());
+    assert!(dir.join("master.key").exists());
     let out = run(&["backend", "test", "gpu"]);
     assert!(
         stdout_of(&out).contains("gpu: answers, serves big"),

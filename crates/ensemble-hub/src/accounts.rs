@@ -159,7 +159,7 @@ impl HubContext {
         let checked = crate::kept::source(dir);
         let changed: Arc<OnceLock<Box<Changed>>> = Arc::default();
         let settings = SettingsFile::kept_in(
-            crate::kept::Settings::new(dir),
+            crate::kept::settings(dir),
             crate::kept::SETTINGS_NAME,
             crate::kept::source(dir),
             "`ensemble-hub init`",
@@ -236,20 +236,18 @@ impl WithSettings for HubContext {
 /// Its keys are kept sealed in its database ([`crate::kept`]).
 impl WithBackends for HubContext {
     fn can_keep_keys(&self) -> Result<(), Error> {
-        crate::kept::Keys::new(&self.dir)
-            .ready()
-            .map_err(Error::failed)
+        crate::kept::keys(&self.dir).ready().map_err(Error::failed)
     }
 
     fn keep_key(&self, name: &str, key: Option<&str>) -> Result<(), Error> {
-        crate::kept::Keys::new(&self.dir)
+        crate::kept::keys(&self.dir)
             .keep(name, key)
             .map_err(Error::failed)
     }
 
     fn variable(&self, name: &str) -> Option<String> {
         use ensemble_config::Env;
-        crate::kept::Variables::new(&self.dir, self.keys_file().as_deref())
+        crate::kept::variables(&self.dir, self.keys_file().as_deref())
             .ok()?
             .get(name)
     }

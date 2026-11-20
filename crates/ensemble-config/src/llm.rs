@@ -1,7 +1,7 @@
-//! The `llm` block of the hub's settings and of `runner.yaml`: the LLM
+//! The `llm` block of the hub's settings and of the runner's: the LLM
 //! backends a hub or a runner uses. It calls its `direct` backends itself; the
 //! others a runner serves, and it reaches them through the hub: `runners` in
-//! the hub's settings, `hub` in runner.yaml. A runner may offer some of its
+//! the hub's settings, `hub` in the runner's. A runner may offer some of its
 //! direct backends to the hub and other runners (`shares`), and says how many
 //! such calls it takes at once (`max_shared_calls`).
 //!

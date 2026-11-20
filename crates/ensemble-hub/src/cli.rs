@@ -48,7 +48,7 @@ pub fn command<H>(hub: &Registry<H>) -> clap::Command {
             "The hub's settings, kept in its database, by their keys joined by dots, such as http.listen",
         ),
     ];
-    config_extras(mount(Cli::command(), hub, &groups), false)
+    config_extras(mount(Cli::command(), hub, &groups))
 }
 
 #[derive(Debug, Subcommand)]

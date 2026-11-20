@@ -29,19 +29,6 @@ pub fn config_path(org: &Path) -> PathBuf {
     org.join(CONFIG_FILENAME)
 }
 
-/// The real environment, then the `.env` file: a variable that is set wins,
-/// as dotenv files are meant to behave.
-pub(super) struct Layered<'a> {
-    pub(super) first: &'a dyn Env,
-    pub(super) then: &'a BTreeMap<String, String>,
-}
-
-impl Env for Layered<'_> {
-    fn get(&self, key: &str) -> Option<String> {
-        self.first.get(key).or_else(|| self.then.get(key).cloned())
-    }
-}
-
 /// Read a `.env` file: `NAME=value` per line, `#` comments, an optional
 /// `export ` prefix, values optionally in single or double quotes. No
 /// interpolation. Every malformed line is reported.

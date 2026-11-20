@@ -350,7 +350,7 @@ fn every_model_in_a_try_list_is_checked() {
         "fail",
     ));
     for wanted in [
-        "agents.summariser.adapter.try[1]: LLM backend 'nowhere' is not defined in runner.yaml's `llm`",
+        "agents.summariser.adapter.try[1]: LLM backend 'nowhere' is not defined in the runner's `llm`",
         "agents.coder.adapter.model.try[1]: LLM backend 'claude' is of type 'anthropic-api'",
     ] {
         assert!(joined.contains(wanted), "{wanted}: {joined}");
@@ -624,41 +624,6 @@ fn a_malformed_dotenv_line_is_reported_with_its_number() {
             "line 3: '9X' is not a variable name"
         ]
     );
-}
-
-#[test]
-fn an_env_file_fills_in_what_the_environment_lacks() {
-    let tmp = ensemble_core::workspace::testing::TempDir::new();
-    let path = runner_path(&tmp.0);
-    let text = format!(
-        "version: 1\nname: laptop\nworks_for: owner\nworkspace: /code\nllm:\n  direct:\n    backends:{RUNNER_BACKENDS}    shares: []\n    max_shared_calls: 1\n"
-    );
-    std::fs::write(&path, text).unwrap();
-    let vars = tmp.0.join(".env");
-    std::fs::write(
-        &vars,
-        "OPENAI_LOCAL_API_KEY=from-file\nOPENAI_REMOTE_API_KEY=remote-file\n",
-    )
-    .unwrap();
-    let key = |r: &Runner, name: &str| r.llm.direct[name].settings.api_key().map(String::from);
-
-    let r = load_runner(&path, Some(&vars), &env(&[])).unwrap().unwrap();
-    assert_eq!(key(&r, "openai-local").as_deref(), Some("from-file"));
-    assert_eq!(key(&r, "openai-remote").as_deref(), Some("remote-file"));
-
-    // A variable that is really set wins over the file.
-    let r = load_runner(
-        &path,
-        Some(&vars),
-        &env(&[("OPENAI_LOCAL_API_KEY", "from-env")]),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(key(&r, "openai-local").as_deref(), Some("from-env"));
-
-    // One named that is missing is an error.
-    let err = load_runner(&path, Some(&tmp.0.join("nope.env")), &env(&[])).unwrap_err();
-    assert!(err.to_string().contains("nope.env"), "{err}");
 }
 
 #[test]
@@ -1859,11 +1824,6 @@ fn a_runner_says_whom_it_works_for_and_its_sample_and_schema_agree() {
         "a relative path is beside the file"
     );
     assert!(bare.llm.direct.is_empty() && bare.llm.hub.is_empty() && bare.llm.shares.is_empty());
-    assert!(
-        load_runner(Path::new("/nonexistent/runner.yaml"), None, &env(&[]))
-            .unwrap()
-            .is_none()
-    );
     let schema: serde_json::Value = serde_json::from_str(runner::RUNNER_SCHEMA).unwrap();
     assert_eq!(schema_keys(&schema), accepted_keys::<runner::RawRunner>());
     let mut required = accepted_keys::<runner::RawRunner>();

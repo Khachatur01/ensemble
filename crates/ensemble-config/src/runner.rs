@@ -1,6 +1,6 @@
-//! `runner.yaml`: one runner, a worker that gives this computer's power to its
-//! owner and, when it works for the hub, to the people of a hub server:
-//! `~/.config/ensemble/runner/runner.yaml`. A computer runs one runner.
+//! The settings of one runner, a worker that gives this computer's power to its
+//! owner and, when it works for the hub, to the people of a hub server, kept
+//! in its database (`ensemble_runner::kept`). A computer runs one runner.
 //!
 //! A runner says who it works for (`works_for`: its owner alone, or also the
 //! accounts of its hub whose role has `compute`, with the agents of its teams
@@ -12,20 +12,20 @@
 //! folders of its teams directory (`teams`).
 
 use super::llm::{RawRunnerLlm, runner_llm};
-use super::validate::{explain, read_env_file};
+use super::validate::explain;
 use super::*;
 use serde::Deserialize;
 
-pub const RUNNER_FILENAME: &str = "runner.yaml";
 pub const RUNNER_SUPPORTED_VERSION: u32 = 1;
 
-/// The JSON Schema for `runner.yaml`.
+/// The JSON Schema of the runner's settings.
 pub const RUNNER_SCHEMA: &str = include_str!("../../../runner.schema.json");
 
-/// The first line of a runner file, which points an editor at its schema.
+/// The first line of the runner's settings, which points an editor at their
+/// schema.
 pub const RUNNER_SCHEMA_URL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/runner.schema.json";
 
-/// The file `ensemble-runner init` writes.
+/// Every setting of a runner, which `ensemble-runner init --stdout` prints.
 pub const RUNNER_SAMPLE: &str = include_str!("runner_sample.yaml");
 
 /// One runner.
@@ -79,48 +79,6 @@ pub(crate) struct RawRunner {
     pub(crate) workspace: String,
     pub(crate) hub: Option<String>,
     pub(crate) llm: RawRunnerLlm,
-}
-
-/// The runner file in `dir`, usually `~/.config/ensemble/runner`.
-pub fn runner_path(dir: &Path) -> PathBuf {
-    dir.join(RUNNER_FILENAME)
-}
-
-/// The runner file at `path`, or none when there is no such file, with
-/// variables the environment does not set taken from `env_file`, usually the
-/// runner's `.env`.
-pub fn load_runner(
-    path: &Path,
-    env_file: Option<&Path>,
-    env: &dyn Env,
-) -> Result<Option<Runner>, ConfigError> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(ConfigError::Unreadable {
-                path: path.to_path_buf(),
-                detail: e.to_string(),
-            });
-        }
-    };
-    parse_runner_with(&text, path, env_file, env).map(Some)
-}
-
-/// `text` as the runner file at `path`, with variables the environment does
-/// not set taken from `env_file`.
-pub fn parse_runner_with(
-    text: &str,
-    path: &Path,
-    env_file: Option<&Path>,
-    env: &dyn Env,
-) -> Result<Runner, ConfigError> {
-    let file_vars = read_env_file(env_file)?;
-    let env = env::Layered {
-        first: env,
-        then: &file_vars,
-    };
-    parse_runner(text, path, &env)
 }
 
 pub fn parse_runner(text: &str, path: &Path, env: &dyn Env) -> Result<Runner, ConfigError> {

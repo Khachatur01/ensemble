@@ -5,10 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Ensemble's hub database: one Turso file for accounts, tokens, tasks, task deliveries and the notes' embeddings."
+description = "Ensemble's databases: the hub's Turso file for accounts, tokens, tasks, task deliveries and the notes' embeddings, and the settings and sealed keys a hub or a runner keeps."
 
 [dependencies]
 turso.workspace = true
+ensemble-config.workspace = true
+ring.workspace = true
 ensemble-core.workspace = true
 tokio.workspace = true
 

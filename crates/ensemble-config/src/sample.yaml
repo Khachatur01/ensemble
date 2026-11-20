@@ -5,7 +5,7 @@
 # project; the repository a task names is where the team works. It can be yours
 # alone, or one your company shares and you pull. It names the LLM backends its
 # agents run on by their names alone: each runner defines them, with their
-# endpoints and keys, in its runner.yaml (`llm`), so the team runs on any
+# endpoints and keys, in its settings (`llm`), so the team runs on any
 # runner that defines the backends it names. This one names `local` and
 # `central`, as `ensemble-runner init --stdout` defines them.
 #

@@ -49,7 +49,7 @@ use clap::FromArgMatches;
 use ensemble_core::state;
 use ensemble_ops::cli::{is_config_extra, matched, run_config_extra};
 use ensemble_ops::{Error, Registry};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 /// The `ensemble-hub` executable.
@@ -98,9 +98,7 @@ fn dispatch(matches: &clap::ArgMatches, hub: &Registry<HubContext>) -> Result<Ex
         if let Some((name, leaf)) = matched(hub, matches) {
             return ensemble_ops::cli::run(hub, &call, name, leaf);
         }
-        // The hub's settings are in its database, which Nix declares none of.
-        let merge = |_: &Path| Err("the hub's settings are not declared in Nix".to_string());
-        if let Some(done) = run_config_extra(matches, &call, merge) {
+        if let Some(done) = run_config_extra(matches, &call) {
             return done;
         }
     }

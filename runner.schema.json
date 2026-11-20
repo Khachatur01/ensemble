@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/runner.schema.json",
-  "title": "Ensemble runner: runner.yaml",
-  "description": "This computer's runner: a worker that runs the tasks its hub keeps for the git repositories of its workspace with the helper teams in its teams directory, and, through the hub, may lend this computer's power to others. In ~/.config/ensemble/runner/runner.yaml; a computer runs one runner. Nothing has a default value; `hub`, `llm.hub` and a backend's `api_key_env` may be left out, which means they are not used.",
+  "title": "Ensemble runner settings",
+  "description": "This computer's runner: a worker that runs the tasks its hub keeps for the git repositories of its workspace with the helper teams in its teams directory, and, through the hub, may lend this computer's power to others. Kept in its database, ~/.config/ensemble/runner/database.db, and changed with `ensemble-runner config`; a computer runs one runner. Nothing has a default value; `hub`, `llm.hub` and a backend's `api_key_env` may be left out, which means they are not used.",
   "type": "object",
   "required": ["version", "name", "works_for", "workspace", "llm"],
   "additionalProperties": false,
@@ -21,7 +21,7 @@
       "enum": ["owner", "hub"]
     },
     "workspace": {
-      "description": "The folder it works in, such as ~/ensemble. Each git repository directly inside it is a project, named for its folder: the runner runs the tasks the hub keeps for it, and finds a repository added later within half a minute; a task for a project it has no folder for, it clones here from the repository the task names. ~/ is the home directory; a relative path is beside runner.yaml.",
+      "description": "The folder it works in, such as ~/ensemble. Each git repository directly inside it is a project, named for its folder: the runner runs the tasks the hub keeps for it, and finds a repository added later within half a minute; a task for a project it has no folder for, it clones here from the repository the task names. ~/ is the home directory; a relative path is in ~/.config/ensemble/runner/.",
       "type": "string",
       "minLength": 1
     },

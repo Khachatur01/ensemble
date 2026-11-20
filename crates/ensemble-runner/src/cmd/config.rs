@@ -1,6 +1,6 @@
 //! `ensemble-runner team config`: a team's settings file, its config.yaml, as
 //! the command line reaches it: through the same `config.*` operations as the
-//! runner's own runner.yaml, and what only a command line does with one
+//! runner's own settings, and what only a command line does with one
 //! (`ensemble_ops::cli`).
 
 use crate::cli::ConfigCommand;
@@ -30,13 +30,6 @@ pub fn run(file: SettingsFile, command: ConfigCommand) -> Result<ExitCode, Strin
         ConfigCommand::Path => ("config.path", json!({})),
         ConfigCommand::Edit => {
             return ensemble_ops::cli::edit(&call).map(|()| ExitCode::SUCCESS);
-        }
-        ConfigCommand::Merge { file: from } => {
-            // Settings declared in Nix, with what is missing still said.
-            if let Some(note) = team.0.merge(&from).map_err(|e| e.to_string())? {
-                eprintln!("ensemble: note: {note}");
-            }
-            return Ok(ExitCode::SUCCESS);
         }
     };
     let output = call(name, input).map_err(|e| e.to_string())?;

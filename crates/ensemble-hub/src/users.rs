@@ -805,11 +805,11 @@ fn sha256(token: &str) -> String {
     hex(digest(&SHA256, token.as_bytes()).as_ref())
 }
 
-pub(crate) fn hex(bytes: &[u8]) -> String {
+fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub(crate) fn unhex(text: &str) -> Option<Vec<u8>> {
+fn unhex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
     }

@@ -176,60 +176,6 @@ pub fn unset(text: &str, key: &str) -> Result<String, String> {
     Ok(join(out, text))
 }
 
-/// `text` with every setting of `doc`, a YAML mapping, set in it: a mapping
-/// setting by setting, so what `text` has beside them stays, and anything
-/// else whole. Returns the result and the paths it set, such as
-/// `http.listen`: what the Nix modules use to keep the settings declared in
-/// Nix, and nothing more.
-pub fn merge(text: &str, doc: &str) -> Result<(String, Vec<String>), String> {
-    let doc: Value = serde_norway::from_str(doc).map_err(|e| e.to_string())?;
-    let mut leaves = Vec::new();
-    match doc {
-        Value::Mapping(map) => leaves_of(&map, &mut Vec::new(), &mut leaves)?,
-        Value::Null => {}
-        _ => return Err("the settings to merge are not a mapping".into()),
-    }
-    let mut out = text.to_string();
-    let mut paths = Vec::new();
-    for (path, value) in leaves {
-        let key = path.join(".");
-        let value = serde_json::to_string(
-            &serde_json::to_value(&value).map_err(|e| format!("{key}: {e}"))?,
-        )
-        .map_err(|e| format!("{key}: {e}"))?;
-        out = set(&out, &key, &value)?;
-        paths.push(key);
-    }
-    Ok((out, paths))
-}
-
-/// The settings of `map` that are not themselves non-empty mappings, by path.
-fn leaves_of(
-    map: &serde_norway::Mapping,
-    at: &mut Vec<String>,
-    out: &mut Vec<(Vec<String>, Value)>,
-) -> Result<(), String> {
-    for (key, value) in map {
-        let key = key
-            .as_str()
-            .ok_or_else(|| format!("a key under `{}` is not a string", at.join(".")))?;
-        at.push(key.to_string());
-        match value {
-            Value::Mapping(inner) if !inner.is_empty() => leaves_of(inner, at, out)?,
-            _ => out.push((at.clone(), value.clone())),
-        }
-        at.pop();
-    }
-    Ok(())
-}
-
-/// Whether `key` is `managed`, or holds or is held by a setting that is.
-pub fn overlaps(key: &str, managed: &str) -> bool {
-    key == managed
-        || managed.starts_with(&format!("{key}."))
-        || key.starts_with(&format!("{managed}."))
-}
-
 /// A key's path: its keys, joined by dots.
 fn path(key: &str) -> Result<Vec<&str>, String> {
     let parts: Vec<&str> = key.split('.').collect();
@@ -506,28 +452,6 @@ llm:
         let out = unset(&out, "llm.hub").unwrap();
         assert!(out.contains("llm: {}\n  # what it uses\n"), "{out}");
         assert!(unset(RUNNER, "hub").unwrap_err().contains("no `hub`"));
-    }
-
-    #[test]
-    fn settings_are_merged_one_by_one_and_what_is_beside_them_stays() {
-        let doc = "name: rogstrix\nllm:\n  direct:\n    shares: [qwen, llama]\n  hub: {}\nhub: \"ws://127.0.0.1:7700\"\n";
-        let (out, paths) = merge(RUNNER, doc).unwrap();
-        assert_eq!(paths, ["name", "llm.direct.shares", "llm.hub", "hub"]);
-        assert!(out.contains("name: \"rogstrix\"  # its name\n"), "{out}");
-        assert!(
-            out.contains(
-                "    base_url: http://127.0.0.1:11434/v1\n    shares: [\"qwen\",\"llama\"]\n"
-            ),
-            "{out}"
-        );
-        assert!(out.contains("  hub: {}\n"), "{out}");
-        assert!(out.ends_with("hub: \"ws://127.0.0.1:7700\"\n"), "{out}");
-        assert_eq!(get(&out, "works_for").unwrap().as_deref(), Some("owner"));
-        // Into nothing, it makes the file.
-        let (made, _) = merge("", "version: 1\nllm: {}\n").unwrap();
-        assert_eq!(made, "version: 1\nllm: {}\n");
-        assert!(overlaps("llm", "llm.hub") && overlaps("llm.hub.backends", "llm.hub"));
-        assert!(!overlaps("llm.direct", "llm.hub") && !overlaps("name", "names"));
     }
 
     #[test]

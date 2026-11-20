@@ -1,12 +1,13 @@
 //! The hub server's state that changes while it runs: its settings, each change
 //! of them kept in their history, and the keys of its backends, sealed
-//! (`ensemble_hub::kept`); its accounts and their tokens
+//! ([`kept`]); its accounts and their tokens
 //! (`ensemble_hub::users`), the tasks it keeps for them
 //! (`ensemble_hub::board`), which issue of which tracker became which task
 //! (the inbox). One Turso database, `database.db`, in the hub's folder
 //! (`~/.config/ensemble/hub/`), which only whoever runs the hub may enter.
 //! [`open`] opens another Turso file, such as the knowledge vault's cache of
-//! its notes' vectors.
+//! its notes' vectors. A runner keeps its settings and keys the same way, in a
+//! `database.db` of its own with only those tables ([`kept`]).
 //!
 //! Turso locks the file while it is open, and another process cannot open it
 //! then. So each read or change opens it, does its work (a change in one
@@ -14,16 +15,19 @@
 //! for a few seconds. That is what lets `ensemble-hub user` change accounts on
 //! the server while the hub runs.
 
+pub mod kept;
+
 use ensemble_core::runtime;
 use std::path::Path;
 use std::time::{Duration, Instant};
 pub use turso::{Connection, Value};
 
-/// The database file in the hub's state directory.
+/// The database file in the hub's folder, or a runner's.
 pub const DB_FILE: &str = "database.db";
 /// How long an open waits for another process to let go of the file.
 const WAIT: Duration = Duration::from_secs(5);
 
+/// The hub's own tables.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS users (
     name TEXT PRIMARY KEY,
@@ -59,6 +63,11 @@ CREATE TABLE IF NOT EXISTS tracker_deliveries (
     data TEXT NOT NULL,
     PRIMARY KEY (tracker, issue)
 );
+";
+
+/// The tables of the settings and keys kept, in a hub's database or a
+/// runner's.
+const KEPT_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS settings (
     name TEXT PRIMARY KEY,
     text TEXT NOT NULL,
@@ -85,7 +94,22 @@ pub fn with<T>(
     work: impl AsyncFnOnce(&turso::Connection) -> Result<T, String>,
 ) -> Result<T, String> {
     private_dir(dir)?;
-    open(&dir.join(DB_FILE), SCHEMA, work)
+    open(&dir.join(DB_FILE), SCHEMA, async |c| {
+        c.execute_batch(KEPT_SCHEMA)
+            .await
+            .map_err(|e| e.to_string())?;
+        work(c).await
+    })
+}
+
+/// Open the database in `dir` with only the tables of the settings and keys
+/// kept, as a runner's is, and run `work` on it.
+fn kept_with<T>(
+    dir: &Path,
+    work: impl AsyncFnOnce(&turso::Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    private_dir(dir)?;
+    open(&dir.join(DB_FILE), KEPT_SCHEMA, work)
 }
 
 /// Open the Turso file at `path`, made with the tables of `schema` when they
@@ -139,7 +163,7 @@ pub async fn transaction(
 
 /// The settings kept as `name`, if there are any.
 pub fn settings(dir: &Path, name: &str) -> Result<Option<String>, String> {
-    let found = with(dir, async |c| {
+    let found = kept_with(dir, async |c| {
         rows(
             c,
             "SELECT text FROM settings WHERE name = ?1",
@@ -158,7 +182,7 @@ pub fn keep_settings(dir: &Path, name: &str, text: &str, at: &str) -> Result<(),
         Value::Text(text.into()),
         Value::Text(at.into()),
     );
-    with(dir, async |c| {
+    kept_with(dir, async |c| {
         transaction(
             c,
             vec![
@@ -178,7 +202,7 @@ pub fn keep_settings(dir: &Path, name: &str, text: &str, at: &str) -> Result<(),
 
 /// Every change of the settings `name`, oldest first: when, and the text.
 pub fn settings_history(dir: &Path, name: &str) -> Result<Vec<(String, String)>, String> {
-    let found = with(dir, async |c| {
+    let found = kept_with(dir, async |c| {
         rows(
             c,
             "SELECT changed, text FROM settings_history WHERE name = ?1 ORDER BY n",
@@ -194,7 +218,7 @@ pub fn settings_history(dir: &Path, name: &str) -> Result<Vec<(String, String)>,
 
 /// Every secret kept, sealed, by its name.
 pub fn secrets(dir: &Path) -> Result<std::collections::BTreeMap<String, String>, String> {
-    let found = with(dir, async |c| {
+    let found = kept_with(dir, async |c| {
         rows(c, "SELECT name, sealed FROM secrets", vec![]).await
     })?;
     Ok(found
@@ -206,7 +230,7 @@ pub fn secrets(dir: &Path) -> Result<std::collections::BTreeMap<String, String>,
 /// Keep the secret `name`, sealed, in place of the one kept; none takes it out.
 pub fn keep_secret(dir: &Path, name: &str, sealed: Option<&str>) -> Result<(), String> {
     let name = Value::Text(name.into());
-    with(dir, async |c| match sealed {
+    kept_with(dir, async |c| match sealed {
         Some(s) => execute(
             c,
             "INSERT OR REPLACE INTO secrets (name, sealed) VALUES (?1, ?2)",

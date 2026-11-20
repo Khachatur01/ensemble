@@ -519,7 +519,7 @@ pub fn claude_tool_writes(tool: &str) -> bool {
 pub struct Config {
     pub version: u32,
     /// The LLM backends its agents may run on: those of the runner that runs
-    /// it, from runner.yaml's `llm` ([`Config::with_backends`]); none as the
+    /// it, from the runner's `llm` ([`Config::with_backends`]); none as the
     /// team is read.
     pub llm_backends: BTreeMap<String, LlmBackend>,
     /// Shared limits, by name.
@@ -646,13 +646,11 @@ mod validate;
 
 pub use env::*;
 pub use hub::{
-    AccountRules, Accounts, Connectors, Embed, HUB_FILENAME, Http, Hub, IssueTracker, Knowledge,
-    Permission, Recall, Registration, SourceFilter, Sources, Tasks, Tracker, parse_hub,
+    AccountRules, Accounts, Connectors, Embed, Http, Hub, IssueTracker, Knowledge, Permission,
+    Recall, Registration, SourceFilter, Sources, Tasks, Tracker, parse_hub,
 };
 pub use llm::{HubLlm, RelayAt, Relayed, RunnerLlm};
-pub use runner::{
-    RUNNER_FILENAME, Runner, WorksFor, load_runner, parse_runner, parse_runner_with, runner_path,
-};
+pub use runner::{Runner, WorksFor, parse_runner};
 pub use settings_file::{SettingsFile, WithSettings};
 pub use validate::{load, parse};
 
