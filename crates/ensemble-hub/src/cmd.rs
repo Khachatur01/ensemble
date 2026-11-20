@@ -5,19 +5,20 @@
 use crate::Ctx;
 use crate::cli::{Command, KnowledgeCommand};
 use crate::kept;
-use ensemble_config::{self as config, SystemEnv};
+use ensemble_config::kept::{Change, Keep};
+use ensemble_config::{self as config, HubSettings, Permission};
 use ensemble_core::state;
-use ensemble_ops::cli::confirm;
+use ensemble_ops::cli::{ask, confirm};
 use ensemble_ops::local::{self, STOP};
+use serde_json::json;
+use std::io::IsTerminal;
+use std::path::Path;
 use std::process::ExitCode;
 
 pub fn run(ctx: &Ctx, command: Command) -> Result<ExitCode, String> {
     match command {
-        Command::Init {
-            force,
-            keep,
-            stdout,
-        } => init(force, keep, stdout),
+        Command::Init { force, keep, owner } => init(force, keep, owner),
+        Command::Setup { owner, admin, yes } => setup(ctx, owner, admin, yes),
         Command::Check => check(ctx),
         Command::Serve => serve(ctx),
         Command::Knowledge(c) => knowledge(ctx, c),
@@ -58,38 +59,198 @@ fn load(ctx: &Ctx) -> Result<config::Hub, String> {
     kept::load(&state::hub_config_dir()?, ctx.hub_env()?.as_deref())
 }
 
-fn init(force: bool, keep: bool, stdout: bool) -> Result<ExitCode, String> {
-    if stdout {
-        print!("{}", config::hub::HUB_SAMPLE);
-        return Ok(ExitCode::SUCCESS);
-    }
+/// Who runs this computer's hub, as its owner is named when nobody says.
+fn this_user() -> Option<String> {
+    std::env::var("USER")
+        .ok()
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+}
+
+/// `ensemble-hub init`: the settings a new hub starts with, and its vault:
+/// `owner`'s, on this computer alone, closed to sign-ups, with no backend or
+/// model yet. Not when it has settings, unless `force`; with `keep`, that is
+/// no error: what the NixOS module runs before the hub starts.
+fn init(force: bool, keep: bool, owner: Option<String>) -> Result<ExitCode, String> {
     let dir = state::hub_config_dir()?;
-    let sample = config::hub::HUB_SAMPLE;
-    if !kept::settings(&dir).init(sample, force)? {
+    if !force && kept::settings(&dir).read()?.is_some() {
         if keep {
             return Ok(ExitCode::SUCCESS);
         }
         return Err(format!(
-            "the hub in {} has its settings already. Pass --force to write the sample in their place.",
+            "the hub in {} has its settings already; `ensemble-hub settings show` shows them. --force makes them anew.",
             dir.display()
         ));
     }
+    let owner = owner
+        .or_else(this_user)
+        .ok_or("init: name the hub with --owner <name>")?;
+    start(&dir, &owner)?;
     println!(
-        "wrote {} in {}: a sample hub, with every setting",
-        kept::SETTINGS_NAME,
-        kept::source(&dir).display()
-    );
-    let hub =
-        config::parse_hub(sample, &kept::source(&dir), &SystemEnv).map_err(|e| e.to_string())?;
-    ensemble_knowledge::Vault::new(&hub.connectors.knowledge.vault).init()?;
-    println!(
-        "made the knowledge vault, a git repository: {}",
-        hub.connectors.knowledge.vault.display()
-    );
-    println!(
-        "Name the hub as `owner`, choose the models that distill and the roles, then run `ensemble-hub check`, add the first admin with `ensemble-hub user add`, and `ensemble-hub serve`."
+        "Next: `ensemble-hub setup` adds the first admin, or `ensemble-hub user add <name> --role admin`."
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// Keep the settings a new hub of `owner`'s starts with in `dir`, and make its
+/// vault.
+fn start(dir: &Path, owner: &str) -> Result<(), String> {
+    let settings = HubSettings::starting(owner.trim());
+    let hub = settings
+        .resolve(&kept::source(dir), &config::SystemEnv)
+        .map_err(|e| e.to_string())?;
+    kept::settings(dir).write(&settings, &Change::by_this_computer("init"))?;
+    println!(
+        "Made the hub {}: on this computer alone ({}), closed to sign-ups, with no LLM backend yet. Its settings are kept in {}.",
+        hub.owner,
+        hub.http.listen,
+        kept::source(dir).display()
+    );
+    ensemble_knowledge::Vault::new(&hub.connectors.knowledge.vault).init()?;
+    println!(
+        "Made the knowledge vault, a git repository: {}",
+        hub.connectors.knowledge.vault.display()
+    );
+    Ok(())
+}
+
+/// `ensemble-hub setup`: the hub's settings when it has none, its first
+/// admin, with their token, and this computer's runner signed in to it when
+/// it names no hub yet; then what is next.
+fn setup(
+    ctx: &Ctx,
+    owner: Option<String>,
+    admin: Option<String>,
+    yes: bool,
+) -> Result<ExitCode, String> {
+    let interactive = std::io::stdin().is_terminal() && !yes;
+    let me = this_user();
+    let dir = state::hub_config_dir()?;
+    let settings = match kept::settings(&dir).read()? {
+        Some(settings) => {
+            println!(
+                "The hub {} has its settings already; keeping them.",
+                settings.owner
+            );
+            settings
+        }
+        None => {
+            let owner = match owner {
+                Some(owner) => owner,
+                None if interactive => ask("What is the hub called?", me.as_deref())?,
+                None => me
+                    .clone()
+                    .ok_or("setup: name the hub with --owner <name>")?,
+            };
+            start(&dir, &owner)?;
+            kept::settings(&dir)
+                .read()?
+                .ok_or("setup: the settings were not kept")?
+        }
+    };
+    let hub = crate::accounts::operations();
+    let route = crate::route(ctx)?;
+    let call = |name: &str, input| route.call(&hub, name, input).map_err(|e| e.to_string());
+    let admins: Vec<&String> = settings
+        .roles
+        .iter()
+        .filter(|(_, can)| can.contains(&Permission::Admin))
+        .map(|(role, _)| role)
+        .collect();
+    let users = call("user.list", json!({}))?;
+    let admin_now = users["users"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|u| u["status"] == "active" && admins.iter().any(|r| u["role"] == r.as_str()));
+    let new_admin = match admin_now {
+        Some(u) => {
+            println!(
+                "{} is an admin already.",
+                u["name"].as_str().unwrap_or("someone")
+            );
+            None
+        }
+        None => {
+            let role = admins
+                .first()
+                .ok_or("setup: no role of the hub may administer it; `ensemble-hub role set admin admin` makes one")?;
+            let name = match admin {
+                Some(name) => name,
+                None if interactive => ask("Who is its first admin?", me.as_deref())?,
+                None => me
+                    .clone()
+                    .ok_or("setup: name the first admin with --admin <name>")?,
+            };
+            let added = call("user.add", json!({ "name": name, "role": role }))?;
+            println!(
+                "\nAdded {name} as {role}. Their token, shown once:\n\n  {}\n",
+                added["token"].as_str().unwrap_or("")
+            );
+            if let Some(note) = added["note"].as_str() {
+                println!("{note}\n");
+            }
+            Some(name)
+        }
+    };
+    if let Some(name) = &new_admin {
+        sign_in_runner(&settings, &route, name, &call);
+    }
+    println!(
+        "Next: give it a model server with `ensemble-hub backend add <name> --type openai-compatible-api --url <url>`, choose the models that distill shares with `ensemble-hub knowledge models <backend>:<model>`, and watch a tracker with `ensemble-hub tracker add`. `ensemble-hub settings show` shows every setting."
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Sign this computer's runner in to the hub as `admin`, when it has a
+/// runner that names no hub and the hub runs: with a join code, through
+/// `ensemble-runner join`.
+fn sign_in_runner(
+    settings: &HubSettings,
+    route: &local::Route<crate::accounts::HubContext>,
+    admin: &str,
+    call: &dyn Fn(&str, serde_json::Value) -> Result<serde_json::Value, String>,
+) {
+    let Ok(runner_dir) = state::runner_config_dir() else {
+        return;
+    };
+    let runner = ensemble_store::kept::RunnerStore::new(&runner_dir).read();
+    let Ok(Some(runner)) = runner else {
+        return;
+    };
+    if runner.hub.is_some() {
+        return;
+    }
+    let port = settings
+        .listen
+        .parse::<std::net::SocketAddr>()
+        .map(|a| a.port())
+        .unwrap_or(7700);
+    let url = format!("ws://127.0.0.1:{port}");
+    if !matches!(route, local::Route::Running(_)) {
+        println!(
+            "This computer's runner names no hub. Once the hub runs, sign it in: ensemble-runner login {url} --token <the token above>\n"
+        );
+        return;
+    }
+    let joined = call("user.join-code", json!({ "name": admin })).and_then(|made| {
+        let code = made["code"].as_str().unwrap_or_default().to_string();
+        std::process::Command::new("ensemble-runner")
+            .args(["join", &url, &code])
+            .status()
+            .map_err(|e| e.to_string())
+    });
+    match joined {
+        Ok(status) if status.success() => {
+            println!(
+                "This computer's runner '{}' is signed in to the hub as {admin}.\n",
+                runner.name
+            )
+        }
+        _ => println!(
+            "This computer's runner names no hub. Sign it in: ensemble-runner login {url} --token <the token above>\n"
+        ),
+    }
 }
 
 fn check(ctx: &Ctx) -> Result<ExitCode, String> {
@@ -109,7 +270,14 @@ fn check(ctx: &Ctx) -> Result<ExitCode, String> {
         .iter()
         .filter_map(|c| backends.get(&c.backend).map(|b| (b, c.model.as_str())))
         .collect();
+    let chosen = !knowledge.distill.fallback.candidates.is_empty();
     let distills = match ensemble_backends::resolve::Resolver::default().choose(&candidates) {
+        _ if !chosen => {
+            println!(
+                "distill: no model is chosen yet, so shares wait; `ensemble-hub knowledge models <backend>:<model>` chooses them"
+            );
+            true
+        }
         Ok(i) => {
             let c = &knowledge.distill.fallback.candidates[i];
             println!(

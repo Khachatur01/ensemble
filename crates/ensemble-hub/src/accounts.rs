@@ -1,11 +1,11 @@
 //! The hub's operations ([`operations`]): its accounts, their tokens and
-//! sessions, and its settings file, for every interface to reach: the CLI on
+//! sessions, and its settings, for every interface to reach: the CLI on
 //! the hub's computer, and the REST API.
 //!
 //! | Operation | Who |
 //! |---|---|
 //! | `user.list`, `user.show`, `user.add`, `user.approve`, `user.role`, `user.password`, `user.tracker`, `user.token`, `user.join-code`, `user.revoke`, `user.remove`, `role.list` | admin |
-//! | `config.get`, `config.set`, `config.unset`, `config.path` | admin |
+//! | `settings.*`, `backend.*` and the goal operations (`crate::goals`) | admin |
 //! | `me.show` | any signed-in account |
 //! | `me.tracker`, `me.password`, `me.tokens`, `me.token`, `me.join-code`, `me.revoke`, `account.logout` | a session |
 //! | `runner.backends` | admin, of the running hub |
@@ -20,9 +20,9 @@
 //! or by the account's session and spent once.
 
 use crate::users::{JOIN_HOURS, Kind, Roles, Token, User, Users, UsersError};
-use ensemble_backends::ops::{Backends, Side, WithBackends};
-use ensemble_config::settings_file::{self, SettingsFile, WithSettings};
-use ensemble_config::{Permission, Registration};
+use ensemble_backends::ops::{Backends, KeptBackends, Side, WithBackends};
+use ensemble_config::kept::{Change, Kept, WithKept};
+use ensemble_config::{HubSettings, Permission, Registration};
 use ensemble_ops::{
     Access, Caller, Code, Error, Field, Kind as FieldKind, Operation, Registry, Said, Spec,
     operation,
@@ -130,7 +130,7 @@ pub struct HubContext {
     accounts: OnceLock<Result<Accounts, String>>,
     /// Its settings, loaded: its roles and account rules, or why not.
     load: Box<Load>,
-    settings: SettingsFile,
+    settings: Kept<HubSettings>,
     /// What the running hub does once its settings changed, and says of it:
     /// set by the hub ([`HubContext::when_changed`]); nothing otherwise.
     changed: Arc<OnceLock<Box<Changed>>>,
@@ -158,13 +158,12 @@ impl HubContext {
     ) -> Self {
         let checked = crate::kept::source(dir);
         let changed: Arc<OnceLock<Box<Changed>>> = Arc::default();
-        let settings = SettingsFile::kept_in(
-            crate::kept::settings(dir),
+        let settings = Kept::new(
+            ensemble_store::kept::HubStore::new(dir),
             crate::kept::SETTINGS_NAME,
-            crate::kept::source(dir),
             "`ensemble-hub init`",
-            move |text| {
-                ensemble_config::parse_hub(text, &checked, &ensemble_config::SystemEnv)
+            move |s: &HubSettings| {
+                s.resolve(&checked, &ensemble_config::SystemEnv)
                     .map(|_| ())
                     .map_err(|e| e.to_string())
             },
@@ -191,6 +190,11 @@ impl HubContext {
         }
     }
 
+    /// The hub's folder, with its database.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// The file variables are read from now, if there is one.
     fn keys_file(&self) -> Option<PathBuf> {
         ensemble_ops::cli::env_file(self.env_file.get().map(PathBuf::as_path), &self.dir)
@@ -200,7 +204,7 @@ impl HubContext {
     pub(crate) fn hub(&self) -> Result<ensemble_config::Hub, Error> {
         crate::kept::load(&self.dir, self.keys_file().as_deref()).map_err(|e| {
             Error::new(Code::Unavailable, e)
-                .hint("fix the hub's settings with `ensemble-hub config`")
+                .hint("`ensemble-hub settings show` shows them; the operations change them")
         })
     }
 
@@ -222,13 +226,13 @@ impl HubContext {
         });
         made.as_ref().map_err(|why| {
             Error::new(Code::Unavailable, format!("the hub's accounts: {why}"))
-                .hint("fix the hub's settings with `ensemble-hub config`")
+                .hint("`ensemble-hub settings show` shows its settings; the operations change them")
         })
     }
 }
 
-impl WithSettings for HubContext {
-    fn settings_file(&self) -> Result<&SettingsFile, Error> {
+impl WithKept<HubSettings> for HubContext {
+    fn kept(&self) -> Result<&Kept<HubSettings>, Error> {
         Ok(&self.settings)
     }
 }
@@ -252,6 +256,33 @@ impl WithBackends for HubContext {
             .get(name)
     }
 
+    fn kept_backends(&self) -> Result<KeptBackends, Error> {
+        Ok(KeptBackends {
+            backends: self.settings.read()?.backends,
+            shares: None,
+        })
+    }
+
+    fn change_backends(
+        &self,
+        change: Change,
+        edit: &mut dyn FnMut(&mut KeptBackends) -> Result<(), Error>,
+    ) -> Result<Option<String>, Error> {
+        self.settings.change(change, |s| {
+            let mut kept = KeptBackends {
+                backends: std::mem::take(&mut s.backends),
+                shares: None,
+            };
+            edit(&mut kept)?;
+            s.backends = kept.backends;
+            Ok(())
+        })
+    }
+
+    fn backends_changed(&self) -> Option<String> {
+        self.settings.changed()
+    }
+
     fn backends(&self) -> Result<Backends, Error> {
         let hub = self.hub()?;
         Ok(Backends {
@@ -264,8 +295,7 @@ impl WithBackends for HubContext {
 
 /// Every operation of the hub.
 pub fn operations() -> Registry<HubContext> {
-    let mut all = settings_file::operations::<HubContext>(Access::Permission("admin"));
-    all.extend(user_operations());
+    let mut all = user_operations();
     all.extend(own_operations());
     all.extend(runner_operations());
     all.extend(ensemble_backends::ops::operations::<HubContext>(
@@ -360,13 +390,11 @@ fn join_note(c: &HubContext, name: &str, code: &str) -> String {
 
 /// Its settings as they are now, when they load.
 fn hub_file(c: &HubContext) -> Option<ensemble_config::Hub> {
-    let text = c.settings.read().ok()?;
-    ensemble_config::parse_hub(
-        &text,
-        &crate::kept::source(&c.dir),
-        &ensemble_config::SystemEnv,
-    )
-    .ok()
+    c.settings
+        .read()
+        .ok()?
+        .resolve(&crate::kept::source(&c.dir), &ensemble_config::SystemEnv)
+        .ok()
 }
 
 thread_local! {

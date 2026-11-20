@@ -1,5 +1,5 @@
-//! The operations on the LLM backends a hub or a runner names in its settings
-//! file, its `llm`, for every interface to reach: `backend.list`,
+//! The operations on the LLM backends a hub or a runner keeps in its
+//! settings, for every interface to reach: `backend.list`,
 //! `backend.add`, `backend.remove`, `backend.test` and `backend.key`, and, for a
 //! runner, `backend.share` and `backend.unshare`.
 //!
@@ -7,48 +7,66 @@
 //! variable: the key is kept under a variable Ensemble names after the
 //! backend ([`backend_key_variable`](ensemble_config::backend_key_variable)),
 //! and the backend names that variable. Where it is kept is the context's
-//! ([`WithBackends::keep_key`]): sealed in the hub's database, or in the
-//! runner's `.env`. One who keeps the key elsewhere already, such
+//! ([`WithBackends::keep_key`]): sealed in its database. One who keeps the
+//! key elsewhere already, such
 //! as a secrets manager that sets a variable, names that variable instead
 //! (`key_env`). A backend is asked which models it serves before it is added,
 //! so a wrong address or key is said at once, and an answer that wants a key
 //! has an interface ask for it.
 
-use ensemble_config::settings::{self, inline};
-use ensemble_config::settings_file::WithSettings;
+use ensemble_config::kept::Change;
+use ensemble_config::llm::RUNNER_BACKEND;
 use ensemble_config::{
-    ANTHROPIC_API, BackendSettings, LlmBackend, OPENAI_COMPATIBLE_API, Relayed,
+    ANTHROPIC_API, BackendSetting, BackendSettings, LlmBackend, OPENAI_COMPATIBLE_API, Relayed,
     backend_key_variable,
 };
 use ensemble_ops::{Access, Caller, Code, Error, Field, Kind, Operation, Spec, operation};
-use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-/// A context whose settings file names LLM backends: a hub's or a runner's.
-pub trait WithBackends: WithSettings {
-    /// Why it may keep no key, if it may not, such as when its keys come from
-    /// a file a secrets manager writes.
+/// A context whose settings keep LLM backends: a hub's or a runner's.
+pub trait WithBackends {
+    /// Why it may keep no key, if it may not.
     fn can_keep_keys(&self) -> Result<(), Error>;
 
     /// Keep `key` as the value of the variable `name`, or with none, forget
     /// it.
     fn keep_key(&self, name: &str, key: Option<&str>) -> Result<(), Error>;
 
-    /// The backends the file names now, with their keys.
-    fn backends(&self) -> Result<Backends, Error>;
+    /// The backends kept, as they are written.
+    fn kept_backends(&self) -> Result<KeptBackends, Error>;
 
-    /// What else must hold once the file is `text`, such as the teams that
-    /// name its backends: the change is refused otherwise.
-    fn check_users(&self, _text: &str) -> Result<(), Error> {
-        Ok(())
-    }
+    /// Make `edit` to the backends kept, and keep them with `change` once the
+    /// settings still load, and what uses the backends, such as a runner's
+    /// teams, still does; say what the running process did with them.
+    fn change_backends(
+        &self,
+        change: Change,
+        edit: &mut dyn FnMut(&mut KeptBackends) -> Result<(), Error>,
+    ) -> Result<Option<String>, Error>;
+
+    /// Tell the running process its backends changed though the settings did
+    /// not, as when a key one of them names did; say what it did.
+    fn backends_changed(&self) -> Option<String>;
+
+    /// The backends as they are now, with their keys.
+    fn backends(&self) -> Result<Backends, Error>;
 
     /// The value of the variable `name`, wherever it looks for one.
     fn variable(&self, name: &str) -> Option<String>;
 }
 
-/// The backends of a settings file.
+/// The backends a hub or a runner keeps, as they are written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptBackends {
+    pub backends: BTreeMap<String, BackendSetting>,
+    /// Those of its own it offers through the hub: a runner's; a hub offers
+    /// none.
+    pub shares: Option<Vec<String>>,
+}
+
+/// The backends of a hub or a runner, resolved.
 pub struct Backends {
     /// Those it calls itself.
     pub direct: BTreeMap<String, LlmBackend>,
@@ -59,26 +77,24 @@ pub struct Backends {
     pub shares: Option<Vec<String>>,
 }
 
-/// Whose settings file it is, which says where its groups are.
+/// Whose backends they are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Hub,
     Runner,
 }
 
-const DIRECT: &str = "llm.direct.backends";
-const SHARES: &str = "llm.direct.shares";
 /// The type of a backend a runner shares, reached through the hub.
-pub const RUNNER_TYPE: &str = "runner";
+pub const RUNNER_TYPE: &str = RUNNER_BACKEND;
 const TYPES: &[&str] = &[OPENAI_COMPATIBLE_API, ANTHROPIC_API, RUNNER_TYPE];
 /// Seconds one request may take, when an addition does not say.
 const TIMEOUT_SECONDS: u64 = 300;
 
 impl Side {
-    fn relayed(self) -> &'static str {
+    fn program(self) -> &'static str {
         match self {
-            Side::Hub => "llm.runners.backends",
-            Side::Runner => "llm.hub.backends",
+            Side::Hub => "ensemble-hub",
+            Side::Runner => "ensemble-runner",
         }
     }
 }
@@ -136,7 +152,7 @@ const KEY_FIELDS: &[Field] = &[
     NO_CHECK,
 ];
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Add {
     name: String,
     #[serde(rename = "type")]
@@ -153,7 +169,7 @@ struct Add {
     share: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Named {
     name: String,
 }
@@ -163,7 +179,7 @@ struct Test {
     name: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct SetKey {
     name: String,
     key: Option<String>,
@@ -177,6 +193,27 @@ struct Nothing {}
 
 /// The backend operations of a hub or a runner, for those `access` lets.
 pub fn operations<C: WithBackends + 'static>(side: Side, access: Access) -> Vec<Operation<C>> {
+    let add_spec = Spec {
+        name: "backend.add",
+        summary: "Add an LLM backend, once it answers: its key is kept for you, never written in the settings.",
+        access,
+        input: match side {
+            Side::Hub => ADD_HUB,
+            Side::Runner => ADD_RUNNER,
+        },
+    };
+    let remove_spec = Spec {
+        name: "backend.remove",
+        summary: "Take an LLM backend out, and the key Ensemble kept for it; refused while something uses it.",
+        access,
+        input: NAMED,
+    };
+    let key_spec = Spec {
+        name: "backend.key",
+        summary: "Give a backend a new API key, or take its key out.",
+        access,
+        input: KEY_FIELDS,
+    };
     let mut all = vec![
         operation(
             Spec {
@@ -187,27 +224,14 @@ pub fn operations<C: WithBackends + 'static>(side: Side, access: Access) -> Vec<
             },
             move |c: &C, _: &Caller, _: Nothing| list(c, side),
         ),
-        operation(
-            Spec {
-                name: "backend.add",
-                summary: "Add an LLM backend, once it answers: its key is kept for you, never written in the settings file.",
-                access,
-                input: match side {
-                    Side::Hub => ADD_HUB,
-                    Side::Runner => ADD_RUNNER,
-                },
-            },
-            move |c: &C, _: &Caller, input: Add| add(c, side, input),
-        ),
-        operation(
-            Spec {
-                name: "backend.remove",
-                summary: "Take an LLM backend out, and the key Ensemble kept for it; refused while something uses it.",
-                access,
-                input: NAMED,
-            },
-            move |c: &C, _: &Caller, input: Named| remove(c, side, &input.name),
-        ),
+        operation(add_spec, move |c: &C, caller: &Caller, input: Add| {
+            let change = Change::new(caller, &add_spec, &input);
+            add(c, side, input, change)
+        }),
+        operation(remove_spec, move |c: &C, caller: &Caller, input: Named| {
+            let change = Change::new(caller, &remove_spec, &input);
+            remove(c, &input.name, change)
+        }),
         operation(
             Spec {
                 name: "backend.test",
@@ -217,34 +241,37 @@ pub fn operations<C: WithBackends + 'static>(side: Side, access: Access) -> Vec<
             },
             |c: &C, _: &Caller, input: Test| test(c, input.name.as_deref()),
         ),
-        operation(
-            Spec {
-                name: "backend.key",
-                summary: "Give a backend a new API key, or take its key out.",
-                access,
-                input: KEY_FIELDS,
-            },
-            move |c: &C, _: &Caller, input: SetKey| set_key(c, side, input),
-        ),
+        operation(key_spec, move |c: &C, caller: &Caller, input: SetKey| {
+            let change = Change::new(caller, &key_spec, &input);
+            set_key(c, input, change)
+        }),
     ];
     if side == Side::Runner {
+        let share_spec = Spec {
+            name: "backend.share",
+            summary: "Offer one of the runner's own backends through the hub, to the hub and other runners.",
+            access,
+            input: NAMED,
+        };
+        let unshare_spec = Spec {
+            name: "backend.unshare",
+            summary: "Stop offering a backend through the hub.",
+            access,
+            input: NAMED,
+        };
         all.push(operation(
-            Spec {
-                name: "backend.share",
-                summary: "Offer one of the runner's own backends through the hub, to the hub and other runners.",
-                access,
-                input: NAMED,
+            share_spec,
+            move |c: &C, caller: &Caller, input: Named| {
+                let change = Change::new(caller, &share_spec, &input);
+                share(c, &input.name, true, change)
             },
-            |c: &C, _: &Caller, input: Named| share(c, &input.name, true),
         ));
         all.push(operation(
-            Spec {
-                name: "backend.unshare",
-                summary: "Stop offering a backend through the hub.",
-                access,
-                input: NAMED,
+            unshare_spec,
+            move |c: &C, caller: &Caller, input: Named| {
+                let change = Change::new(caller, &unshare_spec, &input);
+                share(c, &input.name, false, change)
             },
-            |c: &C, _: &Caller, input: Named| share(c, &input.name, false),
         ));
     }
     all
@@ -253,12 +280,16 @@ pub fn operations<C: WithBackends + 'static>(side: Side, access: Access) -> Vec<
 /// Each backend: what it is, where, and whether it has a key.
 fn list<C: WithBackends>(c: &C, side: Side) -> Result<Value, Error> {
     let backends = c.backends()?;
-    let text = c.settings_file()?.read()?;
+    let kept = c.kept_backends()?;
     let shares = backends.shares.clone().unwrap_or_default();
     let mut rows = Vec::new();
     let mut said = Vec::new();
     for (name, b) in &backends.direct {
-        let env = key_env(&text, DIRECT, name);
+        let env = kept
+            .backends
+            .get(name)
+            .and_then(BackendSetting::api_key_env)
+            .map(String::from);
         let key = match (&env, b.settings.api_key()) {
             (None, _) => "no key".to_string(),
             (Some(var), Some(_)) if *var == backend_key_variable(name) => "key kept".into(),
@@ -300,20 +331,16 @@ fn list<C: WithBackends>(c: &C, side: Side) -> Result<Value, Error> {
     if said.is_empty() {
         said.push(format!(
             "no LLM backends yet; `{} backend add` adds one",
-            match side {
-                Side::Hub => "ensemble-hub",
-                Side::Runner => "ensemble-runner",
-            }
+            side.program()
         ));
     }
     Ok(json!({ "said": said.join("\n"), "backends": rows }))
 }
 
-fn add<C: WithBackends>(c: &C, side: Side, input: Add) -> Result<Value, Error> {
+fn add<C: WithBackends>(c: &C, side: Side, input: Add, change: Change) -> Result<Value, Error> {
     let name = input.name.trim().to_string();
     check_name(&name)?;
-    let backends = c.backends()?;
-    if backends.direct.contains_key(&name) || backends.relayed.contains_key(&name) {
+    if c.kept_backends()?.backends.contains_key(&name) {
         return Err(Error::new(
             Code::Conflict,
             format!("there is a backend '{name}' already"),
@@ -326,11 +353,9 @@ fn add<C: WithBackends>(c: &C, side: Side, input: Add) -> Result<Value, Error> {
             Error::invalid("only an openai-compatible-api backend may be shared").on("share"),
         );
     }
-    let file = c.settings_file()?;
-    let mut edits = Vec::new();
     let mut models = None;
     let mut keep = None;
-    if input.kind == RUNNER_TYPE {
+    let setting = if input.kind == RUNNER_TYPE {
         for (given, field) in [
             (&input.url, "url"),
             (&input.key, "key"),
@@ -358,8 +383,10 @@ fn add<C: WithBackends>(c: &C, side: Side, input: Add) -> Result<Value, Error> {
             .as_deref()
             .map(str::trim)
             .unwrap_or(&name);
-        let value = json!({ "runner": runner, "backend": there });
-        edits.push((format!("{}.{name}", side.relayed()), Some(fields(&value))));
+        BackendSetting::Runner {
+            runner: runner.to_string(),
+            backend: there.to_string(),
+        }
     } else {
         if input.runner.is_some() || input.runner_backend.is_some() {
             return Err(Error::invalid("`runner` is for a backend a runner shares").on("runner"));
@@ -405,29 +432,42 @@ fn add<C: WithBackends>(c: &C, side: Side, input: Add) -> Result<Value, Error> {
             }
             _ => None,
         };
-        let mut value = Map::new();
-        value.insert("type".into(), json!(input.kind));
-        value.insert("base_url".into(), json!(url));
-        if let Some(var) = &env {
-            value.insert("api_key_env".into(), json!(var));
+        if input.kind == ANTHROPIC_API {
+            BackendSetting::Anthropic {
+                base_url: url,
+                api_key_env: env,
+                timeout_seconds: timeout,
+            }
+        } else {
+            BackendSetting::OpenAiCompatible {
+                base_url: url,
+                api_key_env: env,
+                timeout_seconds: timeout,
+            }
         }
-        value.insert("timeout_seconds".into(), json!(timeout));
-        edits.push((
-            format!("{DIRECT}.{name}"),
-            Some(fields(&Value::Object(value))),
-        ));
-        if input.share && side == Side::Runner {
-            let mut shares = backends.shares.clone().unwrap_or_default();
-            shares.push(name.clone());
-            edits.push((SHARES.into(), Some(inline(&json!(shares)))));
-        }
-    }
-    let text = file.plan(&edits)?;
-    c.check_users(&text)?;
+    };
+    let share = input.share && side == Side::Runner;
+    // The key first, so that the running process finds it when it uses the
+    // backend; taken out again when the backend is not kept.
     if let Some((var, key)) = &keep {
         c.keep_key(var, Some(key))?;
     }
-    let note = file.commit(&text)?;
+    let kept = c.change_backends(change, &mut |k| {
+        k.backends.insert(name.clone(), setting.clone());
+        if share {
+            k.shares.get_or_insert_default().push(name.clone());
+        }
+        Ok(())
+    });
+    let note = match kept {
+        Ok(note) => note,
+        Err(e) => {
+            if let Some((var, _)) = &keep {
+                let _ = c.keep_key(var, None);
+            }
+            return Err(e);
+        }
+    };
     let serves = match &models {
         Some(m) => format!(", which serves {}", listed(m)),
         None => String::new(),
@@ -440,31 +480,19 @@ fn add<C: WithBackends>(c: &C, side: Side, input: Add) -> Result<Value, Error> {
     }))
 }
 
-fn remove<C: WithBackends>(c: &C, side: Side, name: &str) -> Result<Value, Error> {
-    let backends = c.backends()?;
-    let file = c.settings_file()?;
-    let before = file.read()?;
-    let mut edits = Vec::new();
-    let mut kept = None;
-    if backends.direct.contains_key(name) {
-        edits.push((format!("{DIRECT}.{name}"), None));
-        if key_env(&before, DIRECT, name).as_deref() == Some(backend_key_variable(name).as_str()) {
-            kept = Some(backend_key_variable(name));
-        }
-        if let Some(shares) = &backends.shares
-            && shares.iter().any(|s| s == name)
-        {
-            let left: Vec<&String> = shares.iter().filter(|s| *s != name).collect();
-            edits.push((SHARES.into(), Some(inline(&json!(left)))));
-        }
-    } else if backends.relayed.contains_key(name) {
-        edits.push((format!("{}.{name}", side.relayed()), None));
-    } else {
+fn remove<C: WithBackends>(c: &C, name: &str, change: Change) -> Result<Value, Error> {
+    let Some(was) = c.kept_backends()?.backends.remove(name) else {
         return Err(Error::not_found(format!("there is no backend '{name}'")).on("name"));
-    }
-    let text = file.plan(&edits)?;
-    c.check_users(&text)?;
-    let note = file.commit(&text)?;
+    };
+    let ours = backend_key_variable(name);
+    let kept = (was.api_key_env() == Some(ours.as_str())).then_some(ours);
+    let note = c.change_backends(change, &mut |k| {
+        k.backends.remove(name);
+        if let Some(shares) = &mut k.shares {
+            shares.retain(|s| s != name);
+        }
+        Ok(())
+    })?;
     if let Some(var) = kept
         && c.can_keep_keys().is_ok()
     {
@@ -514,7 +542,7 @@ fn test<C: WithBackends>(c: &C, name: Option<&str>) -> Result<Value, Error> {
     Ok(json!({ "said": said.join("\n"), "backends": rows }))
 }
 
-fn set_key<C: WithBackends>(c: &C, side: Side, input: SetKey) -> Result<Value, Error> {
+fn set_key<C: WithBackends>(c: &C, input: SetKey, change: Change) -> Result<Value, Error> {
     let name = input.name.as_str();
     let backends = c.backends()?;
     let Some(backend) = backends.direct.get(name) else {
@@ -525,10 +553,12 @@ fn set_key<C: WithBackends>(c: &C, side: Side, input: SetKey) -> Result<Value, E
         };
         return Err(Error::not_found(message).on("name"));
     };
-    let _ = side;
-    let file = c.settings_file()?;
-    let before = file.read()?;
-    let now = key_env(&before, DIRECT, name);
+    let now = c
+        .kept_backends()?
+        .backends
+        .get(name)
+        .and_then(BackendSetting::api_key_env)
+        .map(String::from);
     let ours = backend_key_variable(name);
     let (env, keep): (Option<String>, Option<String>) = match (&input.key_env, &input.key) {
         (Some(_), Some(_)) => {
@@ -562,18 +592,18 @@ fn set_key<C: WithBackends>(c: &C, side: Side, input: SetKey) -> Result<Value, E
         c.keep_key(&ours, Some(k))?;
     }
     let note = if env != now {
-        let mut value = backend_map(&before, DIRECT, name)?;
-        match &env {
-            Some(var) => value.insert("api_key_env".into(), json!(var)),
-            None => value.remove("api_key_env"),
-        };
-        let text = file.plan(&[(
-            format!("{DIRECT}.{name}"),
-            Some(fields(&Value::Object(value))),
-        )])?;
-        file.commit(&text)?
+        c.change_backends(change, &mut |k| {
+            match k.backends.get_mut(name) {
+                Some(
+                    BackendSetting::OpenAiCompatible { api_key_env, .. }
+                    | BackendSetting::Anthropic { api_key_env, .. },
+                ) => *api_key_env = env.clone(),
+                _ => return Err(Error::not_found(format!("there is no backend '{name}'"))),
+            }
+            Ok(())
+        })?
     } else {
-        file.changed()
+        c.backends_changed()
     };
     if now.as_deref() == Some(ours.as_str())
         && env.as_deref() != Some(ours.as_str())
@@ -593,15 +623,18 @@ fn set_key<C: WithBackends>(c: &C, side: Side, input: SetKey) -> Result<Value, E
     Ok(json!({ "said": format!("{name} {what}{serves}"), "note": note }))
 }
 
-fn share<C: WithBackends>(c: &C, name: &str, on: bool) -> Result<Value, Error> {
+fn share<C: WithBackends>(c: &C, name: &str, on: bool, change: Change) -> Result<Value, Error> {
     let backends = c.backends()?;
     if !backends.direct.contains_key(name) {
         return Err(
             Error::not_found(format!("the runner has no backend '{name}' of its own")).on("name"),
         );
     }
-    let mut shares = backends.shares.unwrap_or_default();
-    let has = shares.iter().any(|s| s == name);
+    let has = backends
+        .shares
+        .unwrap_or_default()
+        .iter()
+        .any(|s| s == name);
     if has == on {
         let state = if on {
             "is shared already"
@@ -610,15 +643,15 @@ fn share<C: WithBackends>(c: &C, name: &str, on: bool) -> Result<Value, Error> {
         };
         return Ok(json!({ "said": format!("{name} {state}") }));
     }
-    if on {
-        shares.push(name.to_string());
-    } else {
-        shares.retain(|s| s != name);
-    }
-    let file = c.settings_file()?;
-    let text = file.plan(&[(SHARES.into(), Some(inline(&json!(shares))))])?;
-    c.check_users(&text)?;
-    let note = file.commit(&text)?;
+    let note = c.change_backends(change, &mut |k| {
+        let shares = k.shares.get_or_insert_default();
+        if on {
+            shares.push(name.to_string());
+        } else {
+            shares.retain(|s| s != name);
+        }
+        Ok(())
+    })?;
     let state = if on {
         "is shared through the hub"
     } else {
@@ -627,7 +660,7 @@ fn share<C: WithBackends>(c: &C, name: &str, on: bool) -> Result<Value, Error> {
     Ok(json!({ "said": format!("{name} {state}"), "note": note }))
 }
 
-/// Refuse a name the settings file could not hold as one key.
+/// Refuse a name that is not one word of letters, digits, '-' or '_'.
 fn check_name(name: &str) -> Result<(), Error> {
     let fits = !name.is_empty()
         && name
@@ -723,47 +756,6 @@ fn ask(backend: &LlmBackend, may_ask: bool) -> Result<Vec<String>, Error> {
         )
         .hint("check the address, or go on without asking with `no_check`"),
     })
-}
-
-/// The variable a backend of `group` names for its key, if any.
-fn key_env(text: &str, group: &str, name: &str) -> Option<String> {
-    settings::get(text, &format!("{group}.{name}.api_key_env"))
-        .ok()
-        .flatten()
-}
-
-/// A backend of `group`, as a mapping, to be written whole.
-fn backend_map(text: &str, group: &str, name: &str) -> Result<Map<String, Value>, Error> {
-    let yaml = settings::get(text, &format!("{group}.{name}"))
-        .map_err(Error::failed)?
-        .ok_or_else(|| Error::not_found(format!("there is no backend '{name}'")))?;
-    let value: Value = serde_norway::from_str(&yaml).map_err(|e| Error::failed(e.to_string()))?;
-    match value {
-        Value::Object(map) => Ok(map),
-        _ => Err(Error::failed(format!(
-            "the backend '{name}' is not a mapping"
-        ))),
-    }
-}
-
-/// A backend's mapping as one line, its fields in the order the settings
-/// files write them.
-fn fields(value: &Value) -> String {
-    const ORDER: &[&str] = &[
-        "type",
-        "base_url",
-        "api_key_env",
-        "timeout_seconds",
-        "runner",
-        "backend",
-    ];
-    let Value::Object(map) = value else {
-        return inline(value);
-    };
-    let mut keys: Vec<&String> = map.keys().collect();
-    keys.sort_by_key(|k| ORDER.iter().position(|o| o == k).unwrap_or(ORDER.len()));
-    let pairs: Vec<(&str, Value)> = keys.iter().map(|k| (k.as_str(), map[*k].clone())).collect();
-    settings::inline_fields(&pairs)
 }
 
 /// A few model names, and how many more.

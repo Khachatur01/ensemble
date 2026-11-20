@@ -390,7 +390,7 @@ impl<C> Operation<C> {
 }
 
 /// An output as text: its `said` when it has one, and its `note`; else the
-/// whole of it, as YAML.
+/// whole of it, as [`lines`].
 pub fn said(output: &Value) -> Said {
     let note = output["note"].as_str().map(String::from);
     if let Some(said) = output["said"].as_str() {
@@ -400,12 +400,59 @@ pub fn said(output: &Value) -> Said {
         };
     }
     Said {
-        out: serde_norway::to_string(output)
-            .unwrap_or_default()
-            .trim_end()
-            .to_string(),
+        out: lines(output),
         note,
     }
+}
+
+/// `value` as lines to read: each field on a line of its own, `name: value`,
+/// what is inside it indented below it, a list's items each after `- `.
+pub fn lines(value: &Value) -> String {
+    fn scalar(value: &Value) -> Option<String> {
+        match value {
+            Value::Null => Some("none".into()),
+            Value::String(s) => Some(s.clone()),
+            Value::Bool(b) => Some(if *b { "yes" } else { "no" }.into()),
+            Value::Number(n) => Some(n.to_string()),
+            Value::Array(a) if a.is_empty() => Some("none".into()),
+            Value::Object(o) if o.is_empty() => Some("none".into()),
+            Value::Array(a) if a.iter().all(|v| !v.is_array() && !v.is_object()) => {
+                Some(a.iter().filter_map(scalar).collect::<Vec<_>>().join(", "))
+            }
+            _ => None,
+        }
+    }
+    fn walk(value: &Value, indent: usize, out: &mut Vec<String>) {
+        let pad = "  ".repeat(indent);
+        match value {
+            Value::Object(map) => {
+                for (key, v) in map {
+                    match scalar(v) {
+                        Some(s) => out.push(format!("{pad}{key}: {s}")),
+                        None => {
+                            out.push(format!("{pad}{key}:"));
+                            walk(v, indent + 1, out);
+                        }
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for v in items {
+                    match scalar(v) {
+                        Some(s) => out.push(format!("{pad}- {s}")),
+                        None => {
+                            out.push(format!("{pad}-"));
+                            walk(v, indent + 1, out);
+                        }
+                    }
+                }
+            }
+            other => out.push(format!("{pad}{}", scalar(other).unwrap_or_default())),
+        }
+    }
+    let mut out = Vec::new();
+    walk(value, 0, &mut out);
+    out.join("\n")
 }
 
 /// The operations of a hub or a runner, by name.

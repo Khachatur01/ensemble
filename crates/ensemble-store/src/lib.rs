@@ -65,24 +65,29 @@ CREATE TABLE IF NOT EXISTS tracker_deliveries (
 );
 ";
 
-/// The tables of the settings and keys kept, in a hub's database or a
-/// runner's.
+/// The tables a hub's database and a runner's both have: the keys kept,
+/// sealed, the LLM backends, and the audit log of their settings.
 const KEPT_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS settings (
-    name TEXT PRIMARY KEY,
-    text TEXT NOT NULL,
-    changed TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS settings_history (
-    name TEXT NOT NULL,
-    n INTEGER NOT NULL,
-    text TEXT NOT NULL,
-    changed TEXT NOT NULL,
-    PRIMARY KEY (name, n)
-);
 CREATE TABLE IF NOT EXISTS secrets (
     name TEXT PRIMARY KEY,
     sealed TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS backends (
+    name TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    base_url TEXT,
+    api_key_env TEXT,
+    timeout_seconds INTEGER,
+    runner TEXT,
+    backend TEXT,
+    shared INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings_audit (
+    n INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    who TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    input TEXT NOT NULL
 );
 ";
 
@@ -98,18 +103,25 @@ pub fn with<T>(
         c.execute_batch(KEPT_SCHEMA)
             .await
             .map_err(|e| e.to_string())?;
+        c.execute_batch(kept::HUB_SCHEMA)
+            .await
+            .map_err(|e| e.to_string())?;
         work(c).await
     })
 }
 
-/// Open the database in `dir` with only the tables of the settings and keys
-/// kept, as a runner's is, and run `work` on it.
+/// Open the database in `dir` with only the tables both a hub and a runner
+/// have, and those of `schema`, as a runner's is, and run `work` on it.
 fn kept_with<T>(
     dir: &Path,
+    schema: &str,
     work: impl AsyncFnOnce(&turso::Connection) -> Result<T, String>,
 ) -> Result<T, String> {
     private_dir(dir)?;
-    open(&dir.join(DB_FILE), KEPT_SCHEMA, work)
+    open(&dir.join(DB_FILE), KEPT_SCHEMA, async |c| {
+        c.execute_batch(schema).await.map_err(|e| e.to_string())?;
+        work(c).await
+    })
 }
 
 /// Open the Turso file at `path`, made with the tables of `schema` when they
@@ -161,64 +173,9 @@ pub async fn transaction(
     tx.commit().await.map_err(|e| e.to_string())
 }
 
-/// The settings kept as `name`, if there are any.
-pub fn settings(dir: &Path, name: &str) -> Result<Option<String>, String> {
-    let found = kept_with(dir, async |c| {
-        rows(
-            c,
-            "SELECT text FROM settings WHERE name = ?1",
-            vec![Value::Text(name.into())],
-        )
-        .await
-    })?;
-    Ok(found.first().and_then(|r| text(&r[0])))
-}
-
-/// Keep `text` as the settings `name`, changed at `at`, and in their history,
-/// in one transaction.
-pub fn keep_settings(dir: &Path, name: &str, text: &str, at: &str) -> Result<(), String> {
-    let (name, text, at) = (
-        Value::Text(name.into()),
-        Value::Text(text.into()),
-        Value::Text(at.into()),
-    );
-    kept_with(dir, async |c| {
-        transaction(
-            c,
-            vec![
-                (
-                    "INSERT OR REPLACE INTO settings (name, text, changed) VALUES (?1, ?2, ?3)",
-                    vec![name.clone(), text.clone(), at.clone()],
-                ),
-                (
-                    "INSERT INTO settings_history (name, n, text, changed) SELECT ?1, COALESCE(MAX(n), 0) + 1, ?2, ?3 FROM settings_history WHERE name = ?1",
-                    vec![name, text, at],
-                ),
-            ],
-        )
-        .await
-    })
-}
-
-/// Every change of the settings `name`, oldest first: when, and the text.
-pub fn settings_history(dir: &Path, name: &str) -> Result<Vec<(String, String)>, String> {
-    let found = kept_with(dir, async |c| {
-        rows(
-            c,
-            "SELECT changed, text FROM settings_history WHERE name = ?1 ORDER BY n",
-            vec![Value::Text(name.into())],
-        )
-        .await
-    })?;
-    Ok(found
-        .iter()
-        .filter_map(|r| Some((text(&r[0])?, text(&r[1])?)))
-        .collect())
-}
-
 /// Every secret kept, sealed, by its name.
 pub fn secrets(dir: &Path) -> Result<std::collections::BTreeMap<String, String>, String> {
-    let found = kept_with(dir, async |c| {
+    let found = kept_with(dir, "", async |c| {
         rows(c, "SELECT name, sealed FROM secrets", vec![]).await
     })?;
     Ok(found
@@ -230,7 +187,7 @@ pub fn secrets(dir: &Path) -> Result<std::collections::BTreeMap<String, String>,
 /// Keep the secret `name`, sealed, in place of the one kept; none takes it out.
 pub fn keep_secret(dir: &Path, name: &str, sealed: Option<&str>) -> Result<(), String> {
     let name = Value::Text(name.into());
-    kept_with(dir, async |c| match sealed {
+    kept_with(dir, "", async |c| match sealed {
         Some(s) => execute(
             c,
             "INSERT OR REPLACE INTO secrets (name, sealed) VALUES (?1, ?2)",
@@ -356,24 +313,9 @@ mod tests {
     }
 
     #[test]
-    fn settings_are_kept_with_each_change_in_their_history_and_secrets_by_name() {
+    fn secrets_are_kept_by_name() {
         let tmp = TempDir::new();
         let dir = tmp.0.join("hub");
-        assert_eq!(settings(&dir, "hub").unwrap(), None);
-        keep_settings(&dir, "hub", "owner: a\n", "2026-11-20T10:00:00Z").unwrap();
-        keep_settings(&dir, "hub", "owner: b\n", "2026-11-20T11:00:00Z").unwrap();
-        keep_settings(&dir, "other", "x: 1\n", "2026-11-20T11:00:00Z").unwrap();
-        assert_eq!(
-            settings(&dir, "hub").unwrap().as_deref(),
-            Some("owner: b\n")
-        );
-        assert_eq!(
-            settings_history(&dir, "hub").unwrap(),
-            vec![
-                ("2026-11-20T10:00:00Z".to_string(), "owner: a\n".to_string()),
-                ("2026-11-20T11:00:00Z".to_string(), "owner: b\n".to_string()),
-            ]
-        );
         keep_secret(&dir, "K", Some("sealed-1")).unwrap();
         keep_secret(&dir, "K", Some("sealed-2")).unwrap();
         keep_secret(&dir, "L", Some("sealed-3")).unwrap();

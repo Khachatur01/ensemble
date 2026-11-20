@@ -294,7 +294,7 @@ pub fn builtin_tool_writes(tool: &str) -> bool {
 }
 /// What an agent does when none of the models in its `try` list can be used:
 /// no backend answers, or none serves the model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WhenNone {
     /// The delegation or task fails, saying what each backend answered.
@@ -636,6 +636,7 @@ impl std::error::Error for ConfigError {}
 pub mod edit;
 mod env;
 pub mod hub;
+pub mod kept;
 pub mod llm;
 mod raw;
 pub mod runner;
@@ -646,11 +647,12 @@ mod validate;
 
 pub use env::*;
 pub use hub::{
-    AccountRules, Accounts, Connectors, Embed, Http, Hub, IssueTracker, Knowledge, Permission,
-    Recall, Registration, SourceFilter, Sources, Tasks, Tracker, parse_hub,
+    AccountRules, Accounts, Connectors, Embed, EmbedSetting, Http, Hub, HubSettings, IssueTracker,
+    Knowledge, ModelSetting, ModelsSetting, Permission, Recall, Registration, RegistrationSetting,
+    SourceFilter, SourceFilterSetting, Sources, Tasks, Tracker, TrackerSetting,
 };
-pub use llm::{HubLlm, RelayAt, Relayed, RunnerLlm};
-pub use runner::{Runner, WorksFor, parse_runner};
+pub use llm::{BackendSetting, HubLlm, RelayAt, Relayed, RunnerLlm};
+pub use runner::{Runner, RunnerSettings, WorksFor};
 pub use settings_file::{SettingsFile, WithSettings};
 pub use validate::{load, parse};
 

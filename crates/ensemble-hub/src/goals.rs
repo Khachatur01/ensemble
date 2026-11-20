@@ -1,9 +1,15 @@
-//! The hub's goal operations beside its backends (`ensemble_backends::ops`):
-//! what a person means to change, each checked as it is made, so nobody edits
-//! the hub's settings by hand nor knows its keys.
+//! The hub's settings operations beside its backends
+//! (`ensemble_backends::ops`): what a person means to change, each checked as
+//! it is made, so nobody edits the hub's settings nor knows its keys.
 //!
 //! | Operation | Does |
 //! |---|---|
+//! | `settings.show` | every setting |
+//! | `settings.history` | who changed the settings, when, and how |
+//! | `settings.import` | settings exported from a hub, whole, on its computer alone |
+//! | `settings.owner`, `settings.listen` | the hub's name, and the address it listens on |
+//! | `settings.sessions`, `settings.lockout` | how long a login lasts, and when failed logins lock a name |
+//! | `knowledge.vault` | the knowledge vault's folder |
 //! | `knowledge.models` | the models that turn shares into notes, each asked whether it serves the model |
 //! | `knowledge.embedding` | the embedding model, asked to embed once, or none |
 //! | `knowledge.recall` | how much one recall returns |
@@ -13,26 +19,24 @@
 //! | `source.filter` | the model that collects and filters what sources bring in, and what is confidential, or none |
 //! | `source.try` | what the filter would leave of a text, shared nowhere |
 //!
-//! Each writes the hub's settings through their [`SettingsFile`], kept in its
-//! database, so a change is loaded before it is written, and the running hub
-//! uses it at once.
+//! Each changes the hub's settings through [`Kept`], in its database, so a
+//! change is loaded before it is kept, kept in the audit log with who made
+//! it, and used by the running hub at once.
 //!
-//! [`SettingsFile`]: ensemble_config::SettingsFile
+//! [`Kept`]: ensemble_config::kept::Kept
 
 use crate::accounts::HubContext;
 use ensemble_backends::ops::WithBackends;
-use ensemble_config::settings::{self, inline, inline_fields};
-use ensemble_config::settings_file::WithSettings;
-use ensemble_config::{LlmBackend, Permission};
+use ensemble_config::kept::{Change, WithKept};
+use ensemble_config::{
+    EmbedSetting, HubSettings, LlmBackend, ModelSetting, ModelsSetting, Permission,
+    RegistrationSetting, SourceFilterSetting, TrackerSetting, WhenNone,
+};
 use ensemble_ops::{Access, Caller, Code, Error, Field, Kind, Operation, Spec, operation};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const ADMIN: Access = Access::Permission("admin");
-const KNOWLEDGE: &str = "connectors.knowledge";
-const TRACKERS: &str = "connectors.tasks.trackers";
-const ROLES: &str = "accounts.roles";
-const FILTER: &str = "connectors.sources.filter";
 const PERMISSIONS: &[&str] = &["share", "recall", "tasks", "admin", "compute", "host"];
 
 const NO_CHECK: Field = Field::new(
@@ -174,7 +178,7 @@ const REGISTRATION: &[Field] = &[
     ),
 ];
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Distill {
     models: Vec<String>,
     when_none: Option<String>,
@@ -183,7 +187,7 @@ struct Distill {
     no_check: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Embed {
     model: Option<String>,
     min_similarity: Option<String>,
@@ -193,13 +197,13 @@ struct Embed {
     no_check: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Recall {
     max_notes: Option<u64>,
     max_chars: Option<u64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct TrackerAdd {
     name: String,
     #[serde(rename = "type")]
@@ -209,28 +213,101 @@ struct TrackerAdd {
     poll_seconds: Option<u64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Named {
     name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RoleSet {
     name: String,
     permissions: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Registration {
     #[serde(rename = "type")]
     kind: String,
     max_pending: Option<u64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Nothing {}
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
+struct Owner {
+    name: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Listen {
+    address: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Sessions {
+    hours: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Lockout {
+    failures: u64,
+    minutes: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Vault {
+    dir: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Import {
+    settings: String,
+}
+
+const OWNER: &[Field] = &[Field::text(
+    "name",
+    "The hub's name, for its log and its listings, such as acme or ana.",
+)
+.required()
+.positional()];
+const LISTEN: &[Field] = &[Field::text(
+    "address",
+    "The address and port it listens on, such as 127.0.0.1:7700, or 0.0.0.0:7700 for other computers too.",
+)
+.required()
+.positional()];
+const SESSIONS: &[Field] = &[Field::new("hours", Kind::Number, "Hours a login lasts.")
+    .required()
+    .positional()];
+const LOCKOUT: &[Field] = &[
+    Field::new(
+        "failures",
+        Kind::Number,
+        "Failed logins before a name is refused.",
+    )
+    .required(),
+    Field::new(
+        "minutes",
+        Kind::Number,
+        "For how many minutes it is refused.",
+    )
+    .required(),
+];
+const VAULT: &[Field] = &[Field::text(
+    "dir",
+    "The knowledge vault's folder, relative to the hub's or absolute; made when it is not there.",
+)
+.required()
+.positional()];
+const IMPORT: &[Field] = &[Field::text(
+    "settings",
+    "Settings as `settings show --json` prints them, whole.",
+)
+.required()
+.positional()];
+
+#[derive(Deserialize, Serialize)]
 struct SourceFilter {
     #[serde(default)]
     models: Vec<String>,
@@ -243,7 +320,7 @@ struct SourceFilter {
     no_check: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct SourceTry {
     text: String,
 }
@@ -253,12 +330,138 @@ pub fn operations() -> Vec<Operation<HubContext>> {
     vec![
         operation(
             Spec {
+                name: "settings.show",
+                summary: "Show every setting of the hub; its keys are never among them.",
+                access: ADMIN,
+                input: &[],
+            },
+            |c: &HubContext, _: &Caller, _: Nothing| show(c),
+        )
+        .shown(shown),
+        operation(
+            Spec {
+                name: "settings.history",
+                summary: "Show who changed the hub's settings, when, and with which operation.",
+                access: ADMIN,
+                input: &[],
+            },
+            |c: &HubContext, _: &Caller, _: Nothing| history(c),
+        ),
+        operation(
+            Spec {
+                name: "settings.import",
+                summary: "Replace every setting with settings another hub exported, once they load.",
+                access: Access::Local,
+                input: IMPORT,
+            },
+            |c: &HubContext, caller: &Caller, input: Import| {
+                let change = Change::new(caller, &IMPORT_SPEC, json!({}));
+                import(c, &input.settings, change)
+            },
+        ),
+        operation(
+            Spec {
+                name: "settings.owner",
+                summary: "Name the hub.",
+                access: ADMIN,
+                input: OWNER,
+            },
+            |c: &HubContext, caller: &Caller, input: Owner| {
+                let change = changed(caller, "settings.owner", &input);
+                let name = input.name.trim().to_string();
+                edit(c, change, format!("the hub is {name}"), |s| {
+                    s.owner = name.clone();
+                    Ok(())
+                })
+            },
+        ),
+        operation(
+            Spec {
+                name: "settings.listen",
+                summary: "Say where the hub listens: its address and port.",
+                access: ADMIN,
+                input: LISTEN,
+            },
+            |c: &HubContext, caller: &Caller, input: Listen| {
+                let change = changed(caller, "settings.listen", &input);
+                let address = input.address.trim().to_string();
+                if address.parse::<std::net::SocketAddr>().is_err() {
+                    return Err(Error::invalid(format!(
+                        "'{address}' must be an address and a port, such as 127.0.0.1:7700"
+                    ))
+                    .on("address"));
+                }
+                edit(c, change, format!("the hub listens on {address}"), |s| {
+                    s.listen = address.clone();
+                    Ok(())
+                })
+            },
+        ),
+        operation(
+            Spec {
+                name: "settings.sessions",
+                summary: "Say how many hours a login lasts.",
+                access: ADMIN,
+                input: SESSIONS,
+            },
+            |c: &HubContext, caller: &Caller, input: Sessions| {
+                let change = changed(caller, "settings.sessions", &input);
+                let hours = positive(input.hours, "hours")?;
+                edit(c, change, format!("a login lasts {hours} hours"), |s| {
+                    s.session_hours = hours;
+                    Ok(())
+                })
+            },
+        ),
+        operation(
+            Spec {
+                name: "settings.lockout",
+                summary: "Say after how many failed logins a name is refused, and for how long.",
+                access: ADMIN,
+                input: LOCKOUT,
+            },
+            |c: &HubContext, caller: &Caller, input: Lockout| {
+                let change = changed(caller, "settings.lockout", &input);
+                let failures = positive(input.failures, "failures")?;
+                let minutes = positive(input.minutes, "minutes")?;
+                let said = format!("{failures} failed logins refuse a name for {minutes} minutes");
+                edit(c, change, said, |s| {
+                    s.lockout_failures = failures;
+                    s.lockout_minutes = minutes;
+                    Ok(())
+                })
+            },
+        ),
+        operation(
+            Spec {
+                name: "knowledge.vault",
+                summary: "Say where the knowledge vault is: a folder, a git repository.",
+                access: ADMIN,
+                input: VAULT,
+            },
+            |c: &HubContext, caller: &Caller, input: Vault| {
+                let change = changed(caller, "knowledge.vault", &input);
+                let dir = input.dir.trim().to_string();
+                if dir.is_empty() {
+                    return Err(Error::invalid("name the folder").on("dir"));
+                }
+                edit(c, change, format!("the vault is {dir}"), |s| {
+                    s.vault = dir.clone();
+                    Ok(())
+                })
+            },
+        ),
+        operation(
+            Spec {
                 name: "knowledge.models",
                 summary: "Choose the models that turn shares into notes, in order: each is asked whether it serves its model.",
                 access: ADMIN,
                 input: DISTILL,
             },
-            |c: &HubContext, _: &Caller, input: Distill| distill(c, input),
+            |c: &HubContext, caller: &Caller, input: Distill| {
+                let change = changed(caller, "knowledge.models", &input);
+                distill(c, input, change)
+            },
         ),
         operation(
             Spec {
@@ -267,7 +470,10 @@ pub fn operations() -> Vec<Operation<HubContext>> {
                 access: ADMIN,
                 input: EMBED,
             },
-            |c: &HubContext, _: &Caller, input: Embed| embed(c, input),
+            |c: &HubContext, caller: &Caller, input: Embed| {
+                let change = changed(caller, "knowledge.embedding", &input);
+                embed(c, input, change)
+            },
         ),
         operation(
             Spec {
@@ -276,7 +482,10 @@ pub fn operations() -> Vec<Operation<HubContext>> {
                 access: ADMIN,
                 input: RECALL,
             },
-            |c: &HubContext, _: &Caller, input: Recall| recall(c, input),
+            |c: &HubContext, caller: &Caller, input: Recall| {
+                let change = changed(caller, "knowledge.recall", &input);
+                recall(c, input, change)
+            },
         ),
         operation(
             Spec {
@@ -294,7 +503,10 @@ pub fn operations() -> Vec<Operation<HubContext>> {
                 access: ADMIN,
                 input: TRACKER_ADD,
             },
-            |c: &HubContext, _: &Caller, input: TrackerAdd| add_tracker(c, input),
+            |c: &HubContext, caller: &Caller, input: TrackerAdd| {
+                let change = changed(caller, "tracker.add", &input);
+                add_tracker(c, input, change)
+            },
         ),
         operation(
             Spec {
@@ -303,13 +515,18 @@ pub fn operations() -> Vec<Operation<HubContext>> {
                 access: ADMIN,
                 input: NAMED_TRACKER,
             },
-            |c: &HubContext, _: &Caller, input: Named| {
-                change(
+            |c: &HubContext, caller: &Caller, input: Named| {
+                let change = changed(caller, "tracker.remove", &input);
+                edit(
                     c,
-                    vec![(format!("{TRACKERS}.{}", input.name), None)],
+                    change,
                     format!("the hub no longer watches the tracker {}", input.name),
-                    |names| names.trackers.contains(&input.name),
-                    &input.name,
+                    |s| {
+                        s.trackers
+                            .remove(&input.name)
+                            .map(|_| ())
+                            .ok_or_else(|| no_such("tracker", &input.name))
+                    },
                 )
             },
         ),
@@ -320,7 +537,10 @@ pub fn operations() -> Vec<Operation<HubContext>> {
                 access: ADMIN,
                 input: ROLE_SET,
             },
-            |c: &HubContext, _: &Caller, input: RoleSet| set_role(c, input),
+            |c: &HubContext, caller: &Caller, input: RoleSet| {
+                let change = changed(caller, "role.set", &input);
+                set_role(c, input, change)
+            },
         ),
         operation(
             Spec {
@@ -329,7 +549,10 @@ pub fn operations() -> Vec<Operation<HubContext>> {
                 access: ADMIN,
                 input: NAMED_ROLE,
             },
-            |c: &HubContext, _: &Caller, input: Named| remove_role(c, &input.name),
+            |c: &HubContext, caller: &Caller, input: Named| {
+                let change = changed(caller, "role.remove", &input);
+                remove_role(c, &input.name, change)
+            },
         ),
         operation(
             Spec {
@@ -338,7 +561,10 @@ pub fn operations() -> Vec<Operation<HubContext>> {
                 access: ADMIN,
                 input: REGISTRATION,
             },
-            |c: &HubContext, _: &Caller, input: Registration| registration(c, input),
+            |c: &HubContext, caller: &Caller, input: Registration| {
+                let change = changed(caller, "registration.set", &input);
+                registration(c, input, change)
+            },
         ),
         operation(
             Spec {
@@ -347,7 +573,10 @@ pub fn operations() -> Vec<Operation<HubContext>> {
                 access: ADMIN,
                 input: SOURCE_FILTER,
             },
-            |c: &HubContext, _: &Caller, input: SourceFilter| source_filter(c, input),
+            |c: &HubContext, caller: &Caller, input: SourceFilter| {
+                let change = changed(caller, "source.filter", &input);
+                source_filter(c, input, change)
+            },
         ),
         operation(
             Spec {
@@ -361,63 +590,52 @@ pub fn operations() -> Vec<Operation<HubContext>> {
     ]
 }
 
-fn distill(c: &HubContext, input: Distill) -> Result<Value, Error> {
+fn distill(c: &HubContext, input: Distill, change: Change) -> Result<Value, Error> {
     if input.models.is_empty() {
         return Err(Error::invalid("name at least one model").on("models"));
     }
     let mut candidates = Vec::new();
     for given in &input.models {
         let (backend, model) = model_of(c, given, "models", input.no_check)?;
-        candidates.push(json!({ "backend": backend, "model": model }));
+        candidates.push(ModelSetting {
+            backend: backend.to_string(),
+            model: model.to_string(),
+        });
     }
-    let mut edits = vec![(
-        format!("{KNOWLEDGE}.distill.try"),
-        Some(format!(
-            "[{}]",
-            candidates
-                .iter()
-                .map(|v| inline_fields(&[
-                    ("backend", v["backend"].clone()),
-                    ("model", v["model"].clone())
-                ]))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
-    )];
-    if let Some(when) = &input.when_none {
-        edits.push((format!("{KNOWLEDGE}.distill.when_none"), Some(when.clone())));
+    let when_none = input.when_none.as_deref().map(when_none).transpose()?;
+    if input.max_tokens == Some(0) {
+        return Err(Error::invalid("`max_tokens` must be greater than 0").on("max_tokens"));
     }
-    if let Some(n) = input.max_tokens {
-        if n == 0 {
-            return Err(Error::invalid("`max_tokens` must be greater than 0").on("max_tokens"));
+    let said = format!("shares are distilled by {}", input.models.join(", then "));
+    edit(c, change, said, |s| {
+        s.distill.candidates = candidates.clone();
+        if let Some(when) = when_none {
+            s.distill.when_none = when;
         }
-        edits.push((
-            format!("{KNOWLEDGE}.distill.max_tokens"),
-            Some(n.to_string()),
-        ));
-    }
-    let note = commit(c, &edits)?;
-    Ok(json!({
-        "said": format!("shares are distilled by {}", input.models.join(", then ")),
-        "note": note,
-    }))
+        if let Some(n) = input.max_tokens {
+            s.distill.max_tokens = clamp(n);
+        }
+        Ok(())
+    })
 }
 
-fn source_filter(c: &HubContext, input: SourceFilter) -> Result<Value, Error> {
+fn source_filter(c: &HubContext, input: SourceFilter, change: Change) -> Result<Value, Error> {
     if input.off {
         if !input.models.is_empty() || input.prompt.is_some() {
             return Err(Error::invalid("give models and a prompt, or `off`, not both").on("off"));
         }
-        let note = commit(c, &[(FILTER.into(), None)])?;
-        return Ok(json!({ "said": "no source may be connected now", "note": note }));
+        return edit(c, change, "no source may be connected now".into(), |s| {
+            s.source_filter = None;
+            Ok(())
+        });
     }
     let mut candidates = Vec::new();
     for given in &input.models {
         let (backend, model) = model_of(c, given, "models", input.no_check)?;
-        candidates.push(inline_fields(&[
-            ("backend", json!(backend)),
-            ("model", json!(model)),
-        ]));
+        candidates.push(ModelSetting {
+            backend: backend.to_string(),
+            model: model.to_string(),
+        });
     }
     let prompt = input.prompt.as_deref().map(str::trim);
     if prompt.is_some_and(str::is_empty) {
@@ -426,48 +644,61 @@ fn source_filter(c: &HubContext, input: SourceFilter) -> Result<Value, Error> {
     if input.max_tokens == Some(0) {
         return Err(Error::invalid("`max_tokens` must be greater than 0").on("max_tokens"));
     }
-    // The whole block is written each time, with what is not given kept.
-    let now = c.hub()?.connectors.sources.filter;
-    if candidates.is_empty() {
-        let Some(now) = &now else {
-            return Err(Error::invalid("name at least one model").on("models"));
-        };
-        if prompt.is_none() && input.when_none.is_none() && input.max_tokens.is_none() {
-            return Err(Error::invalid(
-                "give models, a prompt, `when_none` or `max_tokens`",
-            ));
-        }
-        for candidate in &now.model.fallback.candidates {
-            candidates.push(inline_fields(&[
-                ("backend", json!(candidate.backend)),
-                ("model", json!(candidate.model)),
-            ]));
-        }
+    let when = input.when_none.as_deref().map(when_none).transpose()?;
+    let now = c.kept()?.read()?.source_filter;
+    if candidates.is_empty()
+        && now.is_some()
+        && prompt.is_none()
+        && when.is_none()
+        && input.max_tokens.is_none()
+    {
+        return Err(Error::invalid(
+            "give models, a prompt, `when_none` or `max_tokens`",
+        ));
     }
-    let Some(prompt) = prompt
-        .map(str::to_string)
-        .or_else(|| now.as_ref().map(|f| f.prompt.clone()))
-    else {
-        return Err(Error::invalid("say what is confidential").on("prompt"));
-    };
-    let when_none = match (&input.when_none, &now) {
-        (Some(when), _) => when.clone(),
-        (None, Some(f)) if f.model.fallback.when_none == ensemble_config::WhenNone::Fail => {
-            "fail".into()
+    // What is not given is kept; the first time, models and a prompt are needed.
+    let filter = match now {
+        Some(mut f) => {
+            if !candidates.is_empty() {
+                f.models.candidates = candidates;
+            }
+            if let Some(p) = prompt {
+                f.prompt = p.to_string();
+            }
+            if let Some(w) = when {
+                f.models.when_none = w;
+            }
+            if let Some(n) = input.max_tokens {
+                f.models.max_tokens = clamp(n);
+            }
+            f
         }
-        _ => "wait".into(),
+        None => {
+            if candidates.is_empty() {
+                return Err(Error::invalid("name at least one model").on("models"));
+            }
+            let Some(p) = prompt else {
+                return Err(Error::invalid("say what is confidential").on("prompt"));
+            };
+            SourceFilterSetting {
+                models: ModelsSetting {
+                    candidates,
+                    when_none: when.unwrap_or(WhenNone::Wait),
+                    max_tokens: clamp(input.max_tokens.unwrap_or(2000)),
+                },
+                prompt: p.to_string(),
+            }
+        }
     };
-    let max_tokens = input
-        .max_tokens
-        .or_else(|| now.as_ref().map(|f| u64::from(f.model.max_tokens)))
-        .unwrap_or(2000);
-    let block = format!(
-        "{{try: [{}], when_none: {when_none}, max_tokens: {max_tokens}, prompt: {}}}",
-        candidates.join(", "),
-        inline(&json!(prompt)),
-    );
-    let note = commit(c, &[(FILTER.to_string(), Some(block))])?;
-    Ok(json!({ "said": "what sources bring in is filtered so now", "note": note }))
+    edit(
+        c,
+        change,
+        "what sources bring in is filtered so now".into(),
+        |s| {
+            s.source_filter = Some(filter.clone());
+            Ok(())
+        },
+    )
 }
 
 fn source_try(c: &HubContext, input: SourceTry) -> Result<Value, Error> {
@@ -492,31 +723,31 @@ fn source_try(c: &HubContext, input: SourceTry) -> Result<Value, Error> {
     Ok(json!({ "collected": sifted.collected, "clean": sifted.clean, "said": said }))
 }
 
-fn embed(c: &HubContext, input: Embed) -> Result<Value, Error> {
-    let key = format!("{KNOWLEDGE}.embed");
+fn embed(c: &HubContext, input: Embed, change: Change) -> Result<Value, Error> {
     if input.off {
         if input.model.is_some() {
             return Err(Error::invalid("give a model, or `off`, not both").on("off"));
         }
-        let text = c.settings_file()?.read()?;
-        if settings::get(&text, &key).map_err(Error::failed)?.is_none() {
+        if c.kept()?.read()?.embed.is_none() {
             return Ok(
                 json!({ "said": "there is no embedding model: notes are found by their words" }),
             );
         }
-        let note = commit(c, &[(key, None)])?;
-        return Ok(
-            json!({ "said": "no embedding model: notes are found by their words alone", "note": note }),
+        return edit(
+            c,
+            change,
+            "no embedding model: notes are found by their words alone".into(),
+            |s| {
+                s.embed = None;
+                Ok(())
+            },
         );
     }
     let given = input.model.as_deref().ok_or_else(|| {
         Error::invalid("name the model, <backend>:<model>, or say `off`").on("model")
     })?;
     let (backend, model) = split(given, "model")?;
-    let text = c.settings_file()?.read()?;
-    let now = settings::get(&text, &format!("{key}.min_similarity"))
-        .map_err(Error::failed)?
-        .and_then(|v| v.parse::<f64>().ok());
+    let now = c.kept()?.read()?.embed.map(|e| e.min_similarity);
     let min = match &input.min_similarity {
         Some(m) => m
             .trim()
@@ -544,36 +775,38 @@ fn embed(c: &HubContext, input: Embed) -> Result<Value, Error> {
     } else if !backends.relayed.contains_key(backend) {
         return Err(no_backend(backend, "model"));
     }
-    let value = inline_fields(&[
-        ("backend", json!(backend)),
-        ("model", json!(model)),
-        ("min_similarity", json!(min)),
-    ]);
-    let note = commit(c, &[(key, Some(value))])?;
-    Ok(json!({
-        "said": format!("notes are found by their meaning too, with {model} on {backend}"),
-        "note": note,
-    }))
+    let said = format!("notes are found by their meaning too, with {model} on {backend}");
+    edit(c, change, said, |s| {
+        s.embed = Some(EmbedSetting {
+            backend: backend.to_string(),
+            model: model.to_string(),
+            min_similarity: min,
+        });
+        Ok(())
+    })
 }
 
-fn recall(c: &HubContext, input: Recall) -> Result<Value, Error> {
-    let mut edits = Vec::new();
-    for (value, field) in [
-        (input.max_notes, "max_notes"),
-        (input.max_chars, "max_chars"),
-    ] {
-        if let Some(n) = value {
-            if n == 0 {
-                return Err(Error::invalid(format!("`{field}` must be greater than 0")).on(field));
-            }
-            edits.push((format!("{KNOWLEDGE}.recall.{field}"), Some(n.to_string())));
-        }
-    }
-    if edits.is_empty() {
+fn recall(c: &HubContext, input: Recall, change: Change) -> Result<Value, Error> {
+    if input.max_notes.is_none() && input.max_chars.is_none() {
         return Err(Error::invalid("give `max_notes`, `max_chars`, or both").on("max_notes"));
     }
-    let note = commit(c, &edits)?;
-    Ok(json!({ "said": "recall is changed", "note": note }))
+    let notes = input
+        .max_notes
+        .map(|n| positive(n, "max_notes"))
+        .transpose()?;
+    let chars = input
+        .max_chars
+        .map(|n| positive(n, "max_chars"))
+        .transpose()?;
+    edit(c, change, "recall is changed".into(), |s| {
+        if let Some(n) = notes {
+            s.recall_max_notes = n;
+        }
+        if let Some(n) = chars {
+            s.recall_max_chars = n;
+        }
+        Ok(())
+    })
 }
 
 fn trackers(c: &HubContext) -> Result<Value, Error> {
@@ -604,11 +837,10 @@ fn trackers(c: &HubContext) -> Result<Value, Error> {
     Ok(json!({ "said": said.join("\n"), "trackers": rows }))
 }
 
-fn add_tracker(c: &HubContext, input: TrackerAdd) -> Result<Value, Error> {
-    let name = input.name.trim();
-    word(name, "name")?;
-    let hub = c.hub()?;
-    if hub.connectors.tasks.trackers.contains_key(name) {
+fn add_tracker(c: &HubContext, input: TrackerAdd, change: Change) -> Result<Value, Error> {
+    let name = input.name.trim().to_string();
+    word(&name, "name")?;
+    if c.kept()?.read()?.trackers.contains_key(&name) {
         return Err(Error::new(
             Code::Conflict,
             format!("there is a tracker '{name}' already"),
@@ -624,49 +856,59 @@ fn add_tracker(c: &HubContext, input: TrackerAdd) -> Result<Value, Error> {
             Error::invalid("`dir` is required for local_markdown: the folder of its issues")
                 .on("dir")
         })?;
-    let value = inline_fields(&[
-        ("type", json!(input.kind)),
-        ("dir", json!(dir)),
-        (
-            "label",
-            json!(input.label.as_deref().unwrap_or("ensemble").trim()),
-        ),
-        ("poll_seconds", json!(input.poll_seconds.unwrap_or(30))),
-    ]);
-    let note = commit(c, &[(format!("{TRACKERS}.{name}"), Some(value))])?;
-    Ok(json!({ "said": format!("the hub watches the tracker {name}"), "note": note }))
+    let tracker = TrackerSetting::LocalMarkdown {
+        dir: dir.to_string(),
+        label: input
+            .label
+            .as_deref()
+            .unwrap_or("ensemble")
+            .trim()
+            .to_string(),
+        poll_seconds: clamp(input.poll_seconds.unwrap_or(30)),
+    };
+    let said = format!("the hub watches the tracker {name}");
+    edit(c, change, said, |s| {
+        s.trackers.insert(name.clone(), tracker.clone());
+        Ok(())
+    })
 }
 
-fn set_role(c: &HubContext, input: RoleSet) -> Result<Value, Error> {
+fn set_role(c: &HubContext, input: RoleSet, change: Change) -> Result<Value, Error> {
     let name = input.name.trim();
     if name.is_empty() || name.contains(char::is_whitespace) || name.contains('.') {
         return Err(Error::invalid(format!("'{name}' must be one word, with no '.'")).on("name"));
     }
-    let mut permissions = Vec::new();
+    let mut permissions: Vec<Permission> = Vec::new();
     for p in &input.permissions {
         let p = p.trim();
-        if serde_json::from_value::<Permission>(json!(p)).is_err() {
+        let Ok(permission) = serde_json::from_value::<Permission>(json!(p)) else {
             return Err(Error::invalid(format!(
                 "'{p}' is not a permission: {}",
                 PERMISSIONS.join(", ")
             ))
             .on("permissions"));
-        }
-        if !permissions.contains(&p) {
-            permissions.push(p);
+        };
+        if !permissions.contains(&permission) {
+            permissions.push(permission);
         }
     }
-    let note = commit(
-        c,
-        &[(format!("{ROLES}.{name}"), Some(inline(&json!(permissions))))],
-    )?;
-    Ok(json!({
-        "said": format!("{name} may {}", if permissions.is_empty() { "do nothing".to_string() } else { permissions.join(", ") }),
-        "note": note,
-    }))
+    let can: Vec<&str> = permissions.iter().map(|p| p.as_str()).collect();
+    let said = format!(
+        "{name} may {}",
+        if can.is_empty() {
+            "do nothing".to_string()
+        } else {
+            can.join(", ")
+        }
+    );
+    let name = name.to_string();
+    edit(c, change, said, |s| {
+        s.roles.insert(name.clone(), permissions.clone());
+        Ok(())
+    })
 }
 
-fn remove_role(c: &HubContext, name: &str) -> Result<Value, Error> {
+fn remove_role(c: &HubContext, name: &str, change: Change) -> Result<Value, Error> {
     let users = c.accounts()?.users()?;
     let holders: Vec<&str> = users
         .list()
@@ -685,74 +927,128 @@ fn remove_role(c: &HubContext, name: &str) -> Result<Value, Error> {
         .on("name")
         .hint("give them another role first (`user role`)"));
     }
-    change(
-        c,
-        vec![(format!("{ROLES}.{name}"), None)],
-        format!("the role {name} is gone"),
-        |names| names.roles.contains(&name.to_string()),
-        name,
-    )
+    edit(c, change, format!("the role {name} is gone"), |s| {
+        s.roles
+            .remove(name)
+            .map(|_| ())
+            .ok_or_else(|| no_such("role", name))
+    })
 }
 
-fn registration(c: &HubContext, input: Registration) -> Result<Value, Error> {
-    let value = match input.kind.as_str() {
+fn registration(c: &HubContext, input: Registration, change: Change) -> Result<Value, Error> {
+    let (registration, said) = match input.kind.as_str() {
         "closed" => {
             if input.max_pending.is_some() {
                 return Err(
                     Error::invalid("a closed hub takes no sign-ups to wait").on("max_pending")
                 );
             }
-            inline_fields(&[("type", json!("closed"))])
+            (RegistrationSetting::Closed, "only an admin adds people now")
         }
         _ => {
-            let max = input.max_pending.unwrap_or(20);
-            if max == 0 {
-                return Err(
-                    Error::invalid("`max_pending` must be greater than 0").on("max_pending")
-                );
-            }
-            inline_fields(&[("type", json!("approval")), ("max_pending", json!(max))])
+            let max_pending = positive(input.max_pending.unwrap_or(20), "max_pending")?;
+            (
+                RegistrationSetting::Approval { max_pending },
+                "people sign up, and an admin lets them in",
+            )
         }
     };
-    let note = commit(c, &[("accounts.registration".into(), Some(value))])?;
-    let said = match input.kind.as_str() {
-        "closed" => "only an admin adds people now".to_string(),
-        _ => "people sign up, and an admin lets them in".to_string(),
-    };
-    Ok(json!({ "said": said, "note": note }))
+    edit(c, change, said.into(), |s| {
+        s.registration = registration;
+        Ok(())
+    })
 }
 
-/// What the hub's settings name, for an operation to find what it is about.
-struct Names {
-    trackers: Vec<String>,
-    roles: Vec<String>,
+/// The change `caller` makes with the operation `name` and `input`.
+fn changed(caller: &Caller, name: &str, input: &impl Serialize) -> Change {
+    let spec = operations()
+        .into_iter()
+        .find(|o| o.spec.name == name)
+        .map(|o| o.spec)
+        .expect("one of these operations");
+    Change::new(caller, &spec, input)
 }
 
-/// Make `edits`, once `there` finds `name` in what the settings name.
-fn change(
+/// The spec of `settings.import`, whose input is never kept: the settings
+/// it brings are.
+const IMPORT_SPEC: Spec = Spec {
+    name: "settings.import",
+    summary: "",
+    access: Access::Local,
+    input: IMPORT,
+};
+
+/// Make `edit` to the hub's settings and keep them with `change`, once they
+/// load; say `said`, and what the running hub did with them.
+fn edit(
     c: &HubContext,
-    edits: Vec<(String, Option<String>)>,
+    change: Change,
     said: String,
-    there: impl Fn(&Names) -> bool,
-    name: &str,
+    edit: impl FnOnce(&mut HubSettings) -> Result<(), Error>,
 ) -> Result<Value, Error> {
-    let hub = c.hub()?;
-    let names = Names {
-        trackers: hub.connectors.tasks.trackers.keys().cloned().collect(),
-        roles: hub.accounts.roles.keys().cloned().collect(),
-    };
-    if !there(&names) {
-        return Err(Error::not_found(format!("there is no '{name}'")).on("name"));
-    }
-    let note = commit(c, &edits)?;
+    let note = c.kept()?.change(change, edit)?;
     Ok(json!({ "said": said, "note": note }))
 }
 
-/// Write `edits` to the hub's settings, and say what the running hub did.
-fn commit(c: &HubContext, edits: &[(String, Option<String>)]) -> Result<Option<String>, Error> {
-    let file = c.settings_file()?;
-    let text = file.plan(edits)?;
-    file.commit(&text)
+fn no_such(what: &str, name: &str) -> Error {
+    Error::not_found(format!("there is no {what} '{name}'")).on("name")
+}
+
+/// `n` as a setting greater than 0.
+fn positive(n: u64, field: &str) -> Result<u32, Error> {
+    match u32::try_from(n) {
+        Ok(0) => Err(Error::invalid(format!("`{field}` must be greater than 0")).on(field)),
+        Ok(n) => Ok(n),
+        Err(_) => Err(Error::invalid(format!("`{field}` is too large")).on(field)),
+    }
+}
+
+fn clamp(n: u64) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+fn when_none(given: &str) -> Result<WhenNone, Error> {
+    serde_json::from_value(json!(given))
+        .map_err(|_| Error::invalid(format!("'{given}' is not wait or fail")).on("when_none"))
+}
+
+/// Every setting, as data, and as lines to read.
+fn show(c: &HubContext) -> Result<Value, Error> {
+    let settings =
+        serde_json::to_value(c.kept()?.read()?).map_err(|e| Error::failed(e.to_string()))?;
+    Ok(json!({ "settings": settings }))
+}
+
+fn shown(output: &Value) -> ensemble_ops::Said {
+    ensemble_ops::Said {
+        out: ensemble_ops::lines(&output["settings"]),
+        note: None,
+    }
+}
+
+/// Who changed the settings, when, and how.
+fn history(c: &HubContext) -> Result<Value, Error> {
+    let log = ensemble_store::kept::audit(c.dir()).map_err(Error::failed)?;
+    let said: Vec<String> = log
+        .iter()
+        .map(|a| format!("{}  {}  {}  {}", a.at, a.who, a.operation, a.input))
+        .collect();
+    Ok(json!({
+        "said": if said.is_empty() { "no changes yet".to_string() } else { said.join("\n") },
+        "changes": log,
+    }))
+}
+
+/// Replace every setting with `text`, settings as `settings show --json`
+/// prints them, once they load.
+fn import(c: &HubContext, text: &str, change: Change) -> Result<Value, Error> {
+    let value: Value = serde_json::from_str(text)
+        .map_err(|e| Error::invalid(format!("not JSON: {e}")).on("settings"))?;
+    let settings: HubSettings =
+        serde_json::from_value(value.get("settings").cloned().unwrap_or(value))
+            .map_err(|e| Error::invalid(format!("not the hub's settings: {e}")).on("settings"))?;
+    let note = c.kept()?.keep(&settings, &change)?;
+    Ok(json!({ "said": "the hub's settings are those imported", "note": note }))
 }
 
 /// `given`, `<backend>:<model>`, as one of the hub's backends and a model it
@@ -820,7 +1116,7 @@ fn no_backend(backend: &str, field: &str) -> Error {
         .hint("`backend list` lists them; `backend add` adds one")
 }
 
-/// Refuse a name the settings could not hold as one key.
+/// Refuse a name that is not one word of letters, digits, '-' or '_'.
 fn word(name: &str, field: &str) -> Result<(), Error> {
     let fits = !name.is_empty()
         && name

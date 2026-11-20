@@ -670,16 +670,12 @@ mod tests {
 
     /// The knowledge of a hub that distills on `url`, its vault in `tmp`.
     fn memory_on(tmp: &TempDir, url: &str, when_none: &str) -> Memory {
-        let yaml = format!(
-            "version: 1\nowner: Ana\nhttp: {{ listen: \"127.0.0.1:0\" }}\nllm:\n  direct:\n    backends:\n      local: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\naccounts:\n  registration: {{ type: closed }}\n  sessions: {{ hours: 1 }}\n  lockout: {{ failures: 3, minutes: 1 }}\n  roles: {{ member: [share, recall] }}\nconnectors:\n  rest: {{}}\n  mcp: {{}}\n  runners: {{}}\n  knowledge:\n    vault: \"{}\"\n    distill:\n      try:\n        - {{ backend: local, model: small }}\n      when_none: {when_none}\n      max_tokens: 500\n    recall: {{ max_notes: 3, max_chars: 1000 }}\n  tasks: {{ trackers: {{}} }}\n  sources: {{ adapters: {{}} }}\n",
-            tmp.0.join("vault").display()
-        );
-        let hub = ensemble_config::parse_hub(
-            &yaml,
-            Path::new("hub.yaml"),
-            &std::collections::BTreeMap::new(),
-        )
-        .unwrap();
+        let mut settings = crate::tests::settings_on(tmp, url);
+        settings.distill.when_none = serde_json::from_value(serde_json::json!(when_none)).unwrap();
+        settings.distill.max_tokens = 500;
+        let hub = settings
+            .resolve(Path::new("database.db"), &std::collections::BTreeMap::new())
+            .unwrap();
         let memory = Memory::new(&hub, Some("shop".into()));
         memory.vault().init().unwrap();
         memory

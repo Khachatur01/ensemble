@@ -42,7 +42,7 @@ use clap::FromArgMatches;
 use cmd::runner::RunnerContext;
 use ensemble_config::{self as config, Config};
 use ensemble_core::state;
-use ensemble_ops::cli::{is_config_extra, matched, run_config_extra};
+use ensemble_ops::cli::matched;
 use ensemble_ops::{Error, Registry};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -76,7 +76,7 @@ fn dispatch(
         matches.get_one::<PathBuf>("env_file").cloned(),
         matches.get_one::<PathBuf>("dir"),
     )?;
-    if matched(runner, matches).is_some() || is_config_extra(matches) {
+    if matched(runner, matches).is_some() {
         // The running runner runs it, else this process does.
         let socket = state::runner_socket(&state::runner_dir()?);
         let route =
@@ -89,9 +89,6 @@ fn dispatch(
         };
         if let Some((name, leaf)) = matched(runner, matches) {
             return ensemble_ops::cli::run(runner, &call, name, leaf);
-        }
-        if let Some(done) = run_config_extra(matches, &call) {
-            return done;
         }
     }
     let cli = cli::Cli::from_arg_matches(matches).map_err(|e| e.to_string())?;

@@ -270,16 +270,18 @@ mod tests {
     /// A new vault gets three notes: two about releases, in other words, and
     /// one about lunch.
     fn memory_with(tmp: &TempDir, url: &str) -> Memory {
-        let yaml = format!(
-            "version: 1\nowner: Ana\nhttp: {{ listen: \"127.0.0.1:0\" }}\nllm:\n  direct:\n    backends:\n      local: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\naccounts:\n  registration: {{ type: closed }}\n  sessions: {{ hours: 1 }}\n  lockout: {{ failures: 3, minutes: 1 }}\n  roles: {{ member: [share, recall] }}\nconnectors:\n  rest: {{}}\n  mcp: {{}}\n  runners: {{}}\n  knowledge:\n    vault: \"{}\"\n    distill:\n      try:\n        - {{ backend: local, model: small }}\n      when_none: wait\n      max_tokens: 100\n    embed: {{ backend: local, model: e, min_similarity: 0.5 }}\n    recall:\n      max_notes: 3\n      max_chars: 1000\n  tasks: {{ trackers: {{}} }}\n  sources: {{ adapters: {{}} }}\n",
-            tmp.0.join("vault").display()
-        );
-        let hub = ensemble_config::parse_hub(
-            &yaml,
-            &tmp.0.join("hub/hub.yaml"),
-            &std::collections::BTreeMap::new(),
-        )
-        .unwrap();
+        let mut settings = crate::tests::settings_on(tmp, url);
+        settings.embed = Some(ensemble_config::EmbedSetting {
+            backend: "local".into(),
+            model: "e".into(),
+            min_similarity: 0.5,
+        });
+        let hub = settings
+            .resolve(
+                &tmp.0.join("hub/database.db"),
+                &std::collections::BTreeMap::new(),
+            )
+            .unwrap();
         let m = Memory::new(&hub, None);
         let vault = m.vault();
         if vault.exists() {

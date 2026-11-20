@@ -4,7 +4,7 @@
 
 use clap::{CommandFactory, Parser, Subcommand};
 use ensemble_ops::Registry;
-use ensemble_ops::cli::{config_extras, mount};
+use ensemble_ops::cli::mount;
 use std::path::PathBuf;
 
 const AFTER_HELP: &str = "\
@@ -14,8 +14,8 @@ Files:
                              team), hubs.json, .env
   ~/.local/state/ensemble/   run logs and worktrees, per repository
 
-Its settings are kept in its database, and changed with `config`, `backend`
-and `login`. A key given to `backend add` or `backend key` is kept there,
+Its settings are kept in its database, and changed with `settings`, `backend`
+and `login`; `settings show` shows them, `settings history` who changed what. A key given to `backend add` or `backend key` is kept there,
 sealed by master.key: back up both. A key a secrets manager keeps is read from
 the environment, or from the runner's .env (or --env-file), and named with
 `backend key --key-env`.";
@@ -42,15 +42,15 @@ pub struct Cli {
 pub fn command<R>(runner: &Registry<R>) -> clap::Command {
     let groups = [
         (
-            "config",
-            "The runner's settings, kept in its database, by their keys joined by dots, such as hub",
+            "settings",
+            "The runner's settings, kept in its database: every one, who changed them, and each of them.",
         ),
         (
             "backend",
             "The LLM backends the runner's teams run on, their keys, and which it shares.",
         ),
     ];
-    config_extras(mount(Cli::command(), runner, &groups))
+    mount(Cli::command(), runner, &groups)
 }
 
 #[derive(Debug, Subcommand)]
@@ -78,9 +78,6 @@ pub enum Command {
         /// runs before each start.
         #[arg(long)]
         keep: bool,
-        /// Print the sample instead, with every setting.
-        #[arg(long)]
-        stdout: bool,
     },
     /// Run the runner until Ctrl-C or SIGTERM: it works on the tasks of the git
     /// repositories in its workspace. A computer runs one.

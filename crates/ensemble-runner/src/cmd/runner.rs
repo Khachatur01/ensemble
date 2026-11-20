@@ -5,9 +5,9 @@ use crate::cli::Command;
 use crate::{Ctx, daemon, host_name, runner_hub, this_runner};
 use crate::{kept, setup, teams};
 use ensemble_agents::router::Ensemble;
-use ensemble_backends::ops::{Backends, Side, WithBackends};
-use ensemble_config::settings_file::{self, SettingsFile, Store, WithSettings};
-use ensemble_config::{self as config, Config};
+use ensemble_backends::ops::{Backends, KeptBackends, Side, WithBackends};
+use ensemble_config::kept::{Change, Keep, Kept, WithKept};
+use ensemble_config::{self as config, Config, RunnerSettings, WorksFor};
 use ensemble_core::state;
 use ensemble_ops::cli::ask;
 use ensemble_ops::local;
@@ -23,11 +23,7 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<ExitCode, String> {
             workspace,
             yes,
         } => setup(ctx, name, workspace, yes),
-        Command::Init {
-            force,
-            keep,
-            stdout,
-        } => init(force, keep, stdout),
+        Command::Init { force, keep } => init(force, keep),
         Command::Serve => serve(ctx),
         Command::Reload => {
             let said = ensemble_core::runtime::block_on(daemon::reload(&state::runner_socket(
@@ -75,25 +71,23 @@ fn completions(shell: clap_complete::Shell) -> Result<ExitCode, String> {
 /// without asking: named for this computer, working for its owner in
 /// ~/ensemble, offering nothing. Not when it has one, unless `force`; with
 /// `keep`, that is no error: what the NixOS module runs before each start.
-fn init(force: bool, keep: bool, stdout: bool) -> Result<ExitCode, String> {
-    if stdout {
-        print!("{}", config::runner::RUNNER_SAMPLE);
-        return Ok(ExitCode::SUCCESS);
-    }
+fn init(force: bool, keep: bool) -> Result<ExitCode, String> {
     let dir = kept::dir()?;
-    let name = host_name().unwrap_or_else(|| "runner".into());
-    let text = setup::runner_file(&name, setup::WORKSPACE)?;
-    if !kept::settings(&dir).init(&text, force)? {
+    let store = kept::settings(&dir);
+    if !force && store.read()?.is_some() {
         if keep {
             return Ok(ExitCode::SUCCESS);
         }
         return Err(format!(
-            "this computer has a runner already, kept in {}. `ensemble-runner config` changes its settings; --force makes it anew.",
+            "this computer has a runner already, kept in {}; `ensemble-runner settings show` shows it. --force makes it anew.",
             kept::source(&dir).display()
         ));
     }
+    let name = host_name().unwrap_or_else(|| "runner".into());
+    let settings = setup::starting(&name, setup::WORKSPACE)?;
+    store.write(&settings, &Change::by_this_computer("init"))?;
     println!(
-        "Made the runner '{name}', working for you in {}, kept in {}. `ensemble-runner config set` changes its settings, `ensemble-runner backend add` gives it LLM backends, and `ensemble-runner init --stdout` shows every setting.",
+        "Made the runner '{name}', working for you in {}, kept in {}. `ensemble-runner login` signs it in to a hub, `ensemble-runner backend add` gives it LLM backends, and `ensemble-runner settings show` shows every setting.",
         setup::WORKSPACE,
         kept::source(&dir).display()
     );
@@ -339,7 +333,7 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
 /// What the runner's operations are given: its settings, kept in its
 /// database.
 pub struct RunnerContext {
-    settings: SettingsFile,
+    settings: Kept<RunnerSettings>,
     /// Its folder, where its database is.
     dir: PathBuf,
     /// In the running runner: read its hub's token again, and say what it did.
@@ -353,21 +347,20 @@ type Relink = dyn Fn() -> Result<String, String> + Send + Sync;
 
 /// The runner's settings, in its database, checked as a runner before they are
 /// written.
-fn runner_settings() -> Result<SettingsFile, String> {
+fn runner_settings() -> Result<Kept<RunnerSettings>, String> {
     let dir = kept::dir()?;
     let env_file = ensemble_ops::cli::env_file(None, &dir);
     let checked = dir.clone();
-    Ok(SettingsFile::kept_in(
+    Ok(Kept::new(
         kept::settings(&dir),
         kept::SETTINGS_NAME,
-        kept::source(&dir),
         "`ensemble-runner setup`",
-        move |text| kept::parse(text, &checked, env_file.as_deref()).map(|_| ()),
+        move |s: &RunnerSettings| kept::resolve(s, &checked, env_file.as_deref()).map(|_| ()),
     ))
 }
 
-impl WithSettings for RunnerContext {
-    fn settings_file(&self) -> Result<&SettingsFile, Error> {
+impl WithKept<RunnerSettings> for RunnerContext {
+    fn kept(&self) -> Result<&Kept<RunnerSettings>, Error> {
         Ok(&self.settings)
     }
 }
@@ -389,6 +382,41 @@ impl WithBackends for RunnerContext {
             .get(name)
     }
 
+    fn kept_backends(&self) -> Result<KeptBackends, Error> {
+        let s = self.settings.read()?;
+        Ok(KeptBackends {
+            backends: s.backends,
+            shares: Some(s.shares),
+        })
+    }
+
+    /// The teams name the runner's backends: a change that would leave one
+    /// naming a backend that is not there is refused.
+    fn change_backends(
+        &self,
+        change: Change,
+        edit: &mut dyn FnMut(&mut KeptBackends) -> Result<(), Error>,
+    ) -> Result<Option<String>, Error> {
+        self.settings.change(change, |s| {
+            let mut kept = KeptBackends {
+                backends: std::mem::take(&mut s.backends),
+                shares: Some(std::mem::take(&mut s.shares)),
+            };
+            edit(&mut kept)?;
+            s.backends = kept.backends;
+            s.shares = kept.shares.unwrap_or_default();
+            let runner = kept::resolve(s, &self.dir, self.keys().as_deref())
+                .map_err(|e| Error::invalid(format!("nothing was changed: {e}")))?;
+            teams::load_all(&runner.llm, None)
+                .map(|_| ())
+                .map_err(|e| Error::new(Code::Conflict, format!("nothing was changed: {e}")))
+        })
+    }
+
+    fn backends_changed(&self) -> Option<String> {
+        self.settings.changed()
+    }
+
     fn backends(&self) -> Result<Backends, Error> {
         let runner = self.runner()?;
         Ok(Backends {
@@ -396,16 +424,6 @@ impl WithBackends for RunnerContext {
             relayed: runner.llm.hub,
             shares: Some(runner.llm.shares),
         })
-    }
-
-    /// The teams name the runner's backends: a change that would leave one
-    /// naming a backend that is not there is refused.
-    fn check_users(&self, text: &str) -> Result<(), Error> {
-        let runner =
-            kept::parse(text, &self.dir, self.keys().as_deref()).map_err(Error::invalid)?;
-        teams::load_all(&runner.llm, None)
-            .map(|_| ())
-            .map_err(|e| Error::new(Code::Conflict, format!("nothing was changed: {e}")))
     }
 }
 
@@ -455,7 +473,7 @@ impl RunnerContext {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct Login {
     url: String,
     user: Option<String>,
@@ -463,13 +481,13 @@ struct Login {
     password: Option<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct Join {
     url: String,
     code: String,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct Logout {
     url: String,
 }
@@ -497,51 +515,279 @@ const JOIN: &[Field] = &[
 ];
 const LOGOUT: &[Field] = &[URL];
 
+#[derive(serde::Deserialize, serde::Serialize)]
+struct Nothing {}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct Named {
+    name: String,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct Workspace {
+    path: String,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct WorksForInput {
+    whom: String,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct SharedCalls {
+    most: u64,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct Import {
+    settings: String,
+}
+
+const NAME: &[Field] = &[Field::text(
+    "name",
+    "The runner's name, which a hub knows as <you>/<name>: letters, digits, '-', '_' or '.'.",
+)
+.required()
+.positional()];
+const WORKSPACE: &[Field] = &[Field::text(
+    "path",
+    "The folder it works in, of git repositories; ~/ is your home.",
+)
+.required()
+.positional()];
+const WORKS_FOR: &[Field] = &[Field::new(
+    "whom",
+    ensemble_ops::Kind::Choice(&["owner", "hub"]),
+    "owner: you alone; hub: also everyone on the hub whose role has `compute`, with the agents of its teams on LLM backends.",
+)
+.required()
+.positional()];
+const SHARED_CALLS: &[Field] = &[Field::new(
+    "most",
+    ensemble_ops::Kind::Number,
+    "The most calls of others to its shared backends at once.",
+)
+.required()
+.positional()];
+const IMPORT: &[Field] = &[Field::text(
+    "settings",
+    "Settings as `settings show --json` prints them, whole.",
+)
+.required()
+.positional()];
+
+/// An operation that changes the runner's settings: `run` given the change it
+/// makes, for the audit log.
+fn changing<I>(
+    spec: Spec,
+    run: impl Fn(&RunnerContext, I, Change) -> Result<serde_json::Value, Error> + Send + Sync + 'static,
+) -> ensemble_ops::Operation<RunnerContext>
+where
+    I: serde::de::DeserializeOwned + serde::Serialize,
+{
+    operation(spec, move |c: &RunnerContext, caller: &Caller, input: I| {
+        let change = Change::new(caller, &spec, &input);
+        run(c, input, change)
+    })
+}
+
+/// Make `edit` to the runner's settings and keep them with `change`, once
+/// they load; say `said`, and what the running runner did with them.
+fn edit(
+    c: &RunnerContext,
+    change: Change,
+    said: String,
+    edit: impl FnOnce(&mut RunnerSettings) -> Result<(), Error>,
+) -> Result<serde_json::Value, Error> {
+    let note = c.settings.change(change, edit)?;
+    Ok(serde_json::json!({ "said": said, "note": note }))
+}
+
 /// Every operation of the runner.
 pub fn operations() -> Registry<RunnerContext> {
-    let mut all = settings_file::operations::<RunnerContext>(Access::Local);
+    let local = Access::Local;
+    let mut all = vec![
+        operation(
+            Spec {
+                name: "settings.show",
+                summary: "Show every setting of the runner; its keys are never among them.",
+                access: local,
+                input: &[],
+            },
+            |c: &RunnerContext, _: &Caller, _: Nothing| {
+                let s = serde_json::to_value(c.settings.read()?)
+                    .map_err(|e| Error::failed(e.to_string()))?;
+                Ok(serde_json::json!({ "settings": s }))
+            },
+        )
+        .shown(|out| ensemble_ops::Said {
+            out: ensemble_ops::lines(&out["settings"]),
+            note: None,
+        }),
+        operation(
+            Spec {
+                name: "settings.history",
+                summary: "Show who changed the runner's settings, when, and with which operation.",
+                access: local,
+                input: &[],
+            },
+            |c: &RunnerContext, _: &Caller, _: Nothing| {
+                let log = ensemble_store::kept::audit(&c.dir).map_err(Error::failed)?;
+                let said: Vec<String> = log
+                    .iter()
+                    .map(|a| format!("{}  {}  {}  {}", a.at, a.who, a.operation, a.input))
+                    .collect();
+                Ok(serde_json::json!({
+                    "said": if said.is_empty() { "no changes yet".to_string() } else { said.join("\n") },
+                    "changes": log,
+                }))
+            },
+        ),
+        operation(
+            Spec {
+                name: "settings.import",
+                summary: "Replace every setting with settings exported from a runner, once they load.",
+                access: local,
+                input: IMPORT,
+            },
+            |c: &RunnerContext, caller: &Caller, input: Import| {
+                let spec = Spec {
+                    name: "settings.import",
+                    summary: "",
+                    access: Access::Local,
+                    input: IMPORT,
+                };
+                let change = Change::new(caller, &spec, serde_json::json!({}));
+                let value: serde_json::Value = serde_json::from_str(&input.settings)
+                    .map_err(|e| Error::invalid(format!("not JSON: {e}")).on("settings"))?;
+                let settings: RunnerSettings =
+                    serde_json::from_value(value.get("settings").cloned().unwrap_or(value))
+                        .map_err(|e| {
+                            Error::invalid(format!("not the runner's settings: {e}")).on("settings")
+                        })?;
+                let note = c.settings.keep(&settings, &change)?;
+                Ok(
+                    serde_json::json!({ "said": "the runner's settings are those imported", "note": note }),
+                )
+            },
+        ),
+        changing(
+            Spec {
+                name: "settings.name",
+                summary: "Name the runner, as its hub knows it.",
+                access: local,
+                input: NAME,
+            },
+            |c, input: Named, change| {
+                let name = input.name.trim().to_string();
+                edit(c, change, format!("the runner is {name}"), |s| {
+                    s.name = name.clone();
+                    Ok(())
+                })
+            },
+        ),
+        changing(
+            Spec {
+                name: "settings.workspace",
+                summary: "Say which folder the runner works in: each git repository in it is a project.",
+                access: local,
+                input: WORKSPACE,
+            },
+            |c, input: Workspace, change| {
+                let path = input.path.trim().to_string();
+                edit(c, change, format!("the runner works in {path}"), |s| {
+                    s.workspace = path.clone();
+                    Ok(())
+                })
+            },
+        ),
+        changing(
+            Spec {
+                name: "settings.works-for",
+                summary: "Say whom the runner works for: you alone, or also the hub's people with `compute`.",
+                access: local,
+                input: WORKS_FOR,
+            },
+            |c, input: WorksForInput, change| {
+                let whom: WorksFor = serde_json::from_value(serde_json::json!(input.whom))
+                    .map_err(|_| Error::invalid("owner or hub").on("whom"))?;
+                edit(
+                    c,
+                    change,
+                    format!("the runner works for its {}", whom.as_str()),
+                    |s| {
+                        s.works_for = whom;
+                        Ok(())
+                    },
+                )
+            },
+        ),
+        changing(
+            Spec {
+                name: "settings.shared-calls",
+                summary: "Say how many calls of others to its shared backends it takes at once.",
+                access: local,
+                input: SHARED_CALLS,
+            },
+            |c, input: SharedCalls, change| {
+                let most = u32::try_from(input.most)
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| Error::invalid("must be greater than 0").on("most"))?;
+                edit(
+                    c,
+                    change,
+                    format!("it takes {most} shared calls at once"),
+                    |s| {
+                        s.max_shared_calls = most;
+                        Ok(())
+                    },
+                )
+            },
+        ),
+    ];
     all.extend(ensemble_backends::ops::operations::<RunnerContext>(
         Side::Runner,
         Access::Local,
     ));
-    all.push(operation(
+    all.push(changing(
         Spec {
             name: "login",
             summary: "Sign in to a hub (ws:// or wss://) and keep its token for the runner.",
             access: Access::Local,
             input: LOGIN,
         },
-        |c: &RunnerContext, _: &Caller, input: Login| login(c, input),
+        |c, input: Login, change| login(c, input, change),
     ));
-    all.push(operation(
+    all.push(changing(
         Spec {
             name: "join",
             summary: "Join a hub with a code made for your account, and keep its token for the runner.",
             access: Access::Local,
             input: JOIN,
         },
-        |c: &RunnerContext, _: &Caller, input: Join| {
+        |c, input: Join, change| {
             let url = hub_url(&input.url)?;
             let params = serde_json::json!({ "code": input.code.trim(), "runner": runner_name() });
             let token = sign_in(url, ensemble_link::protocol::JOIN, params)?;
-            keep(c, url, &token)
+            keep(c, url, &token, change)
         },
     ));
-    all.push(operation(
+    all.push(changing(
         Spec {
             name: "logout",
             summary: "Forget a hub's token.",
             access: Access::Local,
             input: LOGOUT,
         },
-        |c: &RunnerContext, _: &Caller, input: Logout| logout(c, &input.url),
+        |c, input: Logout, change| logout(c, &input.url, change),
     ));
     Registry::new(all)
 }
 
 /// `login`: sign in to a hub over the link with your account, or take a token
 /// made elsewhere, and keep it.
-fn login(c: &RunnerContext, input: Login) -> Result<serde_json::Value, Error> {
+fn login(c: &RunnerContext, input: Login, change: Change) -> Result<serde_json::Value, Error> {
     let url = hub_url(&input.url)?;
     let token = match (&input.user, &input.token) {
         (Some(user), None) => {
@@ -560,7 +806,7 @@ fn login(c: &RunnerContext, input: Login) -> Result<serde_json::Value, Error> {
             );
         }
     };
-    keep(c, url, &token)
+    keep(c, url, &token, change)
 }
 
 /// `url`, when it is a hub's: a WebSocket's.
@@ -598,7 +844,12 @@ fn runner_name() -> String {
 
 /// Check the token of the hub at `url`, keep it, and have the runner name
 /// the hub.
-fn keep(c: &RunnerContext, url: &str, token: &str) -> Result<serde_json::Value, Error> {
+fn keep(
+    c: &RunnerContext,
+    url: &str,
+    token: &str,
+    change: Change,
+) -> Result<serde_json::Value, Error> {
     let hello = ensemble_core::runtime::block_on(ensemble_link::Link::new(url, token).hello())
         .map_err(|e| Error::new(Code::Unauthorized, e).on("token"))?;
     let mut tokens = ensemble_link::Tokens::load()?;
@@ -611,13 +862,9 @@ fn keep(c: &RunnerContext, url: &str, token: &str) -> Result<serde_json::Value, 
         hello.permissions.join(", ")
     )];
     // The runner names the hub it uses.
-    let file = c.settings_file()?;
-    if !file.path.exists() {
-        said.push(format!(
-            "There is no runner yet: `ensemble-runner setup` writes one; then name this hub in it with `ensemble-runner config set hub {url}`."
-        ));
-    } else {
-        let named = ensemble_config::settings::get(&file.read()?, "hub").map_err(Error::invalid)?;
+    let settings = c.settings.read().ok();
+    if let Some(settings) = settings {
+        let named = settings.hub;
         if named.as_deref() == Some(url) {
             // The running runner takes the new token as it is.
             if let Some(relink) = &c.relink {
@@ -627,7 +874,11 @@ fn keep(c: &RunnerContext, url: &str, token: &str) -> Result<serde_json::Value, 
                 });
             }
         } else {
-            match file.set("hub", url) {
+            let set = c.settings.change(change, |s| {
+                s.hub = Some(url.to_string());
+                Ok(())
+            });
+            match set {
                 Ok(note) => {
                     said.push(match named {
                         Some(before) => {
@@ -640,6 +891,10 @@ fn keep(c: &RunnerContext, url: &str, token: &str) -> Result<serde_json::Value, 
                 Err(e) => said.push(format!("The runner's hub was not changed: {e}")),
             }
         }
+    } else {
+        said.push(
+            "There is no runner yet: `ensemble-runner setup` makes one; then sign in again, and it names this hub.".into(),
+        );
     }
     Ok(serde_json::json!({
         "said": said.join("\n"),
@@ -651,7 +906,7 @@ fn keep(c: &RunnerContext, url: &str, token: &str) -> Result<serde_json::Value, 
 
 /// `logout`: forget a hub's token, and have the runner name no hub when it
 /// named that one.
-fn logout(c: &RunnerContext, url: &str) -> Result<serde_json::Value, Error> {
+fn logout(c: &RunnerContext, url: &str, change: Change) -> Result<serde_json::Value, Error> {
     let mut tokens = ensemble_link::Tokens::load()?;
     let mut said = Vec::new();
     if tokens.remove(url) {
@@ -661,14 +916,18 @@ fn logout(c: &RunnerContext, url: &str) -> Result<serde_json::Value, Error> {
         said.push(format!("no token kept for {url}"));
     }
     // A runner that names it would reach no hub: it names none now.
-    let file = c.settings_file()?;
-    if file.path.exists()
-        && ensemble_config::settings::get(&file.read()?, "hub")
-            .map_err(Error::invalid)?
-            .as_deref()
-            == Some(url)
-    {
-        match file.unset("hub") {
+    let names = c
+        .settings
+        .read()
+        .ok()
+        .and_then(|s| s.hub)
+        .is_some_and(|h| h == url);
+    if names {
+        let unset = c.settings.change(change, |s| {
+            s.hub = None;
+            Ok(())
+        });
+        match unset {
             Ok(note) => {
                 said.push("The runner names no hub now.".into());
                 said.extend(note);
@@ -769,8 +1028,8 @@ fn setup(
         );
     }
     let dir = kept::dir()?;
-    let settings = kept::settings(&dir);
-    if settings.read()?.is_some() {
+    let store = kept::settings(&dir);
+    if store.read()?.is_some() {
         println!("This computer has a runner already; keeping it.");
     } else {
         let name = match name {
@@ -791,8 +1050,8 @@ fn setup(
             )?,
             None => setup::WORKSPACE.to_string(),
         };
-        let text = setup::runner_file(&name, &workspace)?;
-        settings.write(&text)?;
+        let settings = setup::starting(&name, &workspace)?;
+        store.write(&settings, &Change::by_this_computer("setup"))?;
         println!(
             "Made the runner '{name}', working in {workspace}, kept in {}.",
             kept::source(&dir).display()

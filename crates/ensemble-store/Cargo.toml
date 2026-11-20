@@ -11,8 +11,11 @@ description = "Ensemble's databases: the hub's Turso file for accounts, tokens, 
 turso.workspace = true
 ensemble-config.workspace = true
 ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 ensemble-core.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+ensemble-ops.workspace = true
 ensemble-core = { workspace = true, features = ["test-support"] }

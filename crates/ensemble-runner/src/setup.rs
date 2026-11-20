@@ -3,7 +3,6 @@
 //! what they need as arguments, so tests can run them without a terminal or a
 //! network.
 
-use ensemble_config::runner::{RUNNER_SCHEMA_URL_LINE, RUNNER_SUPPORTED_VERSION};
 use ensemble_config::{Adapter, Budget, CLAUDE_CODE_AGENT, Config, OPENCODE_AGENT};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -74,23 +73,17 @@ pub fn detect(probe: bool) -> Detected {
 /// The workspace `setup` offers: a folder in the home directory.
 pub const WORKSPACE: &str = "~/ensemble";
 
-/// The settings of a runner: the runner `name`, working for its owner, in
-/// `workspace`, offering nothing. Checked by loading it.
-pub fn runner_file(name: &str, workspace: &str) -> Result<String, String> {
-    let quoted = |s: &str| serde_json::Value::String(s.to_string()).to_string();
-    let mut text = format!(
-        "{RUNNER_SCHEMA_URL_LINE}\n\n# This computer's runner, which `ensemble-runner serve` runs. `ensemble-runner\n# init --stdout` prints every setting.\n\nversion: {RUNNER_SUPPORTED_VERSION}\n\nname: {}\n\n# owner: it works for you alone. hub: also on the tasks of others on the hub\n# whose role has `compute`, with the agents of its teams on LLM backends.\nworks_for: owner\n\n# Each git repository directly inside it is a project the runner works on.\nworkspace: {}\n",
-        quoted(name),
-        quoted(workspace)
-    );
-    text.push_str("\n# The LLM backends its teams' agents run on, which a team names by name.\n# `ensemble-runner init --stdout` shows how each is written.\nllm:\n  direct:\n    backends: {}\n    shares: []             # those it offers through the hub\n    max_shared_calls: 1    # the most calls of others to them at once\n");
-    ensemble_config::parse_runner(
-        &text,
-        &crate::kept::source(Path::new("")),
-        &ensemble_config::SystemEnv,
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(text)
+/// The settings of a new runner: `name`, working for its owner in
+/// `workspace`, offering nothing, once they load.
+pub fn starting(name: &str, workspace: &str) -> Result<ensemble_config::RunnerSettings, String> {
+    let settings = ensemble_config::RunnerSettings::starting(name.trim(), workspace.trim());
+    settings
+        .resolve(
+            &crate::kept::source(Path::new("")),
+            &ensemble_config::SystemEnv,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(settings)
 }
 
 /// How much a finding matters.
@@ -305,17 +298,17 @@ mod tests {
     }
 
     #[test]
-    fn a_runner_file_is_written_complete_and_loads() {
-        let text = runner_file("desk-2", "/code").unwrap();
-        let runner =
-            ensemble_config::parse_runner(&text, Path::new("runner.yaml"), &BTreeMap::new())
-                .unwrap();
+    fn a_new_runner_is_complete_and_loads() {
+        let settings = starting("desk-2", "/code").unwrap();
+        let runner = settings
+            .resolve(Path::new("database.db"), &BTreeMap::new())
+            .unwrap();
         assert_eq!(runner.name, "desk-2");
         assert_eq!(runner.works_for, ensemble_config::WorksFor::Owner);
         assert_eq!(runner.workspace, Path::new("/code"));
         assert!(runner.llm.direct.is_empty() && runner.llm.shares.is_empty());
-        assert!(runner_file("a/b", "/code").is_err(), "a name is checked");
-        assert!(runner_file("desk", "").is_err(), "a workspace is needed");
+        assert!(starting("a/b", "/code").is_err(), "a name is checked");
+        assert!(starting("desk", "").is_err(), "a workspace is needed");
     }
 
     #[test]

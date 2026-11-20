@@ -186,12 +186,12 @@ mod tests {
         let team =
             ensemble_config::parse(ensemble_config::SAMPLE, Path::new("config.yaml")).unwrap();
         let runner = |works_for: &str| {
-            ensemble_config::parse_runner(
-                &format!("version: 1\nname: box\nworks_for: {works_for}\nworkspace: /code\nhub: ws://hub\nllm: {{ direct: {{ backends: {{}}, shares: [], max_shared_calls: 1 }} }}\n"),
-                Path::new("runner.yaml"),
-                &std::collections::BTreeMap::new(),
-            )
-            .unwrap()
+            let mut settings = ensemble_config::RunnerSettings::starting("box", "/code");
+            settings.hub = Some("ws://hub".into());
+            settings.works_for = serde_json::from_value(serde_json::json!(works_for)).unwrap();
+            settings
+                .resolve(Path::new("database.db"), &std::collections::BTreeMap::new())
+                .unwrap()
         };
         // Its agents on OpenCode with a provider, Codex and Claude Code use
         // their CLI's own login: never lent.

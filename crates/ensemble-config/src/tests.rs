@@ -94,21 +94,19 @@ const RUNNER_BACKENDS: &str = r#"
       claude-api: { type: anthropic-api, base_url: "https://api.anthropic.com/", api_key_env: ANTHROPIC_API_KEY, timeout_seconds: 90 }
 "#;
 
-/// A runner without a hub whose `llm.direct.backends` are `backends`, the
-/// lines of a mapping indented six spaces, or `{}`, its keys read from `env`.
+/// A runner without a hub whose backends are `backends`, the lines of a YAML
+/// mapping indented six spaces, or `{}`, its keys read from `env`.
 fn runner_on(backends: &str, env: &dyn Env) -> Result<Runner, ConfigError> {
-    let backends = if backends.trim() == "{}" {
-        " {}\n".to_string()
-    } else {
-        format!("\n{}\n", backends.trim_matches('\n'))
-    };
-    parse_runner(
-        &format!(
-            "version: 1\nname: laptop\nworks_for: owner\nworkspace: /code\nllm:\n  direct:\n    backends:{backends}    shares: []\n    max_shared_calls: 1\n"
-        ),
-        Path::new("runner.yaml"),
-        env,
-    )
+    let backends: BTreeMap<String, BackendSetting> =
+        serde_norway::from_str(backends).map_err(|e| ConfigError::Syntax {
+            path: PathBuf::from("database.db"),
+            detail: e.to_string(),
+        })?;
+    RunnerSettings {
+        backends,
+        ..RunnerSettings::starting("laptop", "/code")
+    }
+    .resolve(Path::new("/r/database.db"), env)
 }
 
 /// The team `doc` on the runner of RUNNER_BACKENDS.
@@ -234,8 +232,7 @@ fn a_backend_missing_a_setting_is_refused_by_name_and_place() {
     ] {
         let detail = runner_refusal(backend);
         assert!(
-            detail.contains("llm.direct.backends")
-                && detail.contains(&format!("`{key}` is required")),
+            detail.contains(&format!("missing field `{key}`")),
             "{key}: {detail}"
         );
     }
@@ -635,11 +632,13 @@ fn a_team_reads_no_keys_even_from_a_dotenv_beside_it() {
     assert!(c.llm_backends.is_empty());
 }
 
-/// The sample team on the backends of the sample runner, as `ensemble-runner
-/// init --stdout` writes them.
+/// The sample team on a runner with the backends it names.
 fn sample_team() -> Config {
-    let runner = parse_runner(runner::RUNNER_SAMPLE, Path::new("runner.yaml"), &env(&[]))
-        .expect("the sample runner loads");
+    let runner = runner_on(
+        "local: { type: openai-compatible-api, base_url: \"http://127.0.0.1:11434/v1\", timeout_seconds: 600 }\ncentral: { type: openai-compatible-api, base_url: \"https://llm.example.com/v1\", timeout_seconds: 600 }",
+        &env(&[]),
+    )
+    .expect("the sample runner loads");
     parse(SAMPLE, &p())
         .and_then(|c| c.with_backends(runner.llm.backends(None)))
         .expect("the sample is a valid config on the sample runner")
@@ -1045,7 +1044,6 @@ fn an_agent_with_an_empty_model_is_fatal() {
 #[test]
 fn an_unknown_backend_type_lists_the_known_ones() {
     let detail = runner_refusal("      x: { type: ollama }");
-    assert!(detail.contains("llm.direct.backends.x"), "{detail}");
     assert!(detail.contains("ollama"), "{detail}");
     assert!(detail.contains(OPENAI_COMPATIBLE_API), "{detail}");
 }
@@ -1056,8 +1054,8 @@ fn a_base_url_without_a_scheme_or_a_zero_timeout_is_refused() {
         "      x: { type: openai-compatible-api, base_url: \"127.0.0.1:8000/v1\", timeout_seconds: 0 }",
     );
     for wanted in [
-        "llm.direct.backends.x: `base_url` '127.0.0.1:8000/v1' must start with http://",
-        "llm.direct.backends.x: `timeout_seconds` must be greater than 0",
+        "backends.x: `base_url` '127.0.0.1:8000/v1' must start with http://",
+        "backends.x: `timeout_seconds` must be greater than 0",
     ] {
         assert!(said.contains(wanted), "{wanted}: {said}");
     }
@@ -1293,690 +1291,315 @@ fn an_anthropic_backend_loads_and_only_an_llm_agent_may_run_on_it() {
 }
 
 // ---------------------------------------------------------------------------
-// hub.yaml
+// The hub's settings
 // ---------------------------------------------------------------------------
 
-fn hub_schema() -> serde_json::Value {
-    serde_json::from_str(hub::HUB_SCHEMA).expect("the hub schema is JSON")
+/// A hub of Ana's with one backend, `local`, which distills.
+fn hub_settings() -> HubSettings {
+    let mut hub = HubSettings::starting("Ana");
+    hub.backends.insert(
+        "local".into(),
+        BackendSetting::OpenAiCompatible {
+            base_url: "http://127.0.0.1:1/v1".into(),
+            api_key_env: None,
+            timeout_seconds: 5,
+        },
+    );
+    hub.distill.candidates = vec![ModelSetting {
+        backend: "local".into(),
+        model: "small".into(),
+    }];
+    hub
 }
 
-const HUB: &str = "version: 1\nowner: Ana\nhttp: { listen: \"127.0.0.1:7700\" }\nllm:\n  direct:\n    backends:\n      local: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }\naccounts:\n  registration: { type: approval, max_pending: 2 }\n  sessions: { hours: 1 }\n  lockout: { failures: 3, minutes: 1 }\n  roles:\n    member: [share, recall]\n    reader: [recall]\nconnectors:\n  rest: {}\n  mcp: {}\n  runners: {}\n  knowledge:\n    vault: vault\n    distill:\n      try:\n        - { backend: local, model: small }\n      when_none: wait\n      max_tokens: 100\n    recall: { max_notes: 3, max_chars: 1000 }\n  tasks: { trackers: {} }\n  sources: { adapters: {} }\n";
+fn hub_problems(hub: &HubSettings) -> String {
+    problems_of(
+        hub.resolve(Path::new("/hubs/ana/database.db"), &env(&[]))
+            .unwrap_err(),
+    )
+    .join("\n")
+}
 
-fn hub_refusal(doc: &str) -> String {
-    parse_hub(doc, Path::new("/hubs/ana/hub.yaml"), &env(&[]))
-        .unwrap_err()
-        .to_string()
+#[test]
+fn a_new_hub_starts_on_this_computer_closed_with_no_backend_and_loads() {
+    let hub = HubSettings::starting("Ana")
+        .resolve(Path::new("/hubs/ana/database.db"), &env(&[]))
+        .unwrap();
+    assert_eq!(hub.owner, "Ana");
+    assert_eq!(hub.http.listen.to_string(), "127.0.0.1:7700");
+    assert_eq!(hub.accounts.rules.registration, Registration::Closed);
+    assert!(hub.llm.direct.is_empty() && hub.llm.runners.is_empty());
+    let k = &hub.connectors.knowledge;
+    assert_eq!(k.vault, Path::new("/hubs/ana/vault"), "in the hub's folder");
+    assert!(k.distill.fallback.candidates.is_empty(), "shares wait");
+    assert_eq!(k.distill.fallback.when_none, WhenNone::Wait);
+    assert!(k.embed.is_none() && hub.connectors.sources.filter.is_none());
+    assert!(hub.connectors.tasks.trackers.is_empty());
+    assert_eq!(hub.accounts.roles["admin"].len(), 6);
+}
+
+#[test]
+fn a_hub_names_every_problem_of_its_settings() {
+    let mut hub = hub_settings();
+    hub.owner = " ".into();
+    hub.listen = "anywhere".into();
+    hub.registration = RegistrationSetting::Approval { max_pending: 0 };
+    hub.session_hours = 0;
+    hub.roles
+        .insert("two words".into(), vec![Permission::Recall]);
+    hub.distill.candidates[0].backend = "nowhere".into();
+    hub.recall_max_notes = 0;
+    let said = hub_problems(&hub);
+    for wanted in [
+        "owner: is empty",
+        "listen: 'anywhere' must be an address and a port",
+        "registration: `max_pending` must be greater than 0",
+        "session_hours: must be greater than 0",
+        "the role name 'two words' must be one word",
+        "distill.try[0]: LLM backend 'nowhere' is not defined among the backends",
+        "recall: the most notes",
+    ] {
+        assert!(said.contains(wanted), "{wanted}: {said}");
+    }
 }
 
 #[test]
 fn an_embedding_model_is_an_openai_compatible_backend_and_a_similarity_from_0_to_1() {
-    let with = |embed: &str| {
-        HUB.replace(
-            "    recall: { max_notes: 3, max_chars: 1000 }\n",
-            &format!("    embed: {embed}\n    recall: {{ max_notes: 3, max_chars: 1000 }}\n"),
-        )
-    };
-    let hub = parse_hub(
-        &with("{ backend: local, model: nomic-embed-text, min_similarity: 0.45 }"),
-        Path::new("/hubs/ana/hub.yaml"),
-        &env(&[]),
-    )
-    .unwrap();
-    let embed = hub.connectors.knowledge.embed.unwrap();
-    assert_eq!(
-        (embed.backend.as_str(), embed.model.as_str()),
-        ("local", "nomic-embed-text")
+    let mut hub = hub_settings();
+    hub.backends.insert(
+        "claude".into(),
+        BackendSetting::Anthropic {
+            base_url: "https://api.anthropic.com".into(),
+            api_key_env: None,
+            timeout_seconds: 5,
+        },
     );
-    assert!((embed.min_similarity() - 0.45).abs() < 1e-6);
-    assert!(
-        parse_hub(HUB, Path::new("hub.yaml"), &env(&[]))
-            .unwrap()
+    hub.embed = Some(EmbedSetting {
+        backend: "local".into(),
+        model: "nomic".into(),
+        min_similarity: 0.5,
+    });
+    let resolved = hub.resolve(Path::new("/h/database.db"), &env(&[])).unwrap();
+    assert_eq!(
+        resolved
             .connectors
             .knowledge
             .embed
-            .is_none(),
-        "no block, words alone"
+            .unwrap()
+            .min_similarity_permille,
+        500
     );
-    let err = hub_refusal(&with(
-        "{ backend: elsewhere, model: e, min_similarity: 0.5 }",
-    ));
+    hub.embed = Some(EmbedSetting {
+        backend: "claude".into(),
+        model: "nomic".into(),
+        min_similarity: 1.5,
+    });
+    let said = hub_problems(&hub);
     assert!(
-        err.contains("'elsewhere' is not one of the backends of `llm`"),
-        "{err}"
-    );
-    let err = hub_refusal(&with("{ backend: local, model: e, min_similarity: 2 }"));
-    assert!(err.contains("must be from 0 to 1"), "{err}");
-    let anthropic = with("{ backend: claude, model: e, min_similarity: 0.5 }").replace(
-        "    backends:\n",
-        "    backends:\n      claude: { type: anthropic-api, base_url: \"https://api.anthropic.com\", timeout_seconds: 5 }\n",
-    );
-    let err = hub_refusal(&anthropic);
-    assert!(
-        err.contains("not an openai-compatible-api backend"),
-        "{err}"
-    );
-}
-
-#[test]
-fn a_hub_names_its_owner_its_backends_and_its_knowledge() {
-    let hub = parse_hub(HUB, Path::new("/hubs/ana/hub.yaml"), &env(&[])).unwrap();
-    assert_eq!(hub.owner, "Ana");
-    let k = hub.connectors.knowledge;
-    assert_eq!(
-        k.vault,
-        PathBuf::from("/hubs/ana/vault"),
-        "relative to the hub"
-    );
-    assert_eq!(k.distill.backend(), "local");
-    assert_eq!(k.distill.fallback.when_none, WhenNone::Wait);
-    assert_eq!(k.recall.max_notes, 3);
-    assert!(
-        hub.connectors.tasks.trackers.is_empty(),
-        "no tracker, no inbox"
-    );
-    let without = HUB.replace("  knowledge:", "  knowledgee:");
-    assert!(hub_refusal(&without).contains("unknown field `knowledgee`"));
-}
-
-#[test]
-fn a_hub_is_checked_like_a_team_and_every_problem_is_named() {
-    let said = hub_refusal(
-        &HUB.replace("owner: Ana", "owner: \" \"")
-            .replace("backend: local", "backend: nowhere")
-            .replace("max_notes: 3", "max_notes: 0")
-            .replace("version: 1", "version: 2"),
-    );
-    for expected in [
-        "owner: is empty",
-        "connectors.knowledge.distill.try[0]: LLM backend 'nowhere' is not defined",
-        "connectors.knowledge.recall: `max_notes` must be greater than 0",
-        "this build understands hub version 1",
-    ] {
-        assert!(said.contains(expected), "{expected} in {said}");
-    }
-    let said = hub_refusal(&HUB.replace("    recall:", "    recal:"));
-    assert!(said.contains("unknown field `recal`"), "{said}");
-    let said = hub_refusal(&HUB.replace("owner: Ana\n", ""));
-    assert!(said.contains("`owner` is required"), "{said}");
-}
-
-#[test]
-fn every_connector_is_written_and_none_can_be_left_out() {
-    for connector in ["rest", "mcp", "runners", "tasks", "sources"] {
-        let doc: String = HUB
-            .lines()
-            .filter(|l| !l.starts_with(&format!("  {connector}:")))
-            .map(|l| format!("{l}\n"))
-            .collect();
-        let said = hub_refusal(&doc);
-        assert!(
-            said.contains(&format!("`{connector}` is required")),
-            "{connector}: {said}"
-        );
-    }
-    let said = hub_refusal(&HUB.replace("  mcp: {}", "  mcp: { url: \"http://x\" }"));
-    assert!(said.contains("unknown field `url`"), "{said}");
-    let said = hub_refusal(&HUB.replace(
-        "  sources: { adapters: {} }",
-        "  sources: { adapters: { tg: { type: telegram } } }",
-    ));
-    assert!(
-        said.contains("connectors.sources.adapters.tg: no source adapter is built yet"),
+        said.contains("'claude' is not an openai-compatible-api backend"),
         "{said}"
     );
+    assert!(said.contains("must be from 0 to 1"), "{said}");
 }
 
 #[test]
 fn the_source_filter_is_one_of_the_hubs_models_and_the_admins_prompt() {
-    let with = |filter: &str| {
-        HUB.replace(
-            "  sources: { adapters: {} }",
-            &format!("  sources:\n    filter: {filter}\n    adapters: {{}}"),
-        )
-    };
-    let hub = parse_hub(HUB, Path::new("/h/hub.yaml"), &env(&[])).unwrap();
-    assert_eq!(hub.connectors.sources.filter, None, "no source connected");
-    let doc = with(
-        "{ try: [{ backend: local, model: small }], when_none: fail, max_tokens: 50, prompt: \" Salaries. \" }",
-    );
-    let hub = parse_hub(&doc, Path::new("/h/hub.yaml"), &env(&[])).unwrap();
-    let filter = hub.connectors.sources.filter.unwrap();
-    assert_eq!(filter.prompt, "Salaries.");
-    assert_eq!(filter.model.backend(), "local");
-    assert_eq!(filter.model.fallback.when_none, WhenNone::Fail);
-    let said = hub_refusal(&with(
-        "{ try: [{ backend: nope, model: small }], when_none: wait, max_tokens: 50, prompt: \"\" }",
-    ));
-    for expected in [
-        "connectors.sources.filter.try",
-        "nope",
-        "connectors.sources.filter.prompt: is empty",
-    ] {
-        assert!(said.contains(expected), "{expected} in {said}");
-    }
-}
-
-#[test]
-fn a_hub_laid_out_the_old_way_is_told_where_each_block_went() {
-    let old = "version: 1\nowner: Ana\nserver: { listen: \"127.0.0.1:7700\" }\nroles: { member: [share] }\ninterfaces: { cli: {} }\n";
-    let said = hub_refusal(old);
-    assert!(said.contains("server, roles, interfaces:"), "{said}");
-    assert!(said.contains("`server.listen` is `http.listen`"), "{said}");
-}
-
-#[test]
-fn a_hub_inbox_names_its_tracker_and_label() {
-    let doc = HUB.replace(
-        "  tasks: { trackers: {} }\n",
-        "  tasks:\n    trackers:\n      issues: { type: local_markdown, dir: issues, label: ensemble, poll_seconds: 30 }\n",
-    );
-    let hub = parse_hub(&doc, Path::new("/hubs/ana/hub.yaml"), &env(&[])).unwrap();
-    let tracker = &hub.connectors.tasks.trackers["issues"];
+    let mut hub = hub_settings();
+    hub.source_filter = Some(SourceFilterSetting {
+        models: hub.distill.clone(),
+        prompt: "Salaries.".into(),
+    });
+    let resolved = hub.resolve(Path::new("/h/database.db"), &env(&[])).unwrap();
     assert_eq!(
-        tracker.kind,
+        resolved.connectors.sources.filter.unwrap().prompt,
+        "Salaries."
+    );
+    // Unlike the distiller's, its list is never empty, and it says what is
+    // confidential.
+    hub.source_filter = Some(SourceFilterSetting {
+        models: ModelsSetting {
+            candidates: Vec::new(),
+            ..hub.distill.clone()
+        },
+        prompt: " ".into(),
+    });
+    let said = hub_problems(&hub);
+    assert!(said.contains("source_filter: `try` is empty"), "{said}");
+    assert!(said.contains("source_filter.prompt: is empty"), "{said}");
+}
+
+#[test]
+fn a_hub_inbox_names_its_tracker_and_label_and_each_tracker_its_own_folder() {
+    let mut hub = hub_settings();
+    let tracker = |dir: &str, label: &str| TrackerSetting::LocalMarkdown {
+        dir: dir.into(),
+        label: label.into(),
+        poll_seconds: 30,
+    };
+    hub.trackers
+        .insert("issues".into(), tracker("issues", "ensemble"));
+    let resolved = hub.resolve(Path::new("/h/database.db"), &env(&[])).unwrap();
+    let t = &resolved.connectors.tasks.trackers["issues"];
+    assert_eq!(
+        t.kind,
         IssueTracker::LocalMarkdown {
-            dir: PathBuf::from("/hubs/ana/issues")
+            dir: PathBuf::from("/h/issues")
         }
     );
-    assert_eq!(
-        (tracker.label.as_str(), tracker.poll_seconds),
-        ("ensemble", 30)
-    );
-    let said = hub_refusal(
-        &doc.replace("label: ensemble", "label: \"ens:x\"")
-            .replace("poll_seconds: 30", "poll_seconds: 0"),
-    );
-    for expected in [
-        "connectors.tasks.trackers.issues.label: 'ens:x' must be one word",
-        "connectors.tasks.trackers.issues: `poll_seconds` must be greater than 0",
-    ] {
-        assert!(said.contains(expected), "{expected} in {said}");
-    }
-    let said = hub_refusal(&doc.replace("type: local_markdown", "type: jira"));
-    assert!(said.contains("unknown variant `jira`"), "{said}");
-    let two = doc.replace(
-        "      issues: {",
-        "      more: { type: local_markdown, dir: more, label: ensemble, poll_seconds: 30 }\n      issues: {",
-    );
-    let hub = parse_hub(&two, Path::new("/hubs/ana/hub.yaml"), &env(&[])).unwrap();
-    let names: Vec<&String> = hub.connectors.tasks.trackers.keys().collect();
-    assert_eq!(names, ["issues", "more"], "a hub watches each");
-    let same = two.replace("dir: more", "dir: issues");
-    let said = hub_refusal(&same);
+    assert_eq!(t.label, "ensemble");
+    hub.trackers
+        .insert("again".into(), tracker("issues", "a:b"));
+    let said = hub_problems(&hub);
     assert!(
-        said.contains("connectors.tasks.trackers.more: watches /hubs/ana/issues, as issues does"),
+        said.contains("trackers.again.label: 'a:b' must be one word"),
+        "{said}"
+    );
+    assert!(
+        said.contains("as again does") || said.contains("as issues does"),
         "{said}"
     );
 }
 
 #[test]
-fn a_hub_listens_somewhere_and_its_accounts_name_their_roles() {
-    let hub = parse_hub(HUB, Path::new("hub.yaml"), &env(&[])).unwrap();
-    assert_eq!(hub.http.listen.port(), 7700);
-    let rules = hub.accounts.rules;
+fn a_hub_reaches_backends_runners_share_and_names_them_alone() {
+    let mut hub = hub_settings();
+    hub.backends.insert(
+        "gpu".into(),
+        BackendSetting::Runner {
+            runner: "ana/gpu-box".into(),
+            backend: "local".into(),
+        },
+    );
+    hub.distill.candidates.push(ModelSetting {
+        backend: "gpu".into(),
+        model: "big".into(),
+    });
+    let resolved = hub.resolve(Path::new("/h/database.db"), &env(&[])).unwrap();
     assert_eq!(
-        rules.registration,
-        Registration::Approval { max_pending: 2 }
-    );
-    assert_eq!(
-        (
-            rules.session_hours,
-            rules.lockout_failures,
-            rules.lockout_minutes
-        ),
-        (1, 3, 1)
-    );
-    let said = hub_refusal(
-        &HUB.replace("max_pending: 2", "max_pending: 0")
-            .replace("hours: 1", "hours: 0")
-            .replace("failures: 3", "failures: 0"),
-    );
-    assert!(
-        said.contains("accounts.registration: `max_pending` must be greater than 0"),
-        "{said}"
-    );
-    assert!(said.contains("accounts.sessions: `hours`"), "{said}");
-    assert!(said.contains("accounts.lockout:"), "{said}");
-    let closed = HUB.replace("{ type: approval, max_pending: 2 }", "{ type: closed }");
-    let hub_closed = parse_hub(&closed, Path::new("hub.yaml"), &env(&[])).unwrap();
-    assert_eq!(hub_closed.accounts.rules.registration, Registration::Closed);
-    let said = hub_refusal(&HUB.replace("{ type: approval, max_pending: 2 }", "{ type: open }"));
-    assert!(said.contains("unknown variant `open`"), "{said}");
-    assert_eq!(hub.accounts.roles["reader"], vec![Permission::Recall]);
-
-    let said = hub_refusal(&HUB.replace("[recall]\n", "[recall, delete]\n"));
-    assert!(said.contains("unknown variant `delete`"), "{said}");
-    let said = hub_refusal(&HUB.replace("127.0.0.1:7700", "localhost"));
-    assert!(said.contains("http.listen: 'localhost'"), "{said}");
-    let no_roles = HUB.replace(
-        "  roles:\n    member: [share, recall]\n    reader: [recall]\n",
-        "",
-    );
-    assert!(hub_refusal(&no_roles).contains("`roles` is required"));
-    let said = hub_refusal(&HUB.replace(
-        "  roles:\n    member: [share, recall]\n    reader: [recall]\n",
-        "  roles: {}\n",
-    ));
-    assert!(
-        said.contains("accounts.roles: name at least one role"),
-        "{said}"
-    );
-}
-
-#[test]
-fn the_hub_schema_names_exactly_the_keys_the_hub_accepts() {
-    let schema = hub_schema();
-    let defs = &schema["definitions"];
-    assert_eq!(
-        schema_keys(&schema),
-        accepted_keys::<hub::RawHub>(),
-        "top level"
-    );
-    assert_eq!(
-        schema_required(&schema),
-        accepted_keys::<hub::RawHub>(),
-        "nothing at the top may be left out"
-    );
-    let permissions: Vec<String> = defs["permission"]["enum"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| p.as_str().unwrap().to_string())
-        .collect();
-    let parsed: Vec<&str> = permissions
-        .iter()
-        .map(|p| serde_norway::from_str::<Permission>(p).unwrap().as_str())
-        .collect();
-    assert_eq!(
-        permissions, parsed,
-        "the schema's permissions are the code's"
-    );
-    for (def, keys, optional) in [
-        ("http", accepted_keys::<hub::RawHttp>(), vec![]),
-        ("accounts", accepted_keys::<hub::RawAccounts>(), vec![]),
-        ("connectors", accepted_keys::<hub::RawConnectors>(), vec![]),
-        (
-            "sources",
-            accepted_keys::<hub::RawSources>(),
-            vec!["filter"],
-        ),
-        (
-            "source_filter",
-            accepted_keys::<hub::RawSourceFilter>(),
-            vec![],
-        ),
-        (
-            "registration_approval",
-            accepted_keys::<hub::RawApproval>(),
-            vec![],
-        ),
-        ("sessions", accepted_keys::<hub::RawSessions>(), vec![]),
-        ("lockout", accepted_keys::<hub::RawLockout>(), vec![]),
-        ("tasks", accepted_keys::<hub::RawTasks>(), vec![]),
-        (
-            "tracker_local_markdown",
-            accepted_keys::<hub::RawLocalMarkdownIssues>(),
-            vec![],
-        ),
-        ("distill", accepted_keys::<hub::RawDistill>(), vec![]),
-        (
-            "knowledge",
-            accepted_keys::<hub::RawKnowledge>(),
-            vec!["embed"],
-        ),
-        ("recall", accepted_keys::<hub::RawRecall>(), vec![]),
-        ("embed", accepted_keys::<hub::RawEmbed>(), vec![]),
-        ("llm", accepted_keys::<llm::RawHubLlm>(), vec!["runners"]),
-        ("direct", accepted_keys::<llm::RawDirect>(), vec![]),
-        (
-            "relayed_group",
-            accepted_keys::<llm::RawRelayedGroup>(),
-            vec![],
-        ),
-        ("relayed", accepted_keys::<llm::RawRelayed>(), vec![]),
-        (
-            "direct_candidate",
-            accepted_keys::<RawDirectCandidate>(),
-            vec![],
-        ),
-        (
-            "openai_compatible_api_backend",
-            accepted_keys::<RawOpenAiBackend>(),
-            vec!["api_key_env"],
-        ),
-        (
-            "anthropic_api_backend",
-            accepted_keys::<RawAnthropicBackend>(),
-            vec!["api_key_env"],
-        ),
-    ] {
-        assert_eq!(schema_keys(&defs[def]), keys, "{def}");
-        let mut required = keys.clone();
-        required.retain(|k| !optional.contains(&k.as_str()));
-        assert_eq!(schema_required(&defs[def]), required, "{def} required");
-    }
-    assert_eq!(
-        defs["no_settings"],
-        serde_json::json!({ "type": "object", "additionalProperties": false }),
-        "a connector with no settings is `{{}}`"
-    );
-    assert_eq!(
-        schema["properties"]["version"]["const"],
-        hub::HUB_SUPPORTED_VERSION
-    );
-    assert!(
-        !hub::HUB_SCHEMA.contains("\"default\":"),
-        "the schema has a default"
-    );
-}
-
-#[test]
-fn the_hub_sample_loads_and_sets_every_setting_the_schema_has() {
-    let hub = parse_hub(hub::HUB_SAMPLE, Path::new("hub.yaml"), &env(&[])).unwrap();
-    assert!(
-        hub.connectors.knowledge.distill.fallback.candidates.len() > 1,
-        "the sample shows a fallback"
-    );
-    assert!(hub.accounts.roles["member"].contains(&Permission::Tasks));
-    let doc: serde_json::Value = serde_norway::from_str(hub::HUB_SAMPLE).unwrap();
-    let schema = hub_schema();
-    let defs = &schema["definitions"];
-    let backends: Vec<&serde_json::Value> = doc["llm"]["direct"]["backends"]
-        .as_object()
-        .unwrap()
-        .values()
-        .collect();
-    let of_type = |kind: &str| -> Vec<&serde_json::Value> {
-        backends
-            .iter()
-            .copied()
-            .filter(|b| b["type"] == kind)
-            .collect()
-    };
-    let connectors = &doc["connectors"];
-    let knowledge = &connectors["knowledge"];
-    let tasks = &connectors["tasks"];
-    assert_eq!(hub.connectors.tasks.trackers["issues"].label, "ensemble");
-    for (def, objects) in [
-        ("http", vec![&doc["http"]]),
-        ("accounts", vec![&doc["accounts"]]),
-        ("connectors", vec![connectors]),
-        ("tasks", vec![tasks]),
-        ("sources", vec![&connectors["sources"]]),
-        ("source_filter", vec![&connectors["sources"]["filter"]]),
-        (
-            "registration_approval",
-            vec![&doc["accounts"]["registration"]],
-        ),
-        ("sessions", vec![&doc["accounts"]["sessions"]]),
-        ("lockout", vec![&doc["accounts"]["lockout"]]),
-        (
-            "tracker_local_markdown",
-            tasks["trackers"].as_object().unwrap().values().collect(),
-        ),
-        ("knowledge", vec![knowledge]),
-        ("distill", vec![&knowledge["distill"]]),
-        ("recall", vec![&knowledge["recall"]]),
-        ("embed", vec![&knowledge["embed"]]),
-        ("llm", vec![&doc["llm"]]),
-        ("direct", vec![&doc["llm"]["direct"]]),
-        ("relayed_group", vec![&doc["llm"]["runners"]]),
-        (
-            "relayed",
-            doc["llm"]["runners"]["backends"]
-                .as_object()
-                .unwrap()
-                .values()
-                .collect(),
-        ),
-        (
-            "direct_candidate",
-            knowledge["distill"]["try"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .collect(),
-        ),
-        (
-            "openai_compatible_api_backend",
-            of_type(OPENAI_COMPATIBLE_API),
-        ),
-        ("anthropic_api_backend", of_type(ANTHROPIC_API)),
-    ] {
-        assert!(!objects.is_empty(), "the sample has no {def}");
-        let missing: Vec<String> = schema_keys(&defs[def])
-            .into_iter()
-            .filter(|k| !objects.iter().any(|o| o.get(k).is_some()))
-            .collect();
-        assert_eq!(missing, Vec::<String>::new(), "{def}");
-    }
-    let id = schema["$id"].as_str().unwrap();
-    assert!(hub::HUB_SAMPLE.starts_with(&format!("# yaml-language-server: $schema={id}")));
-}
-
-// ---------------------------------------------------------------------------
-// runner.yaml
-
-// ---------------------------------------------------------------------------
-
-#[test]
-fn a_runner_says_whom_it_works_for_and_its_sample_and_schema_agree() {
-    let runner = parse_runner(runner::RUNNER_SAMPLE, Path::new("runner.yaml"), &env(&[])).unwrap();
-    assert_eq!(runner.hub.as_deref(), Some("wss://hub.example.com"));
-    assert_eq!(
-        (runner.name.as_str(), runner.works_for),
-        ("laptop", WorksFor::Owner)
-    );
-    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
-    assert_eq!(runner.workspace, home.join("ensemble"), "~ is the home");
-    assert_eq!(runner.llm.shares, ["local"]);
-    assert_eq!(runner.llm.max_shared_calls, 1);
-    assert_eq!(
-        runner.llm.hub["team-gpu"],
+        resolved.llm.runners["gpu"],
         Relayed {
             runner: "ana/gpu-box".into(),
             backend: "local".into()
         }
     );
-
-    let problems = |yaml: &str| {
-        parse_runner(yaml, Path::new("runner.yaml"), &env(&[]))
-            .unwrap_err()
-            .to_string()
-    };
-    const NO_LLM: &str = "llm: { direct: { backends: {}, shares: [], max_shared_calls: 1 } }\n";
-    let said = problems(&format!(
-        "version: 1\nname: a/b\nworks_for: hub\nworkspace: \"\"\nhub: http://hub\n{NO_LLM}"
-    ));
-    for wanted in [
-        "name: 'a/b'",
-        "workspace: is empty",
-        "hub: 'http://hub' must start with ws://",
-    ] {
-        assert!(said.contains(wanted), "{wanted}: {said}");
-    }
-    let said = problems(&format!(
-        "version: 1\nname: box\nworks_for: hub\nworkspace: /code\n{NO_LLM}"
-    ));
-    assert!(
-        said.contains("works_for: a runner works for the accounts of a hub, and there is no `hub`"),
-        "{said}"
+    assert!(!resolved.llm.direct.contains_key("gpu"));
+    hub.backends.insert(
+        "bad".into(),
+        BackendSetting::Runner {
+            runner: "gpu-box".into(),
+            backend: "local".into(),
+        },
     );
-    let said = problems(&format!(
-        "version: 1\nname: box\nworks_for: everyone\nworkspace: /code\n{NO_LLM}"
-    ));
-    assert!(said.contains("owner") && said.contains("hub"), "{said}");
-    let said = problems(&format!(
-        "version: 1\nname: box\nworkspace: /code\n{NO_LLM}"
-    ));
-    assert!(said.contains("works_for"), "nothing has a default: {said}");
-    let said = problems("version: 1\nname: box\nworks_for: owner\nworkspace: /code\n");
-    assert!(said.contains("`llm` is required"), "{said}");
-    let bare = parse_runner(
-        &format!("version: 1\nname: box\nworks_for: owner\nworkspace: work\n{NO_LLM}"),
-        Path::new("/home/ana/.config/ensemble/runner/runner.yaml"),
-        &env(&[]),
-    )
-    .unwrap();
-    assert_eq!(
-        bare.workspace,
-        Path::new("/home/ana/.config/ensemble/runner/work"),
-        "a relative path is beside the file"
-    );
-    assert!(bare.llm.direct.is_empty() && bare.llm.hub.is_empty() && bare.llm.shares.is_empty());
-    let schema: serde_json::Value = serde_json::from_str(runner::RUNNER_SCHEMA).unwrap();
-    assert_eq!(schema_keys(&schema), accepted_keys::<runner::RawRunner>());
-    let mut required = accepted_keys::<runner::RawRunner>();
-    required.retain(|k| k != "hub");
-    assert_eq!(schema_required(&schema), required);
-    let defs = &schema["definitions"];
-    assert_eq!(
-        schema["properties"]["works_for"]["enum"],
-        serde_json::json!(["owner", "hub"])
-    );
-    for (def, keys, optional) in [
-        ("llm", accepted_keys::<llm::RawRunnerLlm>(), vec!["hub"]),
-        ("direct", accepted_keys::<llm::RawRunnerDirect>(), vec![]),
-        (
-            "relayed_group",
-            accepted_keys::<llm::RawRelayedGroup>(),
-            vec![],
-        ),
-        ("relayed", accepted_keys::<llm::RawRelayed>(), vec![]),
-        (
-            "openai_compatible_api_backend",
-            accepted_keys::<RawOpenAiBackend>(),
-            vec!["api_key_env"],
-        ),
-        (
-            "anthropic_api_backend",
-            accepted_keys::<RawAnthropicBackend>(),
-            vec!["api_key_env"],
-        ),
-    ] {
-        assert_eq!(schema_keys(&defs[def]), keys, "{def}");
-        let mut required = keys.clone();
-        required.retain(|k| !optional.contains(&k.as_str()));
-        assert_eq!(schema_required(&defs[def]), required, "{def} required");
-    }
-    let tag = |def: &str| defs[def]["properties"]["type"]["const"].clone();
-    assert_eq!(tag("openai_compatible_api_backend"), OPENAI_COMPATIBLE_API);
-    assert_eq!(tag("anthropic_api_backend"), ANTHROPIC_API);
-    // The sample sets every setting of a backend.
-    let doc: serde_json::Value = serde_norway::from_str(runner::RUNNER_SAMPLE).unwrap();
-    let backends: Vec<&serde_json::Value> = doc["llm"]["direct"]["backends"]
-        .as_object()
-        .unwrap()
-        .values()
-        .collect();
-    for (def, kind) in [
-        ("openai_compatible_api_backend", OPENAI_COMPATIBLE_API),
-        ("anthropic_api_backend", ANTHROPIC_API),
-    ] {
-        let of_type: Vec<_> = backends.iter().filter(|b| b["type"] == kind).collect();
-        let missing: Vec<String> = schema_keys(&defs[def])
-            .into_iter()
-            .filter(|k| !of_type.iter().any(|o| o.get(k).is_some()))
-            .collect();
-        assert_eq!(missing, Vec::<String>::new(), "{def}");
-    }
-    let id = schema["$id"].as_str().unwrap();
-    assert!(runner::RUNNER_SAMPLE.starts_with(&format!("# yaml-language-server: $schema={id}")));
+    assert!(hub_problems(&hub).contains("backends.bad.runner: 'gpu-box' must be a runner"));
 }
 
-/// A runner of `hub` with the `llm` block `llm`.
-fn runner_llm(llm: &str, hub: bool) -> Result<Runner, ConfigError> {
-    let hub = if hub {
-        "hub: wss://hub.example.com\n"
-    } else {
-        ""
-    };
-    parse_runner(
-        &format!("version: 1\nname: box\nworks_for: owner\nworkspace: /code\n{hub}llm:\n{llm}"),
-        Path::new("runner.yaml"),
+#[test]
+fn settings_are_written_as_json_and_an_unknown_one_is_refused() {
+    let hub = hub_settings();
+    let json = serde_json::to_value(&hub).unwrap();
+    assert_eq!(
+        json["registration"],
+        serde_json::json!({ "type": "closed" })
+    );
+    assert_eq!(json["backends"]["local"]["type"], "openai-compatible-api");
+    assert_eq!(json["distill"]["try"][0]["model"], "small");
+    assert_eq!(
+        serde_json::from_value::<HubSettings>(json.clone()).unwrap(),
+        hub
+    );
+    let mut stray = json;
+    stray["listen_on"] = serde_json::json!("x");
+    assert!(serde_json::from_value::<HubSettings>(stray).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// A runner's settings
+// ---------------------------------------------------------------------------
+
+fn runner_with(edit: impl FnOnce(&mut RunnerSettings)) -> Result<Runner, ConfigError> {
+    let mut runner = RunnerSettings::starting("laptop", "~/ensemble");
+    edit(&mut runner);
+    runner.resolve(
+        Path::new("/home/ana/.config/ensemble/runner/database.db"),
         &env(&[]),
     )
+}
+
+#[test]
+fn a_new_runner_works_for_its_owner_in_its_workspace_and_loads() {
+    let r = runner_with(|_| {}).unwrap();
+    assert_eq!((r.name.as_str(), r.works_for), ("laptop", WorksFor::Owner));
+    assert!(r.workspace.ends_with("ensemble") && r.hub.is_none());
+    assert!(r.llm.direct.is_empty() && r.llm.shares.is_empty());
+    let relative = runner_with(|r| r.workspace = "work".into()).unwrap();
+    assert_eq!(
+        relative.workspace,
+        Path::new("/home/ana/.config/ensemble/runner/work"),
+        "a relative path is in the runner's folder"
+    );
+    let said = runner_with(|r| {
+        r.name = "a b".into();
+        r.works_for = WorksFor::Hub;
+        r.hub = Some("https://hub".into());
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(said.contains("name: 'a b' must be letters"), "{said}");
+    assert!(
+        said.contains("hub: 'https://hub' must start with ws://"),
+        "{said}"
+    );
+    let said = runner_with(|r| r.works_for = WorksFor::Hub)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        said.contains("works_for: a runner works for the accounts of a hub"),
+        "{said}"
+    );
 }
 
 #[test]
 fn a_runner_shares_its_openai_compatible_backends_and_reaches_others_through_its_hub() {
-    let llm = "  direct:\n    backends:\n      local: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }\n      claude: { type: anthropic-api, base_url: \"https://api.anthropic.com\", timeout_seconds: 5 }\n    shares: [local]\n    max_shared_calls: 2\n  hub:\n    backends:\n      gpu: { runner: ana/gpu-box, backend: local }\n";
-    let r = runner_llm(llm, true).unwrap();
-    assert_eq!(r.llm.shared().len(), 1);
-    assert_eq!(r.llm.shared()[0].name, "local");
-    // Without a relay to serve them at, the hub's backends are not there yet.
-    assert_eq!(
-        r.llm.backends(None).keys().collect::<Vec<_>>(),
-        ["claude", "local"]
-    );
-    let at = RelayAt {
-        base_url: "http://127.0.0.1:4000".into(),
-        key: "k".into(),
+    let local = BackendSetting::OpenAiCompatible {
+        base_url: "http://127.0.0.1:1/v1".into(),
+        api_key_env: None,
+        timeout_seconds: 5,
     };
-    let all = r.llm.backends(Some(&at));
-    let gpu = &all["gpu"];
-    assert_eq!(gpu.type_id(), OPENAI_COMPATIBLE_API);
-    assert_eq!(gpu.settings.base_url(), "http://127.0.0.1:4000/gpu");
-    assert_eq!(gpu.settings.api_key(), Some("k"));
-
-    let said = runner_llm(llm, false).unwrap_err().to_string();
-    assert!(
-        said.contains("llm.direct.shares: a runner offers its backends through a hub"),
-        "{said}"
+    let gpu = BackendSetting::Runner {
+        runner: "kim/gpu-box".into(),
+        backend: "big".into(),
+    };
+    let r = runner_with(|r| {
+        r.hub = Some("ws://127.0.0.1:7700".into());
+        r.backends.insert("local".into(), local.clone());
+        r.backends.insert("gpu".into(), gpu.clone());
+        r.shares = vec!["local".into()];
+    })
+    .unwrap();
+    assert_eq!(r.llm.shares, ["local"]);
+    assert_eq!(r.llm.hub["gpu"].runner, "kim/gpu-box");
+    assert_eq!(
+        r.llm.backends(None).len(),
+        1,
+        "gpu only while it is relayed"
     );
-    assert!(
-        said.contains("llm.hub: these backends are reached through a hub"),
-        "{said}"
-    );
-
-    let said = runner_llm(
-        &llm.replace("shares: [local]", "shares: [claude, nowhere, local, local]")
-            .replace("max_shared_calls: 2", "max_shared_calls: 0")
-            .replace("gpu: { runner: ana/gpu-box", "local: { runner: gpu-box"),
-        true,
-    )
+    let said = runner_with(|r| {
+        r.backends.insert("local".into(), local.clone());
+        r.backends.insert("gpu".into(), gpu.clone());
+        r.shares = vec!["local".into(), "gpu".into(), "local".into()];
+        r.max_shared_calls = 0;
+    })
     .unwrap_err()
     .to_string();
     for wanted in [
-        "llm.direct.shares: 'claude' is not an openai-compatible-api backend",
-        "llm.direct.shares: 'nowhere' is not one of llm.direct.backends",
-        "llm.direct.shares: 'local' is listed twice",
-        "llm.direct: `max_shared_calls` must be greater than 0",
-        "llm.hub.backends.local: llm.direct has a backend 'local' too",
-        "llm.hub.backends.local.runner: 'gpu-box' must be a runner as the hub knows it",
+        "shares: 'gpu' is not an openai-compatible-api backend of its own",
+        "shares: 'local' is listed twice",
+        "max_shared_calls: must be greater than 0",
+        "shares: a runner offers its backends through a hub",
+        "backends: those of type runner are reached through a hub",
     ] {
         assert!(said.contains(wanted), "{wanted}: {said}");
     }
-}
-
-#[test]
-fn a_hub_reaches_backends_runners_share_and_names_them_alone() {
-    let doc = HUB
-        .replace(
-            "accounts:\n",
-            "  runners:\n    backends:\n      gpu: { runner: ana/gpu-box, backend: local }\naccounts:\n",
-        )
-        .replace(
-            "        - { backend: local, model: small }\n",
-            "        - { backend: gpu, model: big }\n        - { backend: local, model: small }\n",
-        )
-        .replace(
-            "    recall: { max_notes: 3, max_chars: 1000 }\n",
-            "    embed: { backend: gpu, model: e, min_similarity: 0.5 }\n    recall: { max_notes: 3, max_chars: 1000 }\n",
-        );
-    let hub = parse_hub(&doc, Path::new("hub.yaml"), &env(&[])).unwrap();
-    assert_eq!(hub.llm.runners["gpu"].runner, "ana/gpu-box");
-    assert_eq!(hub.connectors.knowledge.distill.backend(), "gpu");
-    assert_eq!(
-        hub.llm.backends(None).len(),
-        1,
-        "its own alone, until it serves the rest"
-    );
-    let said = hub_refusal(&doc.replace("gpu: { runner", "local: { runner"));
-    assert!(
-        said.contains("llm.runners.backends.local: llm.direct has a backend 'local' too"),
-        "{said}"
-    );
 }
 
 #[test]
@@ -2009,18 +1632,6 @@ fn a_builtin_agent_runs_on_llm_backends_with_tools_it_has() {
     ] {
         assert!(joined.contains(expected), "{expected}: {joined}");
     }
-}
-
-#[test]
-fn a_runner_has_no_interfaces_block_as_its_command_line_is_always_on() {
-    let err = parse_runner(
-        "version: 1\nname: laptop\nworks_for: owner\nworkspace: /code\nllm: { direct: { backends: {}, shares: [], max_shared_calls: 1 } }\ninterfaces: { cli: {} }\n",
-        Path::new("runner.yaml"),
-        &env(&[]),
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(err.contains("interfaces: is gone"), "{err}");
 }
 
 #[test]

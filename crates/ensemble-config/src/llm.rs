@@ -1,20 +1,16 @@
-//! The `llm` block of the hub's settings and of the runner's: the LLM
-//! backends a hub or a runner uses. It calls its `direct` backends itself; the
-//! others a runner serves, and it reaches them through the hub: `runners` in
-//! the hub's settings, `hub` in the runner's. A runner may offer some of its
-//! direct backends to the hub and other runners (`shares`), and says how many
-//! such calls it takes at once (`max_shared_calls`).
+//! The LLM backends a hub or a runner uses: those it calls itself, and those a
+//! runner serves, which it reaches through the hub (`type: runner`). A runner
+//! may offer some of its own to the hub and other runners (`shares`), and says
+//! how many such calls it takes at once (`max_shared_calls`).
 //!
-//! A name is unique across a file's groups, so whatever names a backend (the
-//! hub's distiller and embedding model, a team's agents) names it alone, and a
-//! backend moves between groups without changing where it is used. A process
+//! A name is unique among them, so whatever names a backend (the hub's
+//! distiller and embedding model, a team's agents) names it alone. A process
 //! reaches the backends it uses through the hub at a loopback address of its
 //! own ([`RelayAt`]), where each looks like any OpenAI-compatible backend.
 
 use super::validate::resolve_backend;
 use super::*;
-use crate::raw::RawLlmBackend;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// How long a call to a backend reached through the hub may take on the
 /// caller's side: the runner that serves it holds it to its own backend's
@@ -132,169 +128,129 @@ pub fn valid_runner_id(id: &str) -> bool {
     })
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawHubLlm {
-    pub(crate) direct: RawDirect,
-    pub(crate) runners: Option<RawRelayedGroup>,
+/// One LLM backend as it is kept: a server it calls itself, or one a runner
+/// serves, reached through the hub. Its key is named by the variable that
+/// holds it, never written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum BackendSetting {
+    #[serde(rename = "openai-compatible-api")]
+    OpenAiCompatible {
+        /// Where the endpoint is, as a URL: `http://127.0.0.1:11434/v1`.
+        base_url: String,
+        /// The variable holding the API key. None: the endpoint wants none.
+        api_key_env: Option<String>,
+        /// Seconds one request may take.
+        timeout_seconds: u64,
+    },
+    #[serde(rename = "anthropic-api")]
+    Anthropic {
+        /// Where the API is, without `/v1`: `https://api.anthropic.com`.
+        base_url: String,
+        api_key_env: Option<String>,
+        timeout_seconds: u64,
+    },
+    /// A backend a runner serves, reached through the hub.
+    #[serde(rename = "runner")]
+    Runner {
+        /// The runner, as the hub knows it: `<owner>/<name>`.
+        runner: String,
+        /// Its name among that runner's backends.
+        backend: String,
+    },
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawDirect {
-    pub(crate) backends: BTreeMap<String, RawLlmBackend>,
+impl BackendSetting {
+    /// Its type, as it is written.
+    pub fn type_id(&self) -> &'static str {
+        match self {
+            BackendSetting::OpenAiCompatible { .. } => OPENAI_COMPATIBLE_API,
+            BackendSetting::Anthropic { .. } => ANTHROPIC_API,
+            BackendSetting::Runner { .. } => RUNNER_BACKEND,
+        }
+    }
+
+    /// The variable its key is in, if it names one.
+    pub fn api_key_env(&self) -> Option<&str> {
+        match self {
+            BackendSetting::OpenAiCompatible { api_key_env, .. }
+            | BackendSetting::Anthropic { api_key_env, .. } => api_key_env.as_deref(),
+            BackendSetting::Runner { .. } => None,
+        }
+    }
+
+    /// Whether it serves the OpenAI API: one of its own of that type, or one
+    /// a runner serves, as a runner offers no other.
+    pub fn is_openai(&self) -> bool {
+        !matches!(self, BackendSetting::Anthropic { .. })
+    }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawRunnerLlm {
-    pub(crate) direct: RawRunnerDirect,
-    pub(crate) hub: Option<RawRelayedGroup>,
-}
+/// The type of a backend a runner serves, reached through the hub.
+pub const RUNNER_BACKEND: &str = "runner";
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawRunnerDirect {
-    pub(crate) backends: BTreeMap<String, RawLlmBackend>,
-    pub(crate) shares: Vec<String>,
-    pub(crate) max_shared_calls: u32,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawRelayedGroup {
-    pub(crate) backends: BTreeMap<String, RawRelayed>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawRelayed {
-    pub(crate) runner: String,
-    pub(crate) backend: String,
-}
-
-/// A hub's `llm`, checked, its keys read from `env`.
-pub(crate) fn hub_llm(raw: &RawHubLlm, env: &dyn Env, problems: &mut Vec<String>) -> HubLlm {
-    let direct = direct("llm.direct", &raw.direct.backends, env, problems);
-    let runners = relayed("llm.runners", raw.runners.as_ref(), &direct, problems);
-    HubLlm { direct, runners }
-}
-
-/// A runner's `llm`, checked, its keys read from `env`. `hub` says whether
-/// the runner names one, which sharing and the backends of `llm.hub` need.
-pub(crate) fn runner_llm(
-    raw: &RawRunnerLlm,
-    hub: bool,
+/// The backends of `kept`, checked and split: those called directly, with
+/// their keys from `env`, and those reached through the hub.
+pub(crate) fn backends(
+    kept: &BTreeMap<String, BackendSetting>,
     env: &dyn Env,
     problems: &mut Vec<String>,
-) -> RunnerLlm {
-    let d = &raw.direct;
-    let direct = direct("llm.direct", &d.backends, env, problems);
-    let relayed = relayed("llm.hub", raw.hub.as_ref(), &direct, problems);
-    let mut shares: Vec<String> = Vec::new();
-    for name in &d.shares {
-        let name = name.trim().to_string();
-        match d.backends.get(&name) {
-            None => problems.push(format!(
-                "llm.direct.shares: '{name}' is not one of llm.direct.backends"
-            )),
-            Some(RawLlmBackend::OpenAiCompatibleApi(_)) => {}
-            Some(_) => problems.push(format!(
-                "llm.direct.shares: '{name}' is not an {OPENAI_COMPATIBLE_API} backend, the one kind a runner offers"
-            )),
-        }
-        if shares.contains(&name) {
-            problems.push(format!("llm.direct.shares: '{name}' is listed twice"));
-        }
-        shares.push(name);
-    }
-    if d.max_shared_calls == 0 {
-        problems.push("llm.direct: `max_shared_calls` must be greater than 0".into());
-    }
-    if !hub && !shares.is_empty() {
-        problems.push(
-            "llm.direct.shares: a runner offers its backends through a hub, and there is no `hub`; say `shares: []`, or name the hub".into(),
-        );
-    }
-    if !hub && !relayed.is_empty() {
-        problems.push(
-            "llm.hub: these backends are reached through a hub, and there is no `hub`; leave the block out, or name the hub".into(),
-        );
-    }
-    RunnerLlm {
-        direct,
-        shares,
-        max_shared_calls: d.max_shared_calls,
-        hub: relayed,
-    }
-}
-
-/// The backends of a `direct` group, each resolved with its key from `env`.
-fn direct(
-    at: &str,
-    raw: &BTreeMap<String, RawLlmBackend>,
-    env: &dyn Env,
-    problems: &mut Vec<String>,
-) -> BTreeMap<String, LlmBackend> {
-    let mut out = BTreeMap::new();
-    for (name, rb) in raw {
+) -> (BTreeMap<String, LlmBackend>, BTreeMap<String, Relayed>) {
+    let mut direct = BTreeMap::new();
+    let mut relayed = BTreeMap::new();
+    for (name, b) in kept {
+        let at = format!("backends.{name}");
         if !crate::runner::valid_name(name) {
             problems.push(format!(
-                "{at}.backends: the name '{name}' must be letters, digits, '-', '_' or '.'"
+                "backends: the name '{name}' must be letters, digits, '-', '_' or '.'"
             ));
             continue;
         }
-        match resolve_backend(&format!("{at}.backends.{name}"), name, rb, env) {
-            Ok(b) => {
-                out.insert(name.clone(), b);
+        match b {
+            BackendSetting::Runner { runner, backend } => {
+                let runner = runner.trim().to_string();
+                if !valid_runner_id(&runner) {
+                    problems.push(format!(
+                        "{at}.runner: '{runner}' must be a runner as the hub knows it, <owner>/<name>, such as ana/gpu-box"
+                    ));
+                }
+                let backend = backend.trim().to_string();
+                if !crate::runner::valid_name(&backend) {
+                    problems.push(format!(
+                        "{at}.backend: '{backend}' must be the name of one of that runner's backends"
+                    ));
+                }
+                relayed.insert(name.clone(), Relayed { runner, backend });
             }
-            Err(mut errs) => problems.append(&mut errs),
+            _ => match resolve_backend(&at, name, b, env) {
+                Ok(b) => {
+                    direct.insert(name.clone(), b);
+                }
+                Err(mut errs) => problems.append(&mut errs),
+            },
         }
     }
-    out
+    (direct, relayed)
 }
 
-/// The backends of a group reached through the hub, at `at`; their names are
-/// not those of `direct`.
-fn relayed(
-    at: &str,
-    raw: Option<&RawRelayedGroup>,
-    direct: &BTreeMap<String, LlmBackend>,
-    problems: &mut Vec<String>,
-) -> BTreeMap<String, Relayed> {
-    let mut out = BTreeMap::new();
-    for (name, r) in raw.map(|g| &g.backends).into_iter().flatten() {
-        let here = format!("{at}.backends.{name}");
-        if !crate::runner::valid_name(name) {
-            problems.push(format!(
-                "{at}.backends: the name '{name}' must be letters, digits, '-', '_' or '.'"
-            ));
-            continue;
-        }
-        if direct.contains_key(name) {
-            problems.push(format!(
-                "{here}: llm.direct has a backend '{name}' too; a name is unique across the groups of `llm`"
-            ));
-        }
-        let runner = r.runner.trim().to_string();
-        if !valid_runner_id(&runner) {
-            problems.push(format!(
-                "{here}.runner: '{runner}' must be a runner as the hub knows it, <owner>/<name>, such as ana/gpu-box"
-            ));
-        }
-        let backend = r.backend.trim().to_string();
-        if !crate::runner::valid_name(&backend) {
-            problems.push(format!(
-                "{here}.backend: '{backend}' must be the name of a backend in that runner's llm.direct"
-            ));
-        }
-        out.insert(name.clone(), Relayed { runner, backend });
-    }
-    out
+/// Every backend name kept with its type: one reached through the hub is
+/// OpenAI-compatible, as a runner offers no other.
+pub(crate) fn kept_kinds(
+    kept: &BTreeMap<String, BackendSetting>,
+) -> BTreeMap<String, &'static str> {
+    kept.iter()
+        .map(|(name, b)| {
+            let kind = match b {
+                BackendSetting::Anthropic { .. } => ANTHROPIC_API,
+                _ => OPENAI_COMPATIBLE_API,
+            };
+            (name.clone(), kind)
+        })
+        .collect()
 }
 
-/// Every name a file's `llm` defines, with its type: a backend reached
-/// through the hub is OpenAI-compatible, as a runner offers no other.
+/// Every name of resolved backends, with its type: one reached through the
+/// hub is OpenAI-compatible, as a runner offers no other.
 pub(crate) fn kinds(
     direct: &BTreeMap<String, LlmBackend>,
     relayed: &BTreeMap<String, Relayed>,

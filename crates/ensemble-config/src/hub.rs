@@ -1,36 +1,25 @@
-//! A hub's settings, one YAML document kept in its database
-//! (`ensemble_hub::kept`); `hub.yaml` in `~/.config/ensemble/hub/` before
-//! that, which a hub takes in the first time it reads them. A hub is always
-//! a server (`ensemble-hub serve`), for a team or for one person on their own
+//! A hub's settings ([`HubSettings`]), kept in typed tables of its
+//! database (`ensemble_store::kept`) and changed only through its operations,
+//! as a GitLab instance keeps its application settings. A hub is always a
+//! server (`ensemble-hub serve`), for a team or for one person on their own
 //! computer. Its core is its accounts, their roles and what each may do, the
-//! port it listens on (`http`) and the LLM backends it uses (`llm`).
-//! Everything else reaches it through a **connector**, each always on and
-//! each written in `connectors`: the REST API, MCP, the runners' link,
-//! knowledge, tasks and sources. A connector may hold **adapters** the admin
-//! picks, such as the trackers of `tasks`; a map of them may be empty.
+//! address it listens on and the LLM backends it uses. Everything else
+//! reaches it through a **connector**, each always on: the REST API, MCP, the
+//! runners' link, knowledge, tasks and sources.
 //!
-//! The same rules as `config.yaml`: no default values, unknown keys refused,
-//! secrets named by the variable that holds them.
+//! No setting has a default value: a new hub starts with every one written
+//! ([`HubSettings::starting`]), and secrets are named by the variable that
+//! holds them.
 
-use super::llm::{RawHubLlm, hub_llm, kinds};
-use super::raw::RawDirectAdapter;
-use super::validate::{check_candidates, direct_adapter, explain};
+use super::llm::BackendSetting;
+use super::raw::{self, RawDirectAdapter};
+use super::validate::{check_candidates, direct_adapter};
 use super::*;
-use serde::Deserialize;
-
-pub const HUB_SUPPORTED_VERSION: u32 = 1;
-
-/// The JSON Schema for the hub's settings, for editors. The tests keep it in step with
-/// the structs below.
-pub const HUB_SCHEMA: &str = include_str!("../../../hub.schema.json");
-
-/// The settings `ensemble-hub init` writes, with what each setting does.
-pub const HUB_SAMPLE: &str = include_str!("hub_sample.yaml");
+use serde::{Deserialize, Serialize};
 
 /// The hub's settings, resolved.
 #[derive(Debug, Clone)]
 pub struct Hub {
-    pub version: u32,
     /// The hub's name, for its log and its listings.
     pub owner: String,
     pub http: Http,
@@ -210,293 +199,232 @@ impl Embed {
     }
 }
 
-#[derive(Debug, Deserialize)]
+/// The hub's settings as they are kept, in typed tables of its database
+/// (`ensemble_store::kept`), and as `export` and `import` write them: every
+/// setting written, none with a default. [`HubSettings::resolve`] checks them
+/// and makes the [`Hub`] that runs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawHub {
-    pub(crate) version: u32,
-    pub(crate) owner: String,
-    pub(crate) http: RawHttp,
-    pub(crate) llm: RawHubLlm,
-    pub(crate) accounts: RawAccounts,
-    pub(crate) connectors: RawConnectors,
+pub struct HubSettings {
+    /// The hub's name, for its log and its listings.
+    pub owner: String,
+    /// The address and port every connector over HTTP is served on.
+    pub listen: String,
+    pub registration: RegistrationSetting,
+    /// Hours a login lasts.
+    pub session_hours: u32,
+    /// Failed logins before a name is refused, and for how many minutes.
+    pub lockout_failures: u32,
+    pub lockout_minutes: u32,
+    /// What each role may do, by the role's name.
+    pub roles: BTreeMap<String, Vec<Permission>>,
+    /// The LLM backends the hub uses, by name.
+    pub backends: BTreeMap<String, BackendSetting>,
+    /// The knowledge vault's folder; a relative path is in the hub's folder.
+    pub vault: String,
+    /// The models that turn shares into notes. An empty `try` keeps shares
+    /// waiting until one is chosen.
+    pub distill: ModelsSetting,
+    /// None: notes are found by their words alone.
+    pub embed: Option<EmbedSetting>,
+    pub recall_max_notes: u32,
+    pub recall_max_chars: u32,
+    /// The trackers whose issues become tasks, by the name given each.
+    pub trackers: BTreeMap<String, TrackerSetting>,
+    /// None: no source may be connected.
+    pub source_filter: Option<SourceFilterSetting>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawHttp {
-    pub(crate) listen: String,
+/// How people join, as kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RegistrationSetting {
+    Approval { max_pending: u32 },
+    Closed,
 }
 
-#[derive(Debug, Deserialize)]
+/// Models tried in order, and what happens when none can be used.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawAccounts {
-    pub(crate) registration: RawRegistration,
-    pub(crate) sessions: RawSessions,
-    pub(crate) lockout: RawLockout,
-    pub(crate) roles: BTreeMap<String, Vec<Permission>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawConnectors {
-    // Never read: parsed so that each is written, and holds nothing.
-    #[allow(dead_code)]
-    pub(crate) rest: RawNoSettings,
-    #[allow(dead_code)]
-    pub(crate) mcp: RawNoSettings,
-    #[allow(dead_code)]
-    pub(crate) runners: RawNoSettings,
-    pub(crate) knowledge: RawKnowledge,
-    pub(crate) tasks: RawTasks,
-    pub(crate) sources: RawSources,
-}
-
-/// A connector with no settings: `{}`.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawNoSettings {}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawSources {
-    pub(crate) filter: Option<RawSourceFilter>,
-    /// No source adapter is built yet, so the one value it takes is `{}`.
-    pub(crate) adapters: BTreeMap<String, serde_norway::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawSourceFilter {
+pub struct ModelsSetting {
     #[serde(rename = "try")]
-    pub(crate) candidates: Vec<raw::RawDirectCandidate>,
-    pub(crate) when_none: WhenNone,
-    pub(crate) max_tokens: u32,
-    pub(crate) prompt: String,
+    pub candidates: Vec<ModelSetting>,
+    pub when_none: WhenNone,
+    /// The most tokens of an answer.
+    pub max_tokens: u32,
 }
 
-#[derive(Debug, Deserialize)]
+/// One model, by the backend that serves it and its id there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawSessions {
-    pub(crate) hours: u32,
+pub struct ModelSetting {
+    pub backend: String,
+    pub model: String,
 }
 
-#[derive(Debug, Deserialize)]
+/// The embedding model, as kept.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawLockout {
-    pub(crate) failures: u32,
-    pub(crate) minutes: u32,
+pub struct EmbedSetting {
+    pub backend: String,
+    pub model: String,
+    /// How alike a note must be to be found by its meaning: 0 to 1.
+    pub min_similarity: f64,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-pub(crate) enum RawRegistration {
-    #[serde(rename = "approval")]
-    Approval(RawApproval),
-    #[serde(rename = "closed")]
-    Closed(RawClosed),
+/// A tracker, as kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TrackerSetting {
+    LocalMarkdown {
+        /// The folder of issues; a relative path is in the hub's folder.
+        dir: String,
+        label: String,
+        poll_seconds: u32,
+    },
 }
 
-#[derive(Debug, Deserialize)]
+/// The source filter, as kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawApproval {
-    pub(crate) max_pending: u32,
+pub struct SourceFilterSetting {
+    pub models: ModelsSetting,
+    /// What is confidential, in the admin's words.
+    pub prompt: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawClosed {}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawTasks {
-    pub(crate) trackers: BTreeMap<String, RawIssueTracker>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-pub(crate) enum RawIssueTracker {
-    #[serde(rename = "local_markdown")]
-    LocalMarkdown(RawLocalMarkdownIssues),
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawLocalMarkdownIssues {
-    pub(crate) dir: String,
-    pub(crate) label: String,
-    pub(crate) poll_seconds: u32,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawKnowledge {
-    pub(crate) vault: String,
-    pub(crate) embed: Option<RawEmbed>,
-    pub(crate) distill: RawDistill,
-    pub(crate) recall: RawRecall,
-}
-
-/// A `direct` adapter without its `type`: the distilling model is one chat
-/// request, with no tools.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawDistill {
-    #[serde(rename = "try")]
-    pub(crate) candidates: Vec<raw::RawDirectCandidate>,
-    pub(crate) when_none: WhenNone,
-    pub(crate) max_tokens: u32,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawRecall {
-    pub(crate) max_notes: u32,
-    pub(crate) max_chars: u32,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawEmbed {
-    pub(crate) backend: String,
-    pub(crate) model: String,
-    pub(crate) min_similarity: f64,
-}
-
-pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigError> {
-    // Say what moved rather than which key is unknown.
-    if let Ok(v) = serde_norway::from_str::<serde_norway::Value>(text) {
-        let old: Vec<&str> = ["server", "roles", "interfaces", "knowledge", "tasks"]
-            .into_iter()
-            .filter(|k| v.get(k).is_some())
-            .collect();
-        if !old.is_empty() {
-            return Err(ConfigError::Invalid {
-                path: path.to_path_buf(),
-                problems: vec![format!(
-                    "{}: hub.yaml is laid out anew: `server.listen` is `http.listen`; `server.registration`, `server.sessions`, `server.lockout` and `roles` go under `accounts`; `knowledge` and `tasks` go under `connectors`, with `rest: {{}}`, `mcp: {{}}`, `runners: {{}}` and `sources: {{ adapters: {{}} }}`; a tracker is named under `connectors.tasks.trackers`, with its `label` and `poll_seconds`; `interfaces` is gone, and MCP needs no `url`. `ensemble-hub init --stdout` prints the whole file",
-                    old.join(", ")
-                )],
-            });
+impl HubSettings {
+    /// The settings a new hub starts with: `owner`'s, on this computer
+    /// alone, closed to sign-ups, with no backend, model or tracker yet.
+    /// Shares wait until a model is chosen; recall finds notes by their words.
+    pub fn starting(owner: &str) -> Self {
+        let roles = [
+            (
+                "admin",
+                vec![
+                    Permission::Admin,
+                    Permission::Share,
+                    Permission::Recall,
+                    Permission::Tasks,
+                    Permission::Compute,
+                    Permission::Host,
+                ],
+            ),
+            (
+                "member",
+                vec![
+                    Permission::Share,
+                    Permission::Recall,
+                    Permission::Tasks,
+                    Permission::Compute,
+                ],
+            ),
+            ("reader", vec![Permission::Recall]),
+        ];
+        HubSettings {
+            owner: owner.to_string(),
+            listen: "127.0.0.1:7700".into(),
+            registration: RegistrationSetting::Closed,
+            session_hours: 12,
+            lockout_failures: 5,
+            lockout_minutes: 15,
+            roles: roles
+                .into_iter()
+                .map(|(name, can)| (name.to_string(), can))
+                .collect(),
+            backends: BTreeMap::new(),
+            vault: "vault".into(),
+            distill: ModelsSetting {
+                candidates: Vec::new(),
+                when_none: WhenNone::Wait,
+                max_tokens: 4000,
+            },
+            embed: None,
+            recall_max_notes: 8,
+            recall_max_chars: 6000,
+            trackers: BTreeMap::new(),
+            source_filter: None,
         }
     }
-    let raw: RawHub = serde_norway::from_str(text).map_err(|e| ConfigError::Syntax {
-        path: path.to_path_buf(),
-        detail: explain(&e),
-    })?;
-    let mut problems = Vec::new();
-    if raw.version != HUB_SUPPORTED_VERSION {
-        problems.push(format!(
-            "version: {} is not supported; this build understands hub version {HUB_SUPPORTED_VERSION}",
-            raw.version
-        ));
-    }
-    if raw.owner.trim().is_empty() {
-        problems.push("owner: is empty; name the hub, such as acme or ana".into());
-    }
-    let http = match raw.http.listen.trim().parse() {
-        Ok(listen) => Some(Http { listen }),
-        Err(_) => {
-            problems.push(format!(
-                "http.listen: '{}' must be an address and a port, such as 127.0.0.1:7700",
-                raw.http.listen
-            ));
-            None
+
+    /// The hub these settings make, checked, with the keys they name from
+    /// `env`. `source` is where they are kept, the hub's database: relative
+    /// paths are in its folder.
+    pub fn resolve(&self, source: &Path, env: &dyn Env) -> Result<Hub, ConfigError> {
+        let mut problems = Vec::new();
+        if self.owner.trim().is_empty() {
+            problems.push("owner: is empty; name the hub, such as acme or ana".into());
         }
-    };
-    let llm = hub_llm(&raw.llm, env, &mut problems);
-    let kinds = kinds(&llm.direct, &llm.runners);
-    let accounts = {
-        let a = &raw.accounts;
-        let registration = match &a.registration {
-            RawRegistration::Approval(r) => {
-                if r.max_pending == 0 {
-                    problems
-                        .push("accounts.registration: `max_pending` must be greater than 0".into());
-                }
-                Registration::Approval {
-                    max_pending: r.max_pending,
-                }
-            }
-            RawRegistration::Closed(_) => Registration::Closed,
-        };
-        if a.sessions.hours == 0 {
-            problems.push("accounts.sessions: `hours` must be greater than 0".into());
-        }
-        if a.lockout.failures == 0 || a.lockout.minutes == 0 {
-            problems
-                .push("accounts.lockout: `failures` and `minutes` must be greater than 0".into());
-        }
-        if a.roles.is_empty() {
-            problems.push(
-                "accounts.roles: name at least one role, such as member: [share, recall]".into(),
-            );
-        }
-        for name in a.roles.keys() {
-            if name.trim().is_empty() || name.contains(char::is_whitespace) {
+        let http = match self.listen.trim().parse() {
+            Ok(listen) => Some(Http { listen }),
+            Err(_) => {
                 problems.push(format!(
-                    "accounts.roles: the role name '{name}' must be one word"
+                    "listen: '{}' must be an address and a port, such as 127.0.0.1:7700",
+                    self.listen
                 ));
+                None
+            }
+        };
+        let (direct, runners) = crate::llm::backends(&self.backends, env, &mut problems);
+        let llm = HubLlm { direct, runners };
+        let kinds = crate::llm::kept_kinds(&self.backends);
+        let registration = match self.registration {
+            RegistrationSetting::Approval { max_pending } => {
+                if max_pending == 0 {
+                    problems.push("registration: `max_pending` must be greater than 0".into());
+                }
+                Registration::Approval { max_pending }
+            }
+            RegistrationSetting::Closed => Registration::Closed,
+        };
+        if self.session_hours == 0 {
+            problems.push("session_hours: must be greater than 0".into());
+        }
+        if self.lockout_failures == 0 || self.lockout_minutes == 0 {
+            problems.push("lockout: failures and minutes must be greater than 0".into());
+        }
+        if self.roles.is_empty() {
+            problems.push("roles: name at least one role, such as member: [share, recall]".into());
+        }
+        for name in self.roles.keys() {
+            if name.trim().is_empty() || name.contains(char::is_whitespace) {
+                problems.push(format!("roles: the role name '{name}' must be one word"));
             }
         }
-        Accounts {
+        let accounts = Accounts {
             rules: AccountRules {
                 registration,
-                session_hours: a.sessions.hours,
-                lockout_failures: a.lockout.failures,
-                lockout_minutes: a.lockout.minutes,
+                session_hours: self.session_hours,
+                lockout_failures: self.lockout_failures,
+                lockout_minutes: self.lockout_minutes,
             },
-            roles: a.roles.clone(),
+            roles: self.roles.clone(),
+        };
+        let base = source.parent().unwrap_or(Path::new("."));
+        if self.vault.trim().is_empty() {
+            problems.push("vault: is empty".into());
         }
-    };
-    let base = path.parent().unwrap_or(Path::new("."));
-    let knowledge = {
-        let k = &raw.connectors.knowledge;
-        if k.vault.trim().is_empty() {
-            problems.push("connectors.knowledge.vault: is empty".into());
+        let distill = models("distill", &self.distill, true, &kinds, &mut problems);
+        if self.recall_max_notes == 0 || self.recall_max_chars == 0 {
+            problems.push("recall: the most notes and characters must be greater than 0".into());
         }
-        let distill = direct_adapter(
-            "connectors.knowledge.distill",
-            &RawDirectAdapter {
-                candidates: k.distill.candidates.clone(),
-                when_none: k.distill.when_none,
-                max_tokens: k.distill.max_tokens,
-            },
-            &mut problems,
-        );
-        check_candidates(
-            "connectors.knowledge.distill.try",
-            &distill.fallback.candidates,
-            false,
-            &kinds,
-            " in `llm`",
-            &mut problems,
-        );
-        if k.recall.max_notes == 0 {
-            problems.push("connectors.knowledge.recall: `max_notes` must be greater than 0".into());
-        }
-        if k.recall.max_chars == 0 {
-            problems.push("connectors.knowledge.recall: `max_chars` must be greater than 0".into());
-        }
-        let embed = k.embed.as_ref().map(|e| {
+        let embed = self.embed.as_ref().map(|e| {
             match kinds.get(&e.backend) {
                 None => problems.push(format!(
-                    "connectors.knowledge.embed.backend: '{}' is not one of the backends of `llm`",
+                    "embed.backend: '{}' is not one of the hub's backends",
                     e.backend
                 )),
                 Some(&OPENAI_COMPATIBLE_API) => {}
                 Some(_) => problems.push(format!(
-                    "connectors.knowledge.embed.backend: '{}' is not an openai-compatible-api backend, which is what serves /embeddings",
+                    "embed.backend: '{}' is not an openai-compatible-api backend, which is what serves /embeddings",
                     e.backend
                 )),
             }
             if e.model.trim().is_empty() {
-                problems.push("connectors.knowledge.embed.model: is empty".into());
+                problems.push("embed.model: is empty".into());
             }
             if !(0.0..=1.0).contains(&e.min_similarity) {
-                problems.push(
-                    "connectors.knowledge.embed.min_similarity: must be from 0 to 1, such as 0.5"
-                        .into(),
-                );
+                problems.push("embed.min_similarity: must be from 0 to 1, such as 0.5".into());
             }
             Embed {
                 backend: e.backend.clone(),
@@ -505,126 +433,132 @@ pub fn parse_hub(text: &str, path: &Path, env: &dyn Env) -> Result<Hub, ConfigEr
                     as u32,
             }
         });
-        Knowledge {
-            vault: base.join(k.vault.trim()),
+        let knowledge = Knowledge {
+            vault: base.join(self.vault.trim()),
             embed,
             distill,
             recall: Recall {
-                max_notes: k.recall.max_notes,
-                max_chars: k.recall.max_chars,
+                max_notes: self.recall_max_notes,
+                max_chars: self.recall_max_chars,
             },
-        }
-    };
-    let trackers = &raw.connectors.tasks.trackers;
-    let tasks = Tasks {
-        trackers: trackers
-            .iter()
-            .map(|(name, t)| {
-                let at = format!("connectors.tasks.trackers.{name}");
-                if !super::runner::valid_name(name) {
-                    problems.push(format!(
-                        "{at}: the name must be letters, digits, '-', '_' or '.'"
-                    ));
-                }
-                let RawIssueTracker::LocalMarkdown(m) = t;
-                if m.dir.trim().is_empty() {
-                    problems.push(format!("{at}.dir: is empty"));
-                }
-                let label = m.label.trim();
-                if label.is_empty() || label.contains(char::is_whitespace) || label.contains(':') {
-                    problems.push(format!(
-                        "{at}.label: '{label}' must be one word with no ':', such as ensemble"
-                    ));
-                }
-                if m.poll_seconds == 0 {
-                    problems.push(format!("{at}: `poll_seconds` must be greater than 0"));
-                }
-                let tracker = Tracker {
-                    kind: IssueTracker::LocalMarkdown {
-                        dir: base.join(m.dir.trim()),
-                    },
-                    label: label.to_string(),
-                    poll_seconds: m.poll_seconds,
-                };
-                (name.clone(), tracker)
-            })
-            .collect(),
-    };
-    // Two inboxes on one folder would each take its issues.
-    let mut watched: BTreeMap<&Path, &str> = BTreeMap::new();
-    for (name, tracker) in &tasks.trackers {
-        let IssueTracker::LocalMarkdown { dir } = &tracker.kind;
-        if let Some(first) = watched.insert(dir, name) {
-            problems.push(format!(
-                "connectors.tasks.trackers.{name}: watches {}, as {first} does; give each tracker a folder of its own",
-                dir.display()
-            ));
-        }
-    }
-    for name in raw.connectors.sources.adapters.keys() {
-        problems.push(format!(
-            "connectors.sources.adapters.{name}: no source adapter is built yet; leave `adapters: {{}}`"
-        ));
-    }
-    let sources = Sources {
-        filter: raw.connectors.sources.filter.as_ref().map(|f| {
-            let at = "connectors.sources.filter";
-            let model = direct_adapter(
-                at,
-                &RawDirectAdapter {
-                    candidates: f.candidates.clone(),
-                    when_none: f.when_none,
-                    max_tokens: f.max_tokens,
-                },
-                &mut problems,
-            );
-            check_candidates(
-                &format!("{at}.try"),
-                &model.fallback.candidates,
-                false,
-                &kinds,
-                " in `llm`",
-                &mut problems,
-            );
-            if f.prompt.trim().is_empty() {
+        };
+        let mut trackers = BTreeMap::new();
+        for (name, t) in &self.trackers {
+            let at = format!("trackers.{name}");
+            if !super::runner::valid_name(name) {
                 problems.push(format!(
-                    "{at}.prompt: is empty; say what is confidential, such as salaries and clients' names"
+                    "{at}: the name must be letters, digits, '-', '_' or '.'"
                 ));
             }
-            SourceFilter {
-                model,
-                prompt: f.prompt.trim().to_string(),
+            let TrackerSetting::LocalMarkdown {
+                dir,
+                label,
+                poll_seconds,
+            } = t;
+            if dir.trim().is_empty() {
+                problems.push(format!("{at}.dir: is empty"));
             }
-        }),
-    };
-    for name in kinds.keys() {
-        let uses = |a: &DirectAdapter| a.fallback.candidates.iter().any(|c| &c.backend == name);
-        let used = uses(&knowledge.distill)
-            || knowledge.embed.as_ref().is_some_and(|e| &e.backend == name)
-            || sources.filter.as_ref().is_some_and(|f| uses(&f.model));
-        if !used {
-            eprintln!(
-                "ensemble: note: LLM backend '{name}' is defined but nothing in the hub uses it"
-            );
+            let label = label.trim();
+            if label.is_empty() || label.contains(char::is_whitespace) || label.contains(':') {
+                problems.push(format!(
+                    "{at}.label: '{label}' must be one word with no ':', such as ensemble"
+                ));
+            }
+            if *poll_seconds == 0 {
+                problems.push(format!("{at}: `poll_seconds` must be greater than 0"));
+            }
+            let tracker = Tracker {
+                kind: IssueTracker::LocalMarkdown {
+                    dir: base.join(dir.trim()),
+                },
+                label: label.to_string(),
+                poll_seconds: *poll_seconds,
+            };
+            trackers.insert(name.clone(), tracker);
+        }
+        // Two inboxes on one folder would each take its issues.
+        let mut watched: BTreeMap<&Path, &str> = BTreeMap::new();
+        for (name, tracker) in &trackers {
+            let IssueTracker::LocalMarkdown { dir } = &tracker.kind;
+            if let Some(first) = watched.insert(dir, name) {
+                problems.push(format!(
+                    "trackers.{name}: watches {}, as {first} does; give each tracker a folder of its own",
+                    dir.display()
+                ));
+            }
+        }
+        let tasks = Tasks { trackers };
+        let sources = Sources {
+            filter: self.source_filter.as_ref().map(|f| {
+                let model = models("source_filter", &f.models, false, &kinds, &mut problems);
+                if f.prompt.trim().is_empty() {
+                    problems.push(
+                        "source_filter.prompt: is empty; say what is confidential, such as salaries and clients' names".into(),
+                    );
+                }
+                SourceFilter {
+                    model,
+                    prompt: f.prompt.trim().to_string(),
+                }
+            }),
+        };
+        match (problems.is_empty(), http) {
+            (true, Some(http)) => Ok(Hub {
+                owner: self.owner.trim().to_string(),
+                http,
+                llm,
+                accounts,
+                connectors: Connectors {
+                    knowledge,
+                    tasks,
+                    sources,
+                },
+                source: source.to_path_buf(),
+            }),
+            _ => Err(ConfigError::Invalid {
+                path: source.to_path_buf(),
+                problems,
+            }),
         }
     }
-    match (problems.is_empty(), http) {
-        (true, Some(http)) => Ok(Hub {
-            version: raw.version,
-            owner: raw.owner.trim().to_string(),
-            http,
-            llm,
-            accounts,
-            connectors: Connectors {
-                knowledge,
-                tasks,
-                sources,
-            },
-            source: path.to_path_buf(),
-        }),
-        _ => Err(ConfigError::Invalid {
-            path: path.to_path_buf(),
-            problems,
-        }),
-    }
+}
+
+/// `kept` as a model list, checked against the backends of `kinds`; with
+/// `may_be_empty`, an empty `try` is no problem.
+fn models(
+    at: &str,
+    kept: &ModelsSetting,
+    may_be_empty: bool,
+    kinds: &BTreeMap<String, &'static str>,
+    problems: &mut Vec<String>,
+) -> DirectAdapter {
+    let raw = RawDirectAdapter {
+        candidates: kept
+            .candidates
+            .iter()
+            .map(|c| raw::RawDirectCandidate {
+                backend: c.backend.clone(),
+                model: c.model.clone(),
+            })
+            .collect(),
+        when_none: kept.when_none,
+        max_tokens: kept.max_tokens,
+    };
+    let mut found = Vec::new();
+    let adapter = direct_adapter(at, &raw, &mut found);
+    let empty = format!("{at}: `try` is empty");
+    problems.extend(
+        found
+            .into_iter()
+            .filter(|p| !(may_be_empty && p.starts_with(&empty))),
+    );
+    check_candidates(
+        &format!("{at}.try"),
+        &adapter.fallback.candidates,
+        false,
+        kinds,
+        " among the backends",
+        problems,
+    );
+    adapter
 }

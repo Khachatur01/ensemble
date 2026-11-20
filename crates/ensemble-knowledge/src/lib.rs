@@ -642,17 +642,37 @@ mod tests {
     use ensemble_core::workspace::testing::TempDir;
     use std::path::Path;
 
-    pub(crate) fn memory(tmp: &TempDir) -> Memory {
-        let yaml = format!(
-            "version: 1\nowner: Ana\nhttp: {{ listen: \"127.0.0.1:0\" }}\nllm:\n  direct:\n    backends:\n      local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\naccounts:\n  registration: {{ type: closed }}\n  sessions: {{ hours: 1 }}\n  lockout: {{ failures: 3, minutes: 1 }}\n  roles: {{ member: [share, recall] }}\nconnectors:\n  rest: {{}}\n  mcp: {{}}\n  runners: {{}}\n  knowledge:\n    vault: \"{}\"\n    distill:\n      try:\n        - {{ backend: local, model: small }}\n      when_none: wait\n      max_tokens: 100\n    recall: {{ max_notes: 3, max_chars: 1000 }}\n  tasks: {{ trackers: {{}} }}\n  sources: {{ adapters: {{}} }}\n",
-            tmp.0.join("vault").display()
+    /// The settings of a hub of Ana's whose one backend, `local`, is at `url`
+    /// and distills with `small`, its vault in `tmp`.
+    pub(crate) fn settings_on(tmp: &TempDir, url: &str) -> ensemble_config::HubSettings {
+        let mut s = ensemble_config::HubSettings::starting("Ana");
+        s.listen = "127.0.0.1:0".into();
+        s.backends.insert(
+            "local".into(),
+            ensemble_config::BackendSetting::OpenAiCompatible {
+                base_url: url.into(),
+                api_key_env: None,
+                timeout_seconds: 5,
+            },
         );
-        let hub = ensemble_config::parse_hub(
-            &yaml,
-            Path::new("hub.yaml"),
-            &std::collections::BTreeMap::new(),
-        )
-        .unwrap();
+        s.vault = tmp.0.join("vault").display().to_string();
+        s.distill = ensemble_config::ModelsSetting {
+            candidates: vec![ensemble_config::ModelSetting {
+                backend: "local".into(),
+                model: "small".into(),
+            }],
+            when_none: ensemble_config::WhenNone::Wait,
+            max_tokens: 100,
+        };
+        s.recall_max_notes = 3;
+        s.recall_max_chars = 1000;
+        s
+    }
+
+    pub(crate) fn memory(tmp: &TempDir) -> Memory {
+        let hub = settings_on(tmp, "http://127.0.0.1:1/v1")
+            .resolve(Path::new("database.db"), &std::collections::BTreeMap::new())
+            .unwrap();
         let memory = Memory::new(&hub, Some("shop".into()));
         memory.vault().init().unwrap();
         memory

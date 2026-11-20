@@ -2,7 +2,7 @@
 
 use clap::{CommandFactory, Parser, Subcommand};
 use ensemble_ops::Registry;
-use ensemble_ops::cli::{config_extras, mount};
+use ensemble_ops::cli::mount;
 use std::path::PathBuf;
 
 const AFTER_HELP: &str = "\
@@ -10,7 +10,8 @@ Files:
   ~/.config/ensemble/hub/  database.db, master.key, .env, vault/
 
 The hub's settings are kept in database.db, and changed with its commands, its
-REST API or a web UI. `backend add` and `backend key` keep a backend's key
+REST API or a web UI; `settings show` shows them, `settings history` who
+changed what. `backend add` and `backend key` keep a backend's key
 sealed there by master.key: back up both, as without master.key no key can be
 read. A key a secrets manager keeps is read from the environment, or from the
 hub's .env (or --env-file). Client agents reach the hub over MCP, with an
@@ -44,28 +45,41 @@ pub fn command<H>(hub: &Registry<H>) -> clap::Command {
             "How what sources bring in is collected and filtered.",
         ),
         (
-            "config",
-            "The hub's settings, kept in its database, by their keys joined by dots, such as http.listen",
+            "settings",
+            "The hub's settings, kept in its database: every one, who changed them, and those of the hub itself.",
         ),
     ];
-    config_extras(mount(Cli::command(), hub, &groups))
+    mount(Cli::command(), hub, &groups)
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Write a sample hub: its settings, every one of them, in its database,
-    /// and its vault.
+    /// Make the hub, asking what it is called and who its first admin is,
+    /// and sign this computer's runner in to it; what is done already is kept.
+    Setup {
+        /// The hub's name; asked, or your user name.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Its first admin; asked, or your user name.
+        #[arg(long)]
+        admin: Option<String>,
+        /// Ask nothing: take what is given, and your user name.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Make the settings a new hub starts with, and its vault: on this
+    /// computer alone, closed to sign-ups, with no backend or model yet.
     Init {
-        /// Write the sample in place of the settings there are.
+        /// Make them anew in place of those there are.
         #[arg(long, conflicts_with = "keep")]
         force: bool,
-        /// Keep the settings there are, and write the sample only when there
-        /// are none: what the NixOS module runs before the hub starts.
+        /// Keep the settings there are, and make them only when there are
+        /// none: what the NixOS module runs before the hub starts.
         #[arg(long)]
         keep: bool,
-        /// Print the sample instead.
+        /// The hub's name; your user name when left out.
         #[arg(long)]
-        stdout: bool,
+        owner: Option<String>,
     },
     /// Load and validate the hub's settings, and say which model would
     /// distill now.

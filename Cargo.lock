@@ -775,7 +775,6 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
- "serde_norway",
  "tokio",
 ]
 
@@ -806,7 +805,10 @@ version = "0.1.0"
 dependencies = [
  "ensemble-config",
  "ensemble-core",
+ "ensemble-ops",
  "ring",
+ "serde",
+ "serde_json",
  "tokio",
  "turso",
 ]

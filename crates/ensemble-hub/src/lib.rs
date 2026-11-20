@@ -47,7 +47,7 @@ pub mod users;
 use accounts::HubContext;
 use clap::FromArgMatches;
 use ensemble_core::state;
-use ensemble_ops::cli::{is_config_extra, matched, run_config_extra};
+use ensemble_ops::cli::matched;
 use ensemble_ops::{Error, Registry};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -77,33 +77,32 @@ fn dispatch(matches: &clap::ArgMatches, hub: &Registry<HubContext>) -> Result<Ex
     let ctx = Ctx {
         env_file: matches.get_one::<PathBuf>("env_file").cloned(),
     };
-    if matched(hub, matches).is_some() || is_config_extra(matches) {
-        // The running hub runs it, else this process does; a hub that runs
-        // with no socket takes no commands.
-        let hub_dir = state::hub_dir()?;
-        let route = ensemble_ops::local::Route::to(&state::hub_socket(&hub_dir), || {
-            if let Some(pid) = ensemble_core::lock::holder(&hub_dir) {
-                return Err(format!(
-                    "the running hub (process {pid}) does not answer on its socket; stop it and start it again"
-                ));
-            }
-            cmd::context(&ctx)
-        });
+    if let Some((name, leaf)) = matched(hub, matches) {
+        let route = route(&ctx);
         let call = |name: &str, input| {
             route
                 .as_ref()
                 .map_err(|e| Error::failed(e.clone()))?
                 .call(hub, name, input)
         };
-        if let Some((name, leaf)) = matched(hub, matches) {
-            return ensemble_ops::cli::run(hub, &call, name, leaf);
-        }
-        if let Some(done) = run_config_extra(matches, &call) {
-            return done;
-        }
+        return ensemble_ops::cli::run(hub, &call, name, leaf);
     }
     let cli = cli::Cli::from_arg_matches(matches).map_err(|e| e.to_string())?;
     cmd::run(&ctx, cli.command)
+}
+
+/// Where the hub's operations run: in the running hub, over its socket, else
+/// in this process. A hub that runs with no socket takes no commands.
+fn route(ctx: &Ctx) -> Result<ensemble_ops::local::Route<HubContext>, String> {
+    let hub_dir = state::hub_dir()?;
+    ensemble_ops::local::Route::to(&state::hub_socket(&hub_dir), || {
+        if let Some(pid) = ensemble_core::lock::holder(&hub_dir) {
+            return Err(format!(
+                "the running hub (process {pid}) does not answer on its socket; stop it and start it again"
+            ));
+        }
+        cmd::context(ctx)
+    })
 }
 
 /// What every command is given: the global options, resolved.

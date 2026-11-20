@@ -643,7 +643,7 @@ mod tests {
             "the path names it"
         );
         assert_eq!(body["required"], json!(["role"]), "{body}");
-        assert!(paths.contains_key("/api/v1/ops/config.set"));
+        assert!(paths.contains_key("/api/v1/ops/settings.owner"));
 
         // Each route the document shows is one the API answers.
         let (_, session) = login(&hub.url, "root", PASSWORD);

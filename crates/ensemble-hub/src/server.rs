@@ -673,13 +673,40 @@ pub mod testing {
     /// The test hub, keeping tasks in `tasks` when given.
     pub fn start_with(tasks: Option<&'static dyn TaskService>) -> Running {
         let tmp = TempDir::new();
-        let yaml = format!(
-            "version: 1\nowner: Acme\nhttp: {{ listen: \"127.0.0.1:0\" }}\nllm:\n  direct:\n    backends:\n      local: {{ type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5 }}\naccounts:\n  registration: {{ type: approval, max_pending: 2 }}\n  sessions: {{ hours: 1 }}\n  lockout: {{ failures: 3, minutes: 1 }}\n  roles:\n    admin: [admin, recall, tasks, host]\n    member: [share, recall, tasks, compute]\n    reader: [recall]\nconnectors:\n  rest: {{}}\n  mcp: {{}}\n  runners: {{}}\n  knowledge:\n    vault: \"{}\"\n    distill:\n      try:\n        - {{ backend: local, model: small }}\n      when_none: wait\n      max_tokens: 100\n    recall: {{ max_notes: 3, max_chars: 1000 }}\n  tasks: {{ trackers: {{}} }}\n  sources: {{ adapters: {{}} }}\n",
-            tmp.0.join("vault").display()
+        use ensemble_config::Permission::*;
+        let mut s = ensemble_config::HubSettings::starting("Acme");
+        s.listen = "127.0.0.1:0".into();
+        s.backends.insert(
+            "local".into(),
+            ensemble_config::BackendSetting::OpenAiCompatible {
+                base_url: "http://127.0.0.1:1/v1".into(),
+                api_key_env: None,
+                timeout_seconds: 5,
+            },
         );
-        let hub =
-            ensemble_config::parse_hub(&yaml, std::path::Path::new("hub.yaml"), &BTreeMap::new())
-                .unwrap();
+        s.registration = ensemble_config::RegistrationSetting::Approval { max_pending: 2 };
+        s.session_hours = 1;
+        s.lockout_failures = 3;
+        s.lockout_minutes = 1;
+        s.roles = [
+            ("admin", vec![Admin, Recall, Tasks, Host]),
+            ("member", vec![Share, Recall, Tasks, Compute]),
+            ("reader", vec![Recall]),
+        ]
+        .into_iter()
+        .map(|(name, can)| (name.to_string(), can))
+        .collect();
+        s.vault = tmp.0.join("vault").display().to_string();
+        s.distill.candidates = vec![ensemble_config::ModelSetting {
+            backend: "local".into(),
+            model: "small".into(),
+        }];
+        s.distill.max_tokens = 100;
+        s.recall_max_notes = 3;
+        s.recall_max_chars = 1000;
+        let hub = s
+            .resolve(std::path::Path::new("database.db"), &BTreeMap::new())
+            .unwrap();
         let memory = Memory::new(&hub, None);
         memory.vault().init().unwrap();
         memory

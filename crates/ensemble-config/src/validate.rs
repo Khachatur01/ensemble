@@ -484,43 +484,35 @@ pub(super) fn codex_adapter(
     }
 }
 
+/// A backend the process calls itself, checked, with its key from `env`: a
+/// URL, a timeout and an optional key. Not one a runner serves.
 pub(super) fn resolve_backend(
     at: &str,
     name: &str,
-    rb: &RawLlmBackend,
+    kept: &crate::llm::BackendSetting,
     env: &dyn Env,
 ) -> Result<LlmBackend, Vec<String>> {
-    match rb {
-        RawLlmBackend::OpenAiCompatibleApi(b) => resolve_openai(at, name, b, env),
-        RawLlmBackend::AnthropicApi(b) => {
-            // The same checks: a URL, a timeout and an optional key.
-            let as_openai = RawOpenAiBackend {
-                base_url: b.base_url.clone(),
-                api_key_env: b.api_key_env.clone(),
-                timeout_seconds: b.timeout_seconds,
-            };
-            resolve_openai(at, name, &as_openai, env).map(|mut done| {
-                if let BackendSettings::OpenAiCompatible { base_url, api_key } = done.settings {
-                    done.settings = BackendSettings::Anthropic { base_url, api_key };
-                }
-                done
-            })
+    use crate::llm::BackendSetting;
+    let (anthropic, base_url, api_key_env, timeout_seconds) = match kept {
+        BackendSetting::OpenAiCompatible {
+            base_url,
+            api_key_env,
+            timeout_seconds,
+        } => (false, base_url, api_key_env, *timeout_seconds),
+        BackendSetting::Anthropic {
+            base_url,
+            api_key_env,
+            timeout_seconds,
+        } => (true, base_url, api_key_env, *timeout_seconds),
+        BackendSetting::Runner { .. } => {
+            return Err(vec![format!("{at}: is served by a runner, not called")]);
         }
-    }
-}
-
-/// Check the URL and timeout, and read the optional key from the environment.
-pub(super) fn resolve_openai(
-    at: &str,
-    name: &str,
-    b: &RawOpenAiBackend,
-    env: &dyn Env,
-) -> Result<LlmBackend, Vec<String>> {
+    };
     let mut problems = Vec::new();
-    if b.timeout_seconds == 0 {
+    if timeout_seconds == 0 {
         problems.push(format!("{at}: `timeout_seconds` must be greater than 0"));
     }
-    let base_url = b.base_url.trim();
+    let base_url = base_url.trim();
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
         problems.push(format!(
             "{at}: `base_url` '{base_url}' must start with http:// or https://"
@@ -531,7 +523,7 @@ pub(super) fn resolve_openai(
     // *named* variable that is empty is a different thing from no variable at
     // all: somebody expected authentication. Say so rather than sending an
     // empty bearer token and reading a 401 later.
-    let api_key = match &b.api_key_env {
+    let api_key = match api_key_env {
         None => None,
         Some(key_var) => match env.get(key_var).filter(|v| !v.trim().is_empty()) {
             Some(k) => Some(k),
@@ -546,12 +538,14 @@ pub(super) fn resolve_openai(
     };
 
     if problems.is_empty() {
+        let base_url = base_url.trim_end_matches('/').to_string();
         Ok(LlmBackend {
             name: name.to_string(),
-            timeout_seconds: b.timeout_seconds,
-            settings: BackendSettings::OpenAiCompatible {
-                base_url: base_url.trim_end_matches('/').to_string(),
-                api_key,
+            timeout_seconds,
+            settings: if anthropic {
+                BackendSettings::Anthropic { base_url, api_key }
+            } else {
+                BackendSettings::OpenAiCompatible { base_url, api_key }
             },
         })
     } else {

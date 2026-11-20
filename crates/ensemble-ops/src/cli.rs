@@ -8,9 +8,8 @@
 //! an operation needs one, it is asked for, without echo, or read from stdin,
 //! and the operation runs again.
 //!
-//! A settings file's `config` group gets what only a command line does with
-//! it ([`config_extras`]): `edit`, in $VISUAL or $EDITOR, which reads and
-//! writes through the `config.*` operations.
+//! A team's settings file is edited in $VISUAL or $EDITOR ([`edit`]), through
+//! its `config.*` operations.
 
 use crate::{Access, Code, Error, Field, Kind, Registry};
 use serde_json::{Map, Value, json};
@@ -57,9 +56,17 @@ pub fn mount<C>(
     command
 }
 
+/// The flag every operation's command has, which prints its output as JSON.
+const JSON: &str = "json";
+
 /// The command of one operation.
 fn leaf(verb: &'static str, summary: &'static str, input: &'static [Field]) -> clap::Command {
-    let mut command = clap::Command::new(verb).about(line(summary));
+    let mut command = clap::Command::new(verb).about(line(summary)).arg(
+        clap::Arg::new(JSON)
+            .long(JSON)
+            .action(clap::ArgAction::SetTrue)
+            .help("Print what it answers as JSON, for a script"),
+    );
     for field in input {
         if field.kind == Kind::Secret {
             continue;
@@ -161,6 +168,11 @@ pub fn run<C>(
             }
         }
     };
+    if matches.get_flag(JSON) {
+        let json = serde_json::to_string_pretty(&output).map_err(|e| e.to_string())?;
+        println!("{json}");
+        return Ok(ExitCode::SUCCESS);
+    }
     let said = op.show(&output);
     if !said.out.is_empty() {
         println!("{}", said.out);
@@ -178,39 +190,6 @@ fn line(text: &'static str) -> &'static str {
 
 /// How an operation is run, where it runs.
 pub type Call<'a> = &'a dyn Fn(&str, Value) -> Result<Value, Error>;
-
-/// `command`'s `config` group with `edit`, which only a command line has.
-pub fn config_extras(command: clap::Command) -> clap::Command {
-    command.mut_subcommand("config", |config| {
-        config.subcommand(
-            clap::Command::new("edit").about(
-                "Open the settings in $VISUAL or $EDITOR, and keep the change only if it loads",
-            ),
-        )
-    })
-}
-
-/// Whether `matches` names `config edit`, which only the command line has.
-pub fn is_config_extra(matches: &clap::ArgMatches) -> bool {
-    matches!(
-        matches.subcommand(),
-        Some(("config", c)) if c.subcommand_name() == Some("edit")
-    )
-}
-
-/// `config edit`, when `matches` names it, through `call`.
-pub fn run_config_extra(
-    matches: &clap::ArgMatches,
-    call: Call<'_>,
-) -> Option<Result<ExitCode, String>> {
-    let ("config", config) = matches.subcommand()? else {
-        return None;
-    };
-    match config.subcommand()? {
-        ("edit", _) => Some(edit(call).map(|()| ExitCode::SUCCESS)),
-        _ => None,
-    }
-}
 
 /// Edit a copy of the settings file in $VISUAL or $EDITOR, and keep it
 /// through `config.replace`, which refuses it when it would not load, or the

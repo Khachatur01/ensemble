@@ -10,6 +10,7 @@
 //!
 //! No test here needs the network, a model server or an agent CLI.
 
+use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -71,39 +72,29 @@ impl Scratch {
     /// folder, where its database is.
     fn runner(&self) -> PathBuf {
         if runner_settings(&self.runner_dir()).is_none() {
-            self.runner_with("{}");
+            self.runner_with(json!({}));
         }
         self.runner_dir()
     }
 
     /// The runner `desk`, working in [`Scratch::workspace`], with `backends`
-    /// as its own LLM backends: the lines of a mapping indented six spaces,
-    /// or `{}`.
-    fn runner_with(&self, backends: &str) -> PathBuf {
+    /// as its LLM backends, by name.
+    fn runner_with(&self, backends: Value) -> PathBuf {
         let dir = self.runner_dir();
+        let mut runner = runner_doc("desk", "owner", backends);
+        runner["workspace"] = json!(self.workspace());
         // The hub it names, if it names one, it keeps.
-        let hub = runner_settings(&dir)
-            .and_then(|t| {
-                t.lines()
-                    .find(|l| l.starts_with("hub:"))
-                    .map(|l| format!("{l}\n"))
-            })
-            .unwrap_or_default();
-        write_runner(
-            &dir,
-            format!(
-                "version: 1\nname: desk\nworks_for: owner\nworkspace: \"{}\"\n{hub}{}",
-                self.workspace().display(),
-                llm_block(backends)
-            ),
-        );
+        if let Some(before) = runner_settings(&dir) {
+            runner["hub"] = before["hub"].clone();
+        }
+        write_runner(&dir, runner);
         dir
     }
 
     /// The runner `desk` with `openai-local`, the backend [`config_yaml`]'s
     /// coder runs on, at `url`.
     fn local_backend(&self, url: &str) -> PathBuf {
-        self.runner_with(&local_backend(url))
+        self.runner_with(local_backend(url))
     }
 
     /// The scratch computer's runner's workspace: a folder of git
@@ -207,44 +198,58 @@ impl Drop for Scratch {
     }
 }
 
-/// A runner's `llm` block with `backends` as its own: the lines of a mapping
-/// indented six spaces, or `{}`. It shares none.
-fn llm_block(backends: &str) -> String {
-    let backends = if backends.trim() == "{}" {
-        " {}\n".to_string()
-    } else {
-        format!("\n{}\n", backends.trim_matches('\n'))
-    };
-    format!("llm:\n  direct:\n    backends:{backends}    shares: []\n    max_shared_calls: 1\n")
+/// A runner's settings: `name`, working for `works_for`, with `backends` by
+/// name, sharing none; its workspace and its hub are filled in where it runs.
+fn runner_doc(name: &str, works_for: &str, backends: Value) -> Value {
+    json!({
+        "name": name,
+        "works_for": works_for,
+        "workspace": null,
+        "hub": null,
+        "backends": backends,
+        "shares": [],
+        "max_shared_calls": 1,
+    })
 }
 
-/// `openai-local`, the backend [`config_yaml`]'s coder runs on, at `url`, as
-/// a line of [`llm_block`].
+/// An OpenAI-compatible backend at `url`, taking at most `timeout` seconds.
+fn openai(url: &str, timeout: u64) -> Value {
+    json!({ "type": "openai-compatible-api", "base_url": url, "api_key_env": null, "timeout_seconds": timeout })
+}
+
 /// The settings of the runner in `dir`, as its database keeps them, if it
 /// has any.
-fn runner_settings(dir: &Path) -> Option<String> {
-    use ensemble_config::settings_file::Store;
-    ensemble_runner::kept::settings(dir).read().unwrap()
+fn runner_settings(dir: &Path) -> Option<Value> {
+    use ensemble_config::kept::Keep;
+    ensemble_runner::kept::settings(dir)
+        .read()
+        .unwrap()
+        .map(|s| serde_json::to_value(s).unwrap())
 }
 
 /// The settings of the runner in `dir`.
-fn read_runner(dir: &Path) -> String {
+fn read_runner(dir: &Path) -> Value {
     runner_settings(dir).expect("the runner has its settings")
 }
 
-/// Keep `text` as the settings of the runner in `dir`, as a change by hand
-/// would, which a running runner does not hear of.
-fn write_runner(dir: &Path, text: impl AsRef<str>) {
-    use ensemble_config::settings_file::Store;
+/// Keep `settings` as those of the runner in `dir`, as nothing but a test
+/// does, which a running runner does not hear of.
+fn write_runner(dir: &Path, settings: Value) {
+    use ensemble_config::kept::{Change, Keep};
+    let settings: ensemble_config::RunnerSettings = serde_json::from_value(settings).unwrap();
     ensemble_runner::kept::settings(dir)
-        .write(text.as_ref())
+        .write(&settings, &Change::by_this_computer("test"))
         .unwrap();
 }
 
-fn local_backend(url: &str) -> String {
-    format!(
-        "      openai-local: {{ type: openai-compatible-api, base_url: \"{url}\", api_key_env: ENSEMBLE_TEST_LOCAL_KEY, timeout_seconds: 20 }}"
-    )
+/// `openai-local`, the backend [`config_yaml`]'s coder runs on, at `url`.
+fn local_backend(url: &str) -> Value {
+    json!({ "openai-local": {
+        "type": "openai-compatible-api",
+        "base_url": url,
+        "api_key_env": "ENSEMBLE_TEST_LOCAL_KEY",
+        "timeout_seconds": 20,
+    } })
 }
 
 /// The helper team: two OpenCode agents run by `command`: `reviewer` on a
@@ -447,30 +452,29 @@ agents:
     assert!(err.contains("max_seconds"), "{err}");
     assert!(err.contains("`name` is empty"), "{err}");
     // A runner's backend is checked as the runner is read.
-    s.runner_with(
-        "      x: { type: openai-compatible-api, base_url: \"nope\", timeout_seconds: 0 }",
-    );
+    s.runner_with(json!({ "x": openai("nope", 0) }));
     let err = stderr_of(&ensemble_runner(&s, &["team", "check"]));
     assert!(
-        err.contains("llm.direct.backends.x: `base_url` 'nope'")
-            && err.contains("llm.direct.backends.x: `timeout_seconds`"),
+        err.contains("backends.x: `base_url` 'nope'")
+            && err.contains("backends.x: `timeout_seconds`"),
         "{err}"
     );
 }
 
 #[test]
-fn an_api_key_written_into_the_runner_file_is_refused() {
+fn an_api_key_written_into_the_runners_settings_is_refused() {
     let s = Scratch::new("inline-key");
-    s.runner_with(
-        "      x: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\", timeout_seconds: 5, api_key: sk-should-never-be-here }",
-    );
-    s.write("@team/config.yaml", &config_yaml("opencode"));
-    let out = ensemble_runner(&s, &["team", "check"]);
+    let dir = s.runner();
+    let mut settings = read_runner(&dir);
+    settings["backends"]["x"] = openai("http://127.0.0.1:1/v1", 5);
+    settings["backends"]["x"]["api_key"] = json!("sk-should-never-be-here");
+    let out = ensemble_runner(&s, &["settings", "import", &settings.to_string()]);
     assert!(
         !out.status.success(),
-        "secrets in the runner file must not load"
+        "secrets in the runner's settings must not load"
     );
     assert!(stderr_of(&out).contains("api_key"), "{}", stderr_of(&out));
+    assert!(read_runner(&dir)["backends"].get("x").is_none());
 }
 
 #[test]
@@ -718,9 +722,7 @@ fn team_new_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_acci
     );
 
     // On a runner with the backends the sample names.
-    s.runner_with(&format!(
-        "      local: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}\n      central: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}"
-    ));
+    s.runner_with(json!({ "local": openai(NOWHERE, 5), "central": openai(NOWHERE, 5) }));
     let check = ensemble_runner(&s, &["team", "check"]);
     assert!(check.status.success(), "{}", stderr_of(&check));
     let text = stdout_of(&check);
@@ -946,10 +948,9 @@ fn setup_writes_the_runner_and_checks_its_teams() {
     );
     let runner = s.runner_dir();
     let written = read_runner(&runner);
-    assert!(
-        written.contains("name: \"desk\"")
-            && written.contains("workspace: \"~/code\"")
-            && written.contains("version: 1"),
+    assert_eq!(
+        (&written["name"], &written["workspace"]),
+        (&json!("desk"), &json!("~/code")),
         "{written}"
     );
     assert!(
@@ -985,7 +986,7 @@ fn setup_without_any_agent_cli_says_so_and_writes_the_runner() {
         stdout_of(&out)
     );
     let written = read_runner(&s.runner_dir());
-    assert!(written.contains("workspace: \"~/ensemble\""), "{written}");
+    assert_eq!(written["workspace"], "~/ensemble", "{written}");
 }
 
 #[test]
@@ -1522,10 +1523,14 @@ fn show_prints_how_a_codex_agent_starts() {
 #[test]
 fn a_light_agent_on_an_anthropic_backend_shows_a_messages_request() {
     let s = Scratch::new("show-anthropic");
-    s.runner_with(&format!(
-        "{}\n      claude-api: {{ type: anthropic-api, base_url: \"https://api.anthropic.com\", api_key_env: ENSEMBLE_TEST_ANTHROPIC_KEY, timeout_seconds: 30 }}",
-        local_backend(NOWHERE)
-    ));
+    let mut backends = local_backend(NOWHERE);
+    backends["claude-api"] = json!({
+        "type": "anthropic-api",
+        "base_url": "https://api.anthropic.com",
+        "api_key_env": "ENSEMBLE_TEST_ANTHROPIC_KEY",
+        "timeout_seconds": 30,
+    });
+    s.runner_with(backends);
     s.write("@team/config.yaml", &config_yaml("opencode"));
     let out = ensemble_runner(
         &s,
@@ -1576,9 +1581,7 @@ fn git_in(dir: &Path, args: &[&str]) -> String {
 fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
     let s = Scratch::new("show-probe");
     let central = models_stub(r#"{"data":[{"id":"big"}]}"#);
-    s.runner_with(&format!(
-        "      home: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}\n      central: {{ type: openai-compatible-api, base_url: \"{central}\", timeout_seconds: 5 }}"
-    ));
+    s.runner_with(json!({ "home": openai(NOWHERE, 5), "central": openai(&central, 5) }));
     s.write(
         "@team/config.yaml",
         "version: 1\nlimits: {}\ngates: {}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: direct\n      try:\n        - { backend: home, model: small }\n        - { backend: central, model: big }\n      when_none: wait\n      max_tokens: 10\n",
@@ -1629,9 +1632,13 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
         stderr_of(&out)
     );
 
-    let out = ensemble_hub(&scratch, &["init"]);
+    let out = ensemble_hub(&scratch, &["init", "--owner", "Acme"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(read_hub(&hub).contains("connectors:"));
+    let made = read_hub(&hub);
+    assert_eq!(made["owner"], "Acme");
+    assert_eq!(made["listen"], "127.0.0.1:7700", "this computer alone");
+    assert_eq!(made["registration"], json!({ "type": "closed" }));
+    assert_eq!(made["backends"], json!({}));
     assert!(
         hub.join("vault/.git").exists(),
         "the vault is a git repository"
@@ -1645,36 +1652,25 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
     let kept = ensemble_hub(&scratch, &["init", "--keep"]);
     assert!(kept.status.success(), "{}", stderr_of(&kept));
     assert!(stdout_of(&kept).is_empty(), "{}", stdout_of(&kept));
-    let at = stdout_of(&ensemble_hub(&scratch, &["config", "path"]));
+    let shown = stdout_of(&ensemble_hub(&scratch, &["settings", "show"]));
     assert!(
-        at.contains("the hub's settings, in") && at.contains("database.db"),
-        "{at}"
+        shown.contains("owner: Acme") && shown.contains("listen: 127.0.0.1:7700"),
+        "{shown}"
     );
     assert!(!hub.join("hub.yaml").exists());
+    let check = ensemble_hub(&scratch, &["check"]);
+    assert!(check.status.success(), "{}", stderr_of(&check));
 
     let url = models_stub(r#"{"data":[{"id":"small"}]}"#);
-    let text = read_hub(&hub);
-    let (head, tail) = text.split_once("\nllm:\n").unwrap();
-    let (_, rest) = tail.split_once("# ---").unwrap();
-    let (_, try_and_on) = rest.split_once("      try:").unwrap();
-    let after_try = try_and_on
-        .split_once("      when_none:")
-        .unwrap()
-        .1
-        .replace("backend: central", "backend: up");
-    // The sample's embedding model is on a backend this test takes out.
-    let accounts_to_try = rest
-        .split_once("      try:")
-        .unwrap()
-        .0
-        .replace("backend: central", "backend: up");
-    write_hub(
-        &hub,
-        format!(
-            "{head}\nllm:\n  direct:\n    backends:\n      down: {{ type: openai-compatible-api, base_url: \"{NOWHERE}\", timeout_seconds: 5 }}\n      up: {{ type: openai-compatible-api, base_url: \"{url}\", timeout_seconds: 5 }}\n\n# ---{accounts_to_try}      try:\n        - {{ backend: down, model: small }}\n        - {{ backend: up, model: small }}\n      when_none:{after_try}"
-        ),
-    )
-    .unwrap();
+    let mut settings = read_hub(&hub);
+    settings["backends"] = json!({ "down": openai(NOWHERE, 5), "up": openai(&url, 5) });
+    settings["distill"]["try"] = json!([
+        { "backend": "down", "model": "small" },
+        { "backend": "up", "model": "small" },
+    ]);
+    settings["embed"] =
+        json!({ "backend": "up", "model": "nomic-embed-text", "min_similarity": 0.5 });
+    write_hub(&hub, settings).unwrap();
     let out = ensemble_hub(&scratch, &["check"]);
     assert!(
         out.status.success(),
@@ -1722,12 +1718,11 @@ fn items_stub(items: &str) -> String {
     models_stub(&chat.to_string())
 }
 
-/// Point the scratch hub's distilling models at `url`, the first of them.
+/// Point the scratch hub's distilling model's server at `url`.
 fn distill_on(hub: &Path, url: &str) {
-    let text = read_hub(hub);
-    let start = text.find("base_url: ").unwrap() + "base_url: ".len();
-    let end = start + text[start..].find('\n').unwrap();
-    write_hub(hub, format!("{}\"{url}\"{}", &text[..start], &text[end..])).unwrap();
+    let mut settings = read_hub(hub);
+    settings["backends"]["central"]["base_url"] = json!(url);
+    write_hub(hub, settings).unwrap();
 }
 
 #[test]
@@ -1856,43 +1851,54 @@ fn hub_dir(scratch: &Scratch) -> PathBuf {
 }
 
 /// The settings of the hub in `hub`, as its database keeps them.
-fn read_hub(hub: &Path) -> String {
-    use ensemble_config::settings_file::Store;
-    ensemble_hub::kept::settings(hub)
+fn read_hub(hub: &Path) -> Value {
+    use ensemble_config::kept::Keep;
+    let settings = ensemble_hub::kept::settings(hub)
         .read()
         .unwrap()
-        .expect("the hub has its settings")
+        .expect("the hub has its settings");
+    serde_json::to_value(settings).unwrap()
 }
 
-/// Keep `text` as the settings of the hub in `hub`, as a change by hand
-/// would, which the running hub does not hear of.
-fn write_hub(hub: &Path, text: impl AsRef<str>) -> Result<(), String> {
-    use ensemble_config::settings_file::Store;
-    ensemble_hub::kept::settings(hub).write(text.as_ref())
+/// Keep `settings` as those of the hub in `hub`, as nothing but a test does,
+/// which the running hub does not hear of.
+fn write_hub(hub: &Path, settings: Value) -> Result<(), String> {
+    use ensemble_config::kept::{Change, Keep};
+    let settings: ensemble_config::HubSettings =
+        serde_json::from_value(settings).map_err(|e| e.to_string())?;
+    ensemble_hub::kept::settings(hub).write(&settings, &Change::by_this_computer("test"))
 }
 
-/// A hub made by `ensemble-hub init` on the scratch computer.
+/// A hub made by `ensemble-hub init` on the scratch computer, with a model
+/// server, `central`, that distills, embeds and filters, open to sign-ups,
+/// and watching a folder of issues.
 fn hub_server_of(scratch: &Scratch) -> PathBuf {
-    let out = hub_command(scratch).args(["init"]).output().unwrap();
+    let out = hub_command(scratch)
+        .args(["init", "--owner", "Acme"])
+        .output()
+        .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
-    // No test reaches a hosted model or another runner's: the sample's
-    // Anthropic backend and those of runners go.
     let hub = hub_dir(scratch);
-    let text = read_hub(&hub);
-    let cut = |text: &str, from: &str, to: &str| {
-        let start = text.find(from).unwrap();
-        let end = start + text[start..].find(to).unwrap();
-        format!("{}{}", &text[..start], &text[end..])
-    };
-    let text = cut(&text, "      claude:\n", "  # Backends runners offer");
-    let text = cut(&text, "  # Backends runners offer", "\n\n");
-    let text = text
-        .replace(
-            "        - backend: claude\n          model: claude-haiku-4-5\n",
-            "",
-        )
-        .replace("        - backend: gpu\n          model: qwen3.5:9b\n", "");
-    write_hub(&hub, text).unwrap();
+    let mut s = read_hub(&hub);
+    let central = json!([{ "backend": "central", "model": "qwen3.5-72b" }]);
+    s["registration"] = json!({ "type": "approval", "max_pending": 20 });
+    s["backends"] = json!({ "central": {
+        "type": "openai-compatible-api",
+        "base_url": "http://127.0.0.1:8000/v1",
+        "api_key_env": "CENTRAL_API_KEY",
+        "timeout_seconds": 300,
+    } });
+    s["distill"]["try"] = central.clone();
+    s["embed"] =
+        json!({ "backend": "central", "model": "nomic-embed-text", "min_similarity": 0.5 });
+    s["trackers"] = json!({ "issues": {
+        "type": "local_markdown", "dir": "issues", "label": "ensemble", "poll_seconds": 30,
+    } });
+    s["source_filter"] = json!({
+        "models": { "try": central, "when_none": "wait", "max_tokens": 2000 },
+        "prompt": "Salaries, and prices agreed with clients.",
+    });
+    write_hub(&hub, s).unwrap();
     hub
 }
 
@@ -1902,14 +1908,10 @@ fn runner_names_hub(scratch: &Scratch, url: &str) {
         .0
         .with_extension("xdg-config")
         .join("ensemble/runner");
-    write_runner(
-        &config,
-        format!(
-            "version: 1\nname: desk\nworks_for: owner\nworkspace: \"{}\"\nhub: \"{url}\"\n{}",
-            scratch.workspace().display(),
-            llm_block(&local_backend(NOWHERE))
-        ),
-    );
+    let mut runner = runner_doc("desk", "owner", local_backend(NOWHERE));
+    runner["workspace"] = json!(scratch.workspace());
+    runner["hub"] = json!(url);
+    write_runner(&config, runner);
 }
 
 /// The scratch computer's runner, naming the hub at `url` and signed in to
@@ -1943,8 +1945,9 @@ fn hub_server(scratch: &Scratch) -> (PathBuf, String, String) {
     let hub = hub_server_of(scratch);
     let port = free_port();
     let address = format!("127.0.0.1:{port}");
-    let text = read_hub(&hub);
-    write_hub(&hub, text.replace("127.0.0.1:7700", &address)).unwrap();
+    let mut settings = read_hub(&hub);
+    settings["listen"] = json!(address);
+    write_hub(&hub, settings).unwrap();
     let out = hub_command(scratch)
         .args(["user", "add", "ana", "--role", "member"])
         .output()
@@ -2314,12 +2317,8 @@ fn someone_signs_up_is_let_in_and_logs_in_from_a_runner_with_a_password() {
     drop(child);
 
     // A closed hub takes no sign-ups.
-    let text = read_hub(&hub);
-    let closed = text.replace(
-        "    type: approval               # anyone may sign up; an admin approves. Or: { type: closed }\n    max_pending: 20              # sign-ups waiting at once\n",
-        "    type: closed\n",
-    );
-    assert_ne!(closed, text);
+    let mut closed = read_hub(&hub);
+    closed["registration"] = json!({ "type": "closed" });
     write_hub(&hub, closed).unwrap();
     let _child = serve_hub(&s, &hub);
     let (status, _) = post_json(
@@ -2383,10 +2382,8 @@ fn a_runner_is_made_once_and_an_account_names_itself_in_the_tracker() {
     let out = runner_command(&s).args(["init"]).output().unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     let written = read_runner(&s.runner_dir());
-    assert!(
-        written.contains("llm:") && written.contains("workspace: \"~/ensemble\""),
-        "{written}"
-    );
+    assert_eq!(written["workspace"], "~/ensemble", "{written}");
+    assert_eq!(written["backends"], json!({}), "{written}");
     assert!(
         !s.runner_dir().join("runner.yaml").exists(),
         "its settings are kept in its database"
@@ -2434,12 +2431,9 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_runner_and_reported_back() 
     let shop = s.repo("shop");
     std::fs::write(shop.join("a.txt"), "foo\n").unwrap();
     let (hub, address, token) = hub_server(&s);
-    let text = read_hub(&hub);
-    write_hub(
-        &hub,
-        text.replace("  poll_seconds: 30\n", "  poll_seconds: 1\n"),
-    )
-    .unwrap();
+    let mut settings = read_hub(&hub);
+    settings["trackers"]["issues"]["poll_seconds"] = json!(1);
+    write_hub(&hub, settings).unwrap();
     let out = hub_command(&s)
         .args(["user", "tracker", "ana", "ana.p"])
         .output()
@@ -2483,23 +2477,14 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_runner_and_reported_back() 
 /// and state directories, with `runner_yaml` as its runner, working in the
 /// machine's `workspace` folder unless it says otherwise, and signed in to the
 /// hubs the scratch signed in to.
-fn on_machine(scratch: &Scratch, machine: &str, runner_yaml: &str) -> Command {
+fn on_machine(scratch: &Scratch, machine: &str, runner: &Value) -> Command {
     let home = scratch.0.with_extension("machines").join(machine);
     let config = home.join("config").join("ensemble/runner");
-    std::fs::create_dir_all(&config).unwrap();
-    let runner_yaml = if runner_yaml.contains("\nworkspace:") {
-        runner_yaml.to_string()
-    } else {
-        runner_yaml.replacen(
-            "\nllm:",
-            &format!(
-                "\nworkspace: \"{}\"\nllm:",
-                home.join("workspace").display()
-            ),
-            1,
-        )
-    };
-    write_runner(&config, runner_yaml);
+    let mut runner = runner.clone();
+    if runner["workspace"].is_null() {
+        runner["workspace"] = json!(home.join("workspace"));
+    }
+    write_runner(&config, runner);
     let tokens = scratch
         .0
         .with_extension("xdg-config")
@@ -2531,10 +2516,10 @@ fn machine_team(scratch: &Scratch, machine: &str, team: &str, config: &str) {
     std::fs::write(dir.join("config.yaml"), config).unwrap();
 }
 
-/// `ensemble-runner serve` on the computer `machine`, whose runner is
-/// `runner_yaml`, started and waited for until it is connected.
-fn serve_runner(scratch: &Scratch, url: &str, machine: &str, runner_yaml: &str) -> Served {
-    serve_runner_saying(scratch, url, machine, runner_yaml, "connected to ws")
+/// `ensemble-runner serve` on the computer `machine`, whose runner's
+/// settings are `runner`, started and waited for until it is connected.
+fn serve_runner(scratch: &Scratch, url: &str, machine: &str, runner: &Value) -> Served {
+    serve_runner_saying(scratch, url, machine, runner, "connected to ws")
 }
 
 /// The runner of the computer `machine`, as [`serve_runner`], waited for
@@ -2543,16 +2528,15 @@ fn serve_runner_saying(
     scratch: &Scratch,
     url: &str,
     machine: &str,
-    runner_yaml: &str,
+    runner: &Value,
     said: &str,
 ) -> Served {
     // The runner names the hub it connects to.
-    let runner_yaml = if runner_yaml.contains("\nhub:") {
-        runner_yaml.to_string()
-    } else {
-        runner_yaml.replacen("\nllm:", &format!("\nhub: \"{url}\"\nllm:"), 1)
-    };
-    let mut child = on_machine(scratch, machine, &runner_yaml)
+    let mut runner = runner.clone();
+    if runner["hub"].is_null() {
+        runner["hub"] = json!(url);
+    }
+    let mut child = on_machine(scratch, machine, &runner)
         .args(["serve"])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -2591,23 +2575,17 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
     );
     let (hub, address, ana) = hub_server(&s);
     // The hub distills on the backend the gpu box shares, and nothing else.
-    let text = read_hub(&hub);
-    let end_of_llm = text.find("\nllm:\n").unwrap()
-        + text[text.find("\nllm:\n").unwrap()..].find("\n\n").unwrap();
-    let text = format!(
-        "{}\n  runners:\n    backends:\n      gpu: {{ runner: ana/gpu, backend: local }}{}",
-        &text[..end_of_llm],
-        &text[end_of_llm..]
-    )
-    .replace(
-        "        - backend: central\n          model: qwen3.5-72b\n",
-        "        - backend: gpu\n          model: small\n",
-    );
-    write_hub(&hub, text).unwrap();
+    let mut settings = read_hub(&hub);
+    settings["backends"]["gpu"] =
+        json!({ "type": "runner", "runner": "ana/gpu", "backend": "local" });
+    let gpu = json!([{ "backend": "gpu", "model": "small" }]);
+    settings["distill"]["try"] = gpu.clone();
+    settings["source_filter"]["models"]["try"] = gpu;
+    write_hub(&hub, settings).unwrap();
     let _hub = serve_hub(&s, &hub);
     let url = format!("ws://{address}");
-    let login = |machine: &str, yaml: &str| {
-        let out = on_machine(&s, machine, yaml)
+    let login = |machine: &str, runner: &Value| {
+        let out = on_machine(&s, machine, runner)
             .args(["login", &url, "--token", &ana])
             .output()
             .unwrap();
@@ -2615,12 +2593,13 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
     };
 
     // The gpu box shares its model server as `local`.
-    let gpu = format!(
-        "version: 1\nname: gpu\nworks_for: owner\nhub: \"{url}\"\nllm:\n  direct:\n    backends:\n      local: {{ type: openai-compatible-api, base_url: \"{server}\", timeout_seconds: 10 }}\n    shares: [local]\n    max_shared_calls: 2\n"
-    );
+    let mut gpu = runner_doc("gpu", "owner", json!({ "local": openai(&server, 10) }));
+    gpu["hub"] = json!(url);
+    gpu["shares"] = json!(["local"]);
+    gpu["max_shared_calls"] = json!(2);
     login("gpu", &gpu);
     let _gpu = serve_runner_saying(&s, &url, "gpu", &gpu, "sharing local through the hub");
-    // The hub's admin sees what it shares, to name it in hub.yaml.
+    // The hub's admin sees what it shares, to name it among its backends.
     let out = ensemble_hub(&s, &["runner", "backends"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
@@ -2631,10 +2610,12 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
     );
 
     // ana's laptop has no model server: its agent runs on the gpu box's.
-    let laptop = format!(
-        "version: 1\nname: laptop\nworks_for: owner\nhub: \"{url}\"\n{}  hub:\n    backends:\n      gpu-local: {{ runner: ana/gpu, backend: local }}\n",
-        llm_block("{}")
+    let mut laptop = runner_doc(
+        "laptop",
+        "owner",
+        json!({ "gpu-local": { "type": "runner", "runner": "ana/gpu", "backend": "local" } }),
     );
+    laptop["hub"] = json!(url);
     login("laptop", &laptop);
     machine_team(
         &s,
@@ -2692,12 +2673,10 @@ fn only_a_host_connects_a_runner_that_works_for_the_hub() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let yaml = format!(
-        "version: 1\nname: hub-box\nworks_for: hub\nhub: \"{url}\"\n{}",
-        llm_block("{}")
-    );
+    let mut runner = runner_doc("hub-box", "hub", json!({}));
+    runner["hub"] = json!(url);
     // A member may not connect a runner that works for the hub.
-    let out = on_machine(&s, "hub-box", &yaml)
+    let out = on_machine(&s, "hub-box", &runner)
         .args(["serve"])
         .output()
         .unwrap();
@@ -2748,11 +2727,9 @@ fn a_running_runner_reloads_its_teams() {
 /// The runner of the computer `machine`, named for it, with the hub at
 /// `url`: started and waited for until it is ready.
 fn machine_runner(scratch: &Scratch, machine: &str, url: &str) -> Served {
-    let yaml = format!(
-        "version: 1\nname: {machine}\nworks_for: owner\nhub: \"{url}\"\n{}",
-        llm_block(&local_backend(NOWHERE))
-    );
-    let mut runner = on_machine(scratch, machine, &yaml)
+    let mut settings = runner_doc(machine, "owner", local_backend(NOWHERE));
+    settings["hub"] = json!(url);
+    let mut runner = on_machine(scratch, machine, &settings)
         .args(["serve"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -3126,17 +3103,15 @@ fn bobs_runner(scratch: &Scratch, url: &str, team: &str) -> Served {
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     let bob = stdout_of(&out).trim().to_string();
-    let yaml = format!(
-        "version: 1\nname: gpu\nworks_for: hub\nhub: \"{url}\"\n{}",
-        llm_block(&local_backend(NOWHERE))
-    );
-    let out = on_machine(scratch, "gpu", &yaml)
+    let mut settings = runner_doc("gpu", "hub", local_backend(NOWHERE));
+    settings["hub"] = json!(url);
+    let out = on_machine(scratch, "gpu", &settings)
         .args(["login", url, "--token", &bob])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     machine_team(scratch, "gpu", "team", team);
-    serve_runner(scratch, url, "gpu", &yaml)
+    serve_runner(scratch, url, "gpu", &settings)
 }
 
 /// The workspace of the computer `machine`.
@@ -3244,31 +3219,28 @@ fn a_runner_that_works_for_the_hub_never_lends_an_agent_on_its_clis_own_login() 
 }
 
 #[test]
-fn settings_are_changed_from_the_command_line() {
+fn settings_are_changed_from_the_command_line_and_each_change_is_in_the_history() {
     let s = Scratch::new("config");
     let runner = s.runner();
-    let get = |key: &str| {
-        stdout_of(&ensemble_runner(&s, &["config", "get", key]))
-            .trim()
-            .to_string()
-    };
+    let get = |key: &str| read_runner(&runner)[key].clone();
     assert_eq!(get("name"), "desk");
 
     // Working for the hub needs a hub.
-    let out = ensemble_runner(&s, &["config", "set", "works_for", "hub"]);
+    let out = ensemble_runner(&s, &["settings", "works-for", "hub"]);
     assert!(!out.status.success());
     assert!(
-        stderr_of(&out).contains("there is no `hub`"),
+        stderr_of(&out).contains("it names no hub"),
         "{}",
         stderr_of(&out)
     );
-    let out = ensemble_runner(&s, &["config", "set", "hub", "ws://127.0.0.1:9"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    let out = ensemble_runner(&s, &["config", "set", "works_for", "hub"]);
+    let mut named = read_runner(&runner);
+    named["hub"] = json!("ws://127.0.0.1:9");
+    write_runner(&runner, named);
+    let out = ensemble_runner(&s, &["settings", "works-for", "hub"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(get("works_for"), "hub");
     // One that would not load is refused, and nothing changes.
-    let out = ensemble_runner(&s, &["config", "set", "name", "a b/c"]);
+    let out = ensemble_runner(&s, &["settings", "name", "a b/c"]);
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("nothing was changed"),
@@ -3276,15 +3248,25 @@ fn settings_are_changed_from_the_command_line() {
         stderr_of(&out)
     );
     assert_eq!(get("name"), "desk");
-    let out = ensemble_runner(&s, &["config", "unset", "name"]);
-    assert!(!out.status.success(), "a runner needs a name");
-    let path = stdout_of(&ensemble_runner(&s, &["config", "path"]));
+    let out = ensemble_runner(&s, &["settings", "workspace", "~/code"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let shown = stdout_of(&ensemble_runner(&s, &["settings", "show"]));
     assert!(
-        path.contains("the runner's settings")
-            && path.contains(&runner.join("database.db").display().to_string()),
-        "{path}"
+        shown.contains("name: desk") && shown.contains("workspace: ~/code"),
+        "{shown}"
     );
-    assert!(read_runner(&runner).contains("works_for: hub"));
+    let json = stdout_of(&ensemble_runner(&s, &["settings", "show", "--json"]));
+    assert!(json.contains("\"works_for\": \"hub\""), "{json}");
+    let history = stdout_of(&ensemble_runner(&s, &["settings", "history"]));
+    assert!(
+        history.contains("local  settings.works-for")
+            && history.contains("local  settings.workspace"),
+        "{history}"
+    );
+    assert!(
+        !history.contains("settings.name"),
+        "what was refused is not kept: {history}"
+    );
 
     // A team made here, too; the running runner would reload it.
     let out = ensemble_runner(&s, &["team", "new", "web"]);
@@ -3323,8 +3305,7 @@ fn signing_in_to_a_hub_names_it_in_the_runner_and_signing_out_takes_it_out() {
         "{}",
         stdout_of(&out)
     );
-    let hub_now = stdout_of(&ensemble_runner(&s, &["config", "get", "hub"]));
-    assert_eq!(hub_now.trim(), url);
+    assert_eq!(read_runner(&s.runner_dir())["hub"], json!(url));
     let status = stdout_of(&ensemble_runner(&s, &["status"]));
     assert!(
         status.contains(&format!("hub: {url}, signed in")),
@@ -3338,11 +3319,7 @@ fn signing_in_to_a_hub_names_it_in_the_runner_and_signing_out_takes_it_out() {
         "{}",
         stdout_of(&out)
     );
-    assert!(
-        !ensemble_runner(&s, &["config", "get", "hub"])
-            .status
-            .success()
-    );
+    assert!(read_runner(&s.runner_dir())["hub"].is_null());
 }
 
 #[test]
@@ -3350,11 +3327,11 @@ fn a_running_runner_makes_a_change_to_its_settings_itself() {
     let s = Scratch::new("config-running");
     s.runner();
     // Not running: the command makes it, and nothing needs saying.
-    let out = ensemble_runner(&s, &["config", "set", "name", "desk-2"]);
+    let out = ensemble_runner(&s, &["settings", "name", "desk-2"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(stderr_of(&out).is_empty(), "{}", stderr_of(&out));
     let mut runner = start_runner(&s);
-    let out = ensemble_runner(&s, &["config", "set", "name", "desk"]);
+    let out = ensemble_runner(&s, &["settings", "name", "desk"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stderr_of(&out).contains("The running runner"),
@@ -3362,7 +3339,7 @@ fn a_running_runner_makes_a_change_to_its_settings_itself() {
         stderr_of(&out)
     );
     // Its errors come back as they are.
-    let out = ensemble_runner(&s, &["config", "set", "name", "a b/c"]);
+    let out = ensemble_runner(&s, &["settings", "name", "a b/c"]);
     assert!(
         stderr_of(&out).contains("nothing was changed"),
         "{}",
@@ -3378,10 +3355,7 @@ fn a_running_hub_uses_changed_settings_at_once_or_starts_again() {
     let (hub, _address, _token) = hub_server(&s);
     let _served = serve_hub(&s, &hub);
     // Roles: used at once.
-    let out = ensemble_hub(
-        &s,
-        &["config", "set", "accounts.roles.reader", "[recall, share]"],
-    );
+    let out = ensemble_hub(&s, &["role", "set", "reader", "recall,share"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stderr_of(&out).contains("uses it now"),
@@ -3389,11 +3363,11 @@ fn a_running_hub_uses_changed_settings_at_once_or_starts_again() {
         stderr_of(&out)
     );
     let roles = stdout_of(&ensemble_hub(&s, &["role", "list"]));
-    assert!(roles.contains("reader:\n  - recall\n  - share"), "{roles}");
+    assert!(roles.contains("reader: recall, share"), "{roles}");
     // Where it listens: it starts again, there.
     let port = free_port();
     let listen = format!("127.0.0.1:{port}");
-    let out = ensemble_hub(&s, &["config", "set", "http.listen", &listen]);
+    let out = ensemble_hub(&s, &["settings", "listen", &listen]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stderr_of(&out).contains("starts again"),
@@ -3451,8 +3425,9 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
         "{}",
         stdout_of(&out)
     );
-    assert!(
-        yaml().contains("local: {type: \"openai-compatible-api\""),
+    assert_eq!(
+        yaml()["backends"]["local"]["type"],
+        "openai-compatible-api",
         "{}",
         yaml()
     );
@@ -3462,13 +3437,14 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
     let out = hub_with_stdin(&s, &["backend", "key", "local"], "sk-local\n");
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(vars()["ENSEMBLE_BACKEND_LOCAL_KEY"], "sk-local");
-    assert!(
-        yaml().contains("api_key_env: \"ENSEMBLE_BACKEND_LOCAL_KEY\""),
+    assert_eq!(
+        yaml()["backends"]["local"]["api_key_env"],
+        "ENSEMBLE_BACKEND_LOCAL_KEY",
         "{}",
         yaml()
     );
     assert!(
-        !yaml().contains("sk-local"),
+        !yaml().to_string().contains("sk-local"),
         "the key is never in the settings"
     );
     assert!(!hub.join(".env").exists(), "nor in a .env");
@@ -3534,7 +3510,7 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
     let out = hub_with_stdin(&s, &["backend", "remove", "local"], "");
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!vars().contains_key("ENSEMBLE_BACKEND_LOCAL_KEY"));
-    assert!(!yaml().contains("local: {"));
+    assert!(yaml()["backends"].get("local").is_none());
 
     // A file a secrets manager writes is read for its variables, and left
     // alone: a key given is kept in the database still.
@@ -3595,14 +3571,12 @@ fn a_runners_owner_adds_shares_and_removes_backends_its_teams_do_not_use() {
         "{}",
         stderr_of(&out)
     );
-    assert!(yaml().contains("openai-local"));
+    assert!(yaml()["backends"].get("openai-local").is_some());
 
     // Shared through a hub, which it names.
-    assert!(
-        run(&["config", "set", "hub", "ws://127.0.0.1:1"])
-            .status
-            .success()
-    );
+    let mut named = read_runner(&runner_yaml);
+    named["hub"] = json!("ws://127.0.0.1:1");
+    write_runner(&runner_yaml, named);
     let server = models_stub(r#"{"data":[{"id":"big"}]}"#);
     let out = run(&[
         "backend",
@@ -3615,10 +3589,10 @@ fn a_runners_owner_adds_shares_and_removes_backends_its_teams_do_not_use() {
         "--share",
     ]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(yaml().contains("shares: [\"gpu\"]"), "{}", yaml());
+    assert_eq!(yaml()["shares"], json!(["gpu"]), "{}", yaml());
     let out = run(&["backend", "unshare", "gpu"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(yaml().contains("shares: []"), "{}", yaml());
+    assert_eq!(yaml()["shares"], json!([]), "{}", yaml());
 
     // Its key is kept sealed in the runner's database, as the hub keeps its own.
     let mut child = runner_command(&s)
@@ -3636,7 +3610,7 @@ fn a_runners_owner_adds_shares_and_removes_backends_its_teams_do_not_use() {
         ensemble_runner::kept::keys(&dir).all().unwrap()["ENSEMBLE_BACKEND_GPU_KEY"],
         "sk-gpu"
     );
-    assert!(!yaml().contains("sk-gpu") && !dir.join(".env").exists());
+    assert!(!yaml().to_string().contains("sk-gpu") && !dir.join(".env").exists());
     assert!(dir.join("master.key").exists());
     let out = run(&["backend", "test", "gpu"]);
     assert!(
@@ -3646,7 +3620,7 @@ fn a_runners_owner_adds_shares_and_removes_backends_its_teams_do_not_use() {
     );
     let out = run(&["backend", "remove", "gpu"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(!yaml().contains("gpu"));
+    assert!(!yaml().to_string().contains("gpu"));
 }
 
 #[test]
@@ -3678,8 +3652,9 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
         said.contains("shares are distilled by local:small"),
         "{said}"
     );
-    assert!(
-        yaml().contains("try: [{backend: \"local\", model: \"small\"}]"),
+    assert_eq!(
+        yaml()["distill"]["try"],
+        json!([{ "backend": "local", "model": "small" }]),
         "{}",
         yaml()
     );
@@ -3698,13 +3673,13 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
         "0.4",
     ]);
     assert!(
-        yaml().contains("embed: {backend: \"local\", model: \"small\", min_similarity: 0.4}"),
+        yaml()["embed"] == json!({ "backend": "local", "model": "small", "min_similarity": 0.4 }),
         "{}",
         yaml()
     );
     ok(&["knowledge", "embedding", "--off"]);
     ok(&["knowledge", "recall", "--max-notes", "5"]);
-    assert!(yaml().contains("max_notes: 5"));
+    assert_eq!(yaml()["recall_max_notes"], 5);
 
     // Trackers: each with a folder of its own.
     ok(&[
@@ -3741,7 +3716,7 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
     // Roles, and who may sign up.
     ok(&["role", "set", "auditor", "recall,share"]);
     assert!(
-        yaml().contains("auditor: [\"recall\", \"share\"]"),
+        yaml()["roles"]["auditor"] == json!(["recall", "share"]),
         "{}",
         yaml()
     );
@@ -3761,14 +3736,14 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
     );
     ok(&["registration", "set", "closed"]);
     assert!(
-        yaml().contains("registration: {type: \"closed\"}"),
+        yaml()["registration"] == json!({ "type": "closed" }),
         "{}",
         yaml()
     );
 
     // What sources bring in: no filter, then one.
     ok(&["source", "filter", "--off"]);
-    assert!(!yaml().contains("filter:"), "{}", yaml());
+    assert!(yaml()["source_filter"].is_null(), "{}", yaml());
     let out = run(&["source", "filter", "local:small"]);
     assert!(
         stderr_of(&out).contains("say what is confidential"),
@@ -3777,13 +3752,17 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
     );
     ok(&["source", "filter", "local:small", "--prompt", "Salaries."]);
     assert!(
-        yaml().contains("filter: {try: [{backend: \"local\", model: \"small\"}], when_none: wait, max_tokens: 2000, prompt: \"Salaries.\"}"),
+        yaml()["source_filter"]
+            == json!({
+                "models": { "try": [{ "backend": "local", "model": "small" }], "when_none": "wait", "max_tokens": 2000 },
+                "prompt": "Salaries.",
+            }),
         "{}",
         yaml()
     );
     ok(&["source", "filter", "--when-none", "fail"]);
     assert!(
-        yaml().contains("when_none: fail, max_tokens: 2000"),
+        yaml()["source_filter"]["models"]["when_none"] == "fail",
         "{}",
         yaml()
     );
