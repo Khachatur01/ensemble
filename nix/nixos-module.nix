@@ -2,14 +2,15 @@
 # `ensemble-runner serve`, each a user service of the person it is for, the
 # hub's lingering so it runs from boot without a login. Each runs as the
 # person it is for, with their `XDG_RUNTIME_DIR`, where `ensemble-hub …` and
-# `ensemble-runner …` find its socket, from their `~/.config/ensemble/`, so they manage it with
-# `ensemble-hub` and `ensemble-runner` as on any platform.
+# `ensemble-runner …` find its socket, from their `~/.local/state/ensemble/`
+# (`hub/` and `runner/`, each its own), so they manage it with `ensemble-hub`
+# and `ensemble-runner` as on any platform.
 #
 # The hub is only run from here, as a GitLab instance is: its settings and the
 # keys of its backends are kept in its database, and changed with
 # `ensemble-hub …`, its REST API or a web UI. It makes the settings a new hub
-# starts with the first time it starts. Only a key a secrets manager keeps
-# comes from here, through `environmentFile`.
+# starts with the first time it starts. Only where it listens, and a key a
+# secrets manager keeps, through `environmentFile`, come from here.
 #
 # The runner is only run from here, too: its settings, the keys of its
 # backends and its teams are made and changed with `ensemble-runner setup`,
@@ -43,7 +44,7 @@ in
       enable = mkEnableOption ''
         an Ensemble hub, `ensemble-hub serve`: knowledge, tasks, accounts, and
         the link runners connect to. It runs as `services.ensemble.hub.user`,
-        from their `~/.config/ensemble/hub/`, and they manage it with
+        from their `~/.local/state/ensemble/hub/`, and they manage it with
         `ensemble-hub …` as themselves
       '';
 
@@ -58,10 +59,11 @@ in
         type = types.str;
         description = ''
           Whose hub it is: it runs as them, and its files are in their
-          `~/.config/ensemble/hub/`: its database, with its settings and the
-          keys of its backends, sealed by `master.key` beside it. Back up
-          both. For a hub of an account of its own, make that user, and run
-          `ensemble-hub …` as it.
+          `~/.local/state/ensemble/hub/`: `core/`, its database, with its
+          settings and the keys of its backends, sealed by `master.key` beside
+          it, and a folder for each connector, such as `knowledge/vault/`.
+          Back up the whole folder. For a hub of an account of its own, make
+          that user, and run `ensemble-hub …` as it.
         '';
         example = "ana";
       };
@@ -70,26 +72,29 @@ in
         type = types.nullOr types.str;
         default = null;
         description = ''
-          A file of NAME=value lines, given to `ensemble-hub serve` as
-          `--env-file`, such as a secret sops-nix or agenix puts in /run: the
-          keys a secrets manager keeps, which a backend names with
+          A file of NAME=value lines put in the hub's environment, such as a
+          secret sops-nix or agenix puts in /run: the keys a secrets manager
+          keeps, which a backend names with
           `ensemble-hub backend key <name> --key-env <NAME>`. A path as a
           string, so the keys never enter the Nix store. A key given to
           `ensemble-hub backend key` is kept in the hub's database instead.
-          Null reads the hub's own `~/.config/ensemble/hub/.env`, when there
-          is one.
         '';
       };
 
-      port = mkOption {
-        type = types.nullOr types.port;
-        default = null;
+      listenAddress = mkOption {
+        type = types.str;
+        default = "127.0.0.1";
         description = ''
-          The port the hub listens on, one of its settings, for
-          `openFirewall` to open. Have it listen on an address with that port
-          with `ensemble-hub settings listen 0.0.0.0:<port>`.
+          The address the hub listens on, `serve --http-host`: 127.0.0.1 for
+          this computer alone, 0.0.0.0 for other computers too.
         '';
-        example = 7700;
+        example = "0.0.0.0";
+      };
+
+      port = mkOption {
+        type = types.port;
+        default = 7700;
+        description = "The port of the hub's REST API, MCP and runners' link, `serve --http-port`.";
       };
 
       openFirewall = mkOption {
@@ -97,7 +102,7 @@ in
         default = false;
         description = ''
           Open `port` in the firewall. Without a TLS proxy in front, only on a
-          network you trust. Needs `port`.
+          network you trust.
         '';
       };
     };
@@ -125,13 +130,6 @@ in
     }
 
     (mkIf hub.enable {
-      assertions = [
-        {
-          assertion = hub.openFirewall -> hub.port != null;
-          message = "services.ensemble.hub.openFirewall needs services.ensemble.hub.port, the port the hub listens on";
-        }
-      ];
-
       networking.firewall.allowedTCPPorts = lib.optional hub.openFirewall hub.port;
 
       # A user service, so it has its user's runtime directory, where
@@ -144,24 +142,22 @@ in
         unitConfig.ConditionUser = hub.user;
         # The vault is a git repository.
         path = [ pkgs.git ];
-        # The settings a new hub starts with, and its vault, the first time
-        # it starts; `ensemble-hub setup` adds its first admin.
-        preStart = ''
-          ${lib.getExe hub.package} init --keep
-        '';
+        # The first time it starts, it makes the settings a new hub starts
+        # with, and its vault; `ensemble-hub setup` adds its first admin.
         serviceConfig = {
-          ExecStart = lib.escapeShellArgs (
-            [
-              (lib.getExe hub.package)
-              "serve"
-            ]
-            ++ lib.optionals (hub.environmentFile != null) [
-              "--env-file"
-              hub.environmentFile
-            ]
-          );
+          ExecStart = lib.escapeShellArgs [
+            (lib.getExe hub.package)
+            "serve"
+            "--http-host"
+            hub.listenAddress
+            "--http-port"
+            (toString hub.port)
+          ];
           Restart = "on-failure";
           NoNewPrivileges = true;
+        }
+        // lib.optionalAttrs (hub.environmentFile != null) {
+          EnvironmentFile = hub.environmentFile;
         };
       };
     })
@@ -177,10 +173,12 @@ in
         ]
         ++ runnerCfg.extraPackages;
         # A runner named for this computer, the first time it starts.
-        preStart = runner.init runnerCfg;
         serviceConfig = {
           ExecStart = lib.escapeShellArgs (runner.command runnerCfg);
           Restart = "on-failure";
+        }
+        // lib.optionalAttrs (runnerCfg.environmentFile != null) {
+          EnvironmentFile = runnerCfg.environmentFile;
         };
       };
     })

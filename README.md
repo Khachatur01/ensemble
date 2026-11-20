@@ -141,12 +141,19 @@ Ensemble first, so that `ensemble-hub` and `ensemble-runner` are on your
 `PATH`.
 
 ```console
-$ ensemble-hub setup                       # names the hub, adds you as its first admin, prints your token once
-$ ensemble-hub user password ana           # typed without echo
-$ ensemble-hub serve                       # until Ctrl-C or SIGTERM
+$ ensemble-hub serve                       # the first time, makes a new hub; runs until Ctrl-C or SIGTERM
 ```
 
-A new hub runs on this computer alone, closed to sign-ups, with no model
+In another terminal (or with the hub run as a service, see
+[Installation](#installation)):
+
+```console
+$ ensemble-hub setup                       # adds you as its first admin: your token, shown once, and a join code for your runner
+$ ensemble-hub user password ana           # typed without echo
+```
+
+A new hub listens on this computer alone (`127.0.0.1:7700`; `serve
+--http-host` and `--http-port` say otherwise), closed to sign-ups, with no model
 yet: give it one when you want shares distilled into notes
 (`ensemble-hub backend add`, `ensemble-hub knowledge models`; see
 [Changing settings](#changing-settings)).
@@ -168,7 +175,8 @@ $ ensemble-runner setup
 none) and any local model server. When this computer has no runner yet, it
 asks what to call it (this computer's name, unless you say otherwise) and
 which folder it works in (`~/ensemble`, unless you say otherwise), and makes
-it: its settings are kept in its database, `~/.config/ensemble/runner/database.db`. Then it
+it: its settings are kept in its database,
+`~/.local/state/ensemble/runner/core/database.db`. Then it
 checks the runner's helper teams and says what is next. Give the runner a team,
 a repository and the hub, and run it:
 
@@ -200,9 +208,9 @@ You need not clone them yourself: a task for a project the runner has no
 folder for names the `repository` to clone it from, and the runner clones it
 into the workspace, or asks you on the task which repository it is (see
 [Tasks](#tasks)).
-Ensemble keeps nothing in the repositories: run logs and worktrees go in a
-per-user state directory (`$XDG_STATE_HOME/ensemble`, by default
-`~/.local/state/ensemble`), one per repository. A task's `repo`, a path inside
+Ensemble keeps nothing in the repositories: run logs and worktrees go in the
+runner's folder (`~/.local/state/ensemble/runner/workdirs/`), one per
+repository. A task's `repo`, a path inside
 the repository, has it work in one folder of it, such as one repository of
 several; a path that leaves the repository is refused.
 
@@ -213,16 +221,26 @@ their roles and what each may do; the one port it listens on; and the LLM
 backends it uses. Everything else is a connector (see
 [Connectors](#connectors)). It has no helper team and runs no agents. It is
 always its own process, `ensemble-hub serve`: a team runs one on a server, and
-one person runs one on their own computer beside their runner. Its files are
-in `~/.config/ensemble/hub/`:
+one person runs one on their own computer beside their runner. The hub and
+the runner know nothing of each other's files: a runner reaches the hub over
+the link, wherever it runs. Everything Ensemble keeps is in one folder,
+`--config-dir` (by default `~/.local/state/ensemble`), the hub in its `hub/`,
+a folder for its core and one for each connector that keeps anything, each
+readable only by you:
 
 ```text
-~/.config/ensemble/hub/
-  database.db    its settings and who changed them, its backends' keys (sealed), accounts, tokens,
-                 tasks, and which issue became which task (Turso), readable only by you
-  master.key     what seals the keys in database.db, readable only by you: back it up
-  .env           keys a secrets manager keeps (NAME=value), if any
-  vault/         its knowledge vault, a git repository
+~/.local/state/ensemble/hub/
+  core/
+    database.db    its settings and who changed them, its backends' keys (sealed),
+                   accounts and their tokens (Turso)
+    master.key     what seals the keys in database.db: back it up
+  knowledge/
+    vault/         its knowledge vault: Markdown files in a git repository
+    embeddings.db  the notes' vectors, a cache made again from the notes
+  tasks/
+    database.db    the tasks it keeps for its accounts
+  trackers/
+    database.db    which issue of which tracker became which task
 ```
 
 Its settings are kept in its database, as a GitLab instance keeps its
@@ -234,12 +252,12 @@ Where it runs, such as a NixOS module, only runs it.
 On the hub's computer:
 
 ```console
-$ ensemble-hub setup                      # its settings and vault, and its first admin, whose token it prints once
+$ ensemble-hub serve                      # makes its settings and vault the first time; until Ctrl-C or SIGTERM
+$ ensemble-hub setup                      # its first admin, whose token it prints once
 $ ensemble-hub user password root         # typed without echo
 $ ensemble-hub backend add central --type openai-compatible-api --url http://127.0.0.1:8000/v1
 $ ensemble-hub knowledge models central:qwen3.5-72b   # the models that turn shares into notes
 $ ensemble-hub check                      # says which model would distill shares now
-$ ensemble-hub serve                      # until Ctrl-C or SIGTERM
 ```
 
 `ensemble-hub settings show` shows every setting; `--json` prints them as
@@ -262,7 +280,6 @@ distill:
       model: qwen3.5-72b
   when_none: wait
 embed: none
-listen: 127.0.0.1:7700
 lockout_failures: 5
 lockout_minutes: 15
 owner: Acme
@@ -277,17 +294,17 @@ roles:
 session_hours: 12
 source_filter: none
 trackers: none
-vault: vault
 ```
 
-Its core is its owner, where it listens, its accounts and roles, and the LLM
+Its core is its owner, its accounts and roles, and the LLM
 backends it uses; the rest reaches it through connectors, each always on: the
 REST API at `/api/v1/`, MCP at `/mcp`, the runners' link, knowledge, tasks
 and sources. `ensemble-hub settings history` says who changed what, when,
 and with which operation. The hub's command line, `ensemble-hub …` on its
 computer, is always on and has no settings.
 
-**The port.** `listen` is where the hub listens, for every connector over
+**The port.** `serve` listens on one port (`--http-host`, `--http-port`) for
+every connector over
 HTTP: the REST API at `/api/v1/`, MCP at `/mcp`, and the runners' WebSockets at
 `/link` and `/relay`. A WebSocket anywhere else is refused. The hub speaks
 plain HTTP and WebSocket. For the internet, put a TLS reverse proxy in front,
@@ -301,12 +318,14 @@ hub.example.com {
 ```
 
 On a LAN or a VPN, listen on that address instead
-(`ensemble-hub settings listen 10.0.0.2:7700`) and connect with `ws://`.
-For one person alone, the hub listens on `127.0.0.1` and the runner names
-`ws://127.0.0.1:7700`. The hub needs no setting for its own address: the
-hints it gives with a new token or join code name the address the request
-reached it at (through a proxy, from its `X-Forwarded-Proto` and
-`X-Forwarded-Host`), or, from the command line, where it listens.
+(`ensemble-hub serve --http-host 10.0.0.2`) and connect with `ws://`.
+For one person alone, the hub listens on `127.0.0.1:7700`, what `serve`
+listens on unless `--http-host` and `--http-port` say otherwise, and the
+runner names `ws://127.0.0.1:7700`. Where it listens is how it is run, not a
+setting. The hub needs no setting for its own address: the hints it gives
+with a new token or join code name the address the request reached it at
+(through a proxy, from its `X-Forwarded-Proto` and `X-Forwarded-Host`), or,
+from the command line, where the running hub listens.
 
 **The LLM backends** are the models the hub itself calls, such as to distill
 knowledge: its own, with the keys it keeps, and those runners share through
@@ -489,8 +508,8 @@ join_…
 note: This is ana's join code, shown once and good for one runner within 24 hours. On the runner's computer: ensemble-runner join wss://hub.example.com join_…
 ```
 
-The runner keeps the token in `~/.config/ensemble/runner/hubs.json`, readable
-only by you; `--token T` keeps a token made elsewhere instead, and
+The runner keeps the token in its database, sealed by its `master.key`;
+`--token T` keeps a token made elsewhere instead, and
 `ensemble-runner logout <url>` forgets it. Signing in again, with a new token
 or as someone else, reaches a running runner at once: its links to the hub
 connect again with the new token. `ensemble-runner status` asks the hub whether the token still
@@ -843,7 +862,7 @@ $ ensemble-hub backend add gpu --type runner --runner ana/gpu-box --runner-backe
 
 A helper team is one directory with one file in it: `config.yaml`, the llm
 backends and the agents. Commit it; it holds no secrets. The runner runs every
-team in its teams directory (`~/.config/ensemble/runner/teams/`, see
+team in its teams directory (`~/.local/state/ensemble/runner/teams/`, see
 [Teams](#teams)) as one helper team: each name of a team, its agents, model
 servers, limits and gates, is `<team>/<name>`, so two teams may both have a
 `coder`. Commands that change one agent name it so, `web/coder`; every other
@@ -851,16 +870,19 @@ one reads all the teams. Nothing else is searched for, and there is no
 user-level config. `ensemble-runner team new <name>` writes a sample with every
 setting.
 
-What Ensemble learns while it runs is state, not configuration, and is kept per
-user, outside every repository:
+What the runner learns while it runs is kept in its folder,
+`~/.local/state/ensemble/runner/` (`runner/` in `--config-dir`), outside every
+repository:
 
 | where | |
 | --- | --- |
-| `$XDG_STATE_HOME/ensemble/workdirs/<folder>-<hash>/runs/` | what tasks did as they ran on this computer, for one repository of the workspace |
+| `core/` | its `database.db`, with its settings, its backends' keys and its hub tokens, sealed by `master.key` beside it |
+| `teams/` | its helper teams, a folder each |
+| `workdirs/<folder>-<hash>/runs/` | what tasks did as they ran on this computer, for one repository of the workspace |
 | `.../worktrees/` | a git worktree per task of an agent with `isolation: worktree` |
 | `.../worker.lock` | the lock of the one worker that runs the repository's tasks |
-| `$XDG_STATE_HOME/ensemble/orgs/teams-<hash>/usage.json` | how many runs each agent started, shared by every repository |
-| `$XDG_STATE_HOME/ensemble/runner/` | the runner's own lock |
+| `orgs/teams-<hash>/usage.json` | how many runs each agent started, shared by every repository |
+| `worker.lock` | the runner's own lock |
 
 ```yaml
 version: 1
@@ -1466,7 +1488,7 @@ Claude Code permission modes that skip the checks, and about token budgets.
 ### Teams
 
 The runner keeps its helper teams in one directory,
-`~/.config/ensemble/runner/teams/` (under `$XDG_CONFIG_HOME` when that is set),
+`~/.local/state/ensemble/runner/teams/` (`runner/teams/` in `--config-dir`),
 a folder per team named for it, and runs every team that is ready. A team gets
 there in one of four ways:
 
@@ -1519,45 +1541,27 @@ and a config that tries one is rejected by name, before it reaches a commit.
 and its variable in the settings (see [Changing settings](#changing-settings)).
 
 A key given to `backend add` or `backend key` is kept sealed in the runner's
-database, as the hub keeps its own: by `~/.config/ensemble/runner/master.key`,
-made the first time a key is kept and readable by you alone. Back up both.
-Other values come from the environment, or from the runner's hidden file of
-secrets, `~/.config/ensemble/runner/.env`, where a secrets manager's keys may
-be:
+database, with AES-256-GCM, by its master key,
+`~/.local/state/ensemble/runner/core/master.key`, made the first time a key is
+kept and readable by you alone; so are the runner's hub tokens, which
+`ensemble-runner login` and `join` keep. A hub keeps the keys it is given the
+same way, by its own `hub/core/master.key`, as a GitLab instance keeps its
+secrets. Back up the whole folder; without `master.key`, give each backend
+its key again, and sign the runner in again.
 
-```sh
-# ~/.config/ensemble/runner/.env — NAME=value per line, # comments, optional quotes
-OPENAI_LOCAL_API_KEY=sk-...
-```
+A key a secrets manager keeps is read from the environment, and named with
+`--key-env`: the hub and the runner are separate services, a team's hub often
+on another computer or of another user, so each reads only its own secrets. A
+secret that sops-nix or agenix puts in `/run` reaches it as the service's
+environment (`environmentFile` in Nix, systemd's `EnvironmentFile=`). A
+variable set in the environment wins over a key the hub or the runner keeps.
 
-```console
-$ touch ~/.config/ensemble/runner/.env && chmod 600 ~/.config/ensemble/runner/.env
-```
-
-A hub keeps the keys it is given sealed in its database, with AES-256-GCM, by
-its master key, `~/.config/ensemble/hub/master.key`, made the first time it
-keeps one and readable only by you, as a GitLab instance keeps its secrets:
-the database alone gives no key away. Back up `master.key` apart from the
-database; without it, give each backend its key again. A key a secrets
-manager keeps is read from the environment, or from the hub's own
-`~/.config/ensemble/hub/.env`, and named with `--key-env`: the hub and the
-runner are separate services, a team's hub often on another computer or of
-another user, so each reads only its own secrets. `--env-file <path>` reads
-another file instead of either `.env`, such as a secret that sops-nix or
-agenix puts in `/run`. Neither file
-holds the runner's hub tokens: `ensemble-runner login` and `join` keep those in `hubs.json`,
-also readable by you alone, because Ensemble writes them, not you.
-
-A variable set in the environment wins over a key the hub or the runner keeps,
-and that over the file. A `.env` that other users
-can read is still read, with a note saying to `chmod 600` it. The helper team
-holds no secrets, so nothing is read from beside it, and a pulled or shared
-helper team cannot carry keys by accident. The file feeds only Ensemble's own
-settings: a backend's key reaches an agent's CLI only as that backend's provider
-key in `OPENCODE_CONFIG_CONTENT`, in the CLI's environment for that run. Nothing
-else from it is passed on, so it cannot change how the CLIs log in.
-`ensemble-runner agent show` and `ensemble-runner team check` never print a key.
-Keep the file readable by you alone, and out of any repository.
+The helper team holds no secrets, so nothing is read from beside it, and a
+pulled or shared helper team cannot carry keys by accident. A backend's key
+reaches an agent's CLI only as that backend's provider key in
+`OPENCODE_CONFIG_CONTENT`, in the CLI's environment for that run, so it
+cannot change how the CLIs log in. `ensemble-runner agent show` and
+`ensemble-runner team check` never print a key.
 
 ### Editor support
 
@@ -1583,7 +1587,7 @@ Every independent problem is reported in one pass:
 
 ```console
 $ ensemble-runner team check
-ensemble: team 'web': ~/.config/ensemble/runner/teams/web/config.yaml is invalid:
+ensemble: team 'web': ~/.local/state/ensemble/runner/teams/web/config.yaml is invalid:
   - version: 2 is not supported; this build understands version 1
   - agents.coder: `max_seconds` must be greater than 0
 ```
@@ -1592,7 +1596,7 @@ A team that is valid is then checked against the runner's backends:
 
 ```console
 $ ensemble-runner team check
-ensemble: team 'web': ~/.config/ensemble/runner/teams/web/config.yaml is invalid:
+ensemble: team 'web': ~/.local/state/ensemble/runner/teams/web/config.yaml is invalid:
   - agents.coder.adapter.model.try[0]: LLM backend 'lcoal' is not defined in the runner's `llm`. Defined LLM backends: local.
 ```
 
@@ -1638,8 +1642,8 @@ $ ensemble-runner backend share local | unshare local
   names that variable; `backend remove` takes it out too. The hub and the
   runner each keep it sealed in their database, by their `master.key` (see
   [Secrets](#secrets)). A key you keep elsewhere already, such as one a
-  secrets manager sets in the file given as `--env-file` (`environmentFile`
-  in Nix), is named instead with `--key-env NAME`.
+  secrets manager puts in the environment (`environmentFile` in Nix), is
+  named instead with `--key-env NAME`.
 - **Models are checked too.** `knowledge models` asks each backend whether it
   serves its model, and `knowledge embedding` asks the model to embed once.
 - **What something uses stays.** A backend the distiller, the embedding model
@@ -1649,10 +1653,8 @@ $ ensemble-runner backend share local | unshare local
 
 ```console
 $ ensemble-hub settings owner acme
-$ ensemble-hub settings listen 0.0.0.0:7700          # where it listens: it starts again there
 $ ensemble-hub settings sessions 12                  # hours a login lasts
 $ ensemble-hub settings lockout --failures 5 --minutes 15
-$ ensemble-hub knowledge vault vault                 # the vault's folder
 $ ensemble-runner settings name laptop
 $ ensemble-runner settings workspace ~/code
 $ ensemble-runner settings works-for hub
@@ -1673,8 +1675,8 @@ made here or linked) is changed setting by setting, its comments kept, with
 While the hub or the runner runs, `ensemble-hub …` and `ensemble-runner …` ask it, over its socket, and it
 makes the change itself and uses it at once: a team, the hub's roles, how
 people sign up and how long a login lasts, its models and knowledge settings,
-its owner. A change the hub cannot use as it runs (where it listens, its
-vault, its trackers) has it start again, in the same process;
+its owner. A change the hub cannot use as it runs (its trackers) has it start
+again, in the same process;
 runners connect again by themselves. A change to the runner's settings has it
 start again, in the same process: running tasks start again from where their
 work was last pushed. When neither runs, the command makes the change itself, in
@@ -1705,8 +1707,9 @@ The macOS build is made by the same flake and the same cargo, but the tests run
 on Linux; tell us what breaks. Native Windows is not supported: each
 executable says so and exits.
 
-On every platform Ensemble keeps its files in the same places
-(`~/.config/ensemble/`) and is managed with the same commands. The Nix modules
+On every platform Ensemble keeps its files in the same place
+(`~/.local/state/ensemble/`, `hub/` and `runner/`, each its own; another
+with `--config-dir`) and is managed with the same commands. The Nix modules
 only run the hub and the runner: their settings are kept in their databases,
 and made and changed with `ensemble-hub` and `ensemble-runner`.
 
@@ -1740,15 +1743,15 @@ system flake, and import the module:
 ```
 
 The module has two parts, each enabled on its own. Each runs as the person it is
-for, from their `~/.config/ensemble/`, so they manage it with `ensemble-hub` and
+for, from their `~/.local/state/ensemble/`, so they manage it with `ensemble-hub` and
 `ensemble-runner` as on any platform: `ensemble-hub user add`, `ensemble-runner
 team pull`, `ensemble-runner settings …` and the rest, as themselves, with no
 `sudo`.
 
 Neither has settings in Nix, as one runs a GitLab instance: the settings of
-each, and the keys of its backends, are kept in its `database.db`, sealed by
-its `master.key`, and changed with its commands (a hub's also with its REST
-API or a web UI). Back up both files.
+each, and the keys of its backends, are kept in its `core/database.db`,
+sealed by its `master.key`, and changed with its commands (a hub's also with
+its REST API or a web UI). Back up their folders.
 
 **This computer's runner**, a systemd user service of one person:
 
@@ -1760,7 +1763,7 @@ API or a web UI). Back up both files.
     enable = true;
     user = "ana";                          # it runs for her alone
     extraPackages = [ pkgs.claude-code ];  # the agent CLIs on its PATH; git is always there
-    environmentFile = "/run/secrets/ensemble-runner.env";  # keys a secrets manager keeps; null: ~/.config/ensemble/runner/.env
+    environmentFile = "/run/secrets/ensemble-runner.env";  # keys a secrets manager keeps, put in its environment
   };
 
   # A user service runs only while she is logged in, unless she lingers.
@@ -1768,8 +1771,8 @@ API or a web UI). Back up both files.
 }
 ```
 
-The first time it starts, it makes a runner named for this computer, working
-for her in `~/ensemble`, offering nothing (`ensemble-runner init --keep`).
+The first time it starts, `ensemble-runner serve` makes a runner named for
+this computer, working for her in `~/ensemble`, offering nothing.
 Then, as `ana`: `ensemble-runner login <url> --user ana`, `ensemble-runner
 backend add …`, `ensemble-runner settings …`, and its teams with
 `ensemble-runner team pull`, `link` or `new`; the running runner uses each at
@@ -1777,7 +1780,7 @@ once. `ensemble-runner` is put on the system's `PATH`, for managing it;
 `services.ensemble.runner.package` is the package it comes from.
 
 **A hub**, a systemd user service of `user`, from their
-`~/.config/ensemble/hub/`. The module makes `user` linger, so the hub starts
+`~/.local/state/ensemble/hub/`. The module makes `user` linger, so the hub starts
 at boot without a login, and, as a user service, it has their
 `XDG_RUNTIME_DIR`, where `ensemble-hub …` finds its socket:
 
@@ -1786,24 +1789,25 @@ at boot without a login, and, as a user service, it has their
   services.ensemble.hub = {
     enable = true;
     user = "ana";                          # their hub: they run `ensemble-hub …` as themselves
-    port = 7700;                           # the port it listens on, one of its settings
+    listenAddress = "127.0.0.1";           # `serve --http-host`: 0.0.0.0 for other computers too
+    port = 7700;                           # `serve --http-port`
     openFirewall = false;                  # opens `port`
-    environmentFile = "/run/secrets/ensemble-hub.env";  # keys a secrets manager keeps; null: their hub/.env
+    environmentFile = "/run/secrets/ensemble-hub.env";  # keys a secrets manager keeps, put in its environment
   };
 }
 ```
 
 The module only runs the hub, as one runs a GitLab instance: its settings and
 the keys of its backends are kept in its `database.db`, and changed with
-`ensemble-hub …` as `user`, its REST API or a web UI, never in Nix. The first
-time it starts, it makes the settings a new hub starts with, every one of
-them, named for `user`, and its vault (`ensemble-hub init --keep`). Then, as
-`user`: `ensemble-hub setup`, which adds the first admin and signs this
-computer's runner in, and `ensemble-hub backend add …`, `ensemble-hub
-knowledge models …` and the rest. To reach it from other computers, run
-`ensemble-hub settings listen 0.0.0.0:7700` and give the module
-`port = 7700;` and `openFirewall = true;`. Back up `database.db` and
-`master.key`: without `master.key`, no key the hub keeps can be read.
+`ensemble-hub …` as `user`, its REST API or a web UI, never in Nix; only
+where it listens is. The first time it starts, `ensemble-hub serve` makes the
+settings a new hub starts with, every one of them, named for `user`, and its
+vault. Then, as `user`: `ensemble-hub setup`, which adds the first admin and
+prints a join code for their runner, and `ensemble-hub backend add …`,
+`ensemble-hub knowledge models …` and the rest. To reach it from other
+computers, give the module `listenAddress = "0.0.0.0";` and
+`openFirewall = true;`. Back up the hub's folder: without `core/master.key`,
+no key the hub keeps can be read.
 `ensemble-hub` is put on the system's `PATH`, from
 `services.ensemble.hub.package`. For a hub of an account of its own, make that
 user and run `ensemble-hub …` as it.
@@ -1943,7 +1947,7 @@ $ ensemble-runner agent add <team>/<name> --adapter A [--model M] [--backend B] 
 $ ensemble-runner agent remove <team>/<name>
 
 # A hub this computer runs
-$ ensemble-hub setup [--owner N] [--admin A] [--yes]   # make the hub, its first admin, and sign this computer's runner in
+$ ensemble-hub setup [--owner N] [--admin A] [--yes]   # make the hub, its first admin, and a join code for their runner
 $ ensemble-hub init [--force|--keep] [--owner N]   # the settings a new hub starts with, and its vault
 $ ensemble-hub check                      # validate its settings; which model would distill now
 $ ensemble-hub serve                      # run the hub until stopped
@@ -1957,15 +1961,16 @@ $ ensemble-hub user join-code <name>      # a code, shown once, that signs one r
 $ ensemble-hub user tracker <name> [<tracker name>]
 $ ensemble-hub knowledge status|distill|rebuild
 $ ensemble-hub settings show|history [--json]    # its settings, and who changed them
-$ ensemble-hub settings owner|listen|sessions|lockout …
+$ ensemble-hub settings owner|sessions|lockout …
 $ ensemble-hub settings import <json>     # settings `settings show --json` printed, whole
 
 $ ensemble-runner completions zsh|bash|fish|elvish|powershell   # a completion script for your shell
 $ ensemble-hub completions zsh|bash|fish|elvish|powershell
 ```
 
-Every command takes `--env-file <path>` (read in place of the runner's or the
-hub's `.env`, for keys a secrets manager keeps), and every command of `ensemble-runner` `--dir <path>` (the folder
+Every command takes `--config-dir <path>`, the folder everything is kept in
+(by default `~/.local/state/ensemble`; the hub in its `hub/`, the runner in
+its `runner/`), and every command of `ensemble-runner` `--dir <path>` (the folder
 `ensemble-runner agent run` works in, and where `ensemble-runner agent health`
 and `ensemble-runner doctor` start agent CLIs; by default the current
 directory). `ensemble-runner agent run` prints the answer on stdout and the

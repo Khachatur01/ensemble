@@ -1,10 +1,10 @@
 # What the NixOS and Home Manager modules share about a runner: its options.
-# They only run it. Its settings and the keys of its backends are kept in its
-# database, `~/.config/ensemble/runner/database.db`, and changed with
-# `ensemble-runner setup`, `… settings …`, `… backend …` and `… login`; its
-# teams are added with `ensemble-runner team pull`, `link` or `new`. Before
-# each start the service runs `ensemble-runner init --keep`, which makes a
-# runner named for the computer, working in `~/ensemble`, when there is none.
+# They only run it. Its settings, the keys of its backends and its hub tokens
+# are kept in its database, `~/.local/state/ensemble/runner/core/database.db`,
+# and changed with `ensemble-runner setup`, `… settings …`, `… backend …` and
+# `… login`; its teams are added with `ensemble-runner team pull`, `link` or
+# `new`. The first time it starts, `ensemble-runner serve` makes a runner named
+# for the computer, working in `~/ensemble`.
 { self, lib }:
 let
   inherit (lib) mkOption types;
@@ -24,14 +24,13 @@ in
         type = types.nullOr types.str;
         default = null;
         description = ''
-          A file of NAME=value lines, given to `ensemble-runner serve` as
-          `--env-file`, such as a secret sops-nix or agenix puts in /run: the
-          keys a secrets manager keeps, which a backend names with
+          A file of NAME=value lines put in the runner's environment, such as
+          a secret sops-nix or agenix puts in /run: the keys a secrets manager
+          keeps, which a backend names with
           `ensemble-runner backend key <name> --key-env <NAME>`. A path as a
           string, so the keys never enter the Nix store. A key given to
           `ensemble-runner backend key` is kept in the runner's database
-          instead. Null reads the runner's own `~/.config/ensemble/runner/.env`,
-          when there is one.
+          instead.
         '';
       };
 
@@ -46,18 +45,16 @@ in
       };
     };
 
-  # `ensemble-runner serve`, with the environment file when there is one.
-  command =
-    cfg:
-    [
-      (lib.getExe cfg.package)
-      "serve"
-    ]
-    ++ lib.optionals (cfg.environmentFile != null) [
-      "--env-file"
-      cfg.environmentFile
-    ];
+  # `ensemble-runner serve`.
+  command = cfg: [
+    (lib.getExe cfg.package)
+    "serve"
+  ];
 
-  # A runner to run, when it has none yet.
-  init = cfg: "${lib.getExe cfg.package} init --keep";
+  # `ensemble-runner serve` for a shell, with the environment file's
+  # variables when there is one: for launchd, which reads no such file.
+  shellCommand =
+    cfg:
+    lib.optionalString (cfg.environmentFile != null) "set -a; . ${lib.escapeShellArg cfg.environmentFile}; set +a; "
+    + "exec ${lib.escapeShellArgs [ (lib.getExe cfg.package) "serve" ]}";
 }

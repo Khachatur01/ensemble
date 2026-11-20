@@ -31,10 +31,12 @@ in
     systemd.user.services.ensemble-runner = mkIf pkgs.stdenv.hostPlatform.isLinux {
       Unit.Description = "Ensemble runner";
       Service = {
-        ExecStartPre = runner.init cfg;
         ExecStart = lib.escapeShellArgs command;
         Environment = [ "PATH=${path}" ];
         Restart = "on-failure";
+      }
+      // lib.optionalAttrs (cfg.environmentFile != null) {
+        EnvironmentFile = cfg.environmentFile;
       };
       Install.WantedBy = [ "default.target" ];
     };
@@ -45,7 +47,7 @@ in
         ProgramArguments = [
           "/bin/sh"
           "-c"
-          "${runner.init cfg} && exec ${lib.escapeShellArgs command}"
+          (runner.shellCommand cfg)
         ];
         EnvironmentVariables.PATH = "${path}:/usr/bin:/bin";
         KeepAlive = true;
