@@ -509,7 +509,7 @@ it, within 24 hours (another client spends it with `POST /api/v1/join`):
 ```console
 $ ensemble-hub user join-code ana
 join_…
-note: This is ana's join code, shown once and good for one sign-in within 24 hours: a client of the hub at wss://hub.example.com spends it for a token of its own, as `ensemble-runner join wss://hub.example.com join_…` does.
+note: This is ana's join code, shown once and good for one sign-in within 24 hours: a client of the hub at https://hub.example.com spends it for a token of its own, as `ensemble-runner join wss://hub.example.com join_…` does.
 ```
 
 The runner keeps the token in its database, sealed by its `master.key`;

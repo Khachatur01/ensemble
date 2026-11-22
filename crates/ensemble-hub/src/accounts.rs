@@ -366,7 +366,7 @@ const TRACKER: &[Field] = &[
 fn token_note(c: &HubContext, name: &str, token: &str) -> String {
     format!(
         "This is {name}'s token, shown once: a client of the hub at {} signs in with it. For their agent, as its API key for the hub's MCP: {}",
-        hub_url(c),
+        hub_base(c),
         mcp_line(c, token)
     )
 }
@@ -375,7 +375,7 @@ fn token_note(c: &HubContext, name: &str, token: &str) -> String {
 fn join_note(c: &HubContext, name: &str, code: &str) -> String {
     format!(
         "This is {name}'s join code, shown once and good for one sign-in within {JOIN_HOURS} hours: a client of the hub at {} spends it for a token of its own, as `ensemble-runner join {} {code}` does.",
-        hub_url(c),
+        hub_base(c),
         hub_url(c)
     )
 }
