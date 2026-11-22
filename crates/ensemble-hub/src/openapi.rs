@@ -42,6 +42,7 @@ const fn route(
 pub(crate) const ROUTES: &[Route] = &[
     route("POST", "/register", &["account.register"], 201),
     route("POST", "/login", &["account.login"], 200),
+    route("POST", "/join", &["token.join"], 201),
     route("POST", "/logout", &["account.logout"], 200),
     route("GET", "/me", &["me.show"], 200),
     Route {

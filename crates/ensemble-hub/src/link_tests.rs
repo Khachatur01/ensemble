@@ -54,7 +54,7 @@ mod signing_in {
         sign_in(
             url,
             LOGIN,
-            json!({"name": name, "password": password, "runner": "desk"}),
+            json!({"name": name, "password": password, "client": "runner desk"}),
         )
     }
 
@@ -117,7 +117,13 @@ mod signing_in {
                 .contains("ensemble-runner join <hub-url> join_"),
             "{made}"
         );
-        let join = |code: &str| sign_in(&hub.url, JOIN, json!({"code": code, "runner": "lab"}));
+        let join = |code: &str| {
+            sign_in(
+                &hub.url,
+                JOIN,
+                json!({"code": code, "client": "runner lab"}),
+            )
+        };
         let token = join(&code).await.unwrap();
         assert_eq!(
             Link::new(&hub.url, &token).hello().await.unwrap().user,

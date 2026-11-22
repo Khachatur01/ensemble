@@ -148,7 +148,7 @@ In another terminal (or with the hub run as a service, see
 [Installation](#installation)):
 
 ```console
-$ ensemble-hub setup                       # adds you as its first admin: your token, shown once, and a join code for your runner
+$ ensemble-hub setup                       # adds you as its first admin: your token, shown once
 $ ensemble-hub user password ana           # typed without echo
 ```
 
@@ -395,6 +395,7 @@ come and for scripts. JSON in and out.
 | --- | --- | --- |
 | `POST /api/v1/register` `{name, password}` | anyone, with `approval` | a pending account |
 | `POST /api/v1/login` `{name, password}` | anyone | a session: `{token, expires}` |
+| `POST /api/v1/join` `{code, client}` | anyone, with a join code | spends it: a new access token of the client's own, named `client`: `{name, token}` |
 | `POST /api/v1/logout` | a session | ends it |
 | `GET /api/v1/me` | any token | your account, the token's permissions and kind |
 | `PUT /api/v1/me` `{tracker_user}` | a session | who you are in the tracker; empty for your account name |
@@ -402,14 +403,14 @@ come and for scripts. JSON in and out.
 | `GET /api/v1/me/tokens` | a session | your access tokens: id, name, scopes, made, expires |
 | `POST /api/v1/me/tokens` `{name, expires_days?, scopes?}` | a session | a new access token, shown once |
 | `DELETE /api/v1/me/tokens/{id}` | a session | revokes one |
-| `POST /api/v1/me/join-codes` | a session | a join code for one of your runners, shown once: `{code, expires}` |
+| `POST /api/v1/me/join-codes` | a session | a join code that signs one of your clients in, shown once: `{code, expires}` |
 | `GET /api/v1/users` | admin | every account; never a password, token or hash |
 | `POST /api/v1/users` `{name, role, password}` | admin | an account, active |
 | `GET /api/v1/roles` | admin | the roles and their permissions |
 | `POST /api/v1/users/{name}/approve` `{role}` | admin | lets a pending account in |
 | `PUT /api/v1/users/{name}` `{role?, tracker_user?}` | admin | another role, or who they are in the tracker |
 | `PUT /api/v1/users/{name}/password` `{password}` | admin | resets it; the account's sessions end |
-| `POST /api/v1/users/{name}/join-codes` | admin | a join code for one of their runners, shown once |
+| `POST /api/v1/users/{name}/join-codes` | admin | a join code that signs one of their clients in, shown once |
 | `DELETE /api/v1/users/{name}/tokens` | admin | revokes every token |
 | `DELETE /api/v1/users/{name}` | admin | removes an account, or turns a sign-up down |
 
@@ -492,20 +493,23 @@ $ ensemble-runner join wss://hub.example.com join_…         # or a join code, 
 Signing in names the hub in the runner's settings (`hub: wss://hub.example.com`
 in `ensemble-runner settings show`), and `logout` takes it out.
 
-The runner signs in over its link, the WebSocket it works on, and makes no
-other request to the hub: a link opened without a token may only sign in.
-`ensemble-runner login` checks the password, minding the lockout above, and
-the hub makes an access token for this computer, named after the runner (or
-the computer, before there is a runner). `ensemble-runner join` does the same
-with a **join code** in place of the password: an admin makes one for an
-account on the hub's computer, or you make one for yourself with a session
-(`POST /api/v1/me/join-codes`), and it is shown once, signs in as no one, and
-is spent by the first runner that joins with it, within 24 hours:
+A runner is one more client of the hub, and signs in as any client does: the
+hub's `token.login` (a password) and `token.join` (a join code) make an access
+token of the client's own, named after it. The runner asks them over its link,
+the WebSocket it works on, and makes no other request to the hub: a link opened
+without a token may only sign in. `ensemble-runner login` checks the password,
+minding the lockout above, and the hub makes a token named `runner <name>`,
+after the runner (or the computer, before there is a runner).
+`ensemble-runner join` does the same with a **join code** in place of the
+password: an admin makes one for an account on the hub's computer, or you make
+one for yourself with a session (`POST /api/v1/me/join-codes`), and it is shown
+once, signs in as no one, and is spent by the first client that signs in with
+it, within 24 hours (another client spends it with `POST /api/v1/join`):
 
 ```console
 $ ensemble-hub user join-code ana
 join_…
-note: This is ana's join code, shown once and good for one runner within 24 hours. On the runner's computer: ensemble-runner join wss://hub.example.com join_…
+note: This is ana's join code, shown once and good for one sign-in within 24 hours: a client of the hub at wss://hub.example.com spends it for a token of its own, as `ensemble-runner join wss://hub.example.com join_…` does.
 ```
 
 The runner keeps the token in its database, sealed by its `master.key`;
@@ -1802,8 +1806,8 @@ the keys of its backends are kept in its `database.db`, and changed with
 `ensemble-hub …` as `user`, its REST API or a web UI, never in Nix; only
 where it listens is. The first time it starts, `ensemble-hub serve` makes the
 settings a new hub starts with, every one of them, named for `user`, and its
-vault. Then, as `user`: `ensemble-hub setup`, which adds the first admin and
-prints a join code for their runner, and `ensemble-hub backend add …`,
+vault. Then, as `user`: `ensemble-hub setup`, which adds the first admin, and
+`ensemble-hub backend add …`,
 `ensemble-hub knowledge models …` and the rest. To reach it from other
 computers, give the module `listenAddress = "0.0.0.0";` and
 `openFirewall = true;`. Back up the hub's folder: without `core/master.key`,
@@ -1947,7 +1951,7 @@ $ ensemble-runner agent add <team>/<name> --adapter A [--model M] [--backend B] 
 $ ensemble-runner agent remove <team>/<name>
 
 # A hub this computer runs
-$ ensemble-hub setup [--owner N] [--admin A] [--yes]   # make the hub, its first admin, and a join code for their runner
+$ ensemble-hub setup [--owner N] [--admin A] [--yes]   # make the hub and its first admin, with their token
 $ ensemble-hub init [--force|--keep] [--owner N]   # the settings a new hub starts with, and its vault
 $ ensemble-hub check                      # validate its settings; which model would distill now
 $ ensemble-hub serve                      # run the hub until stopped
@@ -1957,7 +1961,7 @@ $ ensemble-hub role list                  # the roles, and what each may do
 $ ensemble-hub user add <name> --role <role>        # prints their token once
 $ ensemble-hub user approve|role <name> --role <role>
 $ ensemble-hub user password|token|revoke|remove <name>   # a password is asked, or read from stdin; a token comes with the line for an agent
-$ ensemble-hub user join-code <name>      # a code, shown once, that signs one runner in within 24 hours
+$ ensemble-hub user join-code <name>      # a code, shown once, that signs one client, such as a runner, in within 24 hours
 $ ensemble-hub user tracker <name> [<tracker name>]
 $ ensemble-hub knowledge status|distill|rebuild
 $ ensemble-hub settings show|history [--json]    # its settings, and who changed them

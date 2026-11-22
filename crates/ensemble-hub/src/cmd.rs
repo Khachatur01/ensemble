@@ -113,9 +113,8 @@ fn start(dir: &HubDir, owner: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `ensemble-hub setup`: the hub's settings when it has none, its first
-/// admin, with their token, and this computer's runner signed in to it when
-/// it names no hub yet; then what is next.
+/// `ensemble-hub setup`: the hub's settings when it has none, and its first
+/// admin, with their token; then what is next.
 fn setup(
     ctx: &Ctx,
     owner: Option<String>,
@@ -162,13 +161,12 @@ fn setup(
         .into_iter()
         .flatten()
         .find(|u| u["status"] == "active" && admins.iter().any(|r| u["role"] == r.as_str()));
-    let new_admin = match admin_now {
+    match admin_now {
         Some(u) => {
             println!(
                 "{} is an admin already.",
                 u["name"].as_str().unwrap_or("someone")
             );
-            None
         }
         None => {
             let role = admins
@@ -189,32 +187,12 @@ fn setup(
             if let Some(note) = added["note"].as_str() {
                 println!("{note}\n");
             }
-            Some(name)
         }
-    };
-    if let Some(name) = &new_admin {
-        connect_runner(name, &call);
     }
     println!(
         "Next: give it a model server with `ensemble-hub backend add <name> --type openai-compatible-api --url <url>`, choose the models that distill shares with `ensemble-hub knowledge models <backend>:<model>`, and watch a tracker with `ensemble-hub tracker add`. `ensemble-hub settings show` shows every setting."
     );
     Ok(ExitCode::SUCCESS)
-}
-
-/// Say how `admin` connects a runner of theirs, on any computer: with a
-/// join code, spent once.
-fn connect_runner(
-    admin: &str,
-    call: &dyn Fn(&str, serde_json::Value) -> Result<serde_json::Value, String>,
-) {
-    match call("user.join-code", json!({ "name": admin })) {
-        Ok(made) => {
-            if let Some(note) = made["note"].as_str() {
-                println!("{note}\n");
-            }
-        }
-        Err(e) => println!("No join code for {admin}: {e}\n"),
-    }
 }
 
 fn check(ctx: &Ctx) -> Result<ExitCode, String> {

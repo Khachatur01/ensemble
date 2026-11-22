@@ -9,15 +9,15 @@
 //! | `me.show` | any signed-in account |
 //! | `me.tracker`, `me.password`, `me.tokens`, `me.token`, `me.join-code`, `me.revoke`, `account.logout` | a session |
 //! | `runner.backends` | admin, of the running hub |
-//! | `account.register`, `account.login`, `runner.login`, `runner.join` | anyone |
+//! | `account.register`, `account.login`, `token.login`, `token.join` | anyone |
 //!
 //! A **session** comes from logging in with the password, and only a session
 //! may change the password or make and revoke access tokens, so a stolen access
 //! token cannot make more. An **access token** may be narrowed by scopes, and
-//! is what runners, client agents and scripts use. A runner gets its own over
-//! the link, which runs `runner.login` and `runner.join` for a connection
-//! without a token: with a password, or with a **join code**, made by an admin
-//! or by the account's session and spent once.
+//! is what clients use: a runner, an agent, a script. A client gets one of its
+//! own, named after it, with `token.login` (a password) or `token.join` (a
+//! **join code**, made by an admin or by the account's session and spent
+//! once), over the REST API or over the link, on a connection without a token.
 
 use crate::users::{JOIN_HOURS, Kind, Roles, Token, User, Users, UsersError};
 use ensemble_backends::ops::{Backends, KeptBackends, Side, WithBackends};
@@ -291,7 +291,8 @@ impl WithBackends for HubContext {
 pub fn operations() -> Registry<HubContext> {
     let mut all = user_operations();
     all.extend(own_operations());
-    all.extend(runner_operations());
+    all.extend(sign_in_operations());
+    all.push(runner_backends());
     all.extend(ensemble_backends::ops::operations::<HubContext>(
         Side::Hub,
         Access::Permission("admin"),
@@ -363,21 +364,18 @@ const TRACKER: &[Field] = &[
 
 /// What a new token's owner is told.
 fn token_note(c: &HubContext, name: &str, token: &str) -> String {
-    let mut note = format!(
-        "This is {name}'s token, shown once. On their computer: ensemble-runner login {} --token <token>",
-        hub_url(c)
-    );
-    note.push_str(&format!(
-        ". For their agent, as its API key for the hub's MCP: {}",
+    format!(
+        "This is {name}'s token, shown once: a client of the hub at {} signs in with it. For their agent, as its API key for the hub's MCP: {}",
+        hub_url(c),
         mcp_line(c, token)
-    ));
-    note
+    )
 }
 
 /// What a new join code's owner is told.
 fn join_note(c: &HubContext, name: &str, code: &str) -> String {
     format!(
-        "This is {name}'s join code, shown once and good for one runner within {JOIN_HOURS} hours. On the runner's computer: ensemble-runner join {} {code}",
+        "This is {name}'s join code, shown once and good for one sign-in within {JOIN_HOURS} hours: a client of the hub at {} spends it for a token of its own, as `ensemble-runner join {} {code}` does.",
+        hub_url(c),
         hub_url(c)
     )
 }
@@ -592,7 +590,7 @@ fn user_operations() -> Vec<Operation<HubContext>> {
         operation(
             Spec {
                 name: "user.join-code",
-                summary: "Make an account a join code, shown once, that signs one runner in.",
+                summary: "Make an account a join code, shown once, that signs one client in.",
                 access: ADMIN,
                 input: NAMED,
             },
@@ -889,7 +887,7 @@ fn own_operations() -> Vec<Operation<HubContext>> {
         operation(
             Spec {
                 name: "me.join-code",
-                summary: "Make yourself a join code, shown once, that signs one runner in.",
+                summary: "Make yourself a join code, shown once, that signs one client in.",
                 access: Access::Session,
                 input: &[],
             },
@@ -912,56 +910,56 @@ fn own_operations() -> Vec<Operation<HubContext>> {
 }
 
 #[derive(Deserialize)]
-struct RunnerLogin {
+struct ClientLogin {
     name: String,
     password: String,
-    runner: String,
+    client: String,
 }
 
 #[derive(Deserialize)]
 struct Join {
     code: String,
-    runner: String,
+    client: String,
 }
 
-const RUNNER: Field = Field::text(
-    "runner",
-    "The runner's name, which its new access token is named after.",
+const CLIENT: Field = Field::text(
+    "client",
+    "What signs in, such as `runner laptop`: its new access token is named after it.",
 )
 .required();
-const RUNNER_LOGIN: &[Field] = &[
+const CLIENT_LOGIN: &[Field] = &[
     Field::text("name", "Your account's name.").required(),
     Field::secret("password", "Your password.").required(),
-    RUNNER,
+    CLIENT,
 ];
 const JOIN: &[Field] = &[
     Field::text("code", "A join code made for your account.").required(),
-    RUNNER,
+    CLIENT,
 ];
 
-/// How a runner signs in: over the link, on a connection without a token.
-fn runner_operations() -> Vec<Operation<HubContext>> {
+/// How a client signs in, without a token: for an access token of its own.
+fn sign_in_operations() -> Vec<Operation<HubContext>> {
     vec![
         operation(
             Spec {
-                name: "runner.login",
-                summary: "Sign a runner in with a password, for an access token of its own.",
+                name: "token.login",
+                summary: "Sign a client in with a password, for an access token of its own.",
                 access: Access::Anyone,
-                input: RUNNER_LOGIN,
+                input: CLIENT_LOGIN,
             },
-            |c: &HubContext, _: &Caller, input: RunnerLogin| {
+            |c: &HubContext, _: &Caller, input: ClientLogin| {
                 let accounts = c.accounts()?;
                 let token = guarded(accounts, &input.name, |users| {
                     users.verify(&input.name, &input.password)?;
-                    runner_token(users, &input.name, &input.runner, &accounts.roles())
+                    client_token(users, &input.name, &input.client, &accounts.roles())
                 })?;
                 Ok(json!({ "name": input.name, "token": token }))
             },
         ),
         operation(
             Spec {
-                name: "runner.join",
-                summary: "Sign a runner in with a join code, for an access token of its own.",
+                name: "token.join",
+                summary: "Sign a client in with a join code, for an access token of its own.",
                 access: Access::Anyone,
                 input: JOIN,
             },
@@ -969,13 +967,18 @@ fn runner_operations() -> Vec<Operation<HubContext>> {
                 let accounts = c.accounts()?;
                 let (name, token) = accounts.change(|users| {
                     let name = users.spend(&input.code)?;
-                    let token = runner_token(users, &name, &input.runner, &accounts.roles())?;
+                    let token = client_token(users, &name, &input.client, &accounts.roles())?;
                     Ok((name, token))
                 })?;
                 Ok(json!({ "name": name, "token": token }))
             },
         ),
-        operation(
+    ]
+}
+
+/// The backends the connected runners share.
+fn runner_backends() -> Operation<HubContext> {
+    operation(
             Spec {
                 name: "runner.backends",
                 summary: "The backends the connected runners share, with their models: what the hub's `llm.runners` may name.",
@@ -1024,21 +1027,19 @@ fn runner_operations() -> Vec<Operation<HubContext>> {
                 },
                 note: None,
             }
-        }),
-    ]
+        })
 }
 
-/// A new access token of `name` for the runner `runner`, named after it,
-/// with the account's whole role and no expiry.
-fn runner_token(
+/// A new access token of `name` for `client`, named after it, with the
+/// account's whole role and no expiry.
+fn client_token(
     users: &mut Users,
     name: &str,
-    runner: &str,
+    client: &str,
     roles: &Roles,
 ) -> Result<String, UsersError> {
-    let label = format!("runner {}", runner.trim());
     users
-        .create_token(name, &label, None, None, roles)
+        .create_token(name, client, None, None, roles)
         .map(|(_, token, _)| token)
 }
 

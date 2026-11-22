@@ -755,7 +755,7 @@ pub fn operations() -> Registry<RunnerContext> {
         },
         |c, input: Join, change| {
             let url = hub_url(&input.url)?;
-            let params = serde_json::json!({ "code": input.code.trim(), "runner": runner_name() });
+            let params = serde_json::json!({ "code": input.code.trim(), "client": client_name() });
             let token = sign_in(url, ensemble_link::protocol::JOIN, params)?;
             keep(c, url, &token, change)
         },
@@ -782,7 +782,7 @@ fn login(c: &RunnerContext, input: Login, change: Change) -> Result<serde_json::
                 Error::invalid(format!("a password is needed to sign in as {user}")).on("password")
             })?;
             let params = serde_json::json!({
-                "name": user, "password": password, "runner": runner_name(),
+                "name": user, "password": password, "client": client_name(),
             });
             sign_in(url, ensemble_link::protocol::LOGIN, params)?
         }
@@ -819,14 +819,15 @@ fn sign_in(url: &str, method: &str, params: serde_json::Value) -> Result<String,
     )
 }
 
-/// The name the hub gives this computer's token: the runner's, or else the
-/// computer's.
-fn runner_name() -> String {
-    this_runner()
+/// What the runner signs in to a hub as, which the token the hub makes is
+/// named after: `runner <name>`, the runner's name or else the computer's.
+fn client_name() -> String {
+    let name = this_runner()
         .map(|r| r.name)
         .ok()
         .or_else(host_name)
-        .unwrap_or_else(|| "this computer".into())
+        .unwrap_or_else(|| "this computer".into());
+    format!("runner {name}")
 }
 
 /// Check the token of the hub at `url`, keep it, and have the runner name

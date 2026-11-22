@@ -396,11 +396,11 @@ impl<'a> Server<'a> {
     }
 
     /// What a connection without a token may ask: to sign in, with a password
-    /// or a join code, for an access token of the runner's own. Nothing else.
+    /// or a join code, for an access token of the client's own. Nothing else.
     fn unsigned(&self, req: Request) -> Reply {
         let operation = match req.method.as_str() {
-            LOGIN => "runner.login",
-            JOIN => "runner.join",
+            LOGIN => "token.login",
+            JOIN => "token.join",
             other => {
                 return Reply::err(
                     req.id,
@@ -843,7 +843,7 @@ pub(crate) mod tests {
         let err = ask(&mut ws, 4, JOIN, json!({"code": "join_nope"}))
             .error
             .unwrap();
-        assert!(err.contains("`runner` is required"), "{err}");
+        assert!(err.contains("`client` is required"), "{err}");
     }
 
     #[test]

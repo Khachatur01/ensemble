@@ -7,6 +7,7 @@
 //! |---|---|
 //! | `POST /api/v1/register` `{name, password}` | `account.register` |
 //! | `POST /api/v1/login` `{name, password}` | `account.login` |
+//! | `POST /api/v1/join` `{code, client}` | `token.join` |
 //! | `POST /api/v1/logout` | `account.logout` |
 //! | `GET /api/v1/me` | `me.show` |
 //! | `PUT /api/v1/me` `{tracker_user}` | `me.tracker` |
@@ -133,6 +134,7 @@ impl Server<'_> {
         match (head.method.as_str(), parts.as_slice()) {
             ("POST", ["register"]) => made(run("account.register", Value::Object(body()?))?),
             ("POST", ["login"]) => ok(run("account.login", Value::Object(body()?))?),
+            ("POST", ["join"]) => made(run("token.join", Value::Object(body()?))?),
             ("POST", ["logout"]) => ok(run("account.logout", json!({}))?),
             ("GET", ["me"]) => match run("me.show", json!({})) {
                 // One who signed up and waits is told so, with nothing allowed.
@@ -220,7 +222,7 @@ impl Server<'_> {
             (
                 _,
                 [
-                    "register" | "login" | "logout" | "me" | "users" | "roles" | "ops"
+                    "register" | "login" | "join" | "logout" | "me" | "users" | "roles" | "ops"
                     | "openapi.json",
                 ],
             )
@@ -491,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn join_codes_are_made_by_an_admin_or_by_a_session_and_sign_a_runner_in_once() {
+    fn join_codes_are_made_by_an_admin_or_by_a_session_and_sign_a_client_in_once() {
         let hub = start();
         let (_, root) = login(&hub.url, "root", PASSWORD);
         let root = root["token"].as_str().unwrap().to_string();
@@ -520,7 +522,7 @@ mod tests {
             block_on(ensemble_link::client::sign_in(
                 &hub.url,
                 ensemble_link::protocol::JOIN,
-                json!({"code": code, "runner": "lab"}),
+                json!({"code": code, "client": "runner lab"}),
             ))
         };
         let token = join(&code).unwrap();
@@ -554,9 +556,15 @@ mod tests {
             None,
         );
         assert_eq!(status, 201, "{made}");
-        let token = join(made["code"].as_str().unwrap()).unwrap();
-        let hello = block_on(ensemble_link::Link::new(&hub.url, &token).hello()).unwrap();
-        assert_eq!(hello.user, "ana");
+        // Any client spends one, over the REST API as over the link.
+        let body = json!({"code": made["code"], "client": "script"});
+        let (status, joined) = call(&hub.url, "POST", "/api/v1/join", None, Some(body.clone()));
+        assert_eq!(status, 201, "{joined}");
+        let token = joined["token"].as_str().unwrap();
+        let (status, me) = call(&hub.url, "GET", "/api/v1/me", Some(token), None);
+        assert_eq!((status, me["name"].as_str()), (200, Some("ana")), "{me}");
+        let (status, _) = call(&hub.url, "POST", "/api/v1/join", None, Some(body));
+        assert_eq!(status, 401, "spent");
         let (status, _) = call(
             &hub.url,
             "GET",

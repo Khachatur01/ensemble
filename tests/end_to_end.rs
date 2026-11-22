@@ -2067,12 +2067,12 @@ fn a_hub_server_refuses_another_protocol_or_a_bad_token_and_stops_on_sigterm() {
     assert!(status.contains("426"), "no protocol named: {status}");
     let status = upgrade(
         "/link",
-        "Ensemble-Protocol: 5\r\nAuthorization: Bearer ens_wrong\r\n",
+        "Ensemble-Protocol: 6\r\nAuthorization: Bearer ens_wrong\r\n",
     );
     assert!(status.contains("401"), "{status}");
-    let status = upgrade("/", "Ensemble-Protocol: 5\r\n");
+    let status = upgrade("/", "Ensemble-Protocol: 6\r\n");
     assert!(status.contains("404"), "the link is at /link: {status}");
-    let status = upgrade("/link", "Ensemble-Protocol: 5\r\n");
+    let status = upgrade("/link", "Ensemble-Protocol: 6\r\n");
     assert!(
         status.contains("101"),
         "no token: signing in only: {status}"

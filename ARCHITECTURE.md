@@ -500,25 +500,26 @@ projects it has no folder for, one that says it is connected, one per project wh
 without a token to sign in, and a short one for `hello` when it signs in or
 says its status; and, when it shares backends or reaches others', a relay
 socket at `/relay` for model calls, whose frames `ensemble_link::relay`
-describes. This is version 5 of the protocol. It makes no HTTP request
+describes. This is version 6 of the protocol. It makes no HTTP request
 to the hub.
 
 | for | the runner asks | the hub sends |
 | --- | --- | --- |
-| a token, on a link without one | `login` (a name, a password and the runner's name) or `join` (a join code and the runner's name), each answered with a new access token for the runner's computer, named after the runner | |
+| a token, on a link without one | `login` (a name, a password and the client's name, `runner <name>`) or `join` (a join code and the client's name), each answered with a new access token of the client's own, named after it | |
 | who it is | `hello` (who am I, which permissions) | |
 | tasks | each with its `project`: `tasks`, `task`, `task_claim`, `task_renew`, `task_release`, `task_finish`, `task_give_back` (with why), and with `account` and `runner` for a lender on another account's task; and across projects, `tasks_waiting` (the tasks for these agents that this runner has not given back: the account's, then, for a lender, others' it may take, each with its account) | |
 | runners | `runner` (I am a runner: name, whom I work for, every agent, the agents I lend), `runners` (which work for me) | |
 | model calls, on the relay socket | what it shares and how many calls at once, then calls to others' backends: `open`, the request's body in chunks, `end`, or `cancel` | the answers to its calls, and calls to the backends it shares, which it answers: `head`, the body in chunks, `done`, or `error` |
 
-`login` and `join` are the hub's operations `runner.login` and `runner.join`,
-run for anyone: `login` checks the password as logging in anywhere does,
-failures locking the name; `join` spends a join code, which an admin makes
-for an account with `user.join-code` (`ensemble-hub user join-code NAME`, or
-`POST /api/v1/users/{name}/join-codes`) or the account for itself with a
-session, `me.join-code` (`POST /api/v1/me/join-codes`). A code is shown once,
-kept as a hash with the tokens, signs in as no one, and is good once within 24
-hours. The hub's MCP runs its tools as the same requests (`share`, `recall`, and
+`login` and `join` are the hub's operations `token.login` and `token.join`,
+run for anyone and for any client, a runner being one: `login` checks the
+password as logging in anywhere does, failures locking the name; `join`
+spends a join code, which an admin makes for an account with `user.join-code`
+(`ensemble-hub user join-code NAME`, or `POST /api/v1/users/{name}/join-codes`)
+or the account for itself with a session, `me.join-code`
+(`POST /api/v1/me/join-codes`). A code is shown once, kept as a hash with the
+tokens, signs in as no one, and is good once within 24 hours; a client
+without the link spends it with `POST /api/v1/join`. The hub's MCP runs its tools as the same requests (`share`, `recall`, and
 `task_create`, `task_answer`, `task_assign`, `task_cancel` with the reading
 ones, and `runners` for `agents`), so the link and MCP cannot differ. Every request is checked against the
 token's permissions (its role, narrowed by its scopes), read again from the
@@ -1057,12 +1058,13 @@ access tokens for runners, client agents and scripts, each named, with an
 optional expiry and optional scopes that narrow the account's role. Only a
 session may manage tokens or the password; failed logins lock a name for a
 while. (Decided 2026-11-11.) A client agent uses a token as the API key of the
-hub's MCP. A runner signs in over its link, with a name and a password or a
-join code, which makes an access token for that computer, named after the
-runner (the OAuth device flow and OIDC later), and keeps it in its database,
-sealed by its `master.key`; the OS keyring may come later as an option. An admin makes a join code for an account, or the
-account for itself with a session; it is shown once and spent by one runner
-within 24 hours. The hub stores tokens and join codes hashed. Runners, sources and agents are
+hub's MCP. Any client may sign in with a name and a password or a join code
+(`token.login`, `token.join`), for an access token of its own, named after
+it (the OAuth device flow and OIDC later). A runner does so over its link, as
+`runner <name>`, and keeps the token in its database, sealed by its
+`master.key`; the OS keyring may come later as an option. An admin makes a
+join code for an account, or the account for itself with a session; it is
+shown once and spent by one client within 24 hours. The hub stores tokens and join codes hashed. Runners, sources and agents are
 identities too, and an agent acts on behalf of a person.
 
 There are no teams of people in the hub, only roles. Ensemble defines a fixed
@@ -1404,7 +1406,13 @@ crate holds it today.
     `serve`'s, not a setting, and the vault's folder fixed; `serve` makes a
     new hub or runner the first time, so the modules only run them;
     `ensemble-store` keeps only what both share.)
-29. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
+29. Signing in the same for every client: a runner is not special to the
+    hub's accounts. (Done: `runner.login` and `runner.join` are `token.login`
+    and `token.join`, each taking the client's name, which its new token is
+    named after, a runner's being `runner <name>`; a join code signs one
+    client in, over the link or with `POST /api/v1/join`; `ensemble-hub setup`
+    makes the first admin and their token, and no join code; link protocol 6.)
+30. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
     and Teams, Telegram); a runner's operations from the hub, for its own
     account; the remaining goal operations (people, computers, teams from
     templates); chat; a web UI.
