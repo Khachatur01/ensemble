@@ -1,15 +1,17 @@
-//! The app's pages. Each reads and changes the hub through its operations
-//! ([`api`]); the forms are made from them ([`OpForm`]).
+//! The app's pages but the settings ([`crate::settings`]). Each reads and
+//! changes the hub through its operations ([`api`]); the forms are made from
+//! them ([`OpForm`]), with what to pick from read from the hub ([`lookup`]).
 
 use crate::api::{self, Failure};
-use crate::form::{Answer, Json, OpForm};
+use crate::form::{Json, OpForm, Pick, may_run};
+use crate::lookup::{self, use_op};
 use crate::{Me, Route};
 use dioxus::prelude::*;
 use serde_json::{Value, json};
 
 /// What an operation's answer is shown as while it loads, once it failed,
 /// and once it came.
-fn loaded(
+pub fn loaded(
     answer: &Option<Result<Value, Failure>>,
     show: impl FnOnce(&Value) -> Element,
 ) -> Element {
@@ -21,7 +23,7 @@ fn loaded(
 }
 
 /// A text field of a value, or empty.
-fn text(value: &Value, key: &str) -> String {
+pub fn text(value: &Value, key: &str) -> String {
     match &value[key] {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
@@ -29,7 +31,22 @@ fn text(value: &Value, key: &str) -> String {
     }
 }
 
-fn me() -> Me {
+/// A field's name and its value, as a form starts with it.
+pub fn value(field: &str, value: impl ToString) -> (String, String) {
+    (field.to_string(), value.to_string())
+}
+
+/// A field's name and the words a form shows for it.
+pub fn label(field: &str, label: &str) -> (String, String) {
+    (field.to_string(), label.to_string())
+}
+
+/// A time as the hub writes it, as a person reads it: `2026-11-23 08:03`.
+pub fn when(at: &str) -> String {
+    at.get(..16).unwrap_or(at).replace('T', " ")
+}
+
+pub fn me() -> Me {
     use_context::<Signal<Option<Me>>>()
         .read()
         .clone()
@@ -42,12 +59,22 @@ pub fn Login() -> Element {
     let mut name = use_signal(String::new);
     let mut password = use_signal(String::new);
     let mut failure = use_signal(|| None::<Failure>);
+    let mut busy = use_signal(|| false);
     let nav = navigator();
     let submit = move |e: FormEvent| {
         e.prevent_default();
+        if name.read().trim().is_empty() || password.read().is_empty() {
+            failure.set(Some(Failure {
+                status: 400,
+                message: "Type your name and password.".into(),
+                field: None,
+            }));
+            return;
+        }
         spawn(async move {
+            busy.set(true);
             failure.set(None);
-            match api::sign_in(&name.read(), &password.read()).await {
+            match api::sign_in(name.read().trim(), &password.read()).await {
                 Ok(_) => match api::me().await {
                     Ok(value) => {
                         session.set(Some(Me(value)));
@@ -57,6 +84,7 @@ pub fn Login() -> Element {
                 },
                 Err(e) => failure.set(Some(e)),
             }
+            busy.set(false);
         });
     };
     rsx! {
@@ -67,6 +95,7 @@ pub fn Login() -> Element {
                     span { class: "name", "Name" }
                     input {
                         autocomplete: "username",
+                        autofocus: true,
                         value: "{name}",
                         oninput: move |e| name.set(e.value()),
                     }
@@ -80,7 +109,11 @@ pub fn Login() -> Element {
                         oninput: move |e| password.set(e.value()),
                     }
                 }
-                div { class: "actions", button { r#type: "submit", "Sign in" } }
+                div { class: "actions",
+                    button { r#type: "submit", disabled: busy(),
+                        if busy() { "Signing in…" } else { "Sign in" }
+                    }
+                }
                 if let Some(f) = failure.read().as_ref() {
                     p { class: "error", "{f}" }
                 }
@@ -97,15 +130,7 @@ pub fn Login() -> Element {
 #[component]
 pub fn Home() -> Element {
     let me = me();
-    let permissions: Vec<String> = me.0["permissions"]
-        .as_array()
-        .map(|p| {
-            p.iter()
-                .filter_map(Value::as_str)
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default();
+    let permissions = lookup::strings(&me.0["permissions"]);
     rsx! {
         h1 { "Hello, {me.name()}" }
         p { class: "muted", "Role {text(&me.0, \"role\")}; you may: {permissions.join(\", \")}." }
@@ -133,27 +158,63 @@ pub fn Home() -> Element {
             if me.can("admin") {
                 Link { class: "card", to: Route::Users {},
                     h2 { "Users" }
-                    p { "Accounts, sign-ups and roles." }
+                    p { "Accounts and sign-ups." }
                 }
                 Link { class: "card", to: Route::Settings {},
                     h2 { "Settings" }
-                    p { "The hub's settings, backends, models and trackers." }
+                    p { "The hub, roles, backends, knowledge, sources and trackers." }
                 }
             }
         }
     }
 }
 
+/// The fields of a new task seldom needed, folded away.
+fn task_more() -> Vec<String> {
+    [
+        "repository",
+        "context",
+        "goal",
+        "constraints",
+        "files",
+        "after",
+        "gate",
+        "gate_attempts",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
+/// The words a task's form shows for its fields.
+fn task_labels() -> Vec<(String, String)> {
+    vec![
+        label("task", "what to do"),
+        label("agent", "agent (empty: the backlog)"),
+        label("done_when", "done when"),
+        label("gate_attempts", "gate attempts"),
+    ]
+}
+
+/// The agents to give a task to, suggested: one not connected now may still
+/// be named.
+fn agent_pick(agents: &lookup::Asked) -> Pick {
+    let mut pick = Pick::suggest("agent", []);
+    pick.options = lookup::agents(agents);
+    pick
+}
+
 #[component]
 pub fn Projects() -> Element {
-    let mut projects = use_resource(|| api::op("task.projects", json!({})));
+    let mut projects = use_op("task.projects");
+    let agents = use_op("runner.list");
+    let known = lookup::projects(&projects);
     rsx! {
         h1 { "Tasks" }
         {loaded(&projects.read(), |out| {
             let list = out["projects"].as_array().cloned().unwrap_or_default();
             rsx! {
                 if list.is_empty() {
-                    p { class: "muted", "No tasks yet." }
+                    p { class: "muted", "No tasks yet: make the first below." }
                 }
                 ul { class: "list",
                     for p in list {
@@ -171,8 +232,11 @@ pub fn Projects() -> Element {
         h2 { "New task" }
         OpForm {
             op: "task.create",
+            picks: vec![Pick::suggest("project", known), agent_pick(&agents)],
+            more: task_more(),
+            labels: task_labels(),
             submit: "Make the task",
-            quiet: true,
+            clear: true,
             on_done: move |_| projects.restart(),
         }
     }
@@ -196,6 +260,11 @@ fn status(task: &Value) -> String {
     }
 }
 
+/// Is the task over, so nothing more is done to it?
+fn finished(task: &Value) -> bool {
+    matches!(status(task).as_str(), "done" | "failed" | "cancelled")
+}
+
 #[component]
 pub fn ProjectTasks(project: String) -> Element {
     let shown = project.clone();
@@ -203,6 +272,7 @@ pub fn ProjectTasks(project: String) -> Element {
         let project = shown.clone();
         async move { api::op("task.list", json!({ "project": project })).await }
     });
+    let agents = use_op("runner.list");
     rsx! {
         p { class: "crumbs", Link { to: Route::Projects {}, "Tasks" } " / {project}" }
         h1 { "{project}" }
@@ -236,8 +306,11 @@ pub fn ProjectTasks(project: String) -> Element {
         OpForm {
             op: "task.create",
             fixed: vec![("project".to_string(), json!(project))],
+            picks: vec![agent_pick(&agents)],
+            more: task_more(),
+            labels: task_labels(),
             submit: "Make the task",
-            quiet: true,
+            clear: true,
             on_done: move |_| tasks.restart(),
         }
     }
@@ -250,6 +323,7 @@ pub fn TaskPage(project: String, id: String) -> Element {
         let (project, id) = (p.clone(), i.clone());
         async move { api::op("task.show", json!({ "project": project, "id": id })).await }
     });
+    let agents = use_op("runner.list");
     let on_task = vec![
         ("project".to_string(), json!(project)),
         ("id".to_string(), json!(id)),
@@ -263,65 +337,73 @@ pub fn TaskPage(project: String, id: String) -> Element {
         }
         {loaded(&task.read(), |out| {
             let detail = &out["task"];
-            let task = if detail["task"].is_null() { detail } else { &detail["task"] };
-            let ticket = &task["ticket"];
+            let shown = if detail["task"].is_null() { detail } else { &detail["task"] };
+            let ticket = &shown["ticket"];
             let agent = match text(ticket, "agent") {
                 agent if !agent.is_empty() => format!("for {agent}"),
-                _ if status(task) == "backlog" => "in the backlog until it is given to an agent".into(),
+                _ if status(shown) == "backlog" => "in the backlog until it is given to an agent".into(),
                 _ => "for no agent".into(),
             };
-            let question = text(task, "question");
+            let question = text(shown, "question");
+            let over = finished(shown);
             rsx! {
                 h1 { "{text(ticket, \"title\")}" }
                 p { class: "muted",
-                    span { class: "state {status(task)}", "{status(task)}" }
+                    span { class: "state {status(shown)}", "{status(shown)}" }
                     " {id}, {agent}"
                 }
                 if !question.is_empty() {
-                    p { class: "notice", strong { "It asks: " } "{question}" }
+                    section { class: "panel notice",
+                        p { strong { "It asks: " } "{question}" }
+                        OpForm {
+                            op: "task.answer",
+                            fixed: on_task.clone(),
+                            labels: vec![label("text", "your answer")],
+                            submit: "Answer",
+                            on_done: move |_| task.restart(),
+                        }
+                    }
                 }
                 pre { class: "text", "{text(ticket, \"text\")}" }
+                if !over {
+                    div { class: "columns",
+                        section { class: "panel",
+                            h2 { "Give it to an agent" }
+                            OpForm {
+                                op: "task.assign",
+                                fixed: on_task.clone(),
+                                picks: vec![agent_pick(&agents)],
+                                values: vec![value("agent", text(ticket, "agent"))],
+                                submit: "Assign",
+                                on_done: move |_| task.restart(),
+                            }
+                        }
+                        section { class: "panel",
+                            h2 { "Cancel it" }
+                            p { class: "muted", "Before it starts; or its runner stops it." }
+                            OpForm {
+                                op: "task.cancel",
+                                fixed: on_task.clone(),
+                                submit: "Cancel the task",
+                                danger: true,
+                                confirm: "Cancel {id}? An agent working on it stops.",
+                                on_done: move |_| task.restart(),
+                            }
+                        }
+                    }
+                }
                 details {
                     summary { "Everything the hub keeps of it" }
                     Json { value: detail.clone() }
                 }
             }
         })}
-        div { class: "columns",
-            section {
-                h2 { "Answer its question" }
-                OpForm {
-                    op: "task.answer",
-                    fixed: on_task.clone(),
-                    submit: "Answer",
-                    on_done: move |_| task.restart(),
-                }
-            }
-            section {
-                h2 { "Give it to an agent" }
-                OpForm {
-                    op: "task.assign",
-                    fixed: on_task.clone(),
-                    submit: "Assign",
-                    on_done: move |_| task.restart(),
-                }
-            }
-            section {
-                h2 { "Cancel it" }
-                OpForm {
-                    op: "task.cancel",
-                    fixed: on_task.clone(),
-                    submit: "Cancel the task",
-                    on_done: move |_| task.restart(),
-                }
-            }
-        }
     }
 }
 
 #[component]
 pub fn Runners() -> Element {
-    let runners = use_resource(|| api::op("runner.list", json!({})));
+    let runners = use_op("runner.list");
     rsx! {
         h1 { "Runners" }
         {loaded(&runners.read(), |out| {
@@ -331,7 +413,9 @@ pub fn Runners() -> Element {
                     p { class: "muted",
                         "No runner that works for you is connected. On a computer that should work: "
                         code { "ensemble-runner join <hub> <code>" }
-                        ", with a code from your account."
+                        ", with a code from "
+                        Link { to: Route::Account {}, "your account" }
+                        "."
                     }
                 }
                 for runner in list {
@@ -359,21 +443,38 @@ pub fn Knowledge() -> Element {
     let mut found = use_signal(|| None::<Value>);
     rsx! {
         h1 { "Knowledge" }
-        if me.can("recall") {
-            h2 { "Recall" }
-            OpForm {
-                op: "knowledge.find",
-                submit: "Recall",
-                quiet: true,
-                on_done: move |out: Value| found.set(Some(out)),
+        div { class: "columns",
+            if me.can("recall") {
+                section { class: "panel",
+                    h2 { "Recall" }
+                    OpForm {
+                        op: "knowledge.find",
+                        labels: vec![label("query", "topic")],
+                        submit: "Recall",
+                        quiet: true,
+                        on_done: move |out: Value| found.set(Some(out)),
+                    }
+                    if let Some(out) = found.read().as_ref() {
+                        if text(out, "text").trim().is_empty() {
+                            p { class: "muted", "No notes about it." }
+                        } else {
+                            pre { class: "text", "{text(out, \"text\")}" }
+                        }
+                    }
+                }
             }
-            if let Some(out) = found.read().as_ref() {
-                pre { class: "text", "{text(out, \"text\")}" }
+            if me.can("share") {
+                section { class: "panel",
+                    h2 { "Share" }
+                    OpForm {
+                        op: "knowledge.share",
+                        picks: vec![Pick::named("visibility", &[("private", "Only you"), ("hub", "Everyone on the hub")])],
+                        values: vec![value("visibility", "private")],
+                        submit: "Share",
+                        clear: true,
+                    }
+                }
             }
-        }
-        if me.can("share") {
-            h2 { "Share" }
-            OpForm { op: "knowledge.share", submit: "Share" }
         }
     }
 }
@@ -381,7 +482,8 @@ pub fn Knowledge() -> Element {
 #[component]
 pub fn Account() -> Element {
     let me = me();
-    let mut tokens = use_resource(|| api::op("me.tokens", json!({})));
+    let mut tokens = use_op("me.tokens");
+    let mine = lookup::strings(&me.0["permissions"]);
     rsx! {
         h1 { "{me.name()}" }
         p { class: "muted",
@@ -395,7 +497,7 @@ pub fn Account() -> Element {
             let list = out["tokens"].as_array().cloned().unwrap_or_default();
             rsx! {
                 table {
-                    thead { tr { th { "Name" } th { "Scopes" } th { "Made" } th { "Expires" } th {} } }
+                    thead { tr { th { "Name" } th { "May" } th { "Made" } th { "Expires" } th {} } }
                     tbody {
                         for token in list {
                             TokenRow { key: "{text(&token, \"id\")}", token: token.clone(), on_revoked: move |_| tokens.restart() }
@@ -405,24 +507,46 @@ pub fn Account() -> Element {
             }
         })}
         div { class: "columns",
-            section {
+            section { class: "panel",
                 h3 { "New token" }
-                OpForm { op: "me.token", submit: "Make a token", on_done: move |_| tokens.restart() }
+                OpForm {
+                    op: "me.token",
+                    picks: vec![Pick::only("scopes", mine.clone())],
+                    labels: vec![
+                        label("scopes", "may (none: all your role may)"),
+                        label("expires_days", "expires in days"),
+                    ],
+                    submit: "Make a token",
+                    clear: true,
+                    on_done: move |_| tokens.restart(),
+                }
             }
-            section {
+            section { class: "panel",
                 h3 { "Join code" }
                 p { class: "muted", "Signs one client in, such as a runner, within 24 hours." }
                 OpForm { op: "me.join-code", submit: "Make a join code" }
             }
         }
         div { class: "columns",
-            section {
+            section { class: "panel",
                 h3 { "Password" }
-                OpForm { op: "me.password", submit: "Change the password" }
+                OpForm {
+                    op: "me.password",
+                    repeat: vec!["new".to_string()],
+                    labels: vec![label("current", "current password"), label("new", "new password")],
+                    submit: "Change the password",
+                    clear: true,
+                }
             }
-            section {
+            section { class: "panel",
                 h3 { "Tracker name" }
-                OpForm { op: "me.tracker", submit: "Save" }
+                OpForm {
+                    op: "me.tracker",
+                    values: vec![value("tracker_user", text(&me.0, "tracker_user"))],
+                    labels: vec![label("tracker_user", "you in the tracker")],
+                    submit: "Save",
+                    saved: true,
+                }
             }
         }
     }
@@ -431,7 +555,9 @@ pub fn Account() -> Element {
 #[component]
 fn TokenRow(token: Value, on_revoked: EventHandler<()>) -> Element {
     let id = text(&token, "id");
+    let name = text(&token, "name");
     let mut failure = use_signal(|| None::<Failure>);
+    let mut asking = use_signal(|| false);
     let revoke = move |_| {
         let id = id.clone();
         spawn(async move {
@@ -449,15 +575,26 @@ fn TokenRow(token: Value, on_revoked: EventHandler<()>) -> Element {
                 .collect::<Vec<_>>()
                 .join(", ")
         })
-        .unwrap_or_else(|| "its role".into());
+        .unwrap_or_else(|| "all its role may".into());
+    let expires = match text(&token, "expires") {
+        e if e.is_empty() => "never".to_string(),
+        e => when(&e),
+    };
     rsx! {
         tr {
-            td { "{text(&token, \"name\")}" }
+            td { "{name}" }
             td { "{scopes}" }
-            td { "{text(&token, \"made\")}" }
-            td { "{text(&token, \"expires\")}" }
-            td {
-                button { class: "link danger", onclick: revoke, "Revoke" }
+            td { "{when(&text(&token, \"made\"))}" }
+            td { "{expires}" }
+            td { class: "end",
+                if asking() {
+                    span { class: "muted", "Revoke {name}? " }
+                    button { class: "link danger", onclick: revoke, "Yes" }
+                    " "
+                    button { class: "link", onclick: move |_| asking.set(false), "No" }
+                } else {
+                    button { class: "link danger", onclick: move |_| asking.set(true), "Revoke" }
+                }
                 if let Some(f) = failure.read().as_ref() {
                     span { class: "error", " {f}" }
                 }
@@ -468,15 +605,30 @@ fn TokenRow(token: Value, on_revoked: EventHandler<()>) -> Element {
 
 #[component]
 pub fn Users() -> Element {
-    let mut users = use_resource(|| api::op("user.list", json!({})));
-    let roles = use_resource(|| api::op("role.list", json!({})));
+    let mut users = use_op("user.list");
+    let roles = use_op("role.list");
+    let known = lookup::roles(&roles);
     rsx! {
         h1 { "Users" }
         {loaded(&users.read(), |out| {
             let list = out["users"].as_array().cloned().unwrap_or_default();
+            let waiting: Vec<Value> = list.iter().filter(|u| u["status"] == "pending").cloned().collect();
             rsx! {
+                if !waiting.is_empty() {
+                    section { class: "panel notice",
+                        h2 { "Sign-ups waiting" }
+                        for user in waiting {
+                            Waiting {
+                                key: "{text(&user, \"name\")}",
+                                name: text(&user, "name"),
+                                roles: known.clone(),
+                                on_done: move |_| users.restart(),
+                            }
+                        }
+                    }
+                }
                 table {
-                    thead { tr { th { "Name" } th { "Role" } th { "Status" } th { "Tokens" } } }
+                    thead { tr { th { "Name" } th { "Role" } th { "Status" } th { "Tokens" } th { "Since" } } }
                     tbody {
                         for user in list {
                             tr { key: "{text(&user, \"name\")}",
@@ -484,20 +636,58 @@ pub fn Users() -> Element {
                                 td { "{text(&user, \"role\")}" }
                                 td { span { class: "state {text(&user, \"status\")}", "{text(&user, \"status\")}" } }
                                 td { "{text(&user, \"tokens\")}" }
+                                td { "{when(&text(&user, \"registered\"))}" }
                             }
                         }
                     }
                 }
             }
         })}
-        div { class: "columns",
-            section {
-                h2 { "Add a user" }
-                OpForm { op: "user.add", submit: "Add", on_done: move |_| users.restart() }
+        section { class: "panel",
+            h2 { "Add a user" }
+            OpForm {
+                op: "user.add",
+                picks: vec![lookup::role_pick("role", &known)],
+                repeat: vec!["password".to_string()],
+                submit: "Add",
+                clear: true,
+                on_done: move |_| users.restart(),
             }
-            section {
-                h2 { "Roles" }
-                {loaded(&roles.read(), |out| rsx! { Json { value: out.clone() } })}
+            p { class: "muted",
+                "What each role may do is in "
+                Link { to: Route::SettingsPage { section: "roles".into() }, "Settings, Roles" }
+                "."
+            }
+        }
+    }
+}
+
+/// A sign-up waiting for an admin: let in with a role, or turned down.
+#[component]
+fn Waiting(name: String, roles: Vec<(String, Vec<String>)>, on_done: EventHandler<()>) -> Element {
+    let named = vec![("name".to_string(), json!(name))];
+    rsx! {
+        div { class: "columns",
+            div {
+                h3 { "{name}" }
+                OpForm {
+                    op: "user.approve",
+                    fixed: named.clone(),
+                    picks: vec![lookup::role_pick("role", &roles)],
+                    submit: "Let in",
+                    on_done: move |_| on_done.call(()),
+                }
+            }
+            div {
+                h3 { "\u{a0}" }
+                OpForm {
+                    op: "user.remove",
+                    fixed: named.clone(),
+                    submit: "Turn down",
+                    danger: true,
+                    confirm: "Turn down {name}'s sign-up?",
+                    on_done: move |_| on_done.call(()),
+                }
             }
         }
     }
@@ -510,93 +700,121 @@ pub fn UserPage(name: String) -> Element {
         let name = shown.clone();
         async move { api::op("user.show", json!({ "name": name })).await }
     });
+    let roles = use_op("role.list");
+    let known = lookup::roles(&roles);
+    let catalog = use_context::<crate::form::Catalog>();
+    let nav = navigator();
+    let me = me();
     let named = vec![("name".to_string(), json!(name))];
-    let actions: [(&str, &str, &str); 8] = [
-        ("user.approve", "Approve the sign-up", "Approve"),
-        ("user.role", "Give another role", "Change the role"),
-        ("user.password", "Set the password", "Set"),
-        ("user.tracker", "Name in the tracker", "Save"),
-        ("user.token", "New token", "Make a token"),
-        ("user.join-code", "Join code", "Make a join code"),
-        ("user.revoke", "Revoke every token", "Revoke all"),
-        ("user.remove", "Remove the account", "Remove"),
-    ];
+    let yourself = me.name() == name;
     rsx! {
         p { class: "crumbs", Link { to: Route::Users {}, "Users" } " / {name}" }
         h1 { "{name}" }
-        {loaded(&user.read(), |out| rsx! { Answer { value: out.clone() } })}
-        div { class: "grid",
-            for (op, title, submit) in actions {
-                section { key: "{op}",
-                    h3 { "{title}" }
-                    OpForm {
-                        op: op,
-                        fixed: named.clone(),
-                        submit: submit,
-                        on_done: move |_| user.restart(),
+        {loaded(&user.read(), |out| {
+            let pending = out["status"] == "pending";
+            let tracker = match text(out, "tracker_user") {
+                t if t.is_empty() => format!("{} (its own name)", text(out, "tracker_name")),
+                t => t,
+            };
+            rsx! {
+                dl { class: "facts",
+                    dt { "Role" } dd { "{text(out, \"role\")}" }
+                    dt { "Status" } dd { span { class: "state {text(out, \"status\")}", "{text(out, \"status\")}" } }
+                    dt { "Since" } dd { "{when(&text(out, \"registered\"))}" }
+                    dt { "Password" } dd { if out["has_password"] == true { "set" } else { "none: signs in with a token" } }
+                    dt { "Tokens" } dd { "{text(out, \"tokens\")}" }
+                    dt { "In the tracker" } dd { "{tracker}" }
+                }
+                div { class: "grid",
+                    if pending {
+                        section { class: "panel",
+                            h3 { "Let in" }
+                            OpForm {
+                                op: "user.approve",
+                                fixed: named.clone(),
+                                picks: vec![lookup::role_pick("role", &known)],
+                                submit: "Let in",
+                                on_done: move |_| user.restart(),
+                            }
+                        }
+                    } else {
+                        section { class: "panel",
+                            h3 { "Role" }
+                            OpForm {
+                                op: "user.role",
+                                fixed: named.clone(),
+                                picks: vec![lookup::role_pick("role", &known)],
+                                values: vec![value("role", text(out, "role"))],
+                                submit: "Change the role",
+                                confirm: if yourself { Some("Change your own role? You may lose what lets you change it back.".to_string()) } else { None },
+                                saved: true,
+                                on_done: move |_| user.restart(),
+                            }
+                        }
+                        section { class: "panel",
+                            h3 { "Password" }
+                            OpForm {
+                                op: "user.password",
+                                fixed: named.clone(),
+                                repeat: vec!["password".to_string()],
+                                labels: vec![label("password", "new password")],
+                                submit: "Set the password",
+                                clear: true,
+                                saved: true,
+                                on_done: move |_| user.restart(),
+                            }
+                        }
+                        section { class: "panel",
+                            h3 { "Name in the tracker" }
+                            OpForm {
+                                op: "user.tracker",
+                                fixed: named.clone(),
+                                values: vec![value("tracker_user", text(out, "tracker_user"))],
+                                labels: vec![label("tracker_user", "name in the tracker")],
+                                submit: "Save",
+                                saved: true,
+                                on_done: move |_| user.restart(),
+                            }
+                        }
+                        section { class: "panel",
+                            h3 { "Sign a client in" }
+                            p { class: "muted", "A token, or a join code for a runner. Each is shown once." }
+                            OpForm { op: "user.token", fixed: named.clone(), submit: "Make a token", on_done: move |_| user.restart() }
+                            OpForm { op: "user.join-code", fixed: named.clone(), submit: "Make a join code" }
+                        }
                     }
                 }
-            }
-        }
-    }
-}
-
-/// The groups of the hub's settings operations, as the settings page lists
-/// them.
-const GROUPS: &[(&str, &str)] = &[
-    ("settings", "The hub"),
-    ("registration", "Sign-ups"),
-    ("role", "Roles"),
-    ("backend", "Model backends"),
-    ("knowledge", "Knowledge"),
-    ("source", "Sources"),
-    ("tracker", "Trackers"),
-];
-
-/// Operations a page of their own shows elsewhere.
-const ELSEWHERE: &[&str] = &["knowledge.share", "knowledge.find", "settings.show"];
-
-#[component]
-pub fn Settings() -> Element {
-    let shown = use_resource(|| api::op("settings.show", json!({})));
-    let catalog = use_context::<crate::form::Catalog>();
-    rsx! {
-        h1 { "Settings" }
-        {loaded(&catalog.read(), |listed| {
-            let ops = listed["operations"].as_array().cloned().unwrap_or_default();
-            rsx! {
-                div { class: "grid",
-                    for (prefix, title) in GROUPS.iter().copied() {
-                        section { key: "{prefix}",
-                            h2 { "{title}" }
-                            ul { class: "list",
-                                for op in ops.iter().filter(|o| {
-                                    let name = text(o, "name");
-                                    name.split('.').next() == Some(prefix) && !ELSEWHERE.contains(&name.as_str())
-                                }).cloned() {
-                                    li { key: "{text(&op, \"name\")}",
-                                        Link { to: Route::OpPage { op: text(&op, "name") }, "{text(&op, \"name\")}" }
-                                        span { class: "muted", " {text(&op, \"summary\")}" }
-                                    }
-                                }
+                section { class: "panel danger-zone",
+                    h3 { "Danger zone" }
+                    div { class: "columns",
+                        if !pending {
+                            OpForm {
+                                op: "user.revoke",
+                                fixed: named.clone(),
+                                submit: "Revoke every token",
+                                danger: true,
+                                confirm: "Revoke all {name}'s tokens? Their agents and runners are signed out.",
+                                on_done: move |_| user.restart(),
+                            }
+                        }
+                        if may_run(&catalog, "user.remove") {
+                            OpForm {
+                                op: "user.remove",
+                                fixed: named.clone(),
+                                submit: if pending { "Turn down" } else { "Remove the account" },
+                                danger: true,
+                                confirm: if yourself {
+                                    "Remove your own account? You are signed out for good.".to_string()
+                                } else {
+                                    format!("Remove {name}? This cannot be undone.")
+                                },
+                                quiet: true,
+                                on_done: move |_| { nav.push(Route::Users {}); },
                             }
                         }
                     }
                 }
             }
         })}
-        h2 { "Every setting" }
-        {loaded(&shown.read(), |out| rsx! { Json { value: out.clone() } })}
-    }
-}
-
-#[component]
-pub fn OpPage(op: String) -> Element {
-    rsx! {
-        p { class: "crumbs", Link { to: Route::Settings {}, "Settings" } " / {op}" }
-        h1 { "{op}" }
-        // A form of its own for each operation, not one that keeps what was
-        // typed for another.
-        {rsx! { OpForm { key: "{op}", op: op.clone(), summary: true } }}
     }
 }

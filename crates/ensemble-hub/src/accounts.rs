@@ -749,7 +749,7 @@ const MAKE_TOKEN: &[Field] = &[
     ),
     Field::new(
         "scopes",
-        FieldKind::List,
+        FieldKind::Choices(ensemble_config::Permission::NAMES),
         "What it may do, within your role: share, recall, tasks, admin, compute, host.",
     ),
 ];

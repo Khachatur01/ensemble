@@ -164,6 +164,10 @@ impl Permission {
             Permission::Host => "host",
         }
     }
+
+    /// Every permission's name.
+    pub const NAMES: &'static [&'static str] =
+        &["share", "recall", "tasks", "admin", "compute", "host"];
 }
 
 /// The issue tracker types that ship.

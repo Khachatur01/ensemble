@@ -463,13 +463,23 @@ hub. It shows what your account may do:
   keeping, for you alone or for the hub.
 - **Account**: your access tokens and join codes, each shown once, your
   password and your name in the tracker.
-- For an admin, **Users**: the accounts, sign-ups to approve, roles, and what
-  an admin does to an account; and **Settings**: every setting, and a form
-  for each operation that changes them.
+- For an admin, **Users**: the accounts, sign-ups waiting to be let in, and
+  what an admin does to an account; and **Settings**, a section each, filled
+  in with each setting as it is now: the hub and its logins and sign-ups;
+  the roles, a box for each permission; the model backends, each tested,
+  given a key or taken out; the models of the knowledge vault and the source
+  filter; the trackers; who changed what; and a page for each operation of
+  the settings no section shows yet.
 
 Every form is made from what `GET /api/v1/ops` says of the operation it runs,
 so the UI does nothing the API does not, and a new operation's form comes
-with it. A browser signs in with `POST /api/v1/session`: the hub keeps the
+with it. What a field may be is picked, not typed, where the hub says or
+knows it: a role from the hub's roles, permissions and a token's scopes as
+boxes, an agent from those connected now, a model from those the backends
+serve. A form asks only for what the choices made so far need, folds away
+what is seldom needed, has a new password typed twice, and asks before it
+removes, revokes or cancels anything. A browser signs in with
+`POST /api/v1/session`: the hub keeps the
 session in an HttpOnly, SameSite=Strict cookie, never where a script reads
 it, for the UI's origin; `ensemble-ui` makes it Secure when a TLS proxy in
 front says the browser came over TLS. A request that changes anything must

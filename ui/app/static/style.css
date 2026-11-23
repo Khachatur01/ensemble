@@ -150,3 +150,88 @@ details summary { cursor: pointer; color: var(--muted); margin: 0.8rem 0; }
   .bar { flex-wrap: wrap; gap: 0.6rem 1rem; padding: 0.6rem 1rem; }
   .page { padding: 1rem; }
 }
+
+/* Panels, the settings' sections and their parts. */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1rem 1.1rem;
+  margin: 0 0 1rem;
+}
+.panel > h2:first-child, .panel > h3:first-child { margin-top: 0; }
+.panel.notice { border-color: var(--warn); }
+.panel > form.op + form.op { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+
+.settings { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 2rem; align-items: start; }
+.settings > * { min-width: 0; }
+.settings nav.side { display: flex; flex-direction: column; gap: 0.15rem; position: sticky; top: 4rem; }
+.settings nav.side h1 { margin-bottom: 0.6rem; }
+.settings nav.side a { color: var(--muted); padding: 0.35rem 0.6rem; border-radius: 7px; }
+.settings nav.side a:hover { color: var(--text); background: var(--code); text-decoration: none; }
+.settings nav.side a.active { color: var(--text); background: var(--code); font-weight: 600; }
+.settings .section h2.title { margin-top: 0.4rem; }
+
+.choices { display: flex; flex-wrap: wrap; gap: 0.4rem 1.2rem; }
+.choice { display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer; }
+.choice input { width: auto; margin: 0; }
+.field.flag { grid-template-columns: auto 1fr; align-items: start; gap: 0.5rem; cursor: pointer; }
+.field.flag input { margin-top: 0.25rem; }
+.field.flag > span { display: grid; gap: 0.1rem; }
+.field .name { text-transform: none; }
+.field .name::first-letter { text-transform: uppercase; }
+.field .needed { color: var(--danger); }
+.field .error { font-size: 0.85rem; }
+
+.rows { display: grid; gap: 0.35rem; }
+.rows .row { display: grid; grid-template-columns: 1.6rem 1fr auto auto auto; gap: 0.3rem; align-items: center; }
+.rows .order { text-align: right; font-size: 0.85rem; }
+.rows .add { justify-self: start; }
+
+button.plain {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  padding: 0.35rem 0.7rem;
+}
+button.plain:hover:not(:disabled) { border-color: var(--accent); }
+button.small { padding: 0.25rem 0.65rem; font-size: 0.88rem; }
+button.danger:not(.link) { background: var(--danger); color: #fff; }
+button.link:disabled { color: var(--muted); }
+
+.confirm { border: 1px solid var(--danger); border-radius: 8px; padding: 0.7rem 0.9rem; }
+.confirm p { margin: 0 0 0.6rem; }
+.ok { color: var(--ok); }
+.small { font-size: 0.82rem; }
+
+details.more { border-top: 1px dashed var(--line); padding-top: 0.2rem; }
+details.more[open] { display: grid; gap: 0.8rem; }
+details.more summary { margin: 0.4rem 0; }
+
+dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1.2rem; margin: 0 0 1rem; }
+dl.facts dt { color: var(--muted); }
+dl.facts dd { margin: 0; }
+dl.legend { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0.3rem 1rem; color: var(--muted); font-size: 0.88rem; }
+dl.legend div { display: flex; gap: 0.4rem; }
+dl.legend dt { font-weight: 600; color: var(--text); }
+dl.legend dd { margin: 0; }
+
+.scroll { overflow-x: auto; }
+table.matrix td.box, table.matrix th:not(:first-child) { text-align: center; }
+table.matrix input { width: auto; }
+tr.dirty td { background: color-mix(in srgb, var(--warn) 10%, transparent); }
+td.end { text-align: right; white-space: nowrap; }
+td.end form.op { display: inline-grid; max-width: none; }
+
+.backend .head { display: flex; gap: 0.8rem; align-items: baseline; flex-wrap: wrap; }
+.backend .head h3 { margin: 0; }
+.backend form.op { margin-top: 0.6rem; }
+.danger-zone { border-color: var(--danger); }
+.danger-zone .columns { display: flex; flex-wrap: wrap; gap: 1rem; align-items: start; }
+.danger-zone h3 { color: var(--danger); }
+
+@media (max-width: 760px) {
+  .settings { grid-template-columns: minmax(0, 1fr); gap: 0.8rem; }
+  .settings nav.side { position: static; flex-direction: row; flex-wrap: wrap; }
+  .settings nav.side h1 { width: 100%; }
+}

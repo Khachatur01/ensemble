@@ -5,12 +5,15 @@
 
 mod api;
 mod form;
+mod lookup;
 mod pages;
+mod settings;
 
 use dioxus::prelude::*;
 use form::Catalog;
 use pages::*;
 use serde_json::Value;
+use settings::*;
 
 fn main() {
     dioxus::launch(App);
@@ -43,7 +46,9 @@ pub enum Route {
         UserPage { name: String },
         #[route("/settings")]
         Settings {},
-        #[route("/settings/:op")]
+        #[route("/settings/:section")]
+        SettingsPage { section: String },
+        #[route("/settings/op/:op")]
         OpPage { op: String },
     #[end_layout]
     #[route("/:..rest")]
@@ -93,6 +98,15 @@ fn Shell() -> Element {
     let catalog: Catalog = use_resource(|| api::get("/api/v1/ops"));
     use_context_provider(|| catalog);
     let nav = navigator();
+    let route = use_route::<Route>().to_string();
+    // The class of the navigation's link to the pages under `path`.
+    let here = |path: &str| {
+        if route == path || route.starts_with(&format!("{path}/")) {
+            "active".to_string()
+        } else {
+            String::new()
+        }
+    };
     let signed_in = session.read().clone();
     let Some(me) = signed_in else {
         return match &*loaded.read() {
@@ -116,15 +130,15 @@ fn Shell() -> Element {
             Link { class: "brand", to: Route::Home {}, "Ensemble" }
             nav {
                 if me.can("tasks") {
-                    Link { to: Route::Projects {}, "Tasks" }
-                    Link { to: Route::Runners {}, "Runners" }
+                    Link { to: Route::Projects {}, class: here("/tasks"), "Tasks" }
+                    Link { to: Route::Runners {}, class: here("/runners"), "Runners" }
                 }
                 if me.can("recall") || me.can("share") {
-                    Link { to: Route::Knowledge {}, "Knowledge" }
+                    Link { to: Route::Knowledge {}, class: here("/knowledge"), "Knowledge" }
                 }
                 if me.can("admin") {
-                    Link { to: Route::Users {}, "Users" }
-                    Link { to: Route::Settings {}, "Settings" }
+                    Link { to: Route::Users {}, class: here("/users"), "Users" }
+                    Link { to: Route::Settings {}, class: here("/settings"), "Settings" }
                 }
             }
             div { class: "who",

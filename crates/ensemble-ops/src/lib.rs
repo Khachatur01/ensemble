@@ -122,6 +122,8 @@ pub enum Kind {
     List,
     /// One of these texts.
     Choice(&'static [&'static str]),
+    /// Some of these texts, each once.
+    Choices(&'static [&'static str]),
 }
 
 /// One input field of an operation.
@@ -271,6 +273,11 @@ impl Spec {
                 Kind::Flag => json!({ "type": "boolean" }),
                 Kind::List => json!({ "type": "array", "items": { "type": "string" } }),
                 Kind::Choice(choices) => json!({ "enum": choices }),
+                Kind::Choices(choices) => json!({
+                    "type": "array",
+                    "items": { "enum": choices },
+                    "uniqueItems": true,
+                }),
             };
             schema["description"] = json!(field.help);
             properties.insert(field.name.to_string(), schema);
@@ -319,6 +326,10 @@ impl Spec {
                     .as_array()
                     .is_some_and(|a| a.iter().all(Value::is_string)),
                 Kind::Choice(choices) => value.as_str().is_some_and(|t| choices.contains(&t)),
+                Kind::Choices(choices) => value.as_array().is_some_and(|a| {
+                    a.iter()
+                        .all(|t| t.as_str().is_some_and(|t| choices.contains(&t)))
+                }),
             };
             if !fits {
                 let wanted = match field.kind {
@@ -328,6 +339,7 @@ impl Spec {
                     Kind::Flag => "true or false".to_string(),
                     Kind::List => "a list of texts".to_string(),
                     Kind::Choice(choices) => format!("one of {}", choices.join(", ")),
+                    Kind::Choices(choices) => format!("a list of {}", choices.join(", ")),
                 };
                 return Err(
                     Error::invalid(format!("`{}` must be {wanted}", field.name)).on(field.name)
@@ -620,6 +632,30 @@ mod tests {
         assert_eq!(schema["properties"]["by"]["type"], "integer");
         assert_eq!(schema["properties"]["why"]["description"], "What for.");
         assert_eq!(schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn a_field_of_some_choices_lists_them_and_takes_no_other() {
+        const PICK: Spec = Spec {
+            name: "pick",
+            summary: "Pick colours.",
+            access: Access::Local,
+            input: &[Field::new(
+                "colours",
+                Kind::Choices(&["red", "blue"]),
+                "Which.",
+            )],
+        };
+        let schema = PICK.input_schema();
+        assert_eq!(
+            schema["properties"]["colours"]["items"]["enum"],
+            json!(["red", "blue"])
+        );
+        assert!(PICK.check(&json!({ "colours": ["blue", "red"] })).is_ok());
+        assert!(PICK.check(&json!({ "colours": [] })).is_ok());
+        let err = PICK.check(&json!({ "colours": ["green"] })).unwrap_err();
+        assert_eq!(err.field.as_deref(), Some("colours"), "{err}");
+        assert!(PICK.check(&json!({ "colours": "red" })).is_err());
     }
 
     #[test]

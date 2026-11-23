@@ -3695,7 +3695,7 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
     );
     let out = run(&["role", "set", "x", "fly"]);
     assert!(
-        stderr_of(&out).contains("'fly' is not a permission"),
+        stderr_of(&out).contains("invalid value 'fly'"),
         "{}",
         stderr_of(&out)
     );

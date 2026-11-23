@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const ADMIN: Access = Access::Permission("admin");
-const PERMISSIONS: &[&str] = &["share", "recall", "tasks", "admin", "compute", "host"];
+const PERMISSIONS: &[&str] = Permission::NAMES;
 
 const NO_CHECK: Field = Field::new(
     "no_check",
@@ -121,7 +121,7 @@ const ROLE_SET: &[Field] = &[
     ROLE_NAME,
     Field::new(
         "permissions",
-        Kind::List,
+        Kind::Choices(PERMISSIONS),
         "What it may do: share, recall, tasks, admin, compute, host.",
     )
     .required()

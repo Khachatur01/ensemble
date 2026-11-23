@@ -89,6 +89,10 @@ fn leaf(verb: &'static str, summary: &'static str, input: &'static [Field]) -> c
             Kind::Choice(choices) => {
                 arg.value_parser(clap::builder::PossibleValuesParser::new(choices))
             }
+            Kind::Choices(choices) => arg
+                .value_delimiter(',')
+                .action(clap::ArgAction::Append)
+                .value_parser(clap::builder::PossibleValuesParser::new(choices)),
             Kind::Text | Kind::Secret => arg,
         };
         command = command.arg(arg);
@@ -122,7 +126,7 @@ fn input(fields: &[Field], matches: &clap::ArgMatches) -> Value {
                 Some(n) => json!(n),
                 None => continue,
             },
-            Kind::List => match matches.get_many::<String>(field.name) {
+            Kind::List | Kind::Choices(_) => match matches.get_many::<String>(field.name) {
                 Some(items) => json!(items.collect::<Vec<_>>()),
                 None => continue,
             },
