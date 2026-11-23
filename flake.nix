@@ -99,6 +99,10 @@
             rustfmt
             clippy
             rust-analyzer
+            # The web UI: wasm32 links with lld, and wasm-bindgen-cli makes its
+            # JavaScript glue, of the version ui/Cargo.toml pins.
+            lld
+            wasm-bindgen-cli
           ];
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         };

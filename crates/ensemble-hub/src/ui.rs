@@ -52,11 +52,7 @@ impl Ui {
         if let Some(bytes) = self.file(&path) {
             return (200, content_type(&path), bytes);
         }
-        let named_a_file = path
-            .rsplit('/')
-            .next()
-            .is_some_and(|last| last.contains('.'));
-        if named_a_file && path != "index.html" {
+        if is_asset(&path) && path != "index.html" {
             return (404, "text/plain", Cow::Borrowed(b"no such file".as_slice()));
         }
         match self.file("index.html") {
@@ -103,6 +99,29 @@ fn relative(path: &str) -> Option<String> {
     (only_names && !path.contains('\\')).then(|| path.to_string())
 }
 
+/// Does `path` name one of the app's files, by its extension, rather than one
+/// of its pages, which may have a dot too, such as `/settings/backend.add`?
+fn is_asset(path: &str) -> bool {
+    let last = path.rsplit('/').next().unwrap_or("");
+    last.rsplit_once('.').is_some_and(|(_, extension)| {
+        matches!(
+            extension,
+            "html"
+                | "js"
+                | "mjs"
+                | "wasm"
+                | "css"
+                | "json"
+                | "map"
+                | "svg"
+                | "png"
+                | "ico"
+                | "woff2"
+                | "txt"
+        )
+    })
+}
+
 /// The media type of the file at `path`, by its extension.
 fn content_type(path: &str) -> &'static str {
     match path.rsplit('.').next().unwrap_or("") {
@@ -144,6 +163,11 @@ mod tests {
             (200, "application/wasm", "\0asm".into())
         );
         assert_eq!(answer("/tasks/shop/7").2, "<html>app</html>", "a page");
+        assert_eq!(
+            answer("/settings/backend.add").2,
+            "<html>app</html>",
+            "a dot"
+        );
         assert_eq!(answer("/assets/gone.js").0, 404, "a file it lacks");
         assert_eq!(answer("/../secret").0, 404);
         assert_eq!(answer("/assets/../../secret").0, 404);

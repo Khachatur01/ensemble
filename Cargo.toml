@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/*"]
+# The web UI is a workspace of its own, built for wasm32 (ui/build.sh).
+exclude = ["ui"]
 resolver = "3"
 
 [workspace.package]

@@ -27,7 +27,7 @@
 //! | `POST /api/v1/users/{name}/join-codes` | `user.join-code` |
 //! | `DELETE /api/v1/users/{name}/tokens` | `user.revoke` |
 //! | `DELETE /api/v1/users/{name}` | `user.remove` |
-//! | `GET /api/v1/ops` | the operations the token may run, each with the JSON Schema of its input, for a UI to make its forms from |
+//! | `GET /api/v1/ops` | the operations the token may run, each with the JSON Schema of its input and its fields in order, for a UI to make its forms from |
 //! | `POST /api/v1/ops/{name}` `{…its input}` | any operation, such as `backend.add` or `knowledge.models` |
 //! | `GET /api/v1/openapi.json` | this API as an OpenAPI 3.1 document ([`openapi`](crate::openapi)), for anyone |
 //!
@@ -284,6 +284,7 @@ impl Server<'_> {
                             "name": op.spec.name,
                             "summary": op.spec.summary,
                             "input": op.spec.input_schema(),
+                            "fields": op.spec.input.iter().map(|f| f.name).collect::<Vec<_>>(),
                         })
                     })
                     .collect();
@@ -861,6 +862,7 @@ mod tests {
             add["input"]["properties"]["key"]["writeOnly"], true,
             "{add}"
         );
+        assert_eq!(add["fields"][0], "name", "its fields in order: {add}");
         assert!(ops.iter().any(|o| o["name"] == "knowledge.models"));
         let (status, roles) = call(
             &hub.url,
