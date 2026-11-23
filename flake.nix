@@ -23,6 +23,7 @@
               name,
               description,
               tests,
+              env ? { },
             }:
             pkgs.rustPlatform.buildRustPackage {
               pname = name;
@@ -33,6 +34,7 @@
                 "--bin"
                 name
               ];
+              inherit env;
 
               # The suites spawn the built executables, shell scripts that stand
               # in for the agent CLIs, and loopback sockets. All of that works in
@@ -52,6 +54,35 @@
             };
         in
         rec {
+          # The hub's web UI, built for wasm32 as ui/build.sh builds it: the
+          # files the hub embeds and serves at `/`.
+          ensemble-ui = pkgs.stdenv.mkDerivation {
+            pname = "ensemble-ui";
+            version = "0.1.0";
+            src = ./ui;
+            cargoDeps = pkgs.rustPlatform.importCargoLock { lockFile = ./ui/Cargo.lock; };
+            nativeBuildInputs = with pkgs; [
+              cargo
+              rustc
+              lld
+              wasm-bindgen-cli
+              rustPlatform.cargoSetupHook
+            ];
+            buildPhase = ''
+              runHook preBuild
+              cargo build --release --offline --target wasm32-unknown-unknown
+              wasm-bindgen --target web --no-typescript --out-dir dist --out-name ensemble_ui \
+                target/wasm32-unknown-unknown/release/ensemble-ui.wasm
+              cp static/* dist/
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -r dist $out
+              runHook postInstall
+            '';
+            meta.description = "The web UI of an Ensemble hub";
+          };
           ensemble-runner = executable {
             name = "ensemble-runner";
             description = "This computer's Ensemble runner: it runs the tasks of a hub with your helper teams";
@@ -75,6 +106,7 @@
               "ensemble-store"
               "ensemble"
             ];
+            env.ENSEMBLE_UI_DIST = "${ensemble-ui}";
           };
           # Both executables.
           default = pkgs.symlinkJoin {

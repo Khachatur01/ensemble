@@ -152,6 +152,9 @@ $ ensemble-hub setup                       # adds you as its first admin: your t
 $ ensemble-hub user password ana           # typed without echo
 ```
 
+Then open the hub in a browser, `http://127.0.0.1:7700`, and sign in with
+that name and password: its [web UI](#the-web-ui) does what the commands do.
+
 A new hub listens on this computer alone (`127.0.0.1:7700`; `serve
 --http-host` and `--http-port` say otherwise), closed to sign-ups, with no model
 yet: give it one when you want shares distilled into notes
@@ -376,7 +379,7 @@ Everything that reaches the hub is a **connector**, and each is always on:
 
 | connector | what it is | adapters |
 | --- | --- | --- |
-| `rest` | the REST API at `/api/v1/`, for scripts and a web UI to come | |
+| `rest` | the REST API at `/api/v1/`, for scripts and the web UI, which the hub serves at `/` | |
 | `mcp` | MCP over HTTP at `/mcp`, for client agents | |
 | `runners` | the runners' link, WebSockets at `/link` and `/relay` | |
 | `knowledge` | the vault, and the models that turn shares into notes | |
@@ -388,8 +391,8 @@ choosing, with its `type` and the settings of that type.
 
 ### The REST API
 
-The REST API lives on the hub's port, under `/api/v1/`, for the web UI to
-come and for scripts. JSON in and out.
+The REST API lives on the hub's port, under `/api/v1/`, for the web UI and
+for scripts. JSON in and out.
 
 | Method and path | Who | Does |
 | --- | --- | --- |
@@ -416,7 +419,7 @@ come and for scripts. JSON in and out.
 | `DELETE /api/v1/users/{name}/tokens` | admin | revokes every token |
 | `DELETE /api/v1/users/{name}` | admin | removes an account, or turns a sign-up down |
 
-| `GET /api/v1/ops` | any token | the operations it may run, each with the JSON Schema of its input (secrets `writeOnly`), for a UI to make its forms from |
+| `GET /api/v1/ops` | any token | the operations it may run, each with the JSON Schema of its input (secrets `writeOnly`) and its fields in order, for a UI to make its forms from |
 | `POST /api/v1/ops/{name}` `{…its input}` | as the operation says | runs any operation by its name, such as `backend.add`, `knowledge.models` or `tracker.add` |
 | `GET /api/v1/openapi.json` | anyone | this API as an OpenAPI 3.1 document: every path above and every operation, with its body and who may call it |
 
@@ -424,7 +427,48 @@ Point an OpenAPI tool at `/api/v1/openapi.json` to browse the API or make a
 client for it. The document is the same for everyone: what a token may
 actually run is what `GET /api/v1/ops` lists for it.
 
+An account's own work is operations too, which only the running hub answers,
+each as the runners' link and MCP do, the permission it needs checked:
+`task.projects`, `task.list`, `task.show`, `task.create`, `task.answer`,
+`task.assign` and `task.cancel` (`tasks`), `runner.list`, the runners that
+work for you with their agents (`tasks`), `knowledge.share` (`share`) and
+`knowledge.find` (`recall`).
+
 Errors are `{"error": "..."}` with 400, 401, 403, 404, 405, 409 or 429.
+
+### The web UI
+
+The hub serves its web UI at `/` on its port, beside the REST API it calls:
+open the hub's address in a browser and sign in with your name and password.
+It shows what your account may do:
+
+- **Tasks**, by project: each task with its state and the question it asks,
+  made, answered, given to an agent and cancelled.
+- **Runners**: those connected now that work for you, and their agents.
+- **Knowledge**: recall the notes about a topic, and share what is worth
+  keeping, for you alone or for the hub.
+- **Account**: your access tokens and join codes, each shown once, your
+  password and your name in the tracker.
+- For an admin, **Users**: the accounts, sign-ups to approve, roles, and what
+  an admin does to an account; and **Settings**: every setting, and a form
+  for each operation that changes them.
+
+Every form is made from what `GET /api/v1/ops` says of the operation it runs,
+so the UI does nothing the API does not, and a new operation's form comes
+with it. A browser signs in with `POST /api/v1/session`: the session is kept
+in an HttpOnly, SameSite=Strict cookie (Secure behind TLS), never where a
+script reads it, and the hub refuses a request that changes anything from a
+page of another origin. The UI's pages load nothing from elsewhere, under a
+content security policy that allows only the hub's own files.
+
+The UI is a Rust app, built with Dioxus for WebAssembly, in `ui/`. The Nix
+package builds it and embeds it in `ensemble-hub`; a hub built without it says
+so at `/`. To work on it, in the dev shell:
+
+```console
+$ ui/build.sh                                     # builds ui/dist
+$ ensemble-hub serve --ui-dir ui/dist             # serves those files in place of the embedded ones
+```
 
 ### Connect your agent
 
@@ -1614,7 +1658,7 @@ error too: ``agents.coder: `max_seconds` is required at line 12 column 5``.
 There is no settings file to open, nor a variable to name. The settings of a
 hub and of a runner are kept in their databases, as typed rows, and what you
 mean to change is an operation, the same from the command line, the REST API
-(`POST /api/v1/ops/<name>`) and a web UI to come, each checked as it is made.
+(`POST /api/v1/ops/<name>`) and the web UI, each checked as it is made.
 Only a helper team's `config.yaml` is a file, as it is shared in git.
 
 ### By what you mean
@@ -2042,7 +2086,7 @@ scripts stand in for the CLIs.
 | `crates/ensemble-agents/src/external/` | each CLI's command line, generated config and event stream, denials, limits, failures, the time limit killing the process tree |
 | `crates/ensemble-agents/src/router.rs`, `crates/ensemble-backends/` | routing, `health` and its model check, the chat request in both formats |
 | `crates/ensemble-knowledge/` | shares kept as they arrived, notes and the log, commits by the lock holder, the secret check; the pipeline against a stub model: new notes, merges, chatter skipped, unusable answers to review, waiting for a model, rebuild |
-| `crates/ensemble-hub/` | sign-up, approval and the REST API's codes, tokens kept as hashes and revoked at once, join codes spent once and before they expire, a runner signing in over the link with a password (and the lockout) or a code, a link without a token refused all else, a runner of another protocol version refused with what to update, roles checked per request, shares under the signed-in name; the hub's MCP: a token needed, the tools a token allows, share and recall as its account, tasks made and followed, with a `repository` and a `gate`; every connected runner listed to its owner with all its agents, to others it works for with what it lends, model calls streamed from a runner; tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the runner holding the lease, questions, hand-offs, cancelling, tasks given back and blocked until a runner that has not connects or they are assigned again, the answer to where a project is kept as its repository, the tasks waiting for a runner's agents in every project, the notes recalled into a new task, over the link as the signed-in account; another account's task offered to a runner that works for the hub only when no runner of its own with the agent takes it, and acted on only while the runner is connected, works for the hub, lends the agent, and the accounts have `host` and `compute`; the inbox: markdown issues read and written with only the status line changed, issues to tasks of the account matched by tracker name, questions and answers through comments, results posted once, a closed issue cancelling its task |
+| `crates/ensemble-hub/` | sign-up, approval and the REST API's codes, a browser's session in a cookie no page of another origin may use, the web UI's files served with its pages and nothing outside them, an account's tasks, runners and knowledge as operations, tokens kept as hashes and revoked at once, join codes spent once and before they expire, a runner signing in over the link with a password (and the lockout) or a code, a link without a token refused all else, a runner of another protocol version refused with what to update, roles checked per request, shares under the signed-in name; the hub's MCP: a token needed, the tools a token allows, share and recall as its account, tasks made and followed, with a `repository` and a `gate`; every connected runner listed to its owner with all its agents, to others it works for with what it lends, model calls streamed from a runner; tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the runner holding the lease, questions, hand-offs, cancelling, tasks given back and blocked until a runner that has not connects or they are assigned again, the answer to where a project is kept as its repository, the tasks waiting for a runner's agents in every project, the notes recalled into a new task, over the link as the signed-in account; another account's task offered to a runner that works for the hub only when no runner of its own with the agent takes it, and acted on only while the runner is connected, works for the hub, lends the agent, and the accounts have `host` and `compute`; the inbox: markdown issues read and written with only the status line changed, issues to tasks of the account matched by tracker name, questions and answers through comments, results posted once, a closed issue cancelling its task |
 | `crates/ensemble-link/` | the token file 0600, the link opened again when it breaks, a hub of another protocol version named with what to update |
 | `crates/ensemble-core/` | the state directories and their hashes, the worker lock, run records |
 | `crates/ensemble-tasks/` | tickets, questions and hand-offs in a reply, run logs |
@@ -2090,11 +2134,13 @@ scripts stand in for the CLIs.
 - **Your agent sees a task only when it asks.** The hub's MCP sends nothing
   unasked: no progress, and no word when a task ends, until your agent calls
   `tasks` or `task`.
-- **A hub server shares knowledge, keeps tasks and connects runners.** A chat API, a web UI
-  and single sign-on are not built. People sign up through the REST API
-  and wait for an admin; there is no password reset by mail, and no second
-  factor. The API sends no CORS headers, so a UI is served from the hub's own
-  origin. Connectors to chats and mail are not built either.
+- **A hub server shares knowledge, keeps tasks and connects runners.** A chat
+  API and single sign-on are not built. People sign up through the REST API
+  and wait for an admin; the web UI has no sign-up page yet, and does not
+  browse the vault's notes, only recalls them. There is no password reset by
+  mail, and no second factor. The API sends no CORS headers: the web UI is
+  served from the hub's own origin. Connectors to chats and mail are not
+  built either.
 - **Recall needs an embedding model to find by meaning.** Without one
   (`knowledge embedding`), or while its model cannot be asked, it finds notes
   that use your words, not ones that only mean the same; how alike is alike

@@ -66,9 +66,17 @@ impl Ui {
     }
 
     /// Answer `head`, a GET or a HEAD of a path outside the API, on `stream`.
+    /// A browser keeps each file and asks again with its [`tag`], answered
+    /// with 304 while the file is the same.
     pub(crate) async fn serve(&self, mut stream: TcpStream, head: &Head) -> Result<(), String> {
         let (status, kind, bytes) = self.answer(&head.path);
-        let bytes: &[u8] = if head.method == "HEAD" { &[] } else { &bytes };
+        let etag = tag(&bytes);
+        let same = status == 200 && head.header("if-none-match") == Some(etag.as_str());
+        let (status, bytes): (u16, &[u8]) = match (same, head.method.as_str()) {
+            (true, _) => (304, &[]),
+            (false, "HEAD") => (status, &[]),
+            (false, _) => (status, &bytes),
+        };
         http::respond_bytes(
             &mut stream,
             status,
@@ -78,12 +86,23 @@ impl Ui {
                 ("x-content-type-options", "nosniff"),
                 ("referrer-policy", "no-referrer"),
                 ("cache-control", "no-cache"),
+                ("etag", &etag),
             ],
             bytes,
         )
         .await
         .map_err(|e| e.to_string())
     }
+}
+
+/// The entity tag of a file: a hash of its bytes.
+fn tag(bytes: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+    let hex: String = digest.as_ref()[..12]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("\"{hex}\"")
 }
 
 /// `path` under the UI's root, `index.html` for `/`; none when it would
