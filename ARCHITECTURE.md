@@ -1110,7 +1110,10 @@ once, in the core:
 
 - a name, such as `backend.add`, `knowledge.models`, `user.join-code`,
   `settings.owner`;
-- its input and output, as Rust types with JSON Schemas made from them;
+- its input and output, as Rust types with JSON Schemas made from them; a
+  field that takes some of a fixed list of texts (a role's permissions, a
+  token's scopes) lists them in its schema, so every interface offers only
+  those and the CLI refuses another;
 - who may run it: a permission of the hub's roles, or the runner's owner;
 - its secret fields, written and never read back nor kept in the audit log
   (keys are kept sealed in the database of the hub or the runner);
@@ -1438,8 +1441,14 @@ crate holds it today.
     as operations the running hub answers, as the link's requests;
     `GET /api/v1/ops` listing each operation's fields in order, which the
     UI's forms are made from; pages for tasks, runners, knowledge, the
-    account, users and settings. Not yet: sign-up, browsing the vault's
-    notes, the review queue.)
+    account, users and settings; the settings a section each, filled in
+    with each setting as it is now, roles as a box for each permission,
+    backends each tested; forms that pick what the hub knows a field may
+    be (a role, an agent connected now, a project, a model a backend
+    serves), ask only for what the choices so far need, check what they
+    can before asking the hub, and ask before they remove, revoke or
+    cancel anything. Not yet: sign-up, browsing the vault's notes, the
+    review queue.)
 31. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
     and Teams, Telegram); a runner's operations from the hub, for its own
     account; the remaining goal operations (people, computers, teams from
