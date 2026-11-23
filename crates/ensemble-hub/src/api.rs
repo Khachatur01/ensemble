@@ -547,23 +547,6 @@ mod tests {
         assert_eq!(status, 403, "a reader shares nothing");
     }
 
-    #[test]
-    fn the_hub_serves_its_web_ui_beside_the_api() {
-        let hub = start();
-        let base = hub
-            .url
-            .replace("ws://", "http://")
-            .trim_end_matches('/')
-            .to_string();
-        let (status, _, page) = browser(&base, "GET", "/", &[], None);
-        assert_eq!(status, 200);
-        assert!(page.contains("<html"), "{page}");
-        let (status, _, page) = browser(&base, "GET", "/tasks", &[], None);
-        assert_eq!((status, page.contains("<html")), (200, true));
-        let (status, _, body) = browser(&base, "GET", "/api/v1/nowhere", &[], None);
-        assert_eq!(status, 404, "the API's own paths stay its: {body}");
-    }
-
     fn login(base: &str, name: &str, password: &str) -> (u16, Value) {
         call(
             base,

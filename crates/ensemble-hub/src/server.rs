@@ -61,8 +61,6 @@ pub struct Server<'a> {
     pub(crate) routes: Routes,
     /// The runners' relay sockets, and the model calls between them.
     pub(crate) calls: Arc<Calls>,
-    /// The web UI's files.
-    pub(crate) ui: crate::ui::Ui,
 }
 
 /// Who a connection signed in as.
@@ -88,7 +86,6 @@ impl<'a> Server<'a> {
             tasks: None,
             routes: Routes::default(),
             calls: Arc::default(),
-            ui: crate::ui::Ui::Embedded,
         }
     }
 
@@ -109,12 +106,6 @@ impl<'a> Server<'a> {
                     (None, None) => Err(format!("{method}: no answer")),
                 }
             });
-    }
-
-    /// Serve the web UI from `ui`.
-    pub fn with_ui(mut self, ui: crate::ui::Ui) -> Self {
-        self.ui = ui;
-        self
     }
 
     /// Relay model calls through `calls`, which the hub's own calls go
@@ -196,9 +187,7 @@ impl<'a> Server<'a> {
             if head.path == crate::mcp::PATH {
                 return self.mcp(stream, &head, &read[end..], say).await;
             }
-            if !head.path.starts_with("/api/") && head.is_reading() {
-                return self.ui.serve(stream, &head).await;
-            }
+
             return self.rest(stream, &head, &read[end..], say).await;
         }
         let mut session = None;

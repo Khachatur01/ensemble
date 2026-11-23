@@ -152,8 +152,13 @@ $ ensemble-hub setup                       # adds you as its first admin: your t
 $ ensemble-hub user password ana           # typed without echo
 ```
 
-Then open the hub in a browser, `http://127.0.0.1:7700`, and sign in with
-that name and password: its [web UI](#the-web-ui) does what the commands do.
+To use the hub from a browser, run its [web UI](#the-web-ui), a component of
+its own, and open `http://127.0.0.1:7701`; sign in with that name and
+password:
+
+```console
+$ ensemble-ui --hub http://127.0.0.1:7700           # serves the UI on 127.0.0.1:7701
+```
 
 A new hub listens on this computer alone (`127.0.0.1:7700`; `serve
 --http-host` and `--http-port` say otherwise), closed to sign-ups, with no model
@@ -379,7 +384,7 @@ Everything that reaches the hub is a **connector**, and each is always on:
 
 | connector | what it is | adapters |
 | --- | --- | --- |
-| `rest` | the REST API at `/api/v1/`, for scripts and the web UI, which the hub serves at `/` | |
+| `rest` | the REST API at `/api/v1/`, for scripts and the web UI | |
 | `mcp` | MCP over HTTP at `/mcp`, for client agents | |
 | `runners` | the runners' link, WebSockets at `/link` and `/relay` | |
 | `knowledge` | the vault, and the models that turn shares into notes | |
@@ -438,9 +443,18 @@ Errors are `{"error": "..."}` with 400, 401, 403, 404, 405, 409 or 429.
 
 ### The web UI
 
-The hub serves its web UI at `/` on its port, beside the REST API it calls:
-open the hub's address in a browser and sign in with your name and password.
-It shows what your account may do:
+The web UI is optional and apart from the hub: `ensemble-ui`, an executable
+of its own, serves it on a port of its own and passes its calls on to the
+hub's REST API, so the browser sees one origin. The hub knows nothing of it;
+it is a client of the REST API as a script is, and any number of them may
+front one hub.
+
+```console
+$ ensemble-ui --hub http://127.0.0.1:7700 [--http-host 127.0.0.1] [--http-port 7701]
+```
+
+Open its address in a browser and sign in with your name and password on the
+hub. It shows what your account may do:
 
 - **Tasks**, by project: each task with its state and the question it asks,
   made, answered, given to an agent and cancelled.
@@ -455,19 +469,27 @@ It shows what your account may do:
 
 Every form is made from what `GET /api/v1/ops` says of the operation it runs,
 so the UI does nothing the API does not, and a new operation's form comes
-with it. A browser signs in with `POST /api/v1/session`: the session is kept
-in an HttpOnly, SameSite=Strict cookie (Secure behind TLS), never where a
-script reads it, and the hub refuses a request that changes anything from a
-page of another origin. The UI's pages load nothing from elsewhere, under a
-content security policy that allows only the hub's own files.
+with it. A browser signs in with `POST /api/v1/session`: the hub keeps the
+session in an HttpOnly, SameSite=Strict cookie, never where a script reads
+it, for the UI's origin; `ensemble-ui` makes it Secure when a TLS proxy in
+front says the browser came over TLS. A request that changes anything must
+come from a page of the UI, which the browser names, and `ensemble-ui` passes
+it on as from the hub's own origin; it passes on `/api/` alone, not MCP or
+the runners' link. The UI's pages load nothing from elsewhere, under a
+content security policy that allows only their own files.
 
-The UI is a Rust app, built with Dioxus for WebAssembly, in `ui/`. The Nix
-package builds it and embeds it in `ensemble-hub`; a hub built without it says
-so at `/`. To work on it, in the dev shell:
+`--hub` is the hub's plain HTTP address, as the UI's computer reaches it:
+run the UI beside the hub, or on a network the two trust, and put a TLS
+proxy in front of the UI for the internet.
+
+The UI is in `ui/`, a workspace of its own: `ui/app`, the app, in Rust with
+Dioxus for WebAssembly, and `ui/server`, `ensemble-ui`. The Nix package
+`ensemble-ui` builds the app and embeds it in the executable. To work on it,
+in the dev shell:
 
 ```console
-$ ui/build.sh                                     # builds ui/dist
-$ ensemble-hub serve --ui-dir ui/dist             # serves those files in place of the embedded ones
+$ ui/build.sh                                                   # builds the app into ui/dist
+$ cargo run --manifest-path ui/Cargo.toml -- --dist ui/dist     # serves that folder in place of the embedded app
 ```
 
 ### Connect your agent
@@ -1792,7 +1814,8 @@ system flake, and import the module:
 }
 ```
 
-The module has two parts, each enabled on its own. Each runs as the person it is
+The module has three parts, each enabled on its own: a runner, a hub and the
+hub's web UI. The runner and the hub each run as the person it is
 for, from their `~/.local/state/ensemble/`, so they manage it with `ensemble-hub` and
 `ensemble-runner` as on any platform: `ensemble-hub user add`, `ensemble-runner
 team pull`, `ensemble-runner settings …` and the rest, as themselves, with no
@@ -1862,9 +1885,23 @@ no key the hub keeps can be read.
 `services.ensemble.hub.package`. For a hub of an account of its own, make that
 user and run `ensemble-hub …` as it.
 
+**The web UI**, optional, a system service with no state of its own:
+
+```nix
+{
+  services.ensemble.ui = {
+    enable = true;
+    hub = "http://127.0.0.1:7700";         # `--hub`: this computer's hub, by default
+    listenAddress = "127.0.0.1";           # `--http-host`
+    port = 7701;                           # `--http-port`
+    openFirewall = false;                  # opens `port`
+  };
+}
+```
+
 For the internet, put a TLS proxy in front (`services.caddy`, see
 [The hub](#the-hub)) and leave `openFirewall` off. A whole configuration that
-runs a hub for one person and a runner that names it is in
+runs a hub for one person, its web UI and a runner that names it is in
 [`nix/example.nix`](nix/example.nix); the flake's checks build it.
 
 ### Home Manager (Linux and macOS)
@@ -1919,7 +1956,10 @@ $ cargo install --git https://github.com/Khachatur01/ensemble
 
 This puts `ensemble-runner` and `ensemble-hub` in `~/.cargo/bin`, which must be
 on `PATH`; `--bin ensemble-runner` installs the runner alone. Run the same
-command again to update. Ensemble is not published on crates.io. Keep the runner
+command again to update. Ensemble is not published on crates.io. The web UI
+is not among them: from a checkout, in the dev shell, `ui/build.sh` builds its
+app, and `cargo run --manifest-path ui/Cargo.toml --release -- --dist ui/dist`
+serves it ([The web UI](#the-web-ui)). Keep the runner
 running with a systemd user unit on Linux, or a launchd agent on macOS, both in
 [Running the runner](#running-the-runner).
 
@@ -2000,7 +2040,10 @@ $ ensemble-runner agent remove <team>/<name>
 $ ensemble-hub setup [--owner N] [--admin A] [--yes]   # make the hub and its first admin, with their token
 $ ensemble-hub init [--force|--keep] [--owner N]   # the settings a new hub starts with, and its vault
 $ ensemble-hub check                      # validate its settings; which model would distill now
-$ ensemble-hub serve [--http-host A] [--http-port P] [--ui-dir D]   # run the hub until stopped; --ui-dir serves the web UI from a folder
+$ ensemble-hub serve [--http-host A] [--http-port P]   # run the hub until stopped
+
+# The web UI, a component of its own
+$ ensemble-ui [--hub URL] [--http-host A] [--http-port P] [--dist D]   # serve it, for the hub at URL (http://127.0.0.1:7700)
 $ ensemble-hub user list
 $ ensemble-hub user show <name>
 $ ensemble-hub role list                  # the roles, and what each may do
@@ -2086,7 +2129,8 @@ scripts stand in for the CLIs.
 | `crates/ensemble-agents/src/external/` | each CLI's command line, generated config and event stream, denials, limits, failures, the time limit killing the process tree |
 | `crates/ensemble-agents/src/router.rs`, `crates/ensemble-backends/` | routing, `health` and its model check, the chat request in both formats |
 | `crates/ensemble-knowledge/` | shares kept as they arrived, notes and the log, commits by the lock holder, the secret check; the pipeline against a stub model: new notes, merges, chatter skipped, unusable answers to review, waiting for a model, rebuild |
-| `crates/ensemble-hub/` | sign-up, approval and the REST API's codes, a browser's session in a cookie no page of another origin may use, the web UI's files served with its pages and nothing outside them, an account's tasks, runners and knowledge as operations, tokens kept as hashes and revoked at once, join codes spent once and before they expire, a runner signing in over the link with a password (and the lockout) or a code, a link without a token refused all else, a runner of another protocol version refused with what to update, roles checked per request, shares under the signed-in name; the hub's MCP: a token needed, the tools a token allows, share and recall as its account, tasks made and followed, with a `repository` and a `gate`; every connected runner listed to its owner with all its agents, to others it works for with what it lends, model calls streamed from a runner; tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the runner holding the lease, questions, hand-offs, cancelling, tasks given back and blocked until a runner that has not connects or they are assigned again, the answer to where a project is kept as its repository, the tasks waiting for a runner's agents in every project, the notes recalled into a new task, over the link as the signed-in account; another account's task offered to a runner that works for the hub only when no runner of its own with the agent takes it, and acted on only while the runner is connected, works for the hub, lends the agent, and the accounts have `host` and `compute`; the inbox: markdown issues read and written with only the status line changed, issues to tasks of the account matched by tracker name, questions and answers through comments, results posted once, a closed issue cancelling its task |
+| `ui/server/` | the app's files served with its pages and nothing outside them, a call to the API passed on as from the hub's origin only from a page of the UI, the hub's cookies Secure behind TLS |
+| `crates/ensemble-hub/` | sign-up, approval and the REST API's codes, a browser's session in a cookie no page of another origin may use, an account's tasks, runners and knowledge as operations, tokens kept as hashes and revoked at once, join codes spent once and before they expire, a runner signing in over the link with a password (and the lockout) or a code, a link without a token refused all else, a runner of another protocol version refused with what to update, roles checked per request, shares under the signed-in name; the hub's MCP: a token needed, the tools a token allows, share and recall as its account, tasks made and followed, with a `repository` and a `gate`; every connected runner listed to its owner with all its agents, to others it works for with what it lends, model calls streamed from a runner; tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the runner holding the lease, questions, hand-offs, cancelling, tasks given back and blocked until a runner that has not connects or they are assigned again, the answer to where a project is kept as its repository, the tasks waiting for a runner's agents in every project, the notes recalled into a new task, over the link as the signed-in account; another account's task offered to a runner that works for the hub only when no runner of its own with the agent takes it, and acted on only while the runner is connected, works for the hub, lends the agent, and the accounts have `host` and `compute`; the inbox: markdown issues read and written with only the status line changed, issues to tasks of the account matched by tracker name, questions and answers through comments, results posted once, a closed issue cancelling its task |
 | `crates/ensemble-link/` | the token file 0600, the link opened again when it breaks, a hub of another protocol version named with what to update |
 | `crates/ensemble-core/` | the state directories and their hashes, the worker lock, run records |
 | `crates/ensemble-tasks/` | tickets, questions and hand-offs in a reply, run logs |
@@ -2138,9 +2182,9 @@ scripts stand in for the CLIs.
   API and single sign-on are not built. People sign up through the REST API
   and wait for an admin; the web UI has no sign-up page yet, and does not
   browse the vault's notes, only recalls them. There is no password reset by
-  mail, and no second factor. The API sends no CORS headers: the web UI is
-  served from the hub's own origin. Connectors to chats and mail are not
-  built either.
+  mail, and no second factor. The API sends no CORS headers: the web UI
+  reaches it through `ensemble-ui`, on the UI's own origin. Connectors to
+  chats and mail are not built either.
 - **Recall needs an embedding model to find by meaning.** Without one
   (`knowledge embedding`), or while its model cannot be asked, it finds notes
   that use your words, not ones that only mean the same; how alike is alike

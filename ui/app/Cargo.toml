@@ -1,0 +1,18 @@
+[package]
+name = "ensemble-ui-app"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Khachatur01/ensemble"
+description = "The web UI of an Ensemble hub: a single-page app over its REST API, built for WebAssembly and served by ensemble-ui."
+publish = false
+
+[dependencies]
+dioxus = { version = "0.7.10", default-features = false, features = ["web", "router", "document", "macro", "html", "signals", "hooks", "launch"] }
+# Pinned exactly: the wasm-bindgen-cli that makes the JavaScript glue must be
+# the same version (nixpkgs' wasm-bindgen-cli).
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Headers", "History", "Location", "Request", "RequestInit", "RequestCredentials", "Response", "Window"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

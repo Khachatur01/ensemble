@@ -1,0 +1,13 @@
+[package]
+name = "ensemble-ui"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Khachatur01/ensemble"
+description = "The web UI of an Ensemble hub, served on a port of its own: the app's files, and its calls passed on to the hub's REST API."
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "signal"] }
+clap = { version = "4", features = ["derive", "wrap_help"] }
+ring = "0.17"

@@ -133,9 +133,10 @@ and the runner on none of the hub's alone: `ensemble-knowledge` and
 | `ensemble-agents` | running one agent once | the adapters (`external/`): `claude_code.rs`, `opencode.rs`, `codex.rs`, `builtin.rs`, `direct.rs`, the subprocess runner (`process.rs`) and gates (`gate.rs`); a git worktree per task (`worktree.rs`); the router: agents to adapters, models, records, `health` (`router.rs`) |
 | `ensemble-tasks` | the work of the helper teams, as a runner does it | tickets and tasks as the hub has them (`tasks.rs`); how they are leased and given back: the `Board` trait, a runner's `RemoteBoard`, over the link, for its account or, for a runner that works for the hub, another's, and the tasks waiting for its agents in every project (`board.rs`); what a runner keeps of its runs (`runs.rs`); the worker that runs a repository's tasks within slots and budgets, another account's with the agents it lends alone (`queue.rs`); one run of an agent and what it came to (`delegation.rs`) |
 | `ensemble-runner` | the runner, and its executable | `main` and the global options (`lib.rs`); where it keeps its settings and keys (`kept.rs`); the command line, parsed with clap (`cli.rs`), and what each group of commands does (`cmd/`: `runner`, `team`, `agent`, a team's `config`); the runner's workers, the repositories it clones for tasks, its own and other accounts' (in `.for/`), what it asks and gives back, its socket and reload (`daemon.rs`); `Worker`: the link that says the runner is connected, with its agents and those it lends (`worker.rs`); `Relay`: its relay socket, serving others' calls to the backends it shares and carrying its agents' calls to others' (`relay.rs`); what `setup` and `doctor` find and check (`setup.rs`); the runner's teams, loaded, made, linked, pulled and approved (`teams.rs`), over git repositories pinned and trusted per commit (`remote.rs`) |
-| `ensemble-hub` | the hub, and its executable | `main` and the global options (`lib.rs`); the command line (`cli.rs`) and what its commands do (`cmd.rs`); MCP over HTTP for client agents (`mcp.rs`); the hub's operations, its accounts, tokens, join codes, sessions and settings (`accounts.rs`); its settings and its backends' keys in its database, sealed by `master.key` (`kept.rs`); accounts, and hashed tokens and join codes (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API, each route one of the operations (`api.rs`), the operations only the running hub answers, an account's tasks, runners and knowledge (`served.rs`), the web UI's files (`ui.rs`), and its OpenAPI document (`openapi.rs`), over a small HTTP reader (`http.rs`); the hub's side of the link, a task per connection (`server.rs`); connected runners (`runners.rs`); runners' relay sockets and the model calls between them and from the hub, who may make them and how many at once (`calls.rs`); the tasks it keeps and leases, offered to the account's own runners first and then to runners that work for the hub, given back and blocked, with the notes recalled into each, `DbBoard`, and the `Service` that answers the link and lets a lender act on another account's task (`board.rs`), and a runner's worker run against them (`tests/queue.rs`); the tracker inbox (`inbox/`): the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`), an issue made a task and what the task reports (`work.rs`), the hub's inbox, one for each tracker (`relay.rs`) |
+| `ensemble-hub` | the hub, and its executable | `main` and the global options (`lib.rs`); the command line (`cli.rs`) and what its commands do (`cmd.rs`); MCP over HTTP for client agents (`mcp.rs`); the hub's operations, its accounts, tokens, join codes, sessions and settings (`accounts.rs`); its settings and its backends' keys in its database, sealed by `master.key` (`kept.rs`); accounts, and hashed tokens and join codes (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API, each route one of the operations (`api.rs`), the operations only the running hub answers, an account's tasks, runners and knowledge (`served.rs`), and its OpenAPI document (`openapi.rs`), over a small HTTP reader (`http.rs`); the hub's side of the link, a task per connection (`server.rs`); connected runners (`runners.rs`); runners' relay sockets and the model calls between them and from the hub, who may make them and how many at once (`calls.rs`); the tasks it keeps and leases, offered to the account's own runners first and then to runners that work for the hub, given back and blocked, with the notes recalled into each, `DbBoard`, and the `Service` that answers the link and lets a lender act on another account's task (`board.rs`), and a runner's worker run against them (`tests/queue.rs`); the tracker inbox (`inbox/`): the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`), an issue made a task and what the task reports (`work.rs`), the hub's inbox, one for each tracker (`relay.rs`) |
 | `ensemble` (the root) | the two executables, and the tests of the whole | `src/bin/ensemble-hub.rs` and `src/bin/ensemble-runner.rs`, each its crate's `main`; the end-to-end suite, which runs both (`tests/end_to_end.rs`); the checks against the real agent CLIs (`tests/real_cli.rs`); the layering of the crates (`tests/workspace.rs`) |
-| `ensemble-ui` (`ui/`, a workspace of its own) | the hub's web UI, for WebAssembly | the pages and routes (`main.rs`), the REST API as the page calls it (`api.rs`), the form made from an operation (`form.rs`), the pages (`pages.rs`); `ui/build.sh` builds `ui/dist` |
+| `ensemble-ui-app` (`ui/app`, in the UI's own workspace) | the web UI's app, for WebAssembly | the pages and routes (`main.rs`), the REST API as the page calls it (`api.rs`), the form made from an operation (`form.rs`), the pages (`pages.rs`); `ui/build.sh` builds `ui/dist` |
+| `ensemble-ui` (`ui/server`, in the UI's own workspace) | the web UI's executable, apart from the hub | the app's files, embedded or from `--dist`, and the calls to `/api/` passed on to the hub as from its own origin, only from a page of the UI (`main.rs`) |
 | `nix/` | not a crate: the NixOS module (`nixos-module.nix`: the hub and the runner, each a user service of the person it is for, the hub's lingering so it runs from boot), the Home Manager module (`home-manager-module.nix`: the runner on Linux or macOS), what they share about a runner (`runner.nix`), and an example configuration the flake's checks build (`example.nix`). The flake packages each executable on its own (`ensemble-hub`, `ensemble-runner`) and both together. The hub is only run, on the address and port the module says: its settings are kept in its database, and made at its first start by `serve`. The runner is only run too: its settings, keys and teams are made and changed with `ensemble-runner`, as on any platform, and a runner named for the computer is made at its first start by `serve`. A secrets manager's file is the service's `EnvironmentFile` |
 
 Two rules keep the layers apart. The worker knows the router, not which CLIs
@@ -1087,7 +1088,7 @@ first admin is made on the hub's computer with the CLI. (Decided 2026-11-11.)
 |---|---|
 | Client agents (Claude Code, Codex, OpenCode, claude.ai) | Their own login and model. The hub's MCP over HTTP, with a token as the API key: `share`, `recall`, tasks. Nothing of Ensemble installed. |
 | REST API | Apps, scripts and the web UI: what MCP offers, and administration. |
-| Web UI | Served by the hub at `/`: tasks, runners, recall and share, the account, and for an admin the users and the settings. (Built; the review queue later.) |
+| Web UI | `ensemble-ui`, optional and apart from the hub, a client of its REST API: tasks, runners, recall and share, the account, and for an admin the users and the settings. (Built; the review queue later.) |
 | Obsidian over Git | Direct read of the vaults; a correction is shared like any knowledge. (Works today.) |
 | Task tracker | Assign an issue to a person and add the signal. (Built for markdown issues.) |
 | `ensemble-hub` CLI | Administration on the hub's computer. |
@@ -1158,12 +1159,15 @@ every operation, those to come too.
   route, so it needs no code per operation and matches the CLI one to one.
   Signing up is part of it: without it, an admin adds people from the CLI.
 - A web UI, a desktop app, any other: a client of the REST API, or of the
-  socket on the same computer. The hub's web UI (`ui/`, a Dioxus app built
-  for WebAssembly, embedded in `ensemble-hub` and served at `/`) is a client
-  of the REST API on the hub's own origin: a browser signs in with
-  `POST /api/v1/session`, which keeps the session in an HttpOnly,
-  SameSite=Strict cookie, and the hub refuses a change from a page of another
-  origin, or one signed in by the cookie that names no origin. Its forms are
+  socket on the same computer. The web UI (`ui/`) is a component of its own,
+  which the hub knows nothing of: `ensemble-ui` serves its app, a Dioxus app
+  built for WebAssembly and embedded in the executable, on a port of its own,
+  and passes the app's calls to `/api/` on to the hub, so the browser sees
+  one origin. A browser signs in with `POST /api/v1/session`, which keeps the
+  session in an HttpOnly, SameSite=Strict cookie; the hub refuses a change
+  from a page of another origin, or one signed in by the cookie that names no
+  origin, and `ensemble-ui` passes a change on, as from the hub's own origin,
+  only from a page of the UI. Its forms are
   made from `GET /api/v1/ops`: each operation's fields in order, with the JSON
   Schema of each. An account's tasks, runners and knowledge are operations
   only the running hub answers (`served.rs`), each the link's request of the
@@ -1222,7 +1226,7 @@ crate holds it today.
 | operations | every action on a hub or a runner, once, for every interface | identity, config | `ensemble-ops`; the hub's in `ensemble-hub` (`accounts.rs`), the runner's in `ensemble-runner` (`cmd/runner.rs`) (accounts, tokens, settings, signing in so far) |
 | interfaces | the CLI, the REST API, the web UI, and later a desktop app, as adapters over the operations | operations | the CLI made from the operations (`ensemble-ops`, `cli.rs`), the rest by hand in each executable's crate; the REST routes in `ensemble-hub` (`api.rs`) |
 | api | chat API, MCP endpoint, REST | identity | `ensemble-hub` (REST, and MCP in `mcp.rs`) |
-| web | the UI | api | `ui/` (Dioxus, for WebAssembly), served by `ensemble-hub` (`ui.rs`) |
+| web | the UI, apart from the hub | api | `ui/`: the app (`ui/app`, Dioxus, for WebAssembly) and `ensemble-ui` (`ui/server`) |
 | link | hub-to-runner connection | identity | `ensemble-link`, the hub's side in `ensemble-hub` (`server.rs`, `runners.rs`), and the runner's link that says it is there in `ensemble-runner` (`worker.rs`) |
 
 ## Build order
@@ -1423,10 +1427,12 @@ crate holds it today.
     named after, a runner's being `runner <name>`; a join code signs one
     client in, over the link or with `POST /api/v1/join`; `ensemble-hub setup`
     makes the first admin and their token, and no join code; link protocol 6.)
-30. The web UI, over the REST API, served by the hub. (Done: `ui/`, a Dioxus
-    app for WebAssembly that the Nix package embeds in `ensemble-hub`, served
-    at `/` with `index.html` for each of its pages and a strict content
-    security policy, `serve --ui-dir` serving a folder while it is worked on;
+30. The web UI, over the REST API, a component apart from the hub. (Done:
+    `ui/`, a Dioxus app for WebAssembly, and `ensemble-ui`, which embeds it,
+    serves it on a port of its own with `index.html` for each of its pages
+    and a strict content security policy, and passes its calls to `/api/` on
+    to the hub; the Nix package `ensemble-ui` and the NixOS module's optional
+    `services.ensemble.ui`, a system service with no state;
     a browser's session in an HttpOnly, SameSite=Strict cookie, and no change
     from a page of another origin; an account's tasks, runners and knowledge
     as operations the running hub answers, as the link's requests;

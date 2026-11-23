@@ -191,31 +191,6 @@ pub async fn respond_with(
     stream.flush().await
 }
 
-/// Write a response of `bytes`, of the type `content_type`, and end the
-/// exchange.
-pub async fn respond_bytes(
-    stream: &mut (impl AsyncWrite + Unpin),
-    status: u16,
-    content_type: &str,
-    headers: &[(&str, &str)],
-    bytes: &[u8],
-) -> std::io::Result<()> {
-    let mut response = format!(
-        "HTTP/1.1 {status} {}\r\ncontent-type: {content_type}\r\n",
-        reason(status)
-    );
-    for (name, value) in headers {
-        response.push_str(&format!("{name}: {value}\r\n"));
-    }
-    response.push_str(&format!(
-        "content-length: {}\r\nconnection: close\r\n\r\n",
-        bytes.len()
-    ));
-    stream.write_all(response.as_bytes()).await?;
-    stream.write_all(bytes).await?;
-    stream.flush().await
-}
-
 /// The most read away after a refused body, before the connection is closed
 /// anyway.
 const MAX_DRAIN: usize = 16 * MAX_BODY;
@@ -246,7 +221,6 @@ fn reason(status: u16) -> &'static str {
         200 => "OK",
         201 => "Created",
         202 => "Accepted",
-        304 => "Not Modified",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",

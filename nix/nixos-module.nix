@@ -16,6 +16,10 @@
 # backends and its teams are made and changed with `ensemble-runner setup`,
 # `… settings …`, `… backend …` and `ensemble-runner team …`. It makes a
 # runner named for the computer the first time it starts.
+#
+# The web UI, `ensemble-ui`, is optional and apart from the hub: a system
+# service with no state of its own, on a port of its own, that serves the app
+# and passes its calls on to a hub's REST API, this computer's or another's.
 { self }:
 {
   config,
@@ -37,6 +41,8 @@ let
   hub = cfg.hub;
 
   runnerCfg = cfg.runner;
+
+  ui = cfg.ui;
 in
 {
   options.services.ensemble = {
@@ -121,6 +127,57 @@ in
       };
     }
     // runner.options { inherit pkgs; };
+
+    ui = {
+      enable = mkEnableOption ''
+        the web UI of an Ensemble hub, `ensemble-ui`: the app on a port of its
+        own, its calls passed on to the hub's REST API. People sign in with
+        their name and password on the hub
+      '';
+
+      package = mkOption {
+        type = types.package;
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.ensemble-ui;
+        defaultText = lib.literalExpression "ensemble.packages.\${system}.ensemble-ui";
+        description = "The package of `ensemble-ui`.";
+      };
+
+      hub = mkOption {
+        type = types.str;
+        default = "http://127.0.0.1:${toString hub.port}";
+        defaultText = lib.literalExpression ''"http://127.0.0.1:''${toString config.services.ensemble.hub.port}"'';
+        description = ''
+          The hub's plain HTTP address, as this computer reaches it, `--hub`:
+          this computer's hub, unless another is named.
+        '';
+        example = "http://10.0.0.5:7700";
+      };
+
+      listenAddress = mkOption {
+        type = types.str;
+        default = "127.0.0.1";
+        description = ''
+          The address the UI is served on, `--http-host`: 127.0.0.1 for this
+          computer alone, 0.0.0.0 for other computers too.
+        '';
+        example = "0.0.0.0";
+      };
+
+      port = mkOption {
+        type = types.port;
+        default = 7701;
+        description = "The port the UI is served on, `--http-port`.";
+      };
+
+      openFirewall = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Open `port` in the firewall. Without a TLS proxy in front, only on a
+          network you trust: passwords are typed into it.
+        '';
+      };
+    };
   };
 
   config = mkMerge [
@@ -128,6 +185,35 @@ in
       environment.systemPackages =
         lib.optional hub.enable hub.package ++ lib.optional runnerCfg.enable runnerCfg.package;
     }
+
+    (mkIf ui.enable {
+      networking.firewall.allowedTCPPorts = lib.optional ui.openFirewall ui.port;
+
+      # It keeps nothing: the hub keeps the sessions, and the browser their
+      # cookie.
+      systemd.services.ensemble-ui = {
+        description = "Ensemble web UI";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "network.target" ];
+        serviceConfig = {
+          ExecStart = lib.escapeShellArgs [
+            (lib.getExe ui.package)
+            "--hub"
+            ui.hub
+            "--http-host"
+            ui.listenAddress
+            "--http-port"
+            (toString ui.port)
+          ];
+          Restart = "on-failure";
+          DynamicUser = true;
+          NoNewPrivileges = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          PrivateTmp = true;
+        };
+      };
+    })
 
     (mkIf hub.enable {
       networking.firewall.allowedTCPPorts = lib.optional hub.openFirewall hub.port;

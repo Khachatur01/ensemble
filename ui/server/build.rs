@@ -1,7 +1,7 @@
-//! Embed the hub's web UI, the files of `ENSEMBLE_UI_DIST` when it names a
-//! folder (the Nix package builds the UI and names it), so the one
-//! executable serves it. Without it the hub is built with no UI, and says
-//! so at `/`.
+//! Embed the app's files, those of `ENSEMBLE_UI_DIST` when it names a folder
+//! (the Nix package builds the app and names it), so the one executable
+//! serves them. Without it `ensemble-ui` is built with none, and serves the
+//! folder `--dist` names.
 
 use std::path::{Path, PathBuf};
 
@@ -18,12 +18,12 @@ fn main() {
         .iter()
         .map(|(path, file)| format!("    ({path:?}, include_bytes!({file:?})),\n"))
         .collect();
-    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR")).join("ui_files.rs");
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR")).join("files.rs");
     std::fs::write(
         out,
-        format!("/// The UI's files, each by its path.\npub static FILES: &[(&str, &[u8])] = &[\n{entries}];\n"),
+        format!("/// The app's files, each by its path.\npub static FILES: &[(&str, &[u8])] = &[\n{entries}];\n"),
     )
-    .expect("write ui_files.rs");
+    .expect("write files.rs");
 }
 
 /// Every file under `dir`, by its path under `root`, with `/` between names.

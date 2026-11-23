@@ -11,6 +11,9 @@
     environmentFile = "/run/secrets/ensemble-hub.env";
   };
 
+  # Its web UI, at http://127.0.0.1:7701.
+  services.ensemble.ui.enable = true;
+
   services.ensemble.runner = {
     enable = true;
     user = "ana";

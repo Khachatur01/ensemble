@@ -23,7 +23,6 @@
               name,
               description,
               tests,
-              env ? { },
             }:
             pkgs.rustPlatform.buildRustPackage {
               pname = name;
@@ -34,7 +33,6 @@
                 "--bin"
                 name
               ];
-              inherit env;
 
               # The suites spawn the built executables, shell scripts that stand
               # in for the agent CLIs, and loopback sockets. All of that works in
@@ -54,10 +52,10 @@
             };
         in
         rec {
-          # The hub's web UI, built for wasm32 as ui/build.sh builds it: the
-          # files the hub embeds and serves at `/`.
-          ensemble-ui = pkgs.stdenv.mkDerivation {
-            pname = "ensemble-ui";
+          # The web UI's app, built for wasm32 as ui/build.sh builds it: the
+          # files ensemble-ui embeds.
+          ensemble-ui-app = pkgs.stdenv.mkDerivation {
+            pname = "ensemble-ui-app";
             version = "0.1.0";
             src = ./ui;
             cargoDeps = pkgs.rustPlatform.importCargoLock { lockFile = ./ui/Cargo.lock; };
@@ -70,10 +68,10 @@
             ];
             buildPhase = ''
               runHook preBuild
-              cargo build --release --offline --target wasm32-unknown-unknown
+              cargo build --release --offline -p ensemble-ui-app --target wasm32-unknown-unknown
               wasm-bindgen --target web --no-typescript --out-dir dist --out-name ensemble_ui \
-                target/wasm32-unknown-unknown/release/ensemble-ui.wasm
-              cp static/* dist/
+                target/wasm32-unknown-unknown/release/ensemble-ui-app.wasm
+              cp app/static/* dist/
               runHook postBuild
             '';
             installPhase = ''
@@ -81,7 +79,28 @@
               cp -r dist $out
               runHook postInstall
             '';
-            meta.description = "The web UI of an Ensemble hub";
+            meta.description = "The app of the web UI of an Ensemble hub";
+          };
+          # The web UI, a component of its own: `ensemble-ui`, which serves the
+          # app, embedded, and passes its calls on to a hub's REST API.
+          ensemble-ui = pkgs.rustPlatform.buildRustPackage {
+            pname = "ensemble-ui";
+            version = "0.1.0";
+            src = ./ui;
+            cargoLock.lockFile = ./ui/Cargo.lock;
+            cargoBuildFlags = [
+              "-p"
+              "ensemble-ui"
+            ];
+            cargoTestFlags = [
+              "-p"
+              "ensemble-ui"
+            ];
+            env.ENSEMBLE_UI_DIST = "${ensemble-ui-app}";
+            meta = {
+              description = "The web UI of an Ensemble hub, on a port of its own";
+              mainProgram = "ensemble-ui";
+            };
           };
           ensemble-runner = executable {
             name = "ensemble-runner";
@@ -106,7 +125,6 @@
               "ensemble-store"
               "ensemble"
             ];
-            env.ENSEMBLE_UI_DIST = "${ensemble-ui}";
           };
           # Both executables.
           default = pkgs.symlinkJoin {
@@ -152,12 +170,14 @@
         {
           ensemble-hub = app "ensemble-hub";
           ensemble-runner = app "ensemble-runner";
+          ensemble-ui = app "ensemble-ui";
           default = app "ensemble-runner";
         }
       );
 
       # A hub as a system service and this computer's runner as a user service,
-      # each run as the person it is for: `services.ensemble.{hub,runner}`.
+      # each run as the person it is for: `services.ensemble.{hub,runner}`;
+      # and, optionally, the web UI, `services.ensemble.ui`.
       # Their files are written in Nix, or made with `ensemble-hub` and
       # `ensemble-runner`.
       nixosModules.default = import ./nix/nixos-module.nix { inherit self; };
@@ -168,7 +188,7 @@
       checks = forAll (
         pkgs:
         {
-          inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) ensemble-hub ensemble-runner;
+          inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) ensemble-hub ensemble-runner ensemble-ui;
         }
         // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           # The NixOS module evaluates, and makes the hub's and the runner's units.
@@ -193,6 +213,7 @@
             pkgs.linkFarm "ensemble-nixos-module" {
               "ensemble-hub.service" = system.config.systemd.user.units."ensemble-hub.service".unit;
               "ensemble-runner.service" = system.config.systemd.user.units."ensemble-runner.service".unit;
+              "ensemble-ui.service" = system.config.systemd.units."ensemble-ui.service".unit;
             };
         }
       );
