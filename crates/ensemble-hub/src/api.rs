@@ -9,6 +9,8 @@
 //! | `POST /api/v1/login` `{name, password}` | `account.login` |
 //! | `POST /api/v1/join` `{code, client}` | `token.join` |
 //! | `POST /api/v1/logout` | `account.logout` |
+//! | `POST /api/v1/session` `{name, password}` | `account.login`, kept in a cookie |
+//! | `DELETE /api/v1/session` | `account.logout`, and the cookie cleared |
 //! | `GET /api/v1/me` | `me.show` |
 //! | `PUT /api/v1/me` `{tracker_user}` | `me.tracker` |
 //! | `PUT /api/v1/me/password` `{current, new}` | `me.password` |
@@ -33,6 +35,12 @@
 //! also reached by its name under `/api/v1/ops/`, so an interface needs no
 //! route of its own for what it shows. A secret field, such as a backend's
 //! key, is given in the body and never answered back.
+//!
+//! A request signs in with its bearer token, or, from a browser, with the
+//! session `POST /api/v1/session` keeps in the [`SESSION_COOKIE`]: HttpOnly,
+//! so no script of a page reads it, and SameSite=Strict, so no other site's
+//! page sends it. A request that changes anything from a page of another
+//! origin is refused, as is one signed in by the cookie that names no origin.
 
 use crate::accounts::view;
 use crate::http::{self, Head};
@@ -44,6 +52,32 @@ use tokio::net::TcpStream;
 
 /// What a request is answered with: the status and the body.
 type Answer = Result<(u16, Value), Error>;
+
+/// The cookie a browser's session is kept in.
+pub(crate) const SESSION_COOKIE: &str = "ensemble_session";
+
+/// The token a request signs in with: its bearer token, else its session
+/// cookie's.
+pub(crate) fn token(head: &Head) -> Option<&str> {
+    head.bearer().or_else(|| head.cookie(SESSION_COOKIE))
+}
+
+/// The cookie that keeps the session `token` for `seconds`, Secure when the
+/// hub was reached over TLS; with no token, the cookie that clears it.
+fn session_cookie(head: &Head, token: Option<&str>, seconds: u64) -> String {
+    let mut cookie = format!(
+        "{SESSION_COOKIE}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
+        token.unwrap_or(""),
+        if token.is_some() { seconds } else { 0 }
+    );
+    if head
+        .reached_at()
+        .is_some_and(|base| base.starts_with("https://"))
+    {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
 
 /// The status of an operation's error.
 fn status(code: Code) -> u16 {
@@ -69,9 +103,12 @@ impl Server<'_> {
         say: &(dyn Fn(&str) + Sync),
     ) -> Result<(), String> {
         let mut unread = false;
+        let mut cookie = None;
         let answer = match http::read_body(&mut stream, head, already).await {
             Ok(body) => blocking(|| {
-                crate::accounts::reached_at(head.reached_at(), || self.route(head, &body))
+                crate::accounts::reached_at(head.reached_at(), || {
+                    self.route(head, &body, &mut cookie)
+                })
             }),
             Err(e) => {
                 unread = true;
@@ -87,12 +124,13 @@ impl Server<'_> {
             }
         };
         let who = blocking(|| {
-            head.bearer()
-                .and_then(|t| self.users().ok()?.identify(t).map(|u| u.name.clone()))
+            token(head).and_then(|t| self.users().ok()?.identify(t).map(|u| u.name.clone()))
         })
         .unwrap_or_else(|| "-".into());
         say(&format!("{} {} {who} {status}", head.method, head.path));
-        http::respond(&mut stream, status, &body)
+        let headers: Vec<(&str, &str)> =
+            cookie.iter().map(|c| ("set-cookie", c.as_str())).collect();
+        http::respond_with(&mut stream, status, &headers, Some(&body))
             .await
             .map_err(|e| e.to_string())?;
         if unread {
@@ -103,10 +141,29 @@ impl Server<'_> {
         Ok(())
     }
 
-    fn route(&self, head: &Head, body: &[u8]) -> Answer {
+    /// Answer the request `head` with `body`, setting `cookie` to the cookie
+    /// to send back, if any.
+    fn route(&self, head: &Head, body: &[u8], cookie: &mut Option<String>) -> Answer {
         let Some(rest) = head.path.strip_prefix("/api/v1/") else {
             return Err(Error::not_found(format!("no such path: {}", head.path)));
         };
+        if !head.is_reading() {
+            if head.is_from_elsewhere() {
+                return Err(Error::new(
+                    Code::Forbidden,
+                    "a page of another origin may not change anything here",
+                ));
+            }
+            if head.bearer().is_none()
+                && head.cookie(SESSION_COOKIE).is_some()
+                && head.header("origin").is_none()
+            {
+                return Err(Error::new(
+                    Code::Forbidden,
+                    "a request signed in by the session cookie must say its origin",
+                ));
+            }
+        }
         let parts: Vec<&str> = rest.trim_end_matches('/').split('/').collect();
         let body = || -> Result<Map<String, Value>, Error> {
             if body.is_empty() {
@@ -127,7 +184,7 @@ impl Server<'_> {
         let caller = self
             .hub
             .accounts()
-            .map_or(Caller::Anyone, |a| a.caller(head.bearer()));
+            .map_or(Caller::Anyone, |a| a.caller(token(head)));
         let run = |name: &str, input: Value| self.operations.run(&self.hub, &caller, name, input);
         let ok = |out: Value| Ok((200, out));
         let made = |out: Value| Ok((201, out));
@@ -136,11 +193,30 @@ impl Server<'_> {
             ("POST", ["login"]) => ok(run("account.login", Value::Object(body()?))?),
             ("POST", ["join"]) => made(run("token.join", Value::Object(body()?))?),
             ("POST", ["logout"]) => ok(run("account.logout", json!({}))?),
+            ("POST", ["session"]) => {
+                let session = run("account.login", Value::Object(body()?))?;
+                let hours = self.hub.accounts()?.rules().session_hours;
+                *cookie = Some(session_cookie(
+                    head,
+                    session["token"].as_str(),
+                    u64::from(hours) * 3600,
+                ));
+                ok(json!({ "name": session["name"], "expires": session["expires"] }))
+            }
+            ("DELETE", ["session"]) => {
+                let ended = match run("account.logout", json!({})) {
+                    Ok(_) => true,
+                    Err(e) if e.code == Code::Unauthorized => false,
+                    Err(e) => return Err(e),
+                };
+                *cookie = Some(session_cookie(head, None, 0));
+                ok(json!({ "signed_out": ended }))
+            }
             ("GET", ["me"]) => match run("me.show", json!({})) {
                 // One who signed up and waits is told so, with nothing allowed.
                 Err(e) if e.code == Code::Unauthorized => {
                     let users = self.users().map_err(Error::failed)?;
-                    let user = head.bearer().and_then(|t| users.identify(t)).ok_or(e)?;
+                    let user = token(head).and_then(|t| users.identify(t)).ok_or(e)?;
                     let mut out = view(user);
                     out["permissions"] = json!([]);
                     ok(out)
@@ -222,8 +298,8 @@ impl Server<'_> {
             (
                 _,
                 [
-                    "register" | "login" | "join" | "logout" | "me" | "users" | "roles" | "ops"
-                    | "openapi.json",
+                    "register" | "login" | "join" | "logout" | "session" | "me" | "users" | "roles"
+                    | "ops" | "openapi.json",
                 ],
             )
             | (_, ["ops", _])
@@ -291,6 +367,110 @@ mod tests {
         let status = resp.status().as_u16();
         let text = resp.body_mut().read_to_string().unwrap();
         (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
+    /// One HTTP request as a browser makes it, with `headers`: the status,
+    /// the `set-cookie` header and the body as text.
+    fn browser(
+        base: &str,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Option<Value>,
+    ) -> (u16, Option<String>, String) {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let url = format!("{}{path}", base.replace("ws://", "http://"));
+        let mut req = ureq::http::Request::builder().method(method).uri(&url);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let body = body.map(|b| b.to_string()).unwrap_or_default();
+        let mut resp = agent
+            .run(
+                req.header("content-type", "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .unwrap();
+        let cookie = resp
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        let text = resp.body_mut().read_to_string().unwrap_or_default();
+        (resp.status().as_u16(), cookie, text)
+    }
+
+    #[test]
+    fn a_browser_keeps_its_session_in_a_cookie_no_page_of_another_origin_may_use() {
+        let hub = start();
+        let base = hub
+            .url
+            .replace("ws://", "http://")
+            .trim_end_matches('/')
+            .to_string();
+        let origin = ("origin", base.as_str());
+        let login = json!({"name": "root", "password": PASSWORD});
+        let (status, cookie, text) = browser(
+            &base,
+            "POST",
+            "/api/v1/session",
+            &[origin],
+            Some(login.clone()),
+        );
+        assert_eq!(status, 200, "{text}");
+        assert!(!text.contains("ens_"), "no script sees the token: {text}");
+        let cookie = cookie.unwrap();
+        assert!(
+            cookie.starts_with("ensemble_session=ens_")
+                && cookie.contains("HttpOnly")
+                && cookie.contains("SameSite=Strict")
+                && !cookie.contains("Secure"),
+            "{cookie}"
+        );
+        let session = cookie.split(';').next().unwrap().to_string();
+        let sent = ("cookie", session.as_str());
+
+        let (status, _, me) = browser(&base, "GET", "/api/v1/me", &[sent], None);
+        assert_eq!(status, 200, "{me}");
+        assert!(me.contains("\"root\""), "{me}");
+        let codes = "/api/v1/me/join-codes";
+        let (status, _, _) = browser(&base, "POST", codes, &[sent], None);
+        assert_eq!(status, 403, "a change by the cookie names its origin");
+        let elsewhere = ("origin", "https://evil.example");
+        let (status, _, _) = browser(&base, "POST", codes, &[sent, elsewhere], None);
+        assert_eq!(status, 403, "another origin");
+        let (status, _, _) = browser(&base, "POST", "/api/v1/session", &[elsewhere], Some(login));
+        assert_eq!(status, 403, "no login from another origin's page");
+        let (status, _, made) = browser(&base, "POST", codes, &[sent, origin], None);
+        assert_eq!(status, 201, "{made}");
+
+        let (status, cleared, _) =
+            browser(&base, "DELETE", "/api/v1/session", &[sent, origin], None);
+        assert_eq!(status, 200);
+        assert!(cleared.unwrap().contains("Max-Age=0"));
+        let (status, _, _) = browser(&base, "GET", "/api/v1/me", &[sent], None);
+        assert_eq!(status, 401, "the session ended");
+    }
+
+    #[test]
+    fn the_hub_serves_its_web_ui_beside_the_api() {
+        let hub = start();
+        let base = hub
+            .url
+            .replace("ws://", "http://")
+            .trim_end_matches('/')
+            .to_string();
+        let (status, _, page) = browser(&base, "GET", "/", &[], None);
+        assert_eq!(status, 200);
+        assert!(page.contains("<html"), "{page}");
+        let (status, _, page) = browser(&base, "GET", "/tasks", &[], None);
+        assert_eq!((status, page.contains("<html")), (200, true));
+        let (status, _, body) = browser(&base, "GET", "/api/v1/nowhere", &[], None);
+        assert_eq!(status, 404, "the API's own paths stay its: {body}");
     }
 
     fn login(base: &str, name: &str, password: &str) -> (u16, Value) {

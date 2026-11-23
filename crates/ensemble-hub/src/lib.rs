@@ -44,6 +44,7 @@ mod mcp;
 mod openapi;
 mod runners;
 pub mod server;
+pub mod ui;
 pub mod users;
 
 use accounts::HubContext;

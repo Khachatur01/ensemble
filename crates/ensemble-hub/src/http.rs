@@ -60,6 +60,29 @@ impl Head {
             .strip_prefix("Bearer ")
             .map(str::trim)
     }
+
+    /// The value of the cookie `name`, when the request carries it.
+    pub fn cookie(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .filter(|(n, _)| n == "cookie")
+            .flat_map(|(_, v)| v.split(';'))
+            .filter_map(|c| c.trim().split_once('='))
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.trim())
+    }
+
+    /// Does it only read, as a GET or a HEAD does?
+    pub fn is_reading(&self) -> bool {
+        matches!(self.method.as_str(), "GET" | "HEAD")
+    }
+
+    /// Is it a browser's request from a page of another origin than the
+    /// address it reached? Such a page is refused: the hub has no CORS.
+    pub fn is_from_elsewhere(&self) -> bool {
+        self.header("origin")
+            .is_some_and(|origin| Some(origin) != self.reached_at().as_deref())
+    }
 }
 
 /// Read a request's head. Returns it, and every byte read so far, which may
@@ -165,6 +188,31 @@ pub async fn respond_with(
         text.len()
     ));
     stream.write_all(response.as_bytes()).await?;
+    stream.flush().await
+}
+
+/// Write a response of `bytes`, of the type `content_type`, and end the
+/// exchange.
+pub async fn respond_bytes(
+    stream: &mut (impl AsyncWrite + Unpin),
+    status: u16,
+    content_type: &str,
+    headers: &[(&str, &str)],
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let mut response = format!(
+        "HTTP/1.1 {status} {}\r\ncontent-type: {content_type}\r\n",
+        reason(status)
+    );
+    for (name, value) in headers {
+        response.push_str(&format!("{name}: {value}\r\n"));
+    }
+    response.push_str(&format!(
+        "content-length: {}\r\nconnection: close\r\n\r\n",
+        bytes.len()
+    ));
+    stream.write_all(response.as_bytes()).await?;
+    stream.write_all(bytes).await?;
     stream.flush().await
 }
 
@@ -314,6 +362,27 @@ mod tests {
         );
         assert_eq!(head(&[]).reached_at(), None);
         assert_eq!(head(&[("host", "a/b")]).reached_at(), None);
+    }
+
+    #[test]
+    fn a_cookie_is_found_by_name_and_a_page_of_another_origin_is_told_apart() {
+        let head = |headers: &[(&str, &str)]| Head {
+            method: "POST".into(),
+            path: "/api/v1/logout".into(),
+            headers: headers
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect(),
+        };
+        let cookies = head(&[("cookie", "theme=dark; ensemble_session=ens_s1 ;x=y")]);
+        assert_eq!(cookies.cookie("ensemble_session"), Some("ens_s1"));
+        assert_eq!(cookies.cookie("session"), None);
+        assert!(!cookies.is_reading());
+        let host = ("host", "127.0.0.1:7700");
+        assert!(!head(&[host]).is_from_elsewhere(), "no Origin: no page");
+        assert!(!head(&[host, ("origin", "http://127.0.0.1:7700")]).is_from_elsewhere());
+        assert!(head(&[host, ("origin", "https://evil.example")]).is_from_elsewhere());
+        assert!(head(&[("origin", "http://127.0.0.1:7700")]).is_from_elsewhere());
     }
 
     #[test]

@@ -73,7 +73,7 @@ impl Accounts {
         self.roles.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    fn rules(&self) -> ensemble_config::AccountRules {
+    pub(crate) fn rules(&self) -> ensemble_config::AccountRules {
         *self.rules.read().unwrap_or_else(|e| e.into_inner())
     }
 

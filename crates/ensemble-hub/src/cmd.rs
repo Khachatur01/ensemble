@@ -14,6 +14,7 @@ use ensemble_ops::local::{self, STOP};
 use serde_json::json;
 use std::io::IsTerminal;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 pub fn run(ctx: &Ctx, command: Command) -> Result<ExitCode, String> {
@@ -24,7 +25,8 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<ExitCode, String> {
         Command::Serve {
             http_host,
             http_port,
-        } => serve(ctx, SocketAddr::new(http_host, http_port)),
+            ui_dir,
+        } => serve(ctx, SocketAddr::new(http_host, http_port), ui_dir),
         Command::Knowledge(c) => knowledge(ctx, c),
         Command::Completions { shell } => completions(shell),
     }
@@ -278,7 +280,7 @@ fn check(ctx: &Ctx) -> Result<ExitCode, String> {
 /// new one, as `init` makes it, when its folder has none, so that what
 /// installs it only runs it. A change to its settings that cannot be used as
 /// it runs has it start again, in this process.
-fn serve(ctx: &Ctx, listen: SocketAddr) -> Result<ExitCode, String> {
+fn serve(ctx: &Ctx, listen: SocketAddr, ui_dir: Option<PathBuf>) -> Result<ExitCode, String> {
     // One hub per folder; the lock also tells `ensemble-hub …` it runs.
     let _lock = ensemble_core::lock::acquire(ctx.dir.path())
         .map_err(|pid| format!("serve: process {pid} already runs the hub"))?;
@@ -290,7 +292,7 @@ fn serve(ctx: &Ctx, listen: SocketAddr) -> Result<ExitCode, String> {
     }
     local::stop_on_signals();
     loop {
-        serve_once(ctx, listen)?;
+        serve_once(ctx, listen, ui_dir.as_deref())?;
         if !local::restarting() {
             break;
         }
@@ -302,7 +304,7 @@ fn serve(ctx: &Ctx, listen: SocketAddr) -> Result<ExitCode, String> {
 
 /// The hub, as its settings say now, listening on `listen`, until it stops
 /// or starts again.
-fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
+fn serve_once(ctx: &Ctx, listen: SocketAddr, ui_dir: Option<&Path>) -> Result<(), String> {
     let dir = ctx.dir.clone();
     let hub = kept::load(&dir)?;
     // The backends of runners the hub uses, served on loopback, each call
@@ -378,7 +380,11 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
     let tasks: &'static crate::board::Service = Box::leak(Box::new(tasks));
     let server = crate::server::Server::new(memory, &hub.accounts.roles, hub.accounts.rules, &dir)
         .with_tasks(tasks)
-        .with_calls(calls.clone());
+        .with_calls(calls.clone())
+        .with_ui(match ui_dir {
+            Some(dir) => crate::ui::Ui::Folder(dir.to_path_buf()),
+            None => crate::ui::Ui::Embedded,
+        });
     server.operations().1.listening(listen);
     // `runner.backends` lists what the connected runners share.
     server.operations().1.when_serving(move || {

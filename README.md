@@ -397,6 +397,8 @@ come and for scripts. JSON in and out.
 | `POST /api/v1/login` `{name, password}` | anyone | a session: `{token, expires}` |
 | `POST /api/v1/join` `{code, client}` | anyone, with a join code | spends it: a new access token of the client's own, named `client`: `{name, token}` |
 | `POST /api/v1/logout` | a session | ends it |
+| `POST /api/v1/session` `{name, password}` | anyone, from the hub's own origin | a browser's login: the session is kept in an HttpOnly, SameSite=Strict cookie, never in the answer: `{name, expires}` |
+| `DELETE /api/v1/session` | the cookie's session | ends it and clears the cookie |
 | `GET /api/v1/me` | any token | your account, the token's permissions and kind |
 | `PUT /api/v1/me` `{tracker_user}` | a session | who you are in the tracker; empty for your account name |
 | `PUT /api/v1/me/password` `{current, new}` | a session | a new password; every session ends |
@@ -1954,7 +1956,7 @@ $ ensemble-runner agent remove <team>/<name>
 $ ensemble-hub setup [--owner N] [--admin A] [--yes]   # make the hub and its first admin, with their token
 $ ensemble-hub init [--force|--keep] [--owner N]   # the settings a new hub starts with, and its vault
 $ ensemble-hub check                      # validate its settings; which model would distill now
-$ ensemble-hub serve                      # run the hub until stopped
+$ ensemble-hub serve [--http-host A] [--http-port P] [--ui-dir D]   # run the hub until stopped; --ui-dir serves the web UI from a folder
 $ ensemble-hub user list
 $ ensemble-hub user show <name>
 $ ensemble-hub role list                  # the roles, and what each may do

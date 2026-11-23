@@ -92,9 +92,13 @@ pub enum Command {
         /// other computers too.
         #[arg(long, value_name = "ADDRESS", default_value = "127.0.0.1")]
         http_host: std::net::IpAddr,
-        /// The port of the REST API, MCP and the runners' link.
+        /// The port of the REST API, MCP, the web UI and the runners' link.
         #[arg(long, value_name = "PORT", default_value_t = 7700)]
         http_port: u16,
+        /// Serve the web UI from this folder, such as `ui/dist` while it is
+        /// worked on, in place of the UI built into the hub.
+        #[arg(long, value_name = "DIR")]
+        ui_dir: Option<std::path::PathBuf>,
     },
     /// The hub's knowledge vault.
     #[command(subcommand)]
