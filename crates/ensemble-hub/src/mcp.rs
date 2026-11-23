@@ -278,7 +278,7 @@ impl Server<'_> {
             }
             SUBMIT => {
                 tasks()?;
-                let ticket = ticket(args)?;
+                let ticket = ticket(args, SUBMIT)?;
                 let made = ask(
                     TASK_CREATE,
                     json!({ "project": field("project"), "ticket": ticket }),
@@ -377,8 +377,9 @@ fn agents_text(user: &str, listed: &Value) -> String {
     }
 }
 
-/// The ticket `submit`'s arguments describe, as the hub keeps it.
-fn ticket(args: &Value) -> Result<Value, String> {
+/// The ticket of a new task from `args`, as `what` (a tool or an operation)
+/// takes them: refused, named after `what`, when they cannot be one.
+pub(crate) fn ticket(args: &Value, what: &str) -> Result<Value, String> {
     let text = |key: &str| {
         args.get(key)
             .and_then(Value::as_str)
@@ -388,11 +389,11 @@ fn ticket(args: &Value) -> Result<Value, String> {
     let (title, task) = (text("title"), text("task"));
     if title.is_empty() || task.is_empty() || text("project").is_empty() {
         return Err(format!(
-            "{SUBMIT}: `project`, `title` and `task` are required"
+            "{what}: `project`, `title` and `task` are required"
         ));
     }
     if title.contains('\n') {
-        return Err(format!("{SUBMIT}: `title` is one line"));
+        return Err(format!("{what}: `title` is one line"));
     }
     let optional = |key: &str| Some(text(key)).filter(|t| !t.is_empty());
     let mut lists = Map::new();
@@ -403,8 +404,8 @@ fn ticket(args: &Value) -> Result<Value, String> {
                 .iter()
                 .map(|i| i.as_str().map(str::to_string))
                 .collect::<Option<Vec<_>>>()
-                .ok_or_else(|| format!("{SUBMIT}: `{key}` must be a list of strings"))?,
-            Some(_) => return Err(format!("{SUBMIT}: `{key}` must be a list of strings")),
+                .ok_or_else(|| format!("{what}: `{key}` must be a list of strings"))?,
+            Some(_) => return Err(format!("{what}: `{key}` must be a list of strings")),
         };
         lists.insert(key.into(), json!(list));
     }
@@ -420,7 +421,7 @@ fn ticket(args: &Value) -> Result<Value, String> {
                 .is_some_and(|g| g.keys().all(|k| k == "name" || k == "attempts"));
             if name.is_empty() || attempts == 0 || attempts > u64::from(u32::MAX) || !known {
                 return Err(format!(
-                    "{SUBMIT}: `gate` is {{name, attempts}}: a gate of the agent's team, and how many runs of the agent it gets to pass it, at least 1"
+                    "{what}: `gate` is {{name, attempts}}: a gate of the agent's team, and how many runs of the agent it gets to pass it, at least 1"
                 ));
             }
             json!({ "name": name, "attempts": attempts })
@@ -428,8 +429,7 @@ fn ticket(args: &Value) -> Result<Value, String> {
     };
     let repository = optional("repository");
     if let Some(repository) = repository {
-        ensemble_tasks::tasks::check_repository(repository)
-            .map_err(|e| format!("{SUBMIT}: {e}"))?;
+        ensemble_tasks::tasks::check_repository(repository).map_err(|e| format!("{what}: {e}"))?;
     }
     let mut ticket = json!({
         "id": "",

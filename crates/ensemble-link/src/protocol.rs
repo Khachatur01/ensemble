@@ -103,8 +103,11 @@ pub const TASKS_WAITING: &str = "tasks_waiting";
 /// as when this computer cannot reach its repository. Answered with
 /// `{blocked}`: whether no connected runner that may take it is left to try.
 pub const TASK_GIVE_BACK: &str = "task_give_back";
+/// The projects the account has tasks in: `{}`, answered with `{projects:
+/// [{project, tasks}]}`, each with how many tasks it has.
+pub const TASK_PROJECTS: &str = "task_projects";
 /// Every task method, for the server to pass on.
-pub const TASK_METHODS: [&str; 12] = [
+pub const TASK_METHODS: [&str; 13] = [
     TASKS,
     TASK,
     TASK_CREATE,
@@ -117,6 +120,7 @@ pub const TASK_METHODS: [&str; 12] = [
     TASK_CANCEL,
     TASKS_WAITING,
     TASK_GIVE_BACK,
+    TASK_PROJECTS,
 ];
 
 /// This connection is a runner, said once it connects and again when its

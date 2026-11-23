@@ -142,9 +142,15 @@ pub struct HubContext {
     /// Where the running hub listens ([`HubContext::listening`]); nothing
     /// otherwise.
     listen: OnceLock<SocketAddr>,
+    /// How the running hub answers a request of the link for an account
+    /// ([`HubContext::when_linked`]); nothing otherwise.
+    linked: OnceLock<Box<Linked>>,
 }
 
 type Offered = dyn Fn() -> Value + Send + Sync;
+/// A request of the link, `method` with `params`, asked by an account with
+/// these permissions, and its answer.
+pub type Linked = dyn Fn(&str, &[Permission], &str, Value) -> Result<Value, String> + Send + Sync;
 type Load = dyn Fn() -> Result<(Roles, ensemble_config::AccountRules), String> + Send + Sync;
 type Changed = dyn Fn() -> Option<String> + Send + Sync;
 
@@ -182,7 +188,51 @@ impl HubContext {
             changed,
             offered: OnceLock::new(),
             listen: OnceLock::new(),
+            linked: OnceLock::new(),
         }
+    }
+
+    /// Have the operations that the running hub answers (`crate::served`)
+    /// ask `answer`, as the link's request of the same name.
+    pub fn when_linked(
+        &self,
+        answer: impl Fn(&str, &[Permission], &str, Value) -> Result<Value, String>
+        + Send
+        + Sync
+        + 'static,
+    ) {
+        let _ = self.linked.set(Box::new(answer));
+    }
+
+    /// Ask the running hub the link's request `method` with `params`, for
+    /// `caller`: its answer, or why not.
+    pub(crate) fn ask(&self, caller: &Caller, method: &str, params: Value) -> Result<Value, Error> {
+        let Caller::Account {
+            name, permissions, ..
+        } = caller
+        else {
+            return Err(Error::new(
+                Code::Forbidden,
+                "this is done by a signed-in account, for itself",
+            ));
+        };
+        let answer = self.linked.get().ok_or_else(|| {
+            Error::new(
+                Code::Unavailable,
+                "only the running hub answers this; start it with `ensemble-hub serve`",
+            )
+        })?;
+        let permissions: Vec<Permission> = permissions
+            .iter()
+            .filter_map(|p| serde_json::from_value(json!(p)).ok())
+            .collect();
+        answer(name, &permissions, method, params).map_err(|e| {
+            if e.contains("do not allow") {
+                Error::new(Code::Forbidden, e)
+            } else {
+                Error::invalid(e)
+            }
+        })
     }
 
     /// The hub's folder.
@@ -293,6 +343,7 @@ pub fn operations() -> Registry<HubContext> {
     all.extend(own_operations());
     all.extend(sign_in_operations());
     all.push(runner_backends());
+    all.extend(crate::served::operations());
     all.extend(ensemble_backends::ops::operations::<HubContext>(
         Side::Hub,
         Access::Permission("admin"),

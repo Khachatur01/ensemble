@@ -43,6 +43,7 @@ mod link_tests;
 mod mcp;
 mod openapi;
 mod runners;
+mod served;
 pub mod server;
 pub mod ui;
 pub mod users;

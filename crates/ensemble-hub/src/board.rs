@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use ensemble_core::runtime::blocking;
 use ensemble_link::protocol::{
     TASK, TASK_ANSWER, TASK_ASSIGN, TASK_CANCEL, TASK_CLAIM, TASK_CREATE, TASK_FINISH,
-    TASK_GIVE_BACK, TASK_RELEASE, TASK_RENEW, TASKS, TASKS_WAITING,
+    TASK_GIVE_BACK, TASK_PROJECTS, TASK_RELEASE, TASK_RENEW, TASKS, TASKS_WAITING,
 };
 use ensemble_store::{self as store, Value as Sql};
 use ensemble_tasks::board::{Board, Cancelled, Claim, End, LEASE, Progress, Renewal, Waiting};
@@ -48,6 +48,28 @@ fn with<T>(
     work: impl AsyncFnOnce(&store::Connection) -> Result<T, String>,
 ) -> Result<T, String> {
     store::with(dir, SCHEMA, work)
+}
+
+/// The projects `owner` has tasks in, each with how many, by name.
+fn projects(dir: &Path, owner: &str) -> Result<Vec<Value>, String> {
+    let rows = with(dir, async |c| {
+        store::rows(
+            c,
+            "SELECT project, COUNT(*) FROM tasks WHERE owner = ?1 GROUP BY project ORDER BY project",
+            vec![Sql::Text(owner.to_string())],
+        )
+        .await
+    })?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let tasks = match row[1] {
+                Sql::Integer(n) => n,
+                _ => 0,
+            };
+            json!({ "project": store::text(&row[0]).unwrap_or_default(), "tasks": tasks })
+        })
+        .collect())
 }
 
 /// The hub's tasks, as the server passes the link's task methods to them, so
@@ -1117,6 +1139,9 @@ impl TaskService for Service {
                 tasks.extend(lent(&self.dir, user, lender, asker.runners, asker.compute)?);
             }
             return Ok(json!({ "runner": format!("{user}/{runner}"), "tasks": tasks }));
+        }
+        if method == TASK_PROJECTS {
+            return Ok(json!({ "projects": projects(&self.dir, user)? }));
         }
         let project = text("project")?;
         if project.contains(['/', '\\']) || project.starts_with('.') {

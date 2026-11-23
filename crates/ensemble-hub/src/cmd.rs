@@ -405,6 +405,7 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr, ui_dir: Option<&Path>) -> Result<()
         )
     });
     let server: &'static crate::server::Server<'static> = Box::leak(Box::new(server));
+    server.answer_operations();
     // A change to its settings, or to a key they name: used at once where it
     // can be, else it starts again.
     server.operations().1.when_changed(move || {

@@ -457,6 +457,96 @@ mod tests {
     }
 
     #[test]
+    fn tasks_knowledge_and_runners_are_operations_the_running_hub_answers() {
+        let tmp = ensemble_core::workspace::testing::TempDir::new();
+        let service = crate::board::Service::new(&tmp.0);
+        let hub = crate::server::testing::start_with_tasks(Box::leak(Box::new(service)));
+        let op = |token: &str, name: &str, input: Value| {
+            call(
+                &hub.url,
+                "POST",
+                &format!("/api/v1/ops/{name}"),
+                Some(token),
+                Some(input),
+            )
+        };
+        let (status, out) = op(&hub.ana, "task.projects", json!({}));
+        assert_eq!((status, out["projects"].clone()), (200, json!([])), "{out}");
+        let (status, out) = op(
+            &hub.ana,
+            "task.create",
+            json!({"project": "shop", "title": "Fix"}),
+        );
+        assert_eq!(status, 400, "{out}");
+        let (status, made) = op(
+            &hub.ana,
+            "task.create",
+            json!({
+                "project": "shop", "title": "Fix the cart", "task": "The cart loses items.",
+                "done_when": ["cargo test passes"], "gate": "test", "gate_attempts": 2,
+            }),
+        );
+        assert_eq!(status, 200, "{made}");
+        let id = made["id"].as_str().unwrap().to_string();
+        let (_, out) = op(&hub.ana, "task.projects", json!({}));
+        assert_eq!(out["projects"], json!([{"project": "shop", "tasks": 1}]));
+        let (_, out) = op(&hub.ana, "task.list", json!({"project": "shop"}));
+        assert_eq!(out["tasks"][0]["ticket"]["id"], id.as_str(), "{out}");
+        assert_eq!(
+            out["tasks"][0]["ticket"]["gate"],
+            json!({"name": "test", "attempts": 2})
+        );
+        let (status, shown) = op(&hub.ana, "task.show", json!({"project": "shop", "id": id}));
+        assert_eq!(status, 200, "{shown}");
+        assert!(shown["task"].is_object(), "{shown}");
+        let (status, _) = op(
+            &hub.ana,
+            "task.show",
+            json!({"project": "shop", "id": "t-9"}),
+        );
+        assert_eq!(status, 404);
+        let (status, out) = op(
+            &hub.ana,
+            "task.assign",
+            json!({"project": "shop", "id": id, "agent": "web/coder"}),
+        );
+        assert_eq!(status, 200, "{out}");
+        let (status, out) = op(
+            &hub.ana,
+            "task.cancel",
+            json!({"project": "shop", "id": id}),
+        );
+        assert_eq!(
+            (status, out["cancel"].as_str()),
+            (200, Some("before")),
+            "{out}"
+        );
+        let (_, out) = op(&hub.root, "task.projects", json!({}));
+        assert_eq!(out["projects"], json!([]), "each account's own");
+        let (status, _) = op(&hub.rex, "task.projects", json!({}));
+        assert_eq!(status, 403, "no `tasks`");
+
+        let (status, out) = op(&hub.ana, "runner.list", json!({}));
+        assert_eq!((status, out["runners"].clone()), (200, json!([])), "{out}");
+        let (status, shared) = op(
+            &hub.ana,
+            "knowledge.share",
+            json!({"title": "Deploys", "text": "We deploy on Fridays.", "visibility": "hub"}),
+        );
+        assert_eq!(status, 200, "{shared}");
+        assert_eq!(shared["visibility"], "hub");
+        let (status, found) = op(&hub.rex, "knowledge.find", json!({"query": "deploy"}));
+        assert_eq!(status, 200, "{found}");
+        assert!(found["text"].is_string(), "{found}");
+        let (status, _) = op(
+            &hub.rex,
+            "knowledge.share",
+            json!({"title": "x", "text": "y"}),
+        );
+        assert_eq!(status, 403, "a reader shares nothing");
+    }
+
+    #[test]
     fn the_hub_serves_its_web_ui_beside_the_api() {
         let hub = start();
         let base = hub

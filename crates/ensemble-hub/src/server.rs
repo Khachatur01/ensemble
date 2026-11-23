@@ -92,6 +92,25 @@ impl<'a> Server<'a> {
         }
     }
 
+    /// Have the operations only the running hub answers (`crate::served`)
+    /// answered by this server, as the link's requests are.
+    pub fn answer_operations(&'static self) {
+        self.hub
+            .when_linked(move |user, permissions, method, params| {
+                let req = Request {
+                    id: 0,
+                    method: method.into(),
+                    params,
+                };
+                let reply = self.answer_as(user, permissions, 0, req);
+                match (reply.result, reply.error) {
+                    (_, Some(e)) => Err(e),
+                    (Some(result), None) => Ok(result),
+                    (None, None) => Err(format!("{method}: no answer")),
+                }
+            });
+    }
+
     /// Serve the web UI from `ui`.
     pub fn with_ui(mut self, ui: crate::ui::Ui) -> Self {
         self.ui = ui;
@@ -455,10 +474,21 @@ impl<'a> Server<'a> {
     }
 
     pub(crate) fn answer(&self, session: &Session, conn: u64, req: Request) -> Reply {
-        let permissions = match self.permissions(session) {
-            Ok(p) => p,
-            Err(e) => return Reply::err(req.id, e),
-        };
+        match self.permissions(session) {
+            Ok(permissions) => self.answer_as(&session.user, &permissions, conn, req),
+            Err(e) => Reply::err(req.id, e),
+        }
+    }
+
+    /// Answer `req` for `user`, who may do what `permissions` allow, on the
+    /// link `conn`, or 0 off any link.
+    pub(crate) fn answer_as(
+        &self,
+        user: &str,
+        permissions: &[Permission],
+        conn: u64,
+        req: Request,
+    ) -> Reply {
         let may = |p: Permission| -> Result<(), String> {
             if permissions.contains(&p) {
                 Ok(())
@@ -484,7 +514,7 @@ impl<'a> Server<'a> {
                 let role = self
                     .users()
                     .ok()
-                    .and_then(|u| u.get(&session.user).map(|u| u.role.clone()))
+                    .and_then(|u| u.get(user).map(|u| u.role.clone()))
                     .unwrap_or_default();
                 let offered: Vec<Value> = self
                     .memory
@@ -494,7 +524,7 @@ impl<'a> Server<'a> {
                     .map(|t| json!({"name": t.name, "description": t.description, "parameters": t.parameters}))
                     .collect();
                 Ok(json!({
-                    "user": session.user,
+                    "user": user,
                     "role": role,
                     "permissions": tools,
                     "tools": offered,
@@ -503,7 +533,7 @@ impl<'a> Server<'a> {
             }
             SHARE => may(Permission::Share).and_then(|()| {
                 let share = self.memory.share_as(
-                    &session.user,
+                    user,
                     optional("client"),
                     optional("project"),
                     ensemble_knowledge::visibility_of(&req.params)?,
@@ -512,14 +542,13 @@ impl<'a> Server<'a> {
                 )?;
                 Ok(json!({ "id": share.id, "visibility": share.visibility.as_str() }))
             }),
-            RECALL => may(Permission::Recall).and_then(|()| {
-                Ok(json!({ "text": self.memory.recall_as(&session.user, text("query")?) }))
-            }),
+            RECALL => may(Permission::Recall)
+                .and_then(|()| Ok(json!({ "text": self.memory.recall_as(user, text("query")?) }))),
             method if TASK_METHODS.contains(&method) => {
                 may(Permission::Tasks).and_then(|()| match self.tasks {
                     Some(tasks) => self.ask_tasks(
                         tasks,
-                        session,
+                        user,
                         permissions.contains(&Permission::Host),
                         method,
                         &req.params,
@@ -529,13 +558,13 @@ impl<'a> Server<'a> {
             }
             RUNNER => self.routes.register(
                 conn,
-                &session.user,
+                user,
                 &req.params,
                 permissions.contains(&Permission::Host),
             ),
             RUNNERS => Ok(self
                 .routes
-                .listed(&session.user, permissions.contains(&Permission::Compute))),
+                .listed(user, permissions.contains(&Permission::Compute))),
             other => Err(format!("no method `{other}`")),
         };
         match result {
@@ -546,7 +575,7 @@ impl<'a> Server<'a> {
 }
 
 impl Server<'_> {
-    /// Pass a task method to `tasks`, asked by `session`'s account, with who
+    /// Pass a task method to `tasks`, asked by the account `user`, with who
     /// is connected now: the runners that may take each account's tasks, and
     /// the runner the request names (`runner`, by its name or as
     /// `<account>/<name>`) as a lender, when it works for the hub and the
@@ -555,7 +584,7 @@ impl Server<'_> {
     fn ask_tasks(
         &self,
         tasks: &dyn TaskService,
-        session: &Session,
+        user: &str,
         may_host: bool,
         method: &str,
         params: &Value,
@@ -575,7 +604,6 @@ impl Server<'_> {
             })
         };
         let runners = |account: &str| self.routes.present(account, || compute(account));
-        let user = session.user.as_str();
         let lender = params
             .get("runner")
             .and_then(Value::as_str)
@@ -757,6 +785,7 @@ pub mod testing {
             server = server.with_tasks(tasks);
         }
         let server: &'static Server<'static> = Box::leak(Box::new(server));
+        server.answer_operations();
         runtime::shared().spawn(server.run(listener, stop, &|_| {}));
         Running {
             tmp,
