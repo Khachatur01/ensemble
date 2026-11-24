@@ -10,7 +10,7 @@
 
 use crate::remote;
 use ensemble_config::teams::{self, Origin, TeamEntry};
-use ensemble_config::{self as config, Config, RelayAt, RunnerLlm};
+use ensemble_config::{self as config, AnnPool, Config, RelayAt};
 use ensemble_core::state;
 use std::path::{Path, PathBuf};
 
@@ -38,12 +38,13 @@ pub fn config_dir(team: &TeamEntry) -> Result<PathBuf, String> {
     }
 }
 
-/// Every team that is ready, as one helper team on the LLM backends of the
-/// runner whose `llm` is `llm` (those reached through the hub when it serves
-/// them at `relay`), and a line for each that is not: waiting for approval. A
-/// team that cannot be loaded, or names a backend the runner does not define,
-/// is an error that names it, so that a broken team is seen, not skipped.
-pub fn load_all(llm: &RunnerLlm, relay: Option<&RelayAt>) -> Result<(Config, Vec<String>), String> {
+/// Every team that is ready, as one helper team on the runner's ANN pool,
+/// `pool` (the runners it reaches through the hub when it serves them at
+/// `relay`), and a line for each that is not: waiting for approval. A team
+/// that cannot be loaded, or names a model that is not an LLM of the pool that
+/// is on, is an error that names it, so that a broken team is seen, not
+/// skipped.
+pub fn load_all(pool: &AnnPool, relay: Option<&RelayAt>) -> Result<(Config, Vec<String>), String> {
     let dir = dir()?;
     let mut ready = Vec::new();
     let mut waiting = Vec::new();
@@ -58,13 +59,13 @@ pub fn load_all(llm: &RunnerLlm, relay: Option<&RelayAt>) -> Result<(Config, Vec
         let config = config_dir(&team)
             .and_then(|d| {
                 config::load(&config::config_path(&d))
-                    .and_then(|c| c.with_llm(llm, relay))
+                    .and_then(|c| c.with_pool(pool, relay))
                     .map_err(|e| e.to_string())
             })
             .map_err(|e| format!("team '{}': {e}", team.name))?;
         ready.push((team.name, config));
     }
-    Ok((teams::combine(ready, llm.backends(relay), dir), waiting))
+    Ok((teams::combine(ready, pool.backends(relay), dir), waiting))
 }
 
 /// The folder of `name` whose `config.yaml` a command may change: a team made

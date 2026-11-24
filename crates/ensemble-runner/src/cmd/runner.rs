@@ -5,9 +5,10 @@ use crate::cli::Command;
 use crate::{Ctx, daemon, host_name, runner_hub, this_runner};
 use crate::{kept, setup, teams};
 use ensemble_agents::router::Ensemble;
-use ensemble_backends::ops::{Backends, KeptBackends, Side, WithBackends};
+use ensemble_backends::models::Found;
+use ensemble_backends::ops::{Side, WithPool};
 use ensemble_config::kept::{Change, Keep, Kept, WithKept};
-use ensemble_config::{self as config, Config, RunnerSettings};
+use ensemble_config::{self as config, AnnPool, AnnPoolSetting, Config, RunnerSettings};
 use ensemble_core::state::{self, RunnerDir};
 use ensemble_ops::cli::ask;
 use ensemble_ops::local;
@@ -87,7 +88,7 @@ fn init(force: bool, keep: bool) -> Result<ExitCode, String> {
     let settings = setup::starting(&name, setup::WORKSPACE)?;
     store.write(&settings, &Change::by_this_computer("init"))?;
     println!(
-        "Made the runner '{name}', working for you in {}, kept in {}. `ensemble-runner login` signs it in to a hub, `ensemble-runner backend add` gives it LLM backends, and `ensemble-runner settings show` shows every setting.",
+        "Made the runner '{name}', working for you in {}, kept in {}. `ensemble-runner login` signs it in to a hub, `ensemble-runner source add` gives it sources of models, and `ensemble-runner settings show` shows every setting.",
         setup::WORKSPACE,
         dir.database().display()
     );
@@ -250,19 +251,19 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
         }
         None => None,
     };
-    // The relay, when it shares backends or reaches others' through the hub,
-    // and where its agents reach those.
+    // The relay, when it shares models or reaches other runners' through the
+    // hub, and where its agents reach those.
     let relay = hub
         .as_ref()
-        .filter(|_| !runner.llm.shares.is_empty() || !runner.llm.hub.is_empty())
+        .filter(|_| !runner.llm.shared().is_empty() || !runner.llm.relayed.is_empty())
         .map(|(url, token)| {
             std::sync::Arc::new(crate::relay::Relay::new(url, token.clone(), &runner))
         });
-    let loopback = match relay.as_ref().filter(|_| !runner.llm.hub.is_empty()) {
+    let loopback = match relay.as_ref().filter(|_| !runner.llm.relayed.is_empty()) {
         Some(relay) => Some(
             ensemble_core::runtime::shared()
                 .block_on(ensemble_link::loopback::Loopback::start(
-                    config::llm::routes(&runner.llm.hub),
+                    runner.llm.routes(),
                     std::sync::Arc::new(crate::relay::RelayOpener(relay.clone())),
                 ))
                 .map_err(|e| format!("serve: the relay's endpoint: {e}"))?,
@@ -278,6 +279,15 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
     for line in &waiting {
         say(line);
     }
+    // What its sources serve now: a model new to one is kept off, so the
+    // running runner need not start again for it.
+    std::thread::spawn(|| match RunnerContext::new() {
+        Ok(c) => eprintln!(
+            "ensemble: the sources: {}",
+            ensemble_backends::ops::refresh_all(&c).replace('\n', "; ")
+        ),
+        Err(e) => eprintln!("ensemble: the sources were not asked: {e}"),
+    });
     // What `ensemble-runner …` asks of it while it runs.
     let operations = operations();
     let daemon = daemon::Daemon::new(
@@ -363,7 +373,7 @@ impl WithKept<RunnerSettings> for RunnerContext {
 }
 
 /// Its keys are kept sealed in its database ([`crate::kept`]).
-impl WithBackends for RunnerContext {
+impl WithPool for RunnerContext {
     fn can_keep_keys(&self) -> Result<(), Error> {
         kept::keys(&self.dir).ready().map_err(Error::failed)
     }
@@ -377,29 +387,19 @@ impl WithBackends for RunnerContext {
         kept::variables(&self.dir).ok()?.get(name)
     }
 
-    fn kept_backends(&self) -> Result<KeptBackends, Error> {
-        let s = self.settings.read()?;
-        Ok(KeptBackends {
-            backends: s.backends,
-            shares: Some(s.shares),
-        })
+    fn kept_pool(&self) -> Result<AnnPoolSetting, Error> {
+        Ok(self.settings.read()?.ann_pool)
     }
 
-    /// The teams name the runner's backends: a change that would leave one
-    /// naming a backend that is not there is refused.
-    fn change_backends(
+    /// The teams name the models of the runner's pool: a change that would
+    /// leave one naming a model that is not there, or off, is refused.
+    fn change_pool(
         &self,
         change: Change,
-        edit: &mut dyn FnMut(&mut KeptBackends) -> Result<(), Error>,
+        edit: &mut dyn FnMut(&mut AnnPoolSetting) -> Result<(), Error>,
     ) -> Result<Option<String>, Error> {
         self.settings.change(change, |s| {
-            let mut kept = KeptBackends {
-                backends: std::mem::take(&mut s.backends),
-                shares: Some(std::mem::take(&mut s.shares)),
-            };
-            edit(&mut kept)?;
-            s.backends = kept.backends;
-            s.shares = kept.shares.unwrap_or_default();
+            edit(&mut s.ann_pool)?;
             let runner = kept::resolve(s, &self.dir)
                 .map_err(|e| Error::invalid(format!("nothing was changed: {e}")))?;
             teams::load_all(&runner.llm, None)
@@ -408,17 +408,37 @@ impl WithBackends for RunnerContext {
         })
     }
 
-    fn backends_changed(&self) -> Option<String> {
+    fn pool_changed(&self) -> Option<String> {
         self.settings.changed()
     }
 
-    fn backends(&self) -> Result<Backends, Error> {
-        let runner = self.runner()?;
-        Ok(Backends {
-            direct: runner.llm.direct,
-            relayed: runner.llm.hub,
-            shares: Some(runner.llm.shares),
+    fn pool(&self) -> Result<AnnPool, Error> {
+        Ok(self.runner()?.llm)
+    }
+
+    /// Asked of the hub over a link of its own, as `peers` asks.
+    fn shared_by(&self, runner: &str) -> Result<Vec<Found>, Error> {
+        let (url, token) = runner_hub("source").map_err(|e| Error::new(Code::Unavailable, e))?;
+        let listed = ensemble_core::runtime::block_on(async {
+            let mut link = ensemble_link::client::Connection::open(&url, &token).await?;
+            let listed = link
+                .call(ensemble_link::protocol::RUNNERS, serde_json::json!({}))
+                .await
+                .map_err(|f| f.message());
+            link.close().await;
+            listed
         })
+        .map_err(|e| Error::new(Code::Unavailable, format!("could not ask {url}: {e}")))?;
+        let found = listed["runners"]
+            .as_array()
+            .and_then(|all| all.iter().find(|r| r["runner"] == runner))
+            .ok_or_else(|| {
+                Error::new(
+                    Code::Unavailable,
+                    format!("{runner} is not connected to {url} now, or is not yours"),
+                )
+            })?;
+        Ok(crate::relay::shared_models(&found["models"]))
     }
 }
 
@@ -515,11 +535,6 @@ struct Workspace {
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
-struct SharedCalls {
-    most: u64,
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
 struct Import {
     settings: String,
 }
@@ -533,13 +548,6 @@ const NAME: &[Field] = &[Field::text(
 const WORKSPACE: &[Field] = &[Field::text(
     "path",
     "The folder it works in, of git repositories; ~/ is your home.",
-)
-.required()
-.positional()];
-const SHARED_CALLS: &[Field] = &[Field::new(
-    "most",
-    ensemble_ops::Kind::Number,
-    "The most calls of others to its shared backends at once.",
 )
 .required()
 .positional()];
@@ -673,29 +681,6 @@ pub fn operations() -> Registry<RunnerContext> {
                     s.workspace = path.clone();
                     Ok(())
                 })
-            },
-        ),
-        changing(
-            Spec {
-                name: "settings.shared-calls",
-                summary: "Say how many calls of others to its shared backends it takes at once.",
-                access: local,
-                input: SHARED_CALLS,
-            },
-            |c, input: SharedCalls, change| {
-                let most = u32::try_from(input.most)
-                    .ok()
-                    .filter(|n| *n > 0)
-                    .ok_or_else(|| Error::invalid("must be greater than 0").on("most"))?;
-                edit(
-                    c,
-                    change,
-                    format!("it takes {most} shared calls at once"),
-                    |s| {
-                        s.max_shared_calls = most;
-                        Ok(())
-                    },
-                )
             },
         ),
     ];

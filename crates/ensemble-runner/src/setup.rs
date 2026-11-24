@@ -229,7 +229,7 @@ pub fn health_finding(
             let users: Vec<&str> = config
                 .agents
                 .values()
-                .filter(|a| a.kind() == kind || a.llm_backends().iter().any(|(b, _)| *b == name))
+                .filter(|a| a.kind() == kind || a.pool_models().iter().any(|(b, _)| *b == name))
                 .map(|a| a.name.as_str())
                 .collect();
             let remove = users
@@ -243,7 +243,7 @@ pub fn health_finding(
                 )
             } else {
                 format!(
-                    "start the model server, or correct `base_url` in runner.yaml and the model names in config.yaml, or drop the agents that use it: {remove}"
+                    "start the model server, or correct its address with `ensemble-runner source` and the model names in config.yaml, or drop the agents that use it: {remove}"
                 )
             };
             Finding::bad(what, fix)
@@ -287,7 +287,7 @@ mod tests {
                     adapter,
                     prompt: Some("Does the work."),
                     model: None,
-                    backend: None,
+                    source: None,
                     writes,
                 },
             )
@@ -305,7 +305,7 @@ mod tests {
             .unwrap();
         assert_eq!(runner.name, "desk-2");
         assert_eq!(runner.workspace, Path::new("/code"));
-        assert!(runner.llm.direct.is_empty() && runner.llm.shares.is_empty());
+        assert!(runner.llm.direct.is_empty() && runner.llm.models.is_empty());
         assert!(starting("a/b", "/code").is_err(), "a name is checked");
         assert!(starting("desk", "").is_err(), "a workspace is needed");
     }

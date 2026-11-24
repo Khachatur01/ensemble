@@ -3,11 +3,11 @@
 # config.yaml — a helper team of agents, written by `ensemble-runner team new`.
 # It lives in a folder of its own (often its own git repo), apart from any
 # project; the repository a task names is where the team works. It can be yours
-# alone, or one your company shares and you pull. It names the LLM backends its
-# agents run on by their names alone: each runner defines them, with their
-# endpoints and keys (`ensemble-runner backend add`), so the team runs on any
-# runner that defines the backends it names. This one names `local` and
-# `central`.
+# alone, or one your company shares and you pull. It names the models its
+# agents run on as the sources of the runner's ANN pool serve them: each runner
+# keeps its sources, with their endpoints and keys (`ensemble-runner source add`),
+# and turns their models on, so the team runs on any runner that has the models it
+# names on. This one names the sources `local` and `central`.
 #
 # Nothing has a default value: every setting is written here, and one that is
 # missing is refused by name. Only a few may be left out, because leaving them
@@ -66,7 +66,7 @@ gates: {}
 # or makes one request to a model.
 # ---------------------------------------------------------------------------
 agents:
-  # The OpenCode CLI on a model of an LLM backend.
+  # The OpenCode CLI on a model of the ANN pool.
   coder:
     # What it is for. The first line is what the hub lists among its agents;
     # the whole of it is the agent's system prompt. Leave it out for no system
@@ -86,24 +86,24 @@ agents:
     isolation: worktree
     adapter:
       type: opencode
-      # Where the model comes from: `llm_backend` for one an LLM backend of
-      # the runner serves, `provider` for one OpenCode is already set up for.
+      # Where the model comes from: `ann_pool` for an LLM of the runner's
+      # ANN pool that is on, `provider` for one OpenCode is already set up for.
       model:
-        type: llm_backend
+        type: ann_pool
         # The models it may run on, in order. Each run uses the first whose
-        # backend answers and serves it, so the agent keeps working when your
+        # source answers and serves it, so the agent keeps working when your
         # own server is off. With one model, it is simply used.
         try:
-          - backend: local
-            # The id the endpoint serves the model under, as its /models lists it.
+          - source: local
+            # The id the source serves the model under, as its /models lists it.
             name: qwen3.5:9b
             # Tokens of context the server really runs the model with, so
             # OpenCode knows when to compact (Ollama: OLLAMA_CONTEXT_LENGTH).
             context_window: 32768
-          - backend: central
+          - source: central
             name: qwen3.5:72b
             context_window: 131072
-        # When none of them can be used: `fail` (say what each backend
+        # When none of them can be used: `fail` (say what each source
         # answered) or `wait` (a task waits in the queue and is tried again).
         when_none: wait
       # OpenCode permissions, such as read, edit, bash or bash(git *);
@@ -140,7 +140,7 @@ agents:
       max_steps: 30
       command: opencode
 
-  # A light agent: one request straight to a model of an LLM backend. No CLI
+  # A light agent: one request straight to an LLM of the ANN pool. No CLI
   # and no tools, so it reads and changes nothing and answers from what it is
   # given: cheap work such as summarising, classifying or drafting.
   summariser:
@@ -155,16 +155,16 @@ agents:
       type: direct
       # The models it may run on, in order, as for `coder` above.
       try:
-        - backend: local
-          # The id the endpoint serves the model under, as its /models lists it.
+        - source: local
+          # The id the source serves the model under, as its /models lists it.
           model: qwen3.5:9b
       when_none: fail
       # Most tokens of answer; an answer cut off there is marked unfinished.
       max_tokens: 1000
 
-  # An agent loop in Ensemble itself, on a model of an LLM backend: it reads,
+  # An agent loop in Ensemble itself, on an LLM of the ANN pool: it reads,
   # edits and runs commands with the tools listed, so no agent CLI needs
-  # installing. What OpenCode on an LLM backend does, with nothing to install.
+  # installing. What OpenCode on the ANN pool does, with nothing to install.
   patcher:
     prompt: |
       You fix small, well-described bugs. Read the code before changing it,
@@ -179,7 +179,7 @@ agents:
       type: builtin
       # The models it may run on, in order, as for `coder` above.
       try:
-        - backend: local
+        - source: local
           model: qwen3-coder:30b
           # Tokens of context the server runs the model with; the loop
           # compacts the conversation before it outgrows them.

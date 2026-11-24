@@ -5,12 +5,13 @@
 //!
 //! A runner says where it works (its workspace, a folder of git
 //! repositories, each a project named for its folder, where it clones the
-//! repository of a task whose project it has no copy of), and the LLM
-//! backends its teams' agents run on: its own, those it offers
-//! through the hub, and others' it reaches through the hub. Its teams are the
-//! folders of its teams directory (`teams`).
+//! repository of a task whose project it has no copy of), and its ANN pool:
+//! the sources its teams' agents run on, its own and other runners it
+//! reaches through the hub, the models they serve, and which of its own it
+//! shares through the hub. Its teams are the folders of its teams directory
+//! (`teams`).
 
-use super::llm::BackendSetting;
+use super::ann::AnnPoolSetting;
 use super::*;
 use ensemble_core::state::RunnerDir;
 use serde::{Deserialize, Serialize};
@@ -27,8 +28,8 @@ pub struct Runner {
     /// The hub server it connects to, `ws://` or `wss://`, signed in to with
     /// `ensemble-runner login`. None: it uses no hub.
     pub hub: Option<String>,
-    /// The LLM backends its agents run on, and those it offers.
-    pub llm: RunnerLlm,
+    /// Its ANN pool: the sources its agents run on, and the models it shares.
+    pub llm: AnnPool,
     pub source: PathBuf,
 }
 
@@ -45,25 +46,19 @@ pub struct RunnerSettings {
     pub workspace: String,
     /// The hub it connects to, `ws://` or `wss://`. None: no hub.
     pub hub: Option<String>,
-    /// The LLM backends its teams' agents run on, by name.
-    pub backends: BTreeMap<String, BackendSetting>,
-    /// Those of its own backends it offers through the hub.
-    pub shares: Vec<String>,
-    /// The most calls of others to them at once.
-    pub max_shared_calls: u32,
+    /// The sources its teams' agents run on and the models they serve.
+    pub ann_pool: AnnPoolSetting,
 }
 
 impl RunnerSettings {
     /// The settings a new runner starts with: `name`, working in `workspace`,
-    /// with no hub and no backend.
+    /// with no hub and no source.
     pub fn starting(name: &str, workspace: &str) -> Self {
         RunnerSettings {
             name: name.to_string(),
             workspace: workspace.to_string(),
             hub: None,
-            backends: BTreeMap::new(),
-            shares: Vec::new(),
-            max_shared_calls: 1,
+            ann_pool: AnnPoolSetting::default(),
         }
     }
 
@@ -90,33 +85,15 @@ impl RunnerSettings {
                 "hub: '{h}' must start with ws:// or wss://, such as wss://hub.example.com"
             ));
         }
-        let (direct, relayed) = crate::llm::backends(&self.backends, env, &mut problems);
-        let mut shares: Vec<String> = Vec::new();
-        for name in &self.shares {
-            let name = name.trim().to_string();
-            match self.backends.get(&name) {
-                None => problems.push(format!("shares: '{name}' is not one of its backends")),
-                Some(BackendSetting::OpenAiCompatible { .. }) => {}
-                Some(_) => problems.push(format!(
-                    "shares: '{name}' is not an {OPENAI_COMPATIBLE_API} backend of its own, the one kind a runner offers"
-                )),
-            }
-            if shares.contains(&name) {
-                problems.push(format!("shares: '{name}' is listed twice"));
-            }
-            shares.push(name);
-        }
-        if self.max_shared_calls == 0 {
-            problems.push("max_shared_calls: must be greater than 0".into());
-        }
-        if hub.is_none() && !shares.is_empty() {
+        let llm = crate::ann::pool(&self.ann_pool, true, env, &mut problems);
+        if hub.is_none() && llm.models.iter().any(|m| m.shared) {
             problems.push(
-                "shares: a runner offers its backends through a hub, and it names no hub".into(),
+                "ann_pool: a runner shares its models through a hub, and it names no hub".into(),
             );
         }
-        if hub.is_none() && !relayed.is_empty() {
+        if hub.is_none() && !llm.relayed.is_empty() {
             problems.push(
-                "backends: those of type runner are reached through a hub, and it names no hub"
+                "ann_pool: a source that is another runner is reached through a hub, and it names no hub"
                     .into(),
             );
         }
@@ -125,12 +102,7 @@ impl RunnerSettings {
                 name,
                 workspace,
                 hub,
-                llm: RunnerLlm {
-                    direct,
-                    shares,
-                    max_shared_calls: self.max_shared_calls,
-                    hub: relayed,
-                },
+                llm,
                 source: source.to_path_buf(),
             })
         } else {

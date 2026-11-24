@@ -187,11 +187,11 @@ impl Memory {
     fn vectors(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
         let knowledge = self.knowledge();
         let e = knowledge.embed.as_ref().ok_or("no embedding model")?;
-        let backends = self.backends();
-        let backend = backends
-            .get(&e.backend)
-            .ok_or_else(|| format!("no backend '{}'", e.backend))?;
-        embed(backend, &e.model, texts).map_err(|e| e.to_string())
+        let sources = self.backends();
+        let source = sources
+            .get(&e.source)
+            .ok_or_else(|| format!("no source '{}'", e.source))?;
+        embed(source, &e.model, texts).map_err(|e| e.to_string())
     }
 
     /// Run `work` on the cache of the notes' vectors.
@@ -273,8 +273,13 @@ mod tests {
     /// one about lunch.
     fn memory_with(tmp: &TempDir, url: &str) -> Memory {
         let mut settings = crate::tests::settings_on(url);
+        settings.ann_pool.turn_on(
+            "local",
+            "e",
+            ensemble_config::ModelKind::Embedding { dimensions: 2 },
+        );
         settings.embed = Some(ensemble_config::EmbedSetting {
-            backend: "local".into(),
+            source: "local".into(),
             model: "e".into(),
             min_similarity: 0.5,
         });

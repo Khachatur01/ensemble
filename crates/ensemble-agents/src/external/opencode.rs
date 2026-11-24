@@ -214,7 +214,7 @@ fn provider(backend: &LlmBackend, oc: &OpenCodeAdapter) -> Value {
     }
     json!({
         "npm": OPENAI_COMPATIBLE_PACKAGE,
-        "name": format!("Ensemble LLM backend '{}'", backend.name),
+        "name": format!("Ensemble source '{}'", backend.name),
         "options": options,
         "models": { oc.model_id(): model },
     })
@@ -553,9 +553,9 @@ mod tests {
     }
 
     fn on_local_box(model: &str, context_window: u32) -> OpenCodeModel {
-        OpenCodeModel::LlmBackend(ensemble_config::Fallback {
+        OpenCodeModel::Pool(ensemble_config::Fallback {
             candidates: vec![ensemble_config::Candidate {
-                backend: "local box".into(),
+                source: "local box".into(),
                 model: model.into(),
                 context_window: Some(context_window),
             }],
@@ -606,7 +606,7 @@ mod tests {
             cfg["provider"]["ensemble-local-box"],
             json!({
                 "npm": "@ai-sdk/openai-compatible",
-                "name": "Ensemble LLM backend 'local box'",
+                "name": "Ensemble source 'local box'",
                 "options": {
                     "baseURL": "http://127.0.0.1:8888/v1",
                     "timeout": 600000,

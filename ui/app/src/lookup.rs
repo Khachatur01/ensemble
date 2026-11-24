@@ -1,6 +1,6 @@
 //! What the forms offer to pick from, read from the hub: its roles, the
-//! agents of the runners connected now, the projects with tasks, the LLM
-//! backends and the models they serve. Each is asked for once a page needs
+//! agents of the runners connected now, the projects with tasks, and the
+//! models of the ANN pool that are on. Each is asked for once a page needs
 //! it; a page that may not ask gets none, and its fields stay free to type.
 
 use crate::api::{self, Failure};
@@ -83,41 +83,26 @@ pub fn projects(asked: &Asked) -> Vec<String> {
     }
 }
 
-/// The LLM backends, by name (`backend.list`).
-pub fn backends(asked: &Asked) -> Vec<String> {
+/// The models of the ANN pool that are on and of `kind`, `llm` or
+/// `embedding`, as `<source>:<model>`, each with what it is (`model.list`).
+pub fn pool_models(asked: &Asked, kind: &str) -> Vec<(String, String)> {
     match &*asked.read() {
-        Some(Ok(out)) => out["backends"]
+        Some(Ok(out)) => out["models"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|b| b["name"].as_str().map(String::from))
+            .filter(|m| m["on"] == true && m["type"] == kind)
+            .filter_map(|m| {
+                let name = m["name"].as_str()?.to_string();
+                let about = match m["tier"].as_str() {
+                    Some(tier) => format!("{tier} LLM"),
+                    None => "embedding model".to_string(),
+                };
+                Some((name, about))
+            })
             .collect(),
         _ => Vec::new(),
     }
-}
-
-/// Each model a backend serves, as `<backend>:<model>`: from what the
-/// backends answered (`backend.test`) and what runners share
-/// (`runner.backends`), and each backend's name, for a model it did not list.
-pub fn models(backends: &[String], tested: &Asked) -> Vec<(String, String)> {
-    let mut found: Vec<(String, String)> = Vec::new();
-    if let Some(Ok(out)) = &*tested.read() {
-        for b in out["backends"].as_array().into_iter().flatten() {
-            let name = b["name"].as_str().unwrap_or("");
-            for model in strings(&b["models"]) {
-                found.push((format!("{name}:{model}"), format!("served by {name}")));
-            }
-        }
-    }
-    for name in backends {
-        if !found
-            .iter()
-            .any(|(m, _)| m.starts_with(&format!("{name}:")))
-        {
-            found.push((format!("{name}:"), format!("a model of {name}")));
-        }
-    }
-    found
 }
 
 /// The texts of a JSON list.

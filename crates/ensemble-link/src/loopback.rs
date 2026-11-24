@@ -1,13 +1,15 @@
-//! Where a process serves the backends it reaches through the hub: an
-//! OpenAI-compatible endpoint on loopback, `http://127.0.0.1:<port>/<name>`
-//! for each backend by its name, with a key made when it starts. The agents
-//! and the distiller call it like any backend; each request becomes a call
+//! Where a process serves the sources it reaches through the hub, each
+//! another runner: an OpenAI-compatible endpoint on loopback,
+//! `http://127.0.0.1:<port>/<name>` for each source by its name, with a key
+//! made when it starts. A model there is named as the runner that shares it
+//! names it, `<its source>:<id>`. The agents
+//! and the distiller call it like any server; each request becomes a call
 //! that an [`Opener`] carries (the runner's relay socket, or the hub itself),
 //! and the answer is written back as it comes.
 //!
 //! Only this process knows the key, and only loopback reaches the port.
 
-use crate::relay::{Frame, Open, UNAVAILABLE};
+use crate::relay::{Frame, Open, UNAVAILABLE, routed};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -29,13 +31,12 @@ pub trait Opener: Send + Sync {
     fn open(&self, open: Open, body: Vec<u8>) -> UnboundedReceiver<Frame>;
 }
 
-/// Each backend's name here, with the runner that serves it and its name
-/// there.
-pub type Names = BTreeMap<String, (String, String)>;
+/// Each source's name here, with the runner it is, as `<owner>/<name>`.
+pub type Names = BTreeMap<String, String>;
 
 /// A loopback endpoint, served until it is dropped.
 pub struct Loopback {
-    /// `http://127.0.0.1:<port>`; a backend is at `<base_url>/<name>`.
+    /// `http://127.0.0.1:<port>`; a source is at `<base_url>/<name>`.
     pub base_url: String,
     /// What a request must send as its API key.
     pub key: String,
@@ -124,7 +125,7 @@ impl Serving {
             .unwrap_or_else(|e| e.into_inner())
             .get(name)
             .cloned();
-        let Some((runner, backend)) = found else {
+        let Some(runner) = found else {
             let known: Vec<String> = self
                 .names
                 .read()
@@ -133,7 +134,7 @@ impl Serving {
                 .cloned()
                 .collect();
             let why = format!(
-                "no backend '{name}' is reached through the hub here; those that are: {}",
+                "no source '{name}' is reached through the hub here; those that are: {}",
                 if known.is_empty() {
                     "(none)".to_string()
                 } else {
@@ -142,13 +143,29 @@ impl Serving {
             );
             return refuse(&mut stream, 404, &why).await;
         };
+        // A request that names a model goes to the source the runner names
+        // it after, as that source serves it; one that names none asks the
+        // runner which models it shares.
+        let (source, body) = if request.body.is_empty() {
+            (String::new(), request.body)
+        } else {
+            match routed(&request.body) {
+                Some(routed) => routed,
+                None => {
+                    let why = format!(
+                        "name a model of {runner} as it names it, <source>:<model>, such as ollama:qwen3.5:9b"
+                    );
+                    return refuse(&mut stream, 404, &why).await;
+                }
+            }
+        };
         let open = Open {
             runner,
-            backend,
+            source,
             method: request.method,
             path: format!("/{rest}"),
         };
-        let mut answer = self.opener.open(open, request.body);
+        let mut answer = self.opener.open(open, body);
         let _ = write_answer(&mut stream, &mut answer).await;
     }
 }
@@ -319,17 +336,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_request_to_a_backend_by_its_name_is_a_call_and_its_answer_streams_back() {
+    async fn a_request_to_a_source_by_its_name_is_a_call_to_the_model_it_names_and_its_answer_streams_back()
+     {
         let echo = Arc::new(Echo::default());
         let names = Names::from([
-            (
-                "gpu".to_string(),
-                ("ana/gpu-box".to_string(), "local".to_string()),
-            ),
-            (
-                "full".to_string(),
-                ("busy/box".to_string(), "local".to_string()),
-            ),
+            ("gpu".to_string(), "ana/gpu-box".to_string()),
+            ("full".to_string(), "busy/box".to_string()),
         ]);
         let lo = Loopback::start(names, echo.clone()).await.unwrap();
         let (url, key) = (lo.base_url.clone(), lo.key.clone());
@@ -341,7 +353,7 @@ mod tests {
                     .config()
                     .http_status_as_error(false)
                     .build()
-                    .send("{\"model\": \"qwen\"}")
+                    .send("{\"model\": \"local:qwen\"}")
                     .unwrap();
                 let kind = answer
                     .headers()
@@ -365,12 +377,15 @@ mod tests {
             open,
             Open {
                 runner: "ana/gpu-box".into(),
-                backend: "local".into(),
+                source: "local".into(),
                 method: "POST".into(),
                 path: "/chat/completions".into(),
             }
         );
-        assert_eq!(sent, b"{\"model\": \"qwen\"}");
+        assert_eq!(
+            sent, b"{\"model\":\"qwen\"}",
+            "named as its source serves it"
+        );
 
         let (status, _, body) = ask("/full/chat/completions", &key);
         assert_eq!(status, 503);

@@ -415,7 +415,7 @@ pub fn describe(config: &Config) -> String {
                 l.fallback
                     .candidates
                     .iter()
-                    .map(|c| format!("backend '{}'", c.backend))
+                    .map(|c| format!("{}:{}", c.source, c.model))
                     .collect::<Vec<_>>()
                     .join(", else ")
             )),
@@ -426,7 +426,7 @@ pub fn describe(config: &Config) -> String {
                     b.fallback
                         .candidates
                         .iter()
-                        .map(|c| format!("backend '{}'", c.backend))
+                        .map(|c| format!("{}:{}", c.source, c.model))
                         .collect::<Vec<_>>()
                         .join(", else "),
                     b.tools.join(", ")
@@ -469,11 +469,11 @@ pub fn describe(config: &Config) -> String {
     let mut named: Vec<&str> = config
         .agents
         .values()
-        .flat_map(|a| a.llm_backends().into_iter().map(|(b, _)| b))
+        .flat_map(|a| a.pool_models().into_iter().map(|(b, _)| b))
         .collect();
     named.sort_unstable();
     named.dedup();
-    out.push_str("\nLLM backends of runner.yaml it sends your prompts to:\n");
+    out.push_str("\nThe sources of the runner's ANN pool it sends your prompts to:\n");
     for name in &named {
         match config.llm_backends.get(*name) {
             Some(b) => out.push_str(&format!("  {name}: {}\n", b.settings.base_url())),

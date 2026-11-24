@@ -82,7 +82,7 @@ fn new(name: Option<String>, stdout: bool) -> Result<ExitCode, String> {
     let name = name.as_deref().ok_or("team new: needs the team's name")?;
     let dir = teams::make(name, config::SAMPLE).map_err(|e| format!("team new: {e}"))?;
     println!(
-        "wrote {}: the team '{name}', a sample with every setting. Edit its agents, then check it with `ensemble-runner team check`. API keys are kept with `ensemble-runner backend key`, or come from the environment; never in this directory.",
+        "wrote {}: the team '{name}', a sample with every setting. Edit its agents, then check it with `ensemble-runner team check`. API keys are kept with `ensemble-runner source key`, or come from the environment; never in this directory.",
         config::config_path(&dir).display()
     );
     reload_runner();
@@ -158,7 +158,7 @@ fn approve(ctx: &Ctx, name: &str, yes: bool) -> Result<ExitCode, String> {
     }
     let runner = ctx.runner()?;
     let config = config::load(&config::config_path(&team.path))
-        .and_then(|c| c.with_llm(&runner.llm, None))
+        .and_then(|c| c.with_pool(&runner.llm, None))
         .map_err(|e| format!("team approve: {e}"))?;
     println!(
         "{} (written by an agent)\n",
@@ -192,10 +192,10 @@ fn remove(name: &str, yes: bool) -> Result<ExitCode, String> {
 /// approves, record that they trust exactly this commit.
 fn trust(url: &str, sha: &str, yes: bool) -> Result<(), String> {
     let dir = remote::fetch(url, sha)?;
-    // On this computer's backends, when it has a runner yet.
+    // On this computer's ANN pool, when it has a runner yet.
     let config = config::load(&config::config_path(&dir))
         .and_then(|c| match this_runner() {
-            Ok(runner) => c.with_llm(&runner.llm, None),
+            Ok(runner) => c.with_pool(&runner.llm, None),
             Err(_) => Ok(c),
         })
         .map_err(|e| format!("{url} at {sha} has no usable config: {e}"))?;
@@ -232,7 +232,7 @@ fn check(runner: Option<&config::Runner>, config: Config) -> Result<ExitCode, St
         println!("{}: ok ({})", team.name, team.describe());
     }
     println!();
-    println!("LLM backends, of runner.yaml:");
+    println!("sources of the ANN pool:");
     for (name, b) in &config.llm_backends {
         let detail = format!(
             "{}{}",
@@ -249,10 +249,9 @@ fn check(runner: Option<&config::Runner>, config: Config) -> Result<ExitCode, St
             b.timeout_seconds
         );
     }
-    for (name, r) in runner.iter().flat_map(|r| &r.llm.hub) {
+    for (name, r) in runner.iter().flat_map(|r| &r.llm.relayed) {
         println!(
-            "  {name}  [through the hub]  {}'s {}, while `ensemble-runner serve` runs",
-            r.runner, r.backend
+            "  {name}  [through the hub]  the models {r} shares, while `ensemble-runner serve` runs"
         );
     }
     println!();
@@ -349,7 +348,9 @@ fn check(runner: Option<&config::Runner>, config: Config) -> Result<ExitCode, St
     }
 
     println!();
-    println!("ready. `ensemble-runner agent health` checks the agent CLIs and LLM backends.");
+    println!(
+        "ready. `ensemble-runner agent health` checks the agent CLIs and the sources of their models."
+    );
     Ok(if bad.is_empty() {
         ExitCode::SUCCESS
     } else {

@@ -147,7 +147,7 @@ mod tests {
         let la = DirectAdapter {
             fallback: Fallback {
                 candidates: vec![Candidate {
-                    backend: "local".into(),
+                    source: "local".into(),
                     model: "small".into(),
                     context_window: None,
                 }],

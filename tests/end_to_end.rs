@@ -68,20 +68,20 @@ impl Scratch {
     }
 
     /// This scratch computer's runner: `desk`, working in
-    /// [`Scratch::workspace`], with no LLM backend, when it has none yet. Its
+    /// [`Scratch::workspace`], with no source, when it has none yet. Its
     /// folder, where its database is.
     fn runner(&self) -> PathBuf {
         if runner_settings(&self.runner_dir()).is_none() {
-            self.runner_with(json!({}));
+            self.runner_with(pool(json!({}), &[]));
         }
         self.runner_dir()
     }
 
-    /// The runner `desk`, working in [`Scratch::workspace`], with `backends`
-    /// as its LLM backends, by name.
-    fn runner_with(&self, backends: Value) -> PathBuf {
+    /// The runner `desk`, working in [`Scratch::workspace`], with `pool` as
+    /// its ANN pool.
+    fn runner_with(&self, pool: Value) -> PathBuf {
         let dir = self.runner_dir();
-        let mut runner = runner_doc("desk", backends);
+        let mut runner = runner_doc("desk", pool);
         runner["workspace"] = json!(self.workspace());
         // The hub it names, if it names one, it keeps.
         if let Some(before) = runner_settings(&dir) {
@@ -91,10 +91,10 @@ impl Scratch {
         dir
     }
 
-    /// The runner `desk` with `openai-local`, the backend [`config_yaml`]'s
+    /// The runner `desk` with `openai-local`, the source [`config_yaml`]'s
     /// coder runs on, at `url`.
-    fn local_backend(&self, url: &str) -> PathBuf {
-        self.runner_with(local_backend(url))
+    fn local_source(&self, url: &str) -> PathBuf {
+        self.runner_with(local_source(url))
     }
 
     /// The scratch computer's runner's workspace: a folder of git
@@ -202,21 +202,59 @@ impl Drop for Scratch {
     }
 }
 
-/// A runner's settings: `name`, with `backends` by name, sharing none; its workspace and its hub are filled in where it runs.
-fn runner_doc(name: &str, backends: Value) -> Value {
+/// A runner's settings: `name`, with `pool` as its ANN pool; its workspace
+/// and its hub are filled in where it runs.
+fn runner_doc(name: &str, pool: Value) -> Value {
     json!({
         "name": name,
         "workspace": null,
         "hub": null,
-        "backends": backends,
-        "shares": [],
-        "max_shared_calls": 1,
+        "ann_pool": pool,
     })
 }
 
-/// An OpenAI-compatible backend at `url`, taking at most `timeout` seconds.
+/// An ANN pool of `sources`, by name, with `on` turned on, each an LLM as
+/// `<source>:<id>`, sharing none.
+fn pool(sources: Value, on: &[&str]) -> Value {
+    let mut models: Vec<Value> = on
+        .iter()
+        .map(|name| {
+            let (source, id) = name.split_once(':').unwrap();
+            model_on(source, id)
+        })
+        .collect();
+    models.sort_by_key(|m| (m["source"].to_string(), m["id"].to_string()));
+    json!({ "sources": sources, "models": models })
+}
+
+/// The model `id` of `source`, an LLM that is on.
+fn model_on(source: &str, id: &str) -> Value {
+    json!({
+        "source": source,
+        "id": id,
+        "kind": { "type": "llm", "tier": "medium", "context_window": null, "tools": null },
+        "on": true,
+        "missing": false,
+        "shared": false,
+    })
+}
+
+/// The model `id` of `source`, an embedding model that is on.
+fn embedding_on(source: &str, id: &str) -> Value {
+    json!({
+        "source": source,
+        "id": id,
+        "kind": { "type": "embedding", "dimensions": 768 },
+        "on": true,
+        "missing": false,
+        "shared": false,
+    })
+}
+
+/// An OpenAI-compatible server at `url`, as a source taking at most
+/// `timeout` seconds and one call at once.
 fn openai(url: &str, timeout: u64) -> Value {
-    json!({ "type": "openai-compatible-api", "base_url": url, "api_key_env": null, "timeout_seconds": timeout })
+    json!({ "type": "openai-compatible-api", "base_url": url, "api_key_env": null, "timeout_seconds": timeout, "max_concurrent": 1 })
 }
 
 /// The settings of the runner in `dir`, as its database keeps them, if it
@@ -244,19 +282,24 @@ fn write_runner(dir: &Path, settings: Value) {
         .unwrap();
 }
 
-/// `openai-local`, the backend [`config_yaml`]'s coder runs on, at `url`.
-fn local_backend(url: &str) -> Value {
-    json!({ "openai-local": {
-        "type": "openai-compatible-api",
-        "base_url": url,
-        "api_key_env": "ENSEMBLE_TEST_LOCAL_KEY",
-        "timeout_seconds": 20,
-    } })
+/// A pool of `openai-local`, the source [`config_yaml`]'s coder runs on,
+/// at `url`, with the models the tests' teams name on it turned on.
+fn local_source(url: &str) -> Value {
+    pool(
+        json!({ "openai-local": {
+            "type": "openai-compatible-api",
+            "base_url": url,
+            "api_key_env": "ENSEMBLE_TEST_LOCAL_KEY",
+            "timeout_seconds": 20,
+            "max_concurrent": 1,
+        } }),
+        &["openai-local:qwen3-coder", "openai-local:small"],
+    )
 }
 
 /// The helper team: two OpenCode agents run by `command`: `reviewer` on a
-/// provider OpenCode knows, and `coder` on the runner's `openai-local` LLM
-/// backend ([`Scratch::local_backend`]).
+/// provider OpenCode knows, and `coder` on the runner's `openai-local`
+/// source ([`Scratch::local_source`]).
 fn config_yaml(command: &str) -> String {
     format!(
         r#"
@@ -291,9 +334,9 @@ agents:
     adapter:
       type: opencode
       model:
-        type: llm_backend
+        type: ann_pool
         try:
-          - {{ backend: openai-local, name: qwen3-coder, context_window: 32768 }}
+          - {{ source: openai-local, name: qwen3-coder, context_window: 32768 }}
         when_none: fail
       tools: [read, edit]
       system_prompt: append
@@ -407,7 +450,7 @@ fn models_stub(body: &str) -> String {
 #[test]
 fn check_accepts_a_valid_config_and_reports_the_team() {
     let s = Scratch::new("check-ok");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("opencode"));
 
     let out = ensemble_runner(&s, &["team", "check"]);
@@ -440,7 +483,7 @@ agents:
       type: unlimited
     adapter:
       type: opencode
-      model: { type: llm_backend, try: [{ backend: nowhere, name: "", context_window: 8000 }], when_none: fail }
+      model: { type: ann_pool, try: [{ source: nowhere, name: "", context_window: 8000 }], when_none: fail }
       tools: []
       system_prompt: append
       max_steps: 3
@@ -453,12 +496,12 @@ agents:
     assert!(err.contains("version"), "{err}");
     assert!(err.contains("max_seconds"), "{err}");
     assert!(err.contains("`name` is empty"), "{err}");
-    // A runner's backend is checked as the runner is read.
-    s.runner_with(json!({ "x": openai("nope", 0) }));
+    // A runner's source is checked as the runner is read.
+    s.runner_with(pool(json!({ "x": openai("nope", 0) }), &[]));
     let err = stderr_of(&ensemble_runner(&s, &["team", "check"]));
     assert!(
-        err.contains("backends.x: `base_url` 'nope'")
-            && err.contains("backends.x: `timeout_seconds`"),
+        err.contains("ann_pool.sources.x: `base_url` 'nope'")
+            && err.contains("ann_pool.sources.x: `timeout_seconds`"),
         "{err}"
     );
 }
@@ -468,15 +511,15 @@ fn an_api_key_written_into_the_runners_settings_is_refused() {
     let s = Scratch::new("inline-key");
     let dir = s.runner();
     let mut settings = read_runner(&dir);
-    settings["backends"]["x"] = openai("http://127.0.0.1:1/v1", 5);
-    settings["backends"]["x"]["api_key"] = json!("sk-should-never-be-here");
+    settings["ann_pool"]["sources"]["x"] = openai("http://127.0.0.1:1/v1", 5);
+    settings["ann_pool"]["sources"]["x"]["api_key"] = json!("sk-should-never-be-here");
     let out = ensemble_runner(&s, &["settings", "import", &settings.to_string()]);
     assert!(
         !out.status.success(),
         "secrets in the runner's settings must not load"
     );
     assert!(stderr_of(&out).contains("api_key"), "{}", stderr_of(&out));
-    assert!(read_runner(&dir)["backends"].get("x").is_none());
+    assert!(read_runner(&dir)["ann_pool"]["sources"].get("x").is_none());
 }
 
 #[test]
@@ -509,7 +552,7 @@ fn a_broken_team_is_named_rather_than_skipped() {
 #[test]
 fn agents_prints_the_routing_table() {
     let s = Scratch::new("agents");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("opencode"));
 
     let out = ensemble_runner(&s, &["agent", "list"]);
@@ -528,7 +571,7 @@ fn agents_prints_the_routing_table() {
 #[test]
 fn the_base_url_is_the_one_in_the_config_and_no_variable_changes_it() {
     let s = Scratch::new("url-from-config");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("opencode"));
 
     let out = runner_command(&s)
@@ -549,7 +592,7 @@ fn the_base_url_is_the_one_in_the_config_and_no_variable_changes_it() {
 fn run_starts_the_agents_cli_with_the_task_and_prints_its_answer() {
     let s = Scratch::new("run");
     let cli = s.opencode("the review is clean", "");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml(&cli));
 
     let out = ensemble_runner(
@@ -582,10 +625,10 @@ fn run_starts_the_agents_cli_with_the_task_and_prints_its_answer() {
 }
 
 #[test]
-fn an_agent_on_an_llm_backend_gets_its_endpoint_and_the_key_kept() {
+fn an_agent_on_a_model_of_the_pool_gets_its_endpoint_and_the_key_kept() {
     let s = Scratch::new("run-backend");
     let cli = s.opencode("done", "");
-    s.local_backend("http://127.0.0.1:8888/v1");
+    s.local_source("http://127.0.0.1:8888/v1");
     s.write("@team/config.yaml", &config_yaml(&cli));
     s.keep_key("ENSEMBLE_TEST_LOCAL_KEY", "sk-kept");
 
@@ -620,7 +663,7 @@ fn an_agent_on_an_llm_backend_gets_its_endpoint_and_the_key_kept() {
 #[test]
 fn show_prints_how_an_agent_starts_with_the_key_hidden() {
     let s = Scratch::new("show");
-    s.local_backend("http://127.0.0.1:8888/v1");
+    s.local_source("http://127.0.0.1:8888/v1");
     s.write("@team/config.yaml", &config_yaml("opencode"));
     s.keep_key("ENSEMBLE_TEST_LOCAL_KEY", "sk-secret-value");
 
@@ -651,7 +694,7 @@ fn show_prints_how_an_agent_starts_with_the_key_hidden() {
 fn files_the_agent_changed_are_reported() {
     let s = Scratch::new("changes");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml(&cli));
     s.write("a.txt", "foo\n");
 
@@ -661,11 +704,11 @@ fn files_the_agent_changed_are_reported() {
 }
 
 #[test]
-fn health_checks_the_cli_and_that_the_backend_serves_the_model() {
+fn health_checks_the_cli_and_that_the_source_serves_the_model() {
     let s = Scratch::new("health");
     let cli = s.opencode("", "");
     let serving = models_stub(r#"{"object":"list","data":[{"id":"qwen3-coder"}]}"#);
-    s.local_backend(&serving);
+    s.local_source(&serving);
     s.write("@team/config.yaml", &config_yaml(&cli));
     let out = ensemble_runner(&s, &["agent", "health"]);
     assert!(
@@ -679,7 +722,7 @@ fn health_checks_the_cli_and_that_the_backend_serves_the_model() {
     assert!(text.contains("openai-local: ok"), "{text}");
 
     let other = models_stub(r#"{"object":"list","data":[{"id":"something-else"}]}"#);
-    s.local_backend(&other);
+    s.local_source(&other);
     s.write("@team/config.yaml", &config_yaml(&cli));
     let out = ensemble_runner(&s, &["agent", "health"]);
     assert!(!out.status.success());
@@ -690,7 +733,7 @@ fn health_checks_the_cli_and_that_the_backend_serves_the_model() {
         "{text}"
     );
 
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
 
     s.write("@team/config.yaml", &config_yaml(&cli));
     let out = ensemble_runner(&s, &["agent", "health"]);
@@ -736,8 +779,15 @@ fn team_new_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_acci
         "nothing is written in the project"
     );
 
-    // On a runner with the backends the sample names.
-    s.runner_with(json!({ "local": openai(NOWHERE, 5), "central": openai(NOWHERE, 5) }));
+    // On a runner with the models the sample names.
+    s.runner_with(pool(
+        json!({ "local": openai(NOWHERE, 5), "central": openai(NOWHERE, 5) }),
+        &[
+            "local:qwen3.5:9b",
+            "central:qwen3.5:72b",
+            "local:qwen3-coder:30b",
+        ],
+    ));
     let check = ensemble_runner(&s, &["team", "check"]);
     assert!(check.status.success(), "{}", stderr_of(&check));
     let text = stdout_of(&check);
@@ -811,16 +861,16 @@ fn check_says_which_tasks_on_the_hub_this_runner_cannot_run() {
 }
 
 #[test]
-fn a_light_agent_is_one_request_to_its_backend() {
+fn a_light_agent_is_one_request_to_its_source() {
     let s = Scratch::new("llm-agent");
     let url = models_stub(
         r#"{"data":[{"id":"small"},{"id":"qwen3-coder"}],"choices":[{"message":{"content":"three bullets"},"finish_reason":"stop"}]}"#,
     );
     let config = format!(
-        "{}  summariser:\n    prompt: You summarise.\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: direct\n      try: [{{ backend: openai-local, model: small }}]\n      when_none: fail\n      max_tokens: 300\n",
+        "{}  summariser:\n    prompt: You summarise.\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: direct\n      try: [{{ source: openai-local, model: small }}]\n      when_none: fail\n      max_tokens: 300\n",
         config_yaml("opencode")
     );
-    s.local_backend(&url);
+    s.local_source(&url);
     s.write("@team/config.yaml", &config);
 
     let out = ensemble_runner(&s, &["agent", "run", "team/summariser", "sum", "it", "up"]);
@@ -958,7 +1008,7 @@ fn setup_without_any_agent_cli_says_so_and_writes_the_runner() {
 #[test]
 fn doctor_says_what_is_wrong_and_how_to_fix_it() {
     let s = Scratch::new("doctor");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("/nonexistent/opencode"));
     let out = ensemble_runner(&s, &["doctor"]);
     assert!(!out.status.success());
@@ -976,10 +1026,10 @@ fn doctor_says_what_is_wrong_and_how_to_fix_it() {
     assert!(text.contains("fix: start the model server"), "{text}");
 
     let s = Scratch::new("doctor-ok");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("true"));
     let url = models_stub(r#"{"data":[{"id":"qwen3-coder"}]}"#);
-    s.local_backend(&url);
+    s.local_source(&url);
     s.write("@team/config.yaml", &config_yaml("true"));
     let out = ensemble_runner(&s, &["doctor"]);
     let text = stdout_of(&out);
@@ -990,7 +1040,7 @@ fn doctor_says_what_is_wrong_and_how_to_fix_it() {
 #[test]
 fn add_agent_and_remove_agent_edit_the_config_and_keep_it_loading() {
     let s = Scratch::new("add-agent");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("opencode"));
     let out = ensemble_runner(
         &s,
@@ -1083,7 +1133,7 @@ fn pinned_commit(scratch: &Scratch, name: &str) -> String {
 #[test]
 fn a_pulled_team_is_pinned_shown_trusted_and_then_used() {
     let s = Scratch::new("remote");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     let (url, sha) = origin(&s, &config_yaml("true"));
 
     // Without a terminal and without --yes there is nobody to ask: a refusal,
@@ -1198,7 +1248,7 @@ fn team_update_shows_what_changed_and_moves_only_once_trusted() {
         stdout_of(&again)
     );
 
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
 
     s.write("@team/config.yaml", &config_yaml("opencode"));
     let made = ensemble_runner(&s, &["team", "update", "team"]);
@@ -1264,7 +1314,7 @@ fn mcp_tool(address: &str, token: &str, name: &str, arguments: serde_json::Value
 fn the_runner_works_on_the_tasks_of_each_repository_in_its_workspace_and_stops_on_sigterm() {
     let s = Scratch::new("serve");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml(&cli));
     let shop = s.repo("shop");
     std::fs::write(shop.join("a.txt"), "foo\n").unwrap();
@@ -1356,7 +1406,7 @@ fn a_task_stopped_in_the_middle_is_run_again_when_the_runner_starts_again() {
         marker.display()
     );
     let cli = s.opencode("done", &body);
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml(&cli));
     s.repo("shop");
     let _hub = with_hub(&s);
@@ -1396,7 +1446,7 @@ fn a_task_stopped_in_the_middle_is_run_again_when_the_runner_starts_again() {
 fn every_run_leaves_a_record_that_stats_sums_up() {
     let s = Scratch::new("stats");
     let cli = s.opencode("fine", "");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml(&cli));
     let none = ensemble_runner(&s, &["agent", "stats"]);
     assert!(
@@ -1410,7 +1460,7 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
         assert!(out.status.success(), "{}", stderr_of(&out));
     }
     // A run that cannot start is a failure on the record.
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("/nonexistent/opencode"));
     let out = ensemble_runner(&s, &["agent", "run", "team/reviewer", "look"]);
     assert!(!out.status.success());
@@ -1441,7 +1491,7 @@ fn every_run_leaves_a_record_that_stats_sums_up() {
 #[test]
 fn check_warns_about_what_agents_may_do_without_failing() {
     let s = Scratch::new("check-warn");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("opencode"));
     let out = ensemble_runner(&s, &["team", "check"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -1458,7 +1508,7 @@ fn check_warns_about_what_agents_may_do_without_failing() {
 #[test]
 fn show_prints_how_a_codex_agent_starts() {
     let s = Scratch::new("show-codex");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("opencode"));
     let out = ensemble_runner(
         &s,
@@ -1487,16 +1537,21 @@ fn show_prints_how_a_codex_agent_starts() {
 }
 
 #[test]
-fn a_light_agent_on_an_anthropic_backend_shows_a_messages_request() {
+fn a_light_agent_on_an_anthropic_source_shows_a_messages_request() {
     let s = Scratch::new("show-anthropic");
-    let mut backends = local_backend(NOWHERE);
-    backends["claude-api"] = json!({
+    let mut pool = local_source(NOWHERE);
+    pool["sources"]["claude-api"] = json!({
         "type": "anthropic-api",
         "base_url": "https://api.anthropic.com",
         "api_key_env": "ENSEMBLE_TEST_ANTHROPIC_KEY",
         "timeout_seconds": 30,
+        "max_concurrent": 2,
     });
-    s.runner_with(backends);
+    pool["models"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, model_on("claude-api", "claude-haiku-4-5"));
+    s.runner_with(pool);
     s.write("@team/config.yaml", &config_yaml("opencode"));
     let out = ensemble_runner(
         &s,
@@ -1506,7 +1561,7 @@ fn a_light_agent_on_an_anthropic_backend_shows_a_messages_request() {
             "team/helper",
             "--adapter",
             "direct",
-            "--backend",
+            "--source",
             "claude-api",
             "--model",
             "claude-haiku-4-5",
@@ -1547,10 +1602,13 @@ fn git_in(dir: &Path, args: &[&str]) -> String {
 fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
     let s = Scratch::new("show-probe");
     let central = models_stub(r#"{"data":[{"id":"big"}]}"#);
-    s.runner_with(json!({ "home": openai(NOWHERE, 5), "central": openai(&central, 5) }));
+    s.runner_with(pool(
+        json!({ "home": openai(NOWHERE, 5), "central": openai(&central, 5) }),
+        &["home:small", "central:big"],
+    ));
     s.write(
         "@team/config.yaml",
-        "version: 1\nlimits: {}\ngates: {}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: direct\n      try:\n        - { backend: home, model: small }\n        - { backend: central, model: big }\n      when_none: wait\n      max_tokens: 10\n",
+        "version: 1\nlimits: {}\ngates: {}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: direct\n      try:\n        - { source: home, model: small }\n        - { source: central, model: big }\n      when_none: wait\n      max_tokens: 10\n",
     );
     let out = ensemble_runner(&s, &["agent", "show", "team/summariser"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -1560,7 +1618,7 @@ fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
         "{text}"
     );
     assert!(
-        text.contains("  1. home / small\n  2. central / big\n"),
+        text.contains("  1. home:small\n  2. central:big\n"),
         "{text}"
     );
     assert!(!text.contains("a run now"), "{text}");
@@ -1607,7 +1665,7 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
         "where it listens is `serve`'s"
     );
     assert_eq!(made["registration"], json!({ "type": "closed" }));
-    assert_eq!(made["backends"], json!({}));
+    assert_eq!(made["ann_pool"], json!({ "sources": {}, "models": [] }));
     assert!(
         hub.join("knowledge/vault/.git").exists(),
         "the vault is a git repository"
@@ -1632,13 +1690,20 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
 
     let url = models_stub(r#"{"data":[{"id":"small"}]}"#);
     let mut settings = read_hub(&hub);
-    settings["backends"] = json!({ "down": openai(NOWHERE, 5), "up": openai(&url, 5) });
+    settings["ann_pool"] = json!({
+        "sources": { "down": openai(NOWHERE, 5), "up": openai(&url, 5) },
+        "models": [
+            model_on("down", "small"),
+            embedding_on("up", "nomic-embed-text"),
+            model_on("up", "small"),
+        ],
+    });
     settings["distill"]["try"] = json!([
-        { "backend": "down", "model": "small" },
-        { "backend": "up", "model": "small" },
+        { "source": "down", "model": "small" },
+        { "source": "up", "model": "small" },
     ]);
     settings["embed"] =
-        json!({ "backend": "up", "model": "nomic-embed-text", "min_similarity": 0.5 });
+        json!({ "source": "up", "model": "nomic-embed-text", "min_similarity": 0.5 });
     write_hub(&hub, settings).unwrap();
     let out = ensemble_hub(&scratch, &["check"]);
     assert!(
@@ -1648,7 +1713,7 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
         stderr_of(&out)
     );
     assert!(
-        stdout_of(&out).contains("distilled by small on up"),
+        stdout_of(&out).contains("distilled by up:small"),
         "{}",
         stdout_of(&out)
     );
@@ -1656,7 +1721,7 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
     // failure.
     assert!(
         stdout_of(&out)
-            .contains("recall: by words alone for now: nomic-embed-text on up cannot embed"),
+            .contains("recall: by words alone for now: up:nomic-embed-text cannot embed"),
         "{}",
         stdout_of(&out)
     );
@@ -1690,14 +1755,14 @@ fn items_stub(items: &str) -> String {
 /// Point the scratch hub's distilling model's server at `url`.
 fn distill_on(hub: &Path, url: &str) {
     let mut settings = read_hub(hub);
-    settings["backends"]["central"]["base_url"] = json!(url);
+    settings["ann_pool"]["sources"]["central"]["base_url"] = json!(url);
     write_hub(hub, settings).unwrap();
 }
 
 #[test]
 fn shares_become_notes_by_hand_on_the_hub_and_in_the_background_while_it_runs() {
     let s = Scratch::new("hub-distill");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("opencode"));
     let (hub, address, token) = hub_server(&s);
     // No model can be used yet: the share waits.
@@ -1850,17 +1915,23 @@ fn hub_server_of(scratch: &Scratch) -> PathBuf {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let hub = hub_dir(scratch);
     let mut s = read_hub(&hub);
-    let central = json!([{ "backend": "central", "model": "qwen3.5-72b" }]);
+    let central = json!([{ "source": "central", "model": "qwen3.5-72b" }]);
     s["registration"] = json!({ "type": "approval", "max_pending": 20 });
-    s["backends"] = json!({ "central": {
-        "type": "openai-compatible-api",
-        "base_url": "http://127.0.0.1:8000/v1",
-        "api_key_env": "CENTRAL_API_KEY",
-        "timeout_seconds": 300,
-    } });
+    s["ann_pool"] = json!({
+        "sources": { "central": {
+            "type": "openai-compatible-api",
+            "base_url": "http://127.0.0.1:8000/v1",
+            "api_key_env": "CENTRAL_API_KEY",
+            "timeout_seconds": 300,
+            "max_concurrent": 4,
+        } },
+        "models": [
+            embedding_on("central", "nomic-embed-text"),
+            model_on("central", "qwen3.5-72b"),
+        ],
+    });
     s["distill"]["try"] = central.clone();
-    s["embed"] =
-        json!({ "backend": "central", "model": "nomic-embed-text", "min_similarity": 0.5 });
+    s["embed"] = json!({ "source": "central", "model": "nomic-embed-text", "min_similarity": 0.5 });
     s["trackers"] = json!({ "issues": {
         "type": "local_markdown", "dir": "issues", "label": "ensemble", "poll_seconds": 30,
     } });
@@ -1878,7 +1949,7 @@ fn runner_names_hub(scratch: &Scratch, url: &str) {
         .0
         .with_extension("xdg-state")
         .join("ensemble/runner");
-    let mut runner = runner_doc("desk", local_backend(NOWHERE));
+    let mut runner = runner_doc("desk", local_source(NOWHERE));
     runner["workspace"] = json!(scratch.workspace());
     runner["hub"] = json!(url);
     write_runner(&config, runner);
@@ -2065,12 +2136,12 @@ fn a_hub_server_refuses_another_protocol_or_a_bad_token_and_stops_on_sigterm() {
     assert!(status.contains("426"), "no protocol named: {status}");
     let status = upgrade(
         "/link",
-        "Ensemble-Protocol: 7\r\nAuthorization: Bearer ens_wrong\r\n",
+        "Ensemble-Protocol: 8\r\nAuthorization: Bearer ens_wrong\r\n",
     );
     assert!(status.contains("401"), "{status}");
-    let status = upgrade("/", "Ensemble-Protocol: 7\r\n");
+    let status = upgrade("/", "Ensemble-Protocol: 8\r\n");
     assert!(status.contains("404"), "the link is at /link: {status}");
-    let status = upgrade("/link", "Ensemble-Protocol: 7\r\n");
+    let status = upgrade("/link", "Ensemble-Protocol: 8\r\n");
     assert!(
         status.contains("101"),
         "no token: signing in only: {status}"
@@ -2089,7 +2160,7 @@ fn a_hub_server_refuses_another_protocol_or_a_bad_token_and_stops_on_sigterm() {
 #[test]
 fn a_runner_started_before_it_is_signed_in_waits_for_its_token() {
     let s = Scratch::new("hub-wait");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("opencode"));
     let (_hub, address, token) = hub_server(&s);
     let _hub = serve_hub(&s, &address);
@@ -2130,7 +2201,7 @@ fn a_runner_started_before_it_is_signed_in_waits_for_its_token() {
 #[test]
 fn a_runner_signs_in_to_a_hub_server_and_takes_a_new_token_as_it_runs() {
     let s = Scratch::new("hub-remote");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("opencode"));
     let (_hub, address, token) = hub_server(&s);
     let mut child = serve_hub(&s, &address);
@@ -2239,7 +2310,7 @@ fn post_json(address: &str, path: &str, body: serde_json::Value) -> (u16, serde_
 #[test]
 fn someone_signs_up_is_let_in_and_logs_in_from_a_runner_with_a_password() {
     let s = Scratch::new("hub-register");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("opencode"));
     let (hub, address, _) = hub_server(&s);
     let child = serve_hub(&s, &address);
@@ -2347,7 +2418,11 @@ fn a_runner_is_made_once_and_an_account_names_itself_in_the_tracker() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let written = read_runner(&s.runner_dir());
     assert_eq!(written["workspace"], "~/ensemble", "{written}");
-    assert_eq!(written["backends"], json!({}), "{written}");
+    assert_eq!(
+        written["ann_pool"],
+        json!({ "sources": {}, "models": [] }),
+        "{written}"
+    );
     assert!(
         !s.runner_dir().join("runner.yaml").exists(),
         "its settings are kept in its database"
@@ -2390,7 +2465,7 @@ fn a_runner_is_made_once_and_an_account_names_itself_in_the_tracker() {
 fn an_issue_on_the_hub_server_is_worked_on_a_members_runner_and_reported_back() {
     let s = Scratch::new("hub-tasks");
     let cli = s.opencode("renamed it", "echo bar > a.txt");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml(&cli));
     let shop = s.repo("shop");
     std::fs::write(shop.join("a.txt"), "foo\n").unwrap();
@@ -2525,7 +2600,7 @@ fn serve_runner_saying(
 }
 
 #[test]
-fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_the_hub() {
+fn a_model_one_runner_shares_serves_another_runners_agent_and_the_hub_through_the_hub() {
     let s = Scratch::new("relay");
     let origin = bare_origin(&s, "shop");
     // The model server on ana's gpu box: it lists `small`, and answers every
@@ -2539,11 +2614,14 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
         .to_string(),
     );
     let (hub, address, ana) = hub_server(&s);
-    // The hub distills on the backend the gpu box shares, and nothing else.
+    // The hub distills on the model the gpu box shares, and nothing else.
     let mut settings = read_hub(&hub);
-    settings["backends"]["gpu"] =
-        json!({ "type": "runner", "runner": "ana/gpu", "backend": "local" });
-    let gpu = json!([{ "backend": "gpu", "model": "small" }]);
+    settings["ann_pool"]["sources"]["gpu"] = json!({ "type": "runner", "runner": "ana/gpu" });
+    settings["ann_pool"]["models"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, model_on("gpu", "local:small"));
+    let gpu = json!([{ "source": "gpu", "model": "local:small" }]);
     settings["distill"]["try"] = gpu.clone();
     settings["source_filter"]["models"]["try"] = gpu;
     write_hub(&hub, settings).unwrap();
@@ -2557,18 +2635,21 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
         assert!(out.status.success(), "{}", stderr_of(&out));
     };
 
-    // The gpu box shares its model server as `local`.
-    let mut gpu = runner_doc("gpu", json!({ "local": openai(&server, 10) }));
+    // The gpu box shares `small` of its model server, `local`.
+    let mut gpu = runner_doc(
+        "gpu",
+        pool(json!({ "local": openai(&server, 10) }), &["local:small"]),
+    );
     gpu["hub"] = json!(url);
-    gpu["shares"] = json!(["local"]);
-    gpu["max_shared_calls"] = json!(2);
+    gpu["ann_pool"]["sources"]["local"]["max_concurrent"] = json!(2);
+    gpu["ann_pool"]["models"][0]["shared"] = json!(true);
     login("gpu", &gpu);
-    let _gpu = serve_runner_saying(&s, &url, "gpu", &gpu, "sharing local through the hub");
-    // The hub's admin sees what it shares, to name it among its backends.
-    let out = ensemble_hub(&s, &["runner", "backends"]);
+    let _gpu = serve_runner_saying(&s, &url, "gpu", &gpu, "sharing local:small through the hub");
+    // The hub's admin sees what it shares, to reach it from its own pool.
+    let out = ensemble_hub(&s, &["runner", "models"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stdout_of(&out).contains("ana/gpu  local  (2 call(s) at once)  models: small"),
+        stdout_of(&out).contains("ana/gpu  local:small  llm, medium  (2 call(s) at once)"),
         "{}",
         stdout_of(&out)
     );
@@ -2576,7 +2657,10 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
     // ana's laptop has no model server: its agent runs on the gpu box's.
     let mut laptop = runner_doc(
         "laptop",
-        json!({ "gpu-local": { "type": "runner", "runner": "ana/gpu", "backend": "local" } }),
+        pool(
+            json!({ "gpu-local": { "type": "runner", "runner": "ana/gpu" } }),
+            &["gpu-local:local:small"],
+        ),
     );
     laptop["hub"] = json!(url);
     login("laptop", &laptop);
@@ -2584,7 +2668,7 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
         &s,
         "laptop",
         "team",
-        "version: 1\nlimits: {}\ngates: {}\nagents:\n  summariser:\n    prompt: You summarise.\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: direct\n      try: [{ backend: gpu-local, model: small }]\n      when_none: fail\n      max_tokens: 100\n",
+        "version: 1\nlimits: {}\ngates: {}\nagents:\n  summariser:\n    prompt: You summarise.\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: direct\n      try: [{ source: gpu-local, model: local:small }]\n      when_none: fail\n      max_tokens: 100\n",
     );
     let _laptop = serve_runner(&s, &url, "laptop", &laptop);
     let said = mcp_tool(
@@ -2630,7 +2714,7 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
 #[test]
 fn a_running_runner_reloads_its_teams() {
     let s = Scratch::new("reload");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("opencode"));
     let _runner = start_runner(&s);
 
@@ -2666,7 +2750,7 @@ fn a_running_runner_reloads_its_teams() {
 /// The runner of the computer `machine`, named for it, with the hub at
 /// `url`: started and waited for until it is ready.
 fn machine_runner(scratch: &Scratch, machine: &str, url: &str) -> Served {
-    let mut settings = runner_doc(machine, local_backend(NOWHERE));
+    let mut settings = runner_doc(machine, local_source(NOWHERE));
     settings["hub"] = json!(url);
     let mut runner = on_machine(scratch, machine, &settings)
         .args(["serve"])
@@ -2810,7 +2894,7 @@ fn bare_origin(scratch: &Scratch, name: &str) -> PathBuf {
 fn a_repository_added_after_the_runner_started_gets_a_worker_and_a_task_brings_its_notes() {
     let s = Scratch::new("added-later");
     let cli = s.opencode("deployed", "echo bar > a.txt");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml(&cli));
     let (_hub, address, token) = with_hub(&s);
     // A note in the hub's knowledge, as the distiller would have written it.
@@ -2934,7 +3018,7 @@ fn a_runner_asks_where_a_project_is_and_clones_what_it_is_told() {
     let s = Scratch::new("ask-where");
     let origin = bare_origin(&s, "shop");
     let cli = s.opencode("bar it is", "echo bar > a.txt");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml(&cli));
     let (_hub, address, token) = with_hub(&s);
     let _runner = start_runner(&s);
@@ -2986,7 +3070,7 @@ fn a_runner_asks_where_a_project_is_and_clones_what_it_is_told() {
 fn a_task_whose_repository_its_only_runner_cannot_clone_is_given_back_and_blocked() {
     let s = Scratch::new("give-back");
     let cli = s.opencode("never", "true");
-    s.local_backend(NOWHERE);
+    s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml(&cli));
     let (_hub, address, token) = with_hub(&s);
     let _runner = start_runner(&s);
@@ -3039,9 +3123,6 @@ fn settings_are_changed_from_the_command_line_and_each_change_is_in_the_history(
     let get = |key: &str| read_runner(&runner)[key].clone();
     assert_eq!(get("name"), "desk");
 
-    let out = ensemble_runner(&s, &["settings", "shared-calls", "3"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(get("max_shared_calls"), 3);
     // One that would not load is refused, and nothing changes.
     let out = ensemble_runner(&s, &["settings", "name", "a b/c"]);
     assert!(!out.status.success());
@@ -3059,13 +3140,9 @@ fn settings_are_changed_from_the_command_line_and_each_change_is_in_the_history(
         "{shown}"
     );
     let json = stdout_of(&ensemble_runner(&s, &["settings", "show", "--json"]));
-    assert!(json.contains("\"max_shared_calls\": 3"), "{json}");
+    assert!(json.contains("\"workspace\": \"~/code\""), "{json}");
     let history = stdout_of(&ensemble_runner(&s, &["settings", "history"]));
-    assert!(
-        history.contains("local  settings.shared-calls")
-            && history.contains("local  settings.workspace"),
-        "{history}"
-    );
+    assert!(history.contains("local  settings.workspace"), "{history}");
     assert!(
         !history.contains("settings.name"),
         "what was refused is not kept: {history}"
@@ -3198,8 +3275,8 @@ fn hub_with_stdin(scratch: &Scratch, args: &[&str], stdin: &str) -> std::process
 }
 
 #[test]
-fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
-    let s = Scratch::new("hub-backends");
+fn an_admin_adds_sources_and_their_keys_without_naming_a_variable_and_turns_models_on() {
+    let s = Scratch::new("hub-sources");
     let hub = hub_server_of(&s);
     let yaml = || read_hub(&hub);
     // The keys the hub keeps, sealed in its database.
@@ -3214,24 +3291,28 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
     let out = hub_with_stdin(
         &s,
         &[
-            "backend",
+            "source",
             "add",
             "local",
             "--type",
             "openai-compatible-api",
             "--url",
             &server,
+            "--max-concurrent",
+            "1",
         ],
         "",
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stdout_of(&out).contains("added backend local, which serves small"),
+        stdout_of(&out).contains(
+            "added source local, which serves local:small; they are off until you turn them on"
+        ),
         "{}",
         stdout_of(&out)
     );
     assert_eq!(
-        yaml()["backends"]["local"]["type"],
+        yaml()["ann_pool"]["sources"]["local"]["type"],
         "openai-compatible-api",
         "{}",
         yaml()
@@ -3239,12 +3320,26 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
 
     // A key, given as a secret, is kept sealed in the database under a name
     // of Ensemble's, by a master key only the hub's user may read.
-    let out = hub_with_stdin(&s, &["backend", "key", "local"], "sk-local\n");
+    // Its model is off until it is turned on, and what it is is asked then.
+    let models = stdout_of(&hub_with_stdin(&s, &["model", "list", "local"], ""));
+    assert!(
+        models.contains("local:small  not known yet  (off)"),
+        "{models}"
+    );
+    let out = hub_with_stdin(&s, &["model", "on", "local:small", "--tier", "small"], "");
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(vars()["ENSEMBLE_BACKEND_LOCAL_KEY"], "sk-local");
+    assert!(
+        stdout_of(&out).contains("local:small is on: llm, small"),
+        "{}",
+        stdout_of(&out)
+    );
+
+    let out = hub_with_stdin(&s, &["source", "key", "local"], "sk-local\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(vars()["ENSEMBLE_SOURCE_LOCAL_KEY"], "sk-local");
     assert_eq!(
-        yaml()["backends"]["local"]["api_key_env"],
-        "ENSEMBLE_BACKEND_LOCAL_KEY",
+        yaml()["ann_pool"]["sources"]["local"]["api_key_env"],
+        "ENSEMBLE_SOURCE_LOCAL_KEY",
         "{}",
         yaml()
     );
@@ -3261,22 +3356,25 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
             .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
-    let list = stdout_of(&hub_with_stdin(&s, &["backend", "list"], ""));
+    let list = stdout_of(&hub_with_stdin(&s, &["source", "list"], ""));
     assert!(
-        list.contains("local  openai-compatible-api at") && list.contains("key kept"),
+        list.contains("local  openai-compatible-api at")
+            && list.contains("key kept, 1 call(s) at once, 1 model(s), 1 on"),
         "{list}"
     );
 
     // One that does not answer is refused, unless asked not to check.
     let add_down = |extra: &[&str]| {
         let mut args = vec![
-            "backend",
+            "source",
             "add",
             "down",
             "--type",
             "openai-compatible-api",
             "--url",
             NOWHERE,
+            "--max-concurrent",
+            "1",
         ];
         args.extend_from_slice(extra);
         hub_with_stdin(&s, &args, "")
@@ -3294,27 +3392,35 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
     let out = hub_with_stdin(
         &s,
         &[
-            "backend",
+            "source",
             "add",
             "claude2",
             "--type",
             "anthropic-api",
             "--url",
             "https://api.anthropic.com",
+            "--max-concurrent",
+            "4",
             "--no-check",
         ],
         "sk-ant\n",
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(vars()["ENSEMBLE_BACKEND_CLAUDE2_KEY"], "sk-ant");
+    assert_eq!(vars()["ENSEMBLE_SOURCE_CLAUDE2_KEY"], "sk-ant");
 
-    // A backend something uses stays; another goes, with the key kept for it.
-    let out = hub_with_stdin(&s, &["backend", "remove", "central"], "");
+    // A source something uses stays; another goes, with its models and the
+    // key kept for it.
+    let out = hub_with_stdin(&s, &["source", "remove", "central"], "");
     assert!(!out.status.success(), "the distiller uses it");
-    let out = hub_with_stdin(&s, &["backend", "remove", "local"], "");
+    let out = hub_with_stdin(&s, &["source", "remove", "local"], "");
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(!vars().contains_key("ENSEMBLE_BACKEND_LOCAL_KEY"));
-    assert!(yaml()["backends"].get("local").is_none());
+    assert!(!vars().contains_key("ENSEMBLE_SOURCE_LOCAL_KEY"));
+    assert!(yaml()["ann_pool"]["sources"].get("local").is_none());
+    assert!(
+        !yaml()["ann_pool"].to_string().contains("\"small\""),
+        "{}",
+        yaml()
+    );
 
     // A key a secrets manager keeps is read from the environment: a key
     // given is kept in the database still.
@@ -3330,12 +3436,12 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
         write!(child.stdin.take().unwrap(), "{stdin}").unwrap();
         child.wait_with_output().unwrap()
     };
-    let out = with_env(&["backend", "key", "down", "--no-check"], "sk-x\n");
+    let out = with_env(&["source", "key", "down", "--no-check"], "sk-x\n");
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(vars()["ENSEMBLE_BACKEND_DOWN_KEY"], "sk-x");
+    assert_eq!(vars()["ENSEMBLE_SOURCE_DOWN_KEY"], "sk-x");
     let out = with_env(
         &[
-            "backend",
+            "source",
             "key",
             "down",
             "--key-env",
@@ -3345,15 +3451,15 @@ fn an_admin_adds_backends_and_their_keys_without_naming_a_variable() {
         "",
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(!vars().contains_key("ENSEMBLE_BACKEND_DOWN_KEY"));
-    let list = stdout_of(&with_env(&["backend", "list"], ""));
+    assert!(!vars().contains_key("ENSEMBLE_SOURCE_DOWN_KEY"));
+    let list = stdout_of(&with_env(&["source", "list"], ""));
     assert!(list.contains("key from $MANAGED_KEY"), "{list}");
 }
 
 #[test]
-fn a_runners_owner_adds_shares_and_removes_backends_its_teams_do_not_use() {
-    let s = Scratch::new("runner-backends");
-    let runner_yaml = s.local_backend(NOWHERE);
+fn a_runners_owner_adds_sources_shares_their_models_and_removes_what_its_teams_do_not_use() {
+    let s = Scratch::new("runner-sources");
+    let runner_yaml = s.local_source(NOWHERE);
     s.write("@team/config.yaml", &config_yaml("opencode"));
     let run = |args: &[&str]| {
         let mut child = runner_command(&s)
@@ -3368,40 +3474,73 @@ fn a_runners_owner_adds_shares_and_removes_backends_its_teams_do_not_use() {
     };
     let yaml = || read_runner(&runner_yaml);
 
-    // The team's coder runs on openai-local: it stays.
-    let out = run(&["backend", "remove", "openai-local"]);
+    // The team's coder runs on a model of openai-local: it stays, and so
+    // does the model.
+    let out = run(&["source", "remove", "openai-local"]);
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("nothing was changed"),
         "{}",
         stderr_of(&out)
     );
-    assert!(yaml()["backends"].get("openai-local").is_some());
+    assert!(yaml()["ann_pool"]["sources"].get("openai-local").is_some());
+    let out = run(&["model", "off", "openai-local:qwen3-coder"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("openai-local:qwen3-coder is off"),
+        "{}",
+        stderr_of(&out)
+    );
 
-    // Shared through a hub, which it names.
+    // A model is shared through a hub, which it names, once it is on.
     let mut named = read_runner(&runner_yaml);
     named["hub"] = json!("ws://127.0.0.1:1");
     write_runner(&runner_yaml, named);
     let server = models_stub(r#"{"data":[{"id":"big"}]}"#);
     let out = run(&[
-        "backend",
+        "source",
         "add",
         "gpu",
         "--type",
         "openai-compatible-api",
         "--url",
         &server,
-        "--share",
+        "--max-concurrent",
+        "2",
     ]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(yaml()["shares"], json!(["gpu"]), "{}", yaml());
-    let out = run(&["backend", "unshare", "gpu"]);
+    let out = run(&["model", "share", "gpu:big"]);
+    assert!(
+        stderr_of(&out).contains("gpu:big is off; turn it on first"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = run(&["model", "on", "gpu:big"]);
+    assert!(
+        stdout_of(&out).contains("gpu:big is on: llm, medium"),
+        "it does not embed: {}{}",
+        stdout_of(&out),
+        stderr_of(&out)
+    );
+    let shared = || {
+        yaml()["ann_pool"]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["source"] == "gpu")
+            .unwrap()["shared"]
+            .clone()
+    };
+    let out = run(&["model", "share", "gpu:big"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(yaml()["shares"], json!([]), "{}", yaml());
+    assert_eq!(shared(), json!(true), "{}", yaml());
+    let out = run(&["model", "unshare", "gpu:big"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(shared(), json!(false), "{}", yaml());
 
     // Its key is kept sealed in the runner's database, as the hub keeps its own.
     let mut child = runner_command(&s)
-        .args(["backend", "key", "gpu"])
+        .args(["source", "key", "gpu"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -3414,18 +3553,18 @@ fn a_runners_owner_adds_shares_and_removes_backends_its_teams_do_not_use() {
     assert_eq!(
         ensemble_runner::kept::keys(&ensemble_core::state::RunnerDir::new(&dir))
             .all()
-            .unwrap()["ENSEMBLE_BACKEND_GPU_KEY"],
+            .unwrap()["ENSEMBLE_SOURCE_GPU_KEY"],
         "sk-gpu"
     );
     assert!(!yaml().to_string().contains("sk-gpu") && !dir.join(".env").exists());
     assert!(dir.join("core/master.key").exists());
-    let out = run(&["backend", "test", "gpu"]);
+    let out = run(&["source", "test", "gpu"]);
     assert!(
         stdout_of(&out).contains("gpu: answers, serves big"),
         "{}",
         stdout_of(&out)
     );
-    let out = run(&["backend", "remove", "gpu"]);
+    let out = run(&["source", "remove", "gpu"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!yaml().to_string().contains("gpu"));
 }
@@ -3436,51 +3575,82 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
     let hub = hub_server_of(&s);
     let yaml = || read_hub(&hub);
     let run = |args: &[&str]| hub_with_stdin(&s, args, "");
-    // One server for every model: it lists `small`, and embeds.
-    let server = models_stub(r#"{"data":[{"id":"small","embedding":[0.1,0.2]}]}"#);
+    // Two servers: one lists `gpt-5-mini`, an LLM of a family Ensemble knows;
+    // the other `small`, which embeds.
+    let server = models_stub(r#"{"data":[{"id":"gpt-5-mini"}]}"#);
+    let vectors = models_stub(r#"{"data":[{"id":"small","embedding":[0.1,0.2]}]}"#);
     let ok = |args: &[&str]| {
         let out = run(args);
         assert!(out.status.success(), "{args:?}: {}", stderr_of(&out));
         stdout_of(&out)
     };
-    ok(&[
-        "backend",
-        "add",
-        "local",
-        "--type",
-        "openai-compatible-api",
-        "--url",
-        &server,
-    ]);
+    for (name, url) in [("local", &server), ("vec", &vectors)] {
+        ok(&[
+            "source",
+            "add",
+            name,
+            "--type",
+            "openai-compatible-api",
+            "--url",
+            url,
+            "--max-concurrent",
+            "1",
+        ]);
+    }
 
-    // Models are asked for by what they are, and checked.
-    let said = ok(&["knowledge", "models", "local:small", "--when-none", "fail"]);
+    // Models are asked for by what they are, and checked: one that is off
+    // is not used.
+    let out = run(&["knowledge", "models", "local:gpt-5-mini"]);
     assert!(
-        said.contains("shares are distilled by local:small"),
+        stderr_of(&out).contains("local:gpt-5-mini is off; turn it on first"),
+        "{}",
+        stderr_of(&out)
+    );
+    ok(&["model", "on", "local:gpt-5-mini"]);
+    let said = ok(&["model", "on", "vec:small"]);
+    assert!(
+        said.contains("vec:small is on: embedding, 2 dimensions"),
+        "{said}"
+    );
+    let said = ok(&[
+        "knowledge",
+        "models",
+        "local:gpt-5-mini",
+        "--when-none",
+        "fail",
+    ]);
+    assert!(
+        said.contains("shares are distilled by local:gpt-5-mini"),
         "{said}"
     );
     assert_eq!(
         yaml()["distill"]["try"],
-        json!([{ "backend": "local", "model": "small" }]),
+        json!([{ "source": "local", "model": "gpt-5-mini" }]),
         "{}",
         yaml()
     );
     let out = run(&["knowledge", "models", "local:nope"]);
     assert!(!out.status.success());
     assert!(
-        stderr_of(&out).contains("local does not serve 'nope'; it serves small"),
+        stderr_of(&out).contains("there is no model 'local:nope' in the hub's ANN pool"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = run(&["knowledge", "models", "vec:small"]);
+    assert!(
+        stderr_of(&out).contains("vec:small is not an LLM: it is embedding, 2 dimensions"),
         "{}",
         stderr_of(&out)
     );
     ok(&[
         "knowledge",
         "embedding",
-        "local:small",
+        "vec:small",
         "--min-similarity",
         "0.4",
     ]);
     assert!(
-        yaml()["embed"] == json!({ "backend": "local", "model": "small", "min_similarity": 0.4 }),
+        yaml()["embed"] == json!({ "source": "vec", "model": "small", "min_similarity": 0.4 }),
         "{}",
         yaml()
     );
@@ -3551,17 +3721,23 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
     // What sources bring in: no filter, then one.
     ok(&["source", "filter", "--off"]);
     assert!(yaml()["source_filter"].is_null(), "{}", yaml());
-    let out = run(&["source", "filter", "local:small"]);
+    let out = run(&["source", "filter", "local:gpt-5-mini"]);
     assert!(
         stderr_of(&out).contains("say what is confidential"),
         "{}",
         stderr_of(&out)
     );
-    ok(&["source", "filter", "local:small", "--prompt", "Salaries."]);
+    ok(&[
+        "source",
+        "filter",
+        "local:gpt-5-mini",
+        "--prompt",
+        "Salaries.",
+    ]);
     assert!(
         yaml()["source_filter"]
             == json!({
-                "models": { "try": [{ "backend": "local", "model": "small" }], "when_none": "wait", "max_tokens": 2000 },
+                "models": { "try": [{ "source": "local", "model": "gpt-5-mini" }], "when_none": "wait", "max_tokens": 2000 },
                 "prompt": "Salaries.",
             }),
         "{}",

@@ -641,21 +641,31 @@ mod tests {
     use super::*;
     use ensemble_core::workspace::testing::TempDir;
 
-    /// The settings of a hub of Ana's whose one backend, `local`, is at `url`
-    /// and distills with `small`.
+    /// The settings of a hub of Ana's whose one source, `local`, is at `url`
+    /// and distills with `small`, an LLM of it that is on.
     pub(crate) fn settings_on(url: &str) -> ensemble_config::HubSettings {
         let mut s = ensemble_config::HubSettings::starting("Ana");
-        s.backends.insert(
+        s.ann_pool.sources.insert(
             "local".into(),
-            ensemble_config::BackendSetting::OpenAiCompatible {
+            ensemble_config::SourceSetting::OpenAiCompatible {
                 base_url: url.into(),
                 api_key_env: None,
                 timeout_seconds: 5,
+                max_concurrent: 1,
+            },
+        );
+        s.ann_pool.turn_on(
+            "local",
+            "small",
+            ensemble_config::ModelKind::Llm {
+                tier: ensemble_config::Tier::Small,
+                context_window: None,
+                tools: None,
             },
         );
         s.distill = ensemble_config::ModelsSetting {
             candidates: vec![ensemble_config::ModelSetting {
-                backend: "local".into(),
+                source: "local".into(),
                 model: "small".into(),
             }],
             when_none: ensemble_config::WhenNone::Wait,

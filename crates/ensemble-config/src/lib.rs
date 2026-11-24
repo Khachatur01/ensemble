@@ -38,7 +38,7 @@ pub const SAMPLE: &str = include_str!("sample.yaml");
 pub const SCHEMA_URL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json";
 pub const SUPPORTED_VERSION: u32 = 1;
 
-/// The LLM backend types that ship. Adding one is adding an adapter and a
+/// The source types that ship. Adding one is adding an adapter and a
 /// variant.
 pub const OPENAI_COMPATIBLE_API: &str = "openai-compatible-api";
 /// Anthropic's own Messages API.
@@ -52,9 +52,9 @@ pub const OPENCODE_AGENT: &str = "opencode";
 pub const CODEX_AGENT: &str = "codex";
 /// What Codex's sandbox lets a run do.
 pub const CODEX_SANDBOXES: [&str; 3] = ["read-only", "workspace-write", "danger-full-access"];
-/// The light adapter: one request to an LLM backend, no CLI and no tools.
+/// The light adapter: one request to an LLM of the ANN pool, no CLI and no tools.
 pub const DIRECT_AGENT: &str = "direct";
-/// An agent loop in Ensemble itself, on an LLM backend: it reads, edits and
+/// An agent loop in Ensemble itself, on an LLM of the ANN pool: it reads, edits and
 /// runs commands with tools of its own, so no agent CLI has to be installed.
 pub const BUILTIN_AGENT: &str = "builtin";
 /// The tools a `builtin` agent may be given.
@@ -62,7 +62,7 @@ pub const BUILTIN_TOOLS: [&str; 7] = ["read", "list", "grep", "glob", "write", "
 
 /// Where an OpenCode agent's model comes from.
 pub const PROVIDER_MODEL: &str = "provider";
-pub const LLM_BACKEND_MODEL: &str = "llm_backend";
+pub const ANN_POOL_MODEL: &str = "ann_pool";
 
 // ---------------------------------------------------------------------------
 // The document, resolved
@@ -97,6 +97,8 @@ impl BackendSettings {
     }
 }
 
+/// A source of the ANN pool the process calls itself, resolved: where it is
+/// and its key. It is named for the source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmBackend {
     pub name: String,
@@ -105,7 +107,7 @@ pub struct LlmBackend {
 }
 
 impl LlmBackend {
-    /// An OpenAI-compatible backend called `name` at `base_url`, without a
+    /// An OpenAI-compatible source called `name` at `base_url`, without a
     /// key.
     pub fn openai(name: &str, base_url: &str, timeout_seconds: u64) -> LlmBackend {
         LlmBackend {
@@ -239,7 +241,7 @@ pub enum SystemPrompt {
     Replace,
 }
 
-/// One chat request to an LLM backend, with no CLI in between: a light agent
+/// One chat request to an LLM of the ANN pool, with no CLI in between: a light agent
 /// with no tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectAdapter {
@@ -249,9 +251,9 @@ pub struct DirectAdapter {
 }
 
 impl DirectAdapter {
-    /// The LLM backend of its first model.
-    pub fn backend(&self) -> &str {
-        self.fallback.first().map_or("", |c| c.backend.as_str())
+    /// The source of its first model.
+    pub fn source(&self) -> &str {
+        self.fallback.first().map_or("", |c| c.source.as_str())
     }
 
     /// The id its first model is served under.
@@ -260,7 +262,7 @@ impl DirectAdapter {
     }
 }
 
-/// An agent loop in Ensemble itself: the model on an LLM backend asks for
+/// An agent loop in Ensemble itself: an LLM of the ANN pool asks for
 /// tools, Ensemble runs them in the working directory and answers, until the
 /// model is done or `max_steps` is reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,9 +279,9 @@ pub struct BuiltinAdapter {
 }
 
 impl BuiltinAdapter {
-    /// The LLM backend of its first model.
-    pub fn backend(&self) -> &str {
-        self.fallback.first().map_or("", |c| c.backend.as_str())
+    /// The source of its first model.
+    pub fn source(&self) -> &str {
+        self.fallback.first().map_or("", |c| c.source.as_str())
     }
 
     /// The id its first model is served under.
@@ -293,21 +295,21 @@ pub fn builtin_tool_writes(tool: &str) -> bool {
     matches!(tool, "write" | "edit" | "shell")
 }
 /// What an agent does when none of the models in its `try` list can be used:
-/// no backend answers, or none serves the model.
+/// no source answers, or none serves the model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WhenNone {
-    /// The delegation or task fails, saying what each backend answered.
+    /// The delegation or task fails, saying what each source answered.
     Fail,
     /// A task waits in the queue and is tried again later. A delegation, which
     /// someone is waiting for, fails.
     Wait,
 }
 
-/// One model an agent may run on: the backend that serves it, and its id there.
+/// One model an agent may run on: the source that serves it, and its id there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
-    pub backend: String,
+    pub source: String,
     /// The id the endpoint serves the model under.
     pub model: String,
     /// Tokens of context the server runs it with, for an OpenCode agent.
@@ -343,35 +345,35 @@ pub enum OpenCodeModel {
     /// `provider/model`, as OpenCode names it, on a provider it is already
     /// set up for.
     Provider { model: String },
-    /// Models served by the runner's LLM backends ([`Config::llm_backends`]),
+    /// Models of the runner's ANN pool ([`Config::llm_backends`]),
     /// in the order they are tried.
-    LlmBackend(Fallback),
+    Pool(Fallback),
 }
 
 impl OpenCodeAdapter {
-    /// The model: `provider/model`, or the id an LLM backend serves its first
+    /// The model: `provider/model`, or the id a source serves its first
     /// model under.
     pub fn model_id(&self) -> &str {
         match &self.model {
             OpenCodeModel::Provider { model } => model,
-            OpenCodeModel::LlmBackend(f) => f.first().map_or("", |c| c.model.as_str()),
+            OpenCodeModel::Pool(f) => f.first().map_or("", |c| c.model.as_str()),
         }
     }
 
-    /// The LLM backend its first model runs on, when it runs on one.
-    pub fn llm_backend(&self) -> Option<&str> {
+    /// The source its first model runs on, when it runs on one.
+    pub fn source(&self) -> Option<&str> {
         match &self.model {
             OpenCodeModel::Provider { .. } => None,
-            OpenCodeModel::LlmBackend(f) => f.first().map(|c| c.backend.as_str()),
+            OpenCodeModel::Pool(f) => f.first().map(|c| c.source.as_str()),
         }
     }
 
     /// Tokens of context the first model's server runs it with, when it runs
-    /// on an LLM backend.
+    /// on a model of the ANN pool.
     pub fn context_window(&self) -> Option<u32> {
         match &self.model {
             OpenCodeModel::Provider { .. } => None,
-            OpenCodeModel::LlmBackend(f) => f.first().and_then(|c| c.context_window),
+            OpenCodeModel::Pool(f) => f.first().and_then(|c| c.context_window),
         }
     }
 }
@@ -397,35 +399,35 @@ impl AgentConfig {
         }
     }
 
-    /// The LLM backend its first model runs on, when it runs on one.
-    pub fn llm_backend(&self) -> Option<&str> {
+    /// The source its first model runs on, when it runs on one.
+    pub fn source(&self) -> Option<&str> {
         match &self.adapter {
             Adapter::ClaudeCode(_) | Adapter::Codex(_) => None,
-            Adapter::OpenCode(o) => o.llm_backend(),
-            Adapter::Direct(d) => Some(d.backend()),
-            Adapter::Builtin(b) => Some(b.backend()),
+            Adapter::OpenCode(o) => o.source(),
+            Adapter::Direct(d) => Some(d.source()),
+            Adapter::Builtin(b) => Some(b.source()),
         }
     }
 
-    /// The models it may run on, in order, when it runs on LLM backends.
+    /// The models it may run on, in order, when it runs on the ANN pool.
     pub fn fallback(&self) -> Option<&Fallback> {
         match &self.adapter {
             Adapter::ClaudeCode(_) | Adapter::Codex(_) => None,
             Adapter::OpenCode(o) => match &o.model {
                 OpenCodeModel::Provider { .. } => None,
-                OpenCodeModel::LlmBackend(f) => Some(f),
+                OpenCodeModel::Pool(f) => Some(f),
             },
             Adapter::Direct(d) => Some(&d.fallback),
             Adapter::Builtin(b) => Some(&b.fallback),
         }
     }
 
-    /// Every LLM backend it may run on, with the model it would ask there.
-    pub fn llm_backends(&self) -> Vec<(&str, &str)> {
+    /// Every source it may run on, with the model it would ask there.
+    pub fn pool_models(&self) -> Vec<(&str, &str)> {
         self.fallback().map_or_else(Vec::new, |f| {
             f.candidates
                 .iter()
-                .map(|c| (c.backend.as_str(), c.model.as_str()))
+                .map(|c| (c.source.as_str(), c.model.as_str()))
                 .collect()
         })
     }
@@ -436,7 +438,7 @@ impl AgentConfig {
         let mut bound = self.clone();
         match &mut bound.adapter {
             Adapter::OpenCode(OpenCodeAdapter {
-                model: OpenCodeModel::LlmBackend(f),
+                model: OpenCodeModel::Pool(f),
                 ..
             }) => *f = f.bound(index),
             Adapter::Direct(d) => d.fallback = d.fallback.bound(index),
@@ -447,7 +449,7 @@ impl AgentConfig {
     }
 
     /// Tokens of context its model's server runs it with, when it runs on an
-    /// LLM backend.
+    /// model of the ANN pool.
     pub fn context_window(&self) -> Option<u32> {
         match &self.adapter {
             Adapter::OpenCode(o) => o.context_window(),
@@ -455,10 +457,10 @@ impl AgentConfig {
             _ => None,
         }
     }
-    /// Where it runs: the adapter type, and the LLM backend when there is one.
+    /// Where it runs: the adapter type, and the source when there is one.
     pub fn runs_on(&self) -> String {
-        match self.llm_backend() {
-            Some(backend) => format!("{} on {backend}", self.kind()),
+        match self.source() {
+            Some(source) => format!("{} on {source}", self.kind()),
             None => self.kind().to_string(),
         }
     }
@@ -511,8 +513,8 @@ pub fn claude_tool_writes(tool: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub version: u32,
-    /// The LLM backends its agents may run on: those of the runner that runs
-    /// it, from the runner's `llm` ([`Config::with_backends`]); none as the
+    /// The sources its agents may run on: those of the runner that runs
+    /// it, from the runner's ANN pool ([`Config::with_pool`]); none as the
     /// team is read.
     pub llm_backends: BTreeMap<String, LlmBackend>,
     /// Shared limits, by name.
@@ -616,11 +618,11 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+pub mod ann;
 pub mod edit;
 mod env;
 pub mod hub;
 pub mod kept;
-pub mod llm;
 mod raw;
 pub mod runner;
 pub mod settings;
@@ -628,13 +630,15 @@ pub mod settings_file;
 pub mod teams;
 mod validate;
 
+pub use ann::{
+    AnnPool, AnnPoolSetting, ModelKind, PoolModel, RelayAt, SourceSetting, Tier, split_name,
+};
 pub use env::*;
 pub use hub::{
     AccountRules, Accounts, Connectors, Embed, EmbedSetting, Hub, HubSettings, IssueTracker,
     Knowledge, ModelSetting, ModelsSetting, Permission, Recall, Registration, RegistrationSetting,
     SourceFilter, SourceFilterSetting, Sources, Tasks, Tracker, TrackerSetting,
 };
-pub use llm::{BackendSetting, HubLlm, RelayAt, Relayed, RunnerLlm};
 pub use runner::{Runner, RunnerSettings};
 pub use settings_file::{SettingsFile, WithSettings};
 pub use validate::{load, parse};

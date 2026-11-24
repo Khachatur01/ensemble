@@ -3,8 +3,8 @@
 use super::raw::*;
 use super::*;
 
-/// Load the helper team config at `path`. It names the LLM backends its
-/// agents run on, which the runner defines ([`Config::with_backends`]), and
+/// Load the helper team config at `path`. It names the models of the ANN pool
+/// its agents run on, which the runner keeps ([`Config::with_pool`]), and
 /// reads nothing from the environment: it may live in a shared repository.
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
     if !path.exists() {
@@ -218,7 +218,7 @@ pub(super) fn direct_adapter(
 ) -> DirectAdapter {
     if ad.candidates.is_empty() {
         problems.push(format!(
-            "{at}: `try` is empty; name at least one model, as {{ backend, model }}"
+            "{at}: `try` is empty; name at least one model, as {{ source, model }}"
         ));
     }
     let mut candidates = Vec::new();
@@ -228,7 +228,7 @@ pub(super) fn direct_adapter(
             problems.push(format!("{here}: `model` is empty"));
         }
         candidates.push(Candidate {
-            backend: c.backend.clone(),
+            source: c.source.clone(),
             model: c.model.clone(),
             context_window: None,
         });
@@ -252,7 +252,7 @@ pub(super) fn builtin_adapter(
 ) -> BuiltinAdapter {
     if ad.candidates.is_empty() {
         problems.push(format!(
-            "{at}: `try` is empty; name at least one model, as {{ backend, model, context_window }}"
+            "{at}: `try` is empty; name at least one model, as {{ source, model, context_window }}"
         ));
     }
     let mut candidates = Vec::new();
@@ -265,7 +265,7 @@ pub(super) fn builtin_adapter(
             problems.push(format!("{here}: `context_window` must be greater than 0"));
         }
         candidates.push(Candidate {
-            backend: c.backend.clone(),
+            source: c.source.clone(),
             model: c.model.clone(),
             context_window: Some(c.context_window),
         });
@@ -298,40 +298,32 @@ pub(super) fn builtin_adapter(
         max_tokens: ad.max_tokens,
     }
 }
-/// Check that each model of a `try` list at `at` names a backend of `kinds`
-/// (each name with its type), defined `where_`, and, for OpenCode, an
-/// OpenAI-compatible one.
-pub(super) fn check_candidates(
+/// Check that each model of `candidates`, at `at`, names a source of `kinds`
+/// (each name with its type), and, for OpenCode, an OpenAI-compatible one.
+fn check_candidates(
     at: &str,
     candidates: &[Candidate],
     opencode: bool,
     kinds: &BTreeMap<String, &str>,
-    where_: &str,
     problems: &mut Vec<String>,
 ) {
-    for (i, c) in candidates.iter().enumerate() {
-        let here = format!("{at}[{i}]");
-        match kinds.get(&c.backend) {
-            None => problems.push(undefined_backend(&here, &c.backend, kinds, where_)),
+    for c in candidates {
+        match kinds.get(&c.source) {
+            None => problems.push(undefined_source(at, &c.source, kinds)),
             Some(&ANTHROPIC_API) if opencode => problems.push(format!(
-                "{here}: LLM backend '{}' is of type '{ANTHROPIC_API}', which OpenCode cannot use: it needs an '{OPENAI_COMPATIBLE_API}' one. Use a model of type '{PROVIDER_MODEL}', a `claude-code` agent, or a `direct` agent",
-                c.backend
+                "{at}: the source '{}' is of type '{ANTHROPIC_API}', which OpenCode cannot use: it needs an '{OPENAI_COMPATIBLE_API}' one. Use a model of type '{PROVIDER_MODEL}', a `claude-code` agent, or a `direct` agent",
+                c.source
             )),
             Some(_) => {}
         }
     }
 }
 
-/// A model names a backend `kinds` does not have, which are defined `where_`.
-fn undefined_backend(
-    at: &str,
-    backend: &str,
-    kinds: &BTreeMap<String, &str>,
-    where_: &str,
-) -> String {
+/// A model names a source `kinds` does not have.
+fn undefined_source(at: &str, source: &str, kinds: &BTreeMap<String, &str>) -> String {
     let known: Vec<&str> = kinds.keys().map(String::as_str).collect();
     format!(
-        "{at}: LLM backend '{backend}' is not defined{where_}. Defined LLM backends: {}.",
+        "{at}: there is no source '{source}'. Its sources: {}.",
         if known.is_empty() {
             "(none)".to_string()
         } else {
@@ -375,7 +367,7 @@ pub(super) fn opencode_adapter(
                 problems.push(format!("{at}: `model.name` is empty"));
             } else if !p.name.contains('/') {
                 problems.push(format!(
-                    "{at}: model '{}' must be provider/model, as `opencode models` lists it, or run on an LLM backend with a `model` of type '{LLM_BACKEND_MODEL}'",
+                    "{at}: model '{}' must be provider/model, as `opencode models` lists it, or run on a model of the ANN pool with a `model` of type '{ANN_POOL_MODEL}'",
                     p.name
                 ));
             }
@@ -383,16 +375,16 @@ pub(super) fn opencode_adapter(
                 model: p.name.clone(),
             }
         }
-        RawOpenCodeModel::LlmBackend(m) => {
+        RawOpenCodeModel::Pool(m) => {
             if m.candidates.is_empty() {
                 problems.push(format!(
-                    "{at}: `model.try` is empty; name at least one model, as {{ backend, name, context_window }}"
+                    "{at}: `model.try` is empty; name at least one model, as {{ source, name, context_window }}"
                 ));
             }
             let mut candidates = Vec::new();
             for (i, b) in m.candidates.iter().enumerate() {
                 let here = format!("{at}.model.try[{i}]");
-                // On a backend the model is the id the endpoint serves; Ensemble
+                // In the pool the model is the id the source serves; Ensemble
                 // names the provider.
                 if b.name.trim().is_empty() {
                     problems.push(format!("{here}: `name` is empty"));
@@ -401,12 +393,12 @@ pub(super) fn opencode_adapter(
                     problems.push(format!("{here}: `context_window` must be greater than 0"));
                 }
                 candidates.push(Candidate {
-                    backend: b.backend.clone(),
+                    source: b.source.clone(),
                     model: b.name.clone(),
                     context_window: Some(b.context_window),
                 });
             }
-            OpenCodeModel::LlmBackend(Fallback {
+            OpenCodeModel::Pool(Fallback {
                 candidates,
                 when_none: m.when_none,
             })
@@ -484,28 +476,32 @@ pub(super) fn codex_adapter(
     }
 }
 
-/// A backend the process calls itself, checked, with its key from `env`: a
-/// URL, a timeout and an optional key. Not one a runner serves.
-pub(super) fn resolve_backend(
+/// A source the process calls itself, checked, with its key from `env`: a
+/// URL, a timeout and an optional key. Not another runner.
+pub(super) fn resolve_source(
     at: &str,
     name: &str,
-    kept: &crate::llm::BackendSetting,
+    kept: &crate::ann::SourceSetting,
     env: &dyn Env,
 ) -> Result<LlmBackend, Vec<String>> {
-    use crate::llm::BackendSetting;
+    use crate::ann::SourceSetting;
     let (anthropic, base_url, api_key_env, timeout_seconds) = match kept {
-        BackendSetting::OpenAiCompatible {
+        SourceSetting::OpenAiCompatible {
             base_url,
             api_key_env,
             timeout_seconds,
+            ..
         } => (false, base_url, api_key_env, *timeout_seconds),
-        BackendSetting::Anthropic {
+        SourceSetting::Anthropic {
             base_url,
             api_key_env,
             timeout_seconds,
+            ..
         } => (true, base_url, api_key_env, *timeout_seconds),
-        BackendSetting::Runner { .. } => {
-            return Err(vec![format!("{at}: is served by a runner, not called")]);
+        SourceSetting::Runner { .. } => {
+            return Err(vec![format!(
+                "{at}: is another runner, reached through the hub"
+            )]);
         }
     };
     let mut problems = Vec::new();
@@ -554,8 +550,8 @@ pub(super) fn resolve_backend(
 }
 
 impl Config {
-    /// This team on `backends`, the LLM backends of the runner that runs it,
-    /// once every model its agents name is one of them.
+    /// This team on `backends`, sources it is given alone, as a team run
+    /// apart from a runner is: every source its agents name is one of them.
     pub fn with_backends(
         mut self,
         backends: BTreeMap<String, LlmBackend>,
@@ -564,31 +560,45 @@ impl Config {
             .iter()
             .map(|(name, b)| (name.clone(), b.type_id()))
             .collect();
-        self.check_backends(&kinds)?;
+        self.check_models(|at, c, opencode, problems| {
+            check_candidates(at, std::slice::from_ref(c), opencode, &kinds, problems)
+        })?;
         self.llm_backends = backends;
         Ok(self)
     }
 
-    /// This team on the LLM backends of the runner whose `llm` is `llm`,
-    /// once every model its agents name is one of them: its own, and those
-    /// it reaches through the hub when it serves them at `relay`. Without a
-    /// relay those are named but not there, and a run tries the next model.
-    pub fn with_llm(
+    /// This team on the ANN pool of the runner that runs it, once every
+    /// model its agents name is an LLM of it that is on: its own sources,
+    /// and the runners it reaches through the hub when it serves them at
+    /// `relay`. Without a relay those are named but not there, and a run
+    /// tries the next model.
+    pub fn with_pool(
         mut self,
-        llm: &RunnerLlm,
+        pool: &AnnPool,
         relay: Option<&RelayAt>,
     ) -> Result<Config, ConfigError> {
-        let kinds: BTreeMap<String, &str> = crate::llm::kinds(&llm.direct, &llm.hub)
-            .into_iter()
-            .collect();
-        self.check_backends(&kinds)?;
-        self.llm_backends = llm.backends(relay);
+        let known = pool.known();
+        self.check_models(|at, c, opencode, problems| {
+            crate::ann::check_model(
+                at,
+                &c.source,
+                &c.model,
+                crate::ann::Use::Llm,
+                opencode,
+                &known,
+                problems,
+            )
+        })?;
+        self.llm_backends = pool.backends(relay);
         Ok(self)
     }
 
-    /// Does every model of its agents name a backend of `kinds`, each name
-    /// with its type?
-    fn check_backends(&self, kinds: &BTreeMap<String, &str>) -> Result<(), ConfigError> {
+    /// Check every model of its agents with `check`, given where it is named,
+    /// the model and whether an OpenCode agent names it.
+    fn check_models(
+        &self,
+        check: impl Fn(&str, &Candidate, bool, &mut Vec<String>),
+    ) -> Result<(), ConfigError> {
         let mut problems = Vec::new();
         for (name, agent) in &self.agents {
             let Some(fallback) = agent.fallback() else {
@@ -600,14 +610,9 @@ impl Config {
             } else {
                 format!("agents.{name}.adapter.try")
             };
-            check_candidates(
-                &at,
-                &fallback.candidates,
-                opencode,
-                kinds,
-                " in the runner's `llm`",
-                &mut problems,
-            );
+            for (i, c) in fallback.candidates.iter().enumerate() {
+                check(&format!("{at}[{i}]"), c, opencode, &mut problems);
+            }
         }
         if problems.is_empty() {
             Ok(())

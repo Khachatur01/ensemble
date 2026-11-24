@@ -356,12 +356,17 @@ impl<'a> Server<'a> {
                 return Ok(());
             }
         };
+        let shared: Vec<String> = offer
+            .sources
+            .iter()
+            .flat_map(|(source, s)| s.models.iter().map(move |m| format!("{source}:{}", m.id)))
+            .collect();
         say(&format!(
             "{runner} relays, sharing {}",
-            if offer.shares.is_empty() {
+            if shared.is_empty() {
                 "nothing".to_string()
             } else {
-                offer.shares.join(", ")
+                shared.join(", ")
             }
         ));
         let caller = crate::calls::Caller::Account {
@@ -533,7 +538,7 @@ impl<'a> Server<'a> {
                 })
             }
             RUNNER => self.routes.register(conn, user, &req.params),
-            RUNNERS => Ok(self.routes.listed(user)),
+            RUNNERS => Ok(self.with_shared(self.routes.listed(user))),
             other => Err(format!("no method `{other}`")),
         };
         match result {
@@ -544,6 +549,25 @@ impl<'a> Server<'a> {
 }
 
 impl Server<'_> {
+    /// `listed`, the account's runners, each with the models it shares now,
+    /// `[{source, id, kind}]`, as its relay socket offered them.
+    fn with_shared(&self, mut listed: Value) -> Value {
+        let offered = self.calls.offered();
+        for r in listed["runners"].as_array_mut().into_iter().flatten() {
+            let models: Vec<Value> = offered
+                .iter()
+                .filter(|o| r["runner"] == o.runner.as_str())
+                .flat_map(|o| {
+                    o.models
+                        .iter()
+                        .map(|m| json!({ "source": o.source, "id": m.id, "kind": m.kind }))
+                })
+                .collect();
+            r["models"] = Value::Array(models);
+        }
+        listed
+    }
+
     /// Pass a task method to `tasks`, asked by the account `user`, with who
     /// is connected now: the runners that may take its tasks.
     fn ask_tasks(
@@ -651,12 +675,22 @@ pub mod testing {
         let tmp = TempDir::new();
         use ensemble_config::Permission::*;
         let mut s = ensemble_config::HubSettings::starting("Acme");
-        s.backends.insert(
+        s.ann_pool.sources.insert(
             "local".into(),
-            ensemble_config::BackendSetting::OpenAiCompatible {
+            ensemble_config::SourceSetting::OpenAiCompatible {
                 base_url: "http://127.0.0.1:1/v1".into(),
                 api_key_env: None,
                 timeout_seconds: 5,
+                max_concurrent: 1,
+            },
+        );
+        s.ann_pool.turn_on(
+            "local",
+            "small",
+            ensemble_config::ModelKind::Llm {
+                tier: ensemble_config::Tier::Small,
+                context_window: None,
+                tools: None,
             },
         );
         s.registration = ensemble_config::RegistrationSetting::Approval { max_pending: 2 };
@@ -672,7 +706,7 @@ pub mod testing {
         .map(|(name, can)| (name.to_string(), can))
         .collect();
         s.distill.candidates = vec![ensemble_config::ModelSetting {
-            backend: "local".into(),
+            source: "local".into(),
             model: "small".into(),
         }];
         s.distill.max_tokens = 100;

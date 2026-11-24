@@ -1,6 +1,6 @@
 //! The hub's settings, a section each, with what each is now: the hub and
-//! its logins and sign-ups, the roles, the LLM backends, the models of the
-//! knowledge vault, the source filter, the trackers, and who changed what.
+//! its logins and sign-ups, the roles, the ANN pool (its sources and their
+//! models), the models of the knowledge vault, the source filter, the trackers, and who changed what.
 //! Each change is an operation's form, filled in with the setting as it is.
 //! An operation of the settings no section shows has a page of its own, so a
 //! new one is reached before a section shows it.
@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 const SECTIONS: &[(&str, &str)] = &[
     ("general", "Hub and logins"),
     ("roles", "Roles"),
-    ("backends", "Model backends"),
+    ("models", "Models"),
     ("knowledge", "Knowledge"),
     ("sources", "Sources"),
     ("trackers", "Trackers"),
@@ -36,12 +36,17 @@ const SHOWN: &[&str] = &[
     "role.list",
     "role.set",
     "role.remove",
-    "backend.list",
-    "backend.add",
-    "backend.remove",
-    "backend.test",
-    "backend.key",
-    "runner.backends",
+    "source.list",
+    "source.add",
+    "source.remove",
+    "source.test",
+    "source.key",
+    "source.refresh",
+    "model.list",
+    "model.on",
+    "model.off",
+    "model.set",
+    "runner.models",
     "runner.list",
     "knowledge.models",
     "knowledge.embedding",
@@ -60,7 +65,7 @@ const GROUPS: &[&str] = &[
     "settings",
     "registration",
     "role",
-    "backend",
+    "model",
     "runner",
     "knowledge",
     "source",
@@ -106,7 +111,7 @@ pub fn SettingsPage(section: String) -> Element {
                 match section.as_str() {
                     "general" => rsx! { General {} },
                     "roles" => rsx! { Roles {} },
-                    "backends" => rsx! { Backends {} },
+                    "models" => rsx! { Models {} },
                     "knowledge" => rsx! { KnowledgeModels {} },
                     "sources" => rsx! { Sources {} },
                     "trackers" => rsx! { Trackers {} },
@@ -138,14 +143,14 @@ fn waiting(shown: &Shown) -> Element {
     }
 }
 
-/// Models as a list of `<backend>:<model>`, one per line, from the settings'
-/// `[{backend, model}]`.
+/// Models as a list of `<source>:<model>`, one per line, from the settings'
+/// `[{source, model}]`.
 fn model_lines(tried: &Value) -> String {
     tried
         .as_array()
         .into_iter()
         .flatten()
-        .map(|m| format!("{}:{}", text(m, "backend"), text(m, "model")))
+        .map(|m| format!("{}:{}", text(m, "source"), text(m, "model")))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -393,63 +398,94 @@ fn RoleRow(
     }
 }
 
-/// What each kind of backend is, as a person reads it.
-const BACKEND_TYPES: &[(&str, &str)] = &[
+/// What each type of source is, as a person reads it.
+const SOURCE_TYPES: &[(&str, &str)] = &[
     ("openai-compatible-api", "OpenAI-compatible server"),
     ("anthropic-api", "Anthropic's API"),
-    ("runner", "A runner's, shared through the hub"),
+    (
+        "runner",
+        "Another runner, whose shared models are reached through the hub",
+    ),
+];
+
+/// How strong an LLM is, as a person reads it.
+const TIERS: &[(&str, &str)] = &[
+    ("small", "Small: quick work, such as summing up"),
+    ("medium", "Medium"),
+    ("strong", "Strong: the hardest work"),
 ];
 
 #[component]
-fn Backends() -> Element {
-    let mut backends = use_op("backend.list");
-    let offered = use_op("runner.backends");
+fn Models() -> Element {
+    let mut sources = use_op("source.list");
+    let mut models = use_op("model.list");
+    let offered = use_op("runner.models");
     let (mut shown, _) = settings();
     let mut changed = move || {
-        backends.restart();
+        sources.restart();
+        models.restart();
         shown.restart();
     };
     let mut runners: Vec<String> = Vec::new();
-    let mut shared: Vec<String> = Vec::new();
     if let Some(Ok(out)) = &*offered.read() {
-        for o in out["backends"].as_array().into_iter().flatten() {
-            let (runner, backend) = (text(o, "runner"), text(o, "backend"));
+        for o in out["shared"].as_array().into_iter().flatten() {
+            let runner = text(o, "runner");
             if !runners.contains(&runner) {
                 runners.push(runner);
             }
-            if !shared.contains(&backend) {
-                shared.push(backend);
-            }
         }
     }
+    let all_models = match &*models.read() {
+        Some(Ok(out)) => out["models"].as_array().cloned().unwrap_or_default(),
+        _ => Vec::new(),
+    };
     let api_types = ["openai-compatible-api", "anthropic-api"];
     rsx! {
-        p { class: "muted", "The LLM servers the hub's models are on. Keys are kept sealed, never in the settings." }
-        {loaded(&backends.read(), |out| {
-            let list = out["backends"].as_array().cloned().unwrap_or_default();
+        p { class: "muted",
+            "The hub's ANN pool: the sources of models it calls, and the models each serves. A model a source newly lists is off until you turn it on. Keys are kept sealed, never in the settings."
+        }
+        {loaded(&sources.read(), |out| {
+            let list = out["sources"].as_array().cloned().unwrap_or_default();
             rsx! {
                 if list.is_empty() {
-                    p { class: "muted", "No backend yet: add one below." }
+                    p { class: "muted", "No source yet: add one below." }
                 } else {
-                    for b in list {
-                        BackendCard { key: "{text(&b, \"name\")}", backend: b.clone(), on_changed: move |_| changed() }
+                    for s in list {
+                        SourceCard {
+                            key: "{text(&s, \"name\")}",
+                            source: s.clone(),
+                            models: all_models
+                                .iter()
+                                .filter(|m| m["source"] == s["name"])
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                            on_changed: move |_| changed(),
+                        }
                     }
                 }
             }
         })}
         {loaded(&offered.read(), |out| {
-            let list = out["backends"].as_array().cloned().unwrap_or_default();
+            let list = out["shared"].as_array().cloned().unwrap_or_default();
             rsx! {
                 if !list.is_empty() {
                     h3 { "Shared by the runners connected now" }
                     table {
-                        thead { tr { th { "Runner" } th { "Backend" } th { "Models" } } }
+                        thead { tr { th { "Runner" } th { "Models" } th { "Calls at once" } } }
                         tbody {
                             for o in list {
-                                tr { key: "{text(&o, \"runner\")}/{text(&o, \"backend\")}",
+                                tr { key: "{text(&o, \"runner\")}/{text(&o, \"source\")}",
                                     td { "{text(&o, \"runner\")}" }
-                                    td { "{text(&o, \"backend\")}" }
-                                    td { "{lookup::strings(&o[\"models\"]).join(\", \")}" }
+                                    td {
+                                        {o["models"]
+                                            .as_array()
+                                            .into_iter()
+                                            .flatten()
+                                            .map(|m| format!("{}:{}", text(&o, "source"), text(m, "id")))
+                                            .collect::<Vec<_>>()
+                                            .join(", ")}
+                                    }
+                                    td { "{text(&o, \"max_concurrent\")}" }
                                 }
                             }
                         }
@@ -458,32 +494,31 @@ fn Backends() -> Element {
             }
         })}
         section { class: "panel",
-            h3 { "Add a backend" }
+            h3 { "Add a source" }
             OpForm {
-                op: "backend.add",
+                op: "source.add",
                 picks: vec![
-                    Pick::named("type", BACKEND_TYPES),
+                    Pick::named("type", SOURCE_TYPES),
                     Pick::suggest("runner", runners),
-                    Pick::suggest("runner_backend", shared),
                 ],
                 when: vec![
                     When::new("url", "type", &api_types),
                     When::new("key", "type", &api_types),
                     When::new("key_env", "type", &api_types),
+                    When::new("max_concurrent", "type", &api_types),
+                    When::new("timeout", "type", &api_types),
                     When::new("runner", "type", &["runner"]),
-                    When::new("runner_backend", "type", &["runner"]),
-                    When::new("timeout", "type", &["openai-compatible-api", "anthropic-api", "runner"]),
                 ],
                 more: vec!["key_env".to_string(), "timeout".to_string()],
                 labels: vec![
                     label("url", "URL"),
                     label("key", "API key"),
                     label("key_env", "key from a variable"),
-                    label("runner_backend", "its name on the runner"),
+                    label("max_concurrent", "calls it takes at once"),
                     label("timeout", "timeout, in seconds"),
                     label("no_check", "do not ask it which models it serves first"),
                 ],
-                submit: "Add the backend",
+                submit: "Add the source",
                 clear: true,
                 on_done: move |_| changed(),
             }
@@ -491,23 +526,24 @@ fn Backends() -> Element {
     }
 }
 
-/// A backend: what it is, where, its key; tested, given a key, or taken out.
+/// A source: what it is, where, its key, and its models; tested, asked again
+/// which models it serves, given a key, or taken out.
 #[component]
-fn BackendCard(backend: Value, on_changed: EventHandler<()>) -> Element {
-    let name = text(&backend, "name");
+fn SourceCard(source: Value, models: Vec<Value>, on_changed: EventHandler<()>) -> Element {
+    let name = text(&source, "name");
     let mut tested = use_signal(|| None::<Result<Value, Failure>>);
     let mut keying = use_signal(|| false);
-    let kind = text(&backend, "type");
-    let shown_kind = BACKEND_TYPES
+    let kind = text(&source, "type");
+    let shown_kind = SOURCE_TYPES
         .iter()
         .find(|(t, _)| *t == kind)
         .map(|(_, l)| l.to_string())
         .unwrap_or(kind.clone());
-    let place = match text(&backend, "url") {
+    let place = match text(&source, "url") {
         u if !u.is_empty() => u,
-        _ => format!("on {}", text(&backend, "runner")),
+        _ => text(&source, "runner"),
     };
-    let key = match (backend["key"] == true, text(&backend, "key_env")) {
+    let key = match (source["key"] == true, text(&source, "key_env")) {
         (_, env) if !env.is_empty() => format!("from ${env}"),
         (true, _) => "kept sealed".into(),
         (false, _) => "none".into(),
@@ -518,7 +554,7 @@ fn BackendCard(backend: Value, on_changed: EventHandler<()>) -> Element {
             let name = name.clone();
             spawn(async move {
                 tested.set(None);
-                let out = api::op("backend.test", json!({ "name": name })).await;
+                let out = api::op("source.test", json!({ "name": name })).await;
                 tested.set(Some(out));
             });
         }
@@ -526,15 +562,27 @@ fn BackendCard(backend: Value, on_changed: EventHandler<()>) -> Element {
     let named = vec![("name".to_string(), json!(name))];
     let direct = kind != "runner";
     rsx! {
-        section { class: "panel backend",
+        section { class: "panel source",
             div { class: "head",
                 h3 { "{name}" }
                 span { class: "muted", "{shown_kind}, {place}" }
             }
             dl { class: "facts",
-                dt { "Key" } dd { "{key}" }
-                if backend["shared"] == true {
-                    dt { "Shared" } dd { "offered to runners through the hub" }
+                if direct {
+                    dt { "Key" } dd { "{key}" }
+                    dt { "Calls at once" } dd { "{text(&source, \"max_concurrent\")}" }
+                }
+            }
+            if models.is_empty() {
+                p { class: "muted", "It serves no model the hub knows of yet." }
+            } else {
+                table {
+                    thead { tr { th { "Model" } th { "What it is" } th { "" } } }
+                    tbody {
+                        for m in models {
+                            ModelRow { key: "{text(&m, \"name\")}", model: m.clone(), on_changed: move |_| on_changed.call(()) }
+                        }
+                    }
                 }
             }
             div { class: "actions",
@@ -545,7 +593,7 @@ fn BackendCard(backend: Value, on_changed: EventHandler<()>) -> Element {
             }
             match &*tested.read() {
                 Some(Ok(out)) => {
-                    let row = out["backends"].get(0).cloned().unwrap_or(Value::Null);
+                    let row = out["sources"].get(0).cloned().unwrap_or(Value::Null);
                     match row["ok"].as_bool() {
                         Some(true) => rsx! { p { class: "ok", "Answers; serves {lookup::strings(&row[\"models\"]).join(\", \")}" } },
                         Some(false) => rsx! { p { class: "error", "{text(&row, \"error\")}" } },
@@ -557,7 +605,7 @@ fn BackendCard(backend: Value, on_changed: EventHandler<()>) -> Element {
             }
             if keying() {
                 OpForm {
-                    op: "backend.key",
+                    op: "source.key",
                     fixed: named.clone(),
                     labels: vec![label("key", "new API key (empty takes it out)"), label("key_env", "key from a variable")],
                     more: vec!["key_env".to_string()],
@@ -568,13 +616,94 @@ fn BackendCard(backend: Value, on_changed: EventHandler<()>) -> Element {
                 }
             }
             OpForm {
-                op: "backend.remove",
+                op: "source.refresh",
+                fixed: named.clone(),
+                submit: "Ask it again which models it serves",
+                saved: true,
+                on_done: move |_| on_changed.call(()),
+            }
+            OpForm {
+                op: "source.remove",
                 fixed: named.clone(),
                 submit: "Remove",
                 danger: true,
-                confirm: "Remove {name}, and the key kept for it? Refused while something uses it.",
+                confirm: "Remove {name}, with its models and the key kept for it? Refused while something uses one of its models.",
                 quiet: true,
                 on_done: move |_| on_changed.call(()),
+            }
+        }
+    }
+}
+
+/// A model of a source: what it is, whether it is on; turned on, off, or
+/// said how strong it is.
+#[component]
+fn ModelRow(model: Value, on_changed: EventHandler<()>) -> Element {
+    let name = text(&model, "name");
+    let named = vec![("model".to_string(), json!(name))];
+    let on = model["on"] == true;
+    let llm = text(&model, "type") == "llm";
+    let mut what = match text(&model, "type").as_str() {
+        "llm" => {
+            let mut said = format!("LLM, {}", text(&model, "tier"));
+            if let Some(n) = model["context_window"].as_u64() {
+                said.push_str(&format!(", {n} tokens"));
+            }
+            match model["tools"].as_bool() {
+                Some(true) => said.push_str(", makes tool calls"),
+                Some(false) => said.push_str(", no tool calls"),
+                None => {}
+            }
+            said
+        }
+        "embedding" => format!("embedding model, {} dimensions", text(&model, "dimensions")),
+        _ => "not known yet: asked when it is turned on".to_string(),
+    };
+    if model["missing"] == true {
+        what.push_str("; its source no longer lists it");
+    }
+    rsx! {
+        tr {
+            td { "{name}" }
+            td { "{what}" }
+            td {
+                if on {
+                    OpForm {
+                        op: "model.off",
+                        fixed: named.clone(),
+                        submit: "Turn off",
+                        quiet: true,
+                        on_done: move |_| on_changed.call(()),
+                    }
+                    if llm {
+                        OpForm {
+                            op: "model.set",
+                            fixed: named.clone(),
+                            values: vec![value("tier", text(&model, "tier"))],
+                            picks: vec![Pick::named("tier", TIERS)],
+                            labels: vec![
+                                label("tier", "how strong it is"),
+                                label("context_window", "tokens of context its server runs it with"),
+                                label("tools", "makes tool calls"),
+                            ],
+                            more: vec!["context_window".to_string(), "tools".to_string()],
+                            submit: "Save",
+                            saved: true,
+                            on_done: move |_| on_changed.call(()),
+                        }
+                    }
+                } else {
+                    OpForm {
+                        op: "model.on",
+                        fixed: named.clone(),
+                        values: if llm { vec![value("tier", text(&model, "tier"))] } else { vec![] },
+                        picks: vec![Pick::named("tier", TIERS)],
+                        labels: vec![label("tier", "how strong it is, for an LLM")],
+                        more: vec!["tier".to_string()],
+                        submit: "Turn on",
+                        on_done: move |_| on_changed.call(()),
+                    }
+                }
             }
         }
     }
@@ -583,22 +712,22 @@ fn BackendCard(backend: Value, on_changed: EventHandler<()>) -> Element {
 #[component]
 fn KnowledgeModels() -> Element {
     let (mut shown, now) = settings();
-    let backends = use_op("backend.list");
-    let tested = use_op("backend.test");
+    let pool = use_op("model.list");
     let Some(now) = now else {
         return waiting(&shown);
     };
-    let models = lookup::models(&lookup::backends(&backends), &tested);
+    let llms = lookup::pool_models(&pool, "llm");
+    let embeddings = lookup::pool_models(&pool, "embedding");
     let distill = &now["distill"];
     let embed = &now["embed"];
     let embed_model = if embed.is_null() {
         String::new()
     } else {
-        format!("{}:{}", text(embed, "backend"), text(embed, "model"))
+        format!("{}:{}", text(embed, "source"), text(embed, "model"))
     };
-    let pick = |field: &str| Pick {
+    let pick = |field: &str, options: &Vec<(String, String)>| Pick {
         field: field.into(),
-        options: models.clone(),
+        options: options.clone(),
         strict: false,
     };
     rsx! {
@@ -612,7 +741,7 @@ fn KnowledgeModels() -> Element {
                     value("when_none", text(distill, "when_none")),
                     value("max_tokens", text(distill, "max_tokens")),
                 ],
-                picks: vec![pick("models"), when_none("Fail the share into review/")],
+                picks: vec![pick("models", &llms), when_none("Fail the share into review/")],
                 labels: vec![label("when_none", "when none can be used"), label("max_tokens", "most tokens of one answer")],
                 more: vec!["max_tokens".to_string()],
                 submit: "Save",
@@ -629,7 +758,7 @@ fn KnowledgeModels() -> Element {
                     value("model", embed_model),
                     value("min_similarity", if embed.is_null() { String::new() } else { text(embed, "min_similarity") }),
                 ],
-                picks: vec![pick("model")],
+                picks: vec![pick("model", &embeddings)],
                 when: vec![When::new("model", "off", &[""]), When::new("min_similarity", "off", &[""])],
                 labels: vec![
                     label("off", "no embedding model: find notes by their words alone"),
@@ -661,12 +790,11 @@ fn KnowledgeModels() -> Element {
 #[component]
 fn Sources() -> Element {
     let (mut shown, now) = settings();
-    let backends = use_op("backend.list");
-    let tested = use_op("backend.test");
+    let pool = use_op("model.list");
     let Some(now) = now else {
         return waiting(&shown);
     };
-    let models = lookup::models(&lookup::backends(&backends), &tested);
+    let models = lookup::pool_models(&pool, "llm");
     let filter = &now["source_filter"];
     let used = &filter["models"];
     rsx! {

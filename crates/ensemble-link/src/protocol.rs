@@ -14,7 +14,7 @@ use serde_json::Value;
 /// The version of what is said here. The runner sends it as the
 /// [`VERSION_HEADER`] of every link it opens, and a hub refuses one of
 /// another version, or of none, before anything else.
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 /// The path of a runner's link on the hub's port.
 pub const PATH: &str = "/link";
 /// The header of the upgrade that carries the runner's [`VERSION`].
@@ -116,7 +116,8 @@ pub const TASK_METHODS: [&str; 13] = [
 /// Answered with `{runner}`, its `<owner>/<name>`.
 pub const RUNNER: &str = "runner";
 /// The account's runners connected now: `{}`, answered with `{runners:
-/// [{runner, agents}]}`, each with every agent of its teams.
+/// [{runner, agents, models}]}`, each with every agent of its teams and the
+/// models it shares, `[{source, id, kind}]`, as its relay socket offered them.
 pub const RUNNERS: &str = "runners";
 
 /// The most a WebSocket message may be: a model call's request, and some

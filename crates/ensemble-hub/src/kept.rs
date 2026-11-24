@@ -1,8 +1,8 @@
-//! Where the hub keeps its settings and the keys of its backends: in typed
+//! Where the hub keeps its settings and the keys of its sources: in typed
 //! tables of its core's database (`<config-dir>/hub/core/database.db`), as a
 //! GitLab instance keeps its application settings, so that the operations,
 //! the REST API and a web UI change them, and a deployment, such as the
-//! NixOS module, only runs the hub. The backends, their keys, sealed by the
+//! NixOS module, only runs the hub. The ANN pool, its keys, sealed by the
 //! `master.key` beside the database, and the audit log are kept as a
 //! runner's are ([`ensemble_store::kept`]).
 //!
@@ -15,7 +15,7 @@ use ensemble_config::{
 };
 use ensemble_core::state::HubDir;
 use ensemble_store::kept::{
-    self, audited, backend_rows, int, name_of, named, num, read_backends, some_text, txt,
+    self, audited, int, name_of, named, num, pool_rows, read_pool, some_text, txt,
 };
 use ensemble_store::{Value, rows, text, transaction};
 use std::collections::BTreeMap;
@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 pub use ensemble_store::kept::MASTER_KEY_FILE;
 
-/// What keeps a backend's key, for what is said.
+/// What keeps a source's key, for what is said.
 const PROGRAM: &str = "ensemble-hub";
 
 /// What the hub's settings are called in what is said.
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS hub_settings (
     distill_max_tokens INTEGER NOT NULL,
     recall_max_notes INTEGER NOT NULL,
     recall_max_chars INTEGER NOT NULL,
-    embed_backend TEXT,
+    embed_source TEXT,
     embed_model TEXT,
     embed_min_similarity REAL,
     filter_when_none TEXT,
@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS roles (
 CREATE TABLE IF NOT EXISTS models (
     purpose TEXT NOT NULL,
     position INTEGER NOT NULL,
-    backend TEXT NOT NULL,
+    source TEXT NOT NULL,
     model TEXT NOT NULL,
     PRIMARY KEY (purpose, position)
 );
@@ -160,7 +160,7 @@ impl Keep<HubSettings> for HubStore {
         core(&self.dir, async |c| {
             let found = rows(
                 c,
-                "SELECT owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_backend, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt FROM hub_settings WHERE id = 1",
+                "SELECT owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_source, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt FROM hub_settings WHERE id = 1",
                 vec![],
             )
             .await?;
@@ -178,7 +178,7 @@ impl Keep<HubSettings> for HubStore {
             let mut models: BTreeMap<String, Vec<ModelSetting>> = BTreeMap::new();
             for m in rows(
                 c,
-                "SELECT purpose, backend, model FROM models ORDER BY purpose, position",
+                "SELECT purpose, source, model FROM models ORDER BY purpose, position",
                 vec![],
             )
             .await?
@@ -187,7 +187,7 @@ impl Keep<HubSettings> for HubStore {
                     .entry(some_text(&m[0], "models.purpose")?)
                     .or_default()
                     .push(ModelSetting {
-                        backend: some_text(&m[1], "models.backend")?,
+                        source: some_text(&m[1], "models.source")?,
                         model: some_text(&m[2], "models.model")?,
                     });
             }
@@ -214,7 +214,6 @@ impl Keep<HubSettings> for HubStore {
                     },
                 );
             }
-            let (backends, _) = read_backends(c).await?;
             let registration = match some_text(&r[1], "registration")?.as_str() {
                 "closed" => RegistrationSetting::Closed,
                 "approval" => RegistrationSetting::Approval {
@@ -223,8 +222,8 @@ impl Keep<HubSettings> for HubStore {
                 other => return Err(format!("registration: '{other}' is unknown")),
             };
             let embed = match text(&r[10]) {
-                Some(backend) => Some(EmbedSetting {
-                    backend,
+                Some(source) => Some(EmbedSetting {
+                    source,
                     model: some_text(&r[11], "embed.model")?,
                     min_similarity: match &r[12] {
                         Value::Real(x) => *x,
@@ -252,7 +251,7 @@ impl Keep<HubSettings> for HubStore {
                 lockout_failures: num(&r[4], "lockout_failures")?,
                 lockout_minutes: num(&r[5], "lockout_minutes")?,
                 roles,
-                backends,
+                ann_pool: read_pool(c).await?,
                 distill: ModelsSetting {
                     candidates: models.remove(DISTILL).unwrap_or_default(),
                     when_none: named::<WhenNone>(&r[6], "distill.when_none")?,
@@ -272,12 +271,8 @@ impl Keep<HubSettings> for HubStore {
             RegistrationSetting::Closed => ("closed", Value::Null),
             RegistrationSetting::Approval { max_pending } => ("approval", int(max_pending)),
         };
-        let (embed_backend, embed_model, embed_min) = match &s.embed {
-            Some(e) => (
-                txt(&e.backend),
-                txt(&e.model),
-                Value::Real(e.min_similarity),
-            ),
+        let (embed_source, embed_model, embed_min) = match &s.embed {
+            Some(e) => (txt(&e.source), txt(&e.model), Value::Real(e.min_similarity)),
             None => (Value::Null, Value::Null, Value::Null),
         };
         let (filter_when_none, filter_max_tokens, filter_prompt) = match &s.source_filter {
@@ -291,7 +286,7 @@ impl Keep<HubSettings> for HubStore {
         let mut statements = vec![
             ("DELETE FROM hub_settings", vec![]),
             (
-                "INSERT INTO hub_settings (id, owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_backend, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                "INSERT INTO hub_settings (id, owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_source, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 vec![
                     txt(&s.owner),
                     txt(registration),
@@ -303,7 +298,7 @@ impl Keep<HubSettings> for HubStore {
                     int(s.distill.max_tokens),
                     int(s.recall_max_notes),
                     int(s.recall_max_chars),
-                    embed_backend,
+                    embed_source,
                     embed_model,
                     embed_min,
                     filter_when_none,
@@ -326,8 +321,8 @@ impl Keep<HubSettings> for HubStore {
         for (purpose, models) in std::iter::once((DISTILL, &s.distill)).chain(filter) {
             for (i, m) in models.candidates.iter().enumerate() {
                 statements.push((
-                    "INSERT INTO models (purpose, position, backend, model) VALUES (?1, ?2, ?3, ?4)",
-                    vec![txt(purpose), int(i as i64), txt(&m.backend), txt(&m.model)],
+                    "INSERT INTO models (purpose, position, source, model) VALUES (?1, ?2, ?3, ?4)",
+                    vec![txt(purpose), int(i as i64), txt(&m.source), txt(&m.model)],
                 ));
             }
         }
@@ -348,7 +343,7 @@ impl Keep<HubSettings> for HubStore {
                 ],
             ));
         }
-        statements.extend(backend_rows(&s.backends, &[]));
+        statements.extend(pool_rows(&s.ann_pool));
         statements.push(audited(change));
         core(&self.dir, async |c| transaction(c, statements).await)
     }
@@ -357,7 +352,7 @@ impl Keep<HubSettings> for HubStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ensemble_config::BackendSetting;
+    use ensemble_config::{ModelKind, SourceSetting, Tier};
     use ensemble_core::workspace::testing::TempDir;
     use ensemble_store::kept::{audit, is_new};
 
@@ -374,36 +369,58 @@ mod tests {
             .unwrap();
         assert_eq!(store.read().unwrap().as_ref(), Some(&hub), "as it starts");
         hub.registration = RegistrationSetting::Approval { max_pending: 3 };
-        hub.backends.insert(
+        let pool = &mut hub.ann_pool;
+        pool.sources.insert(
             "local".into(),
-            BackendSetting::OpenAiCompatible {
+            SourceSetting::OpenAiCompatible {
                 base_url: "http://127.0.0.1:1/v1".into(),
-                api_key_env: Some("ENSEMBLE_BACKEND_LOCAL_KEY".into()),
+                api_key_env: Some("ENSEMBLE_SOURCE_LOCAL_KEY".into()),
                 timeout_seconds: 5,
+                max_concurrent: 2,
             },
         );
-        hub.backends.insert(
+        pool.sources.insert(
             "claude".into(),
-            BackendSetting::Anthropic {
+            SourceSetting::Anthropic {
                 base_url: "https://api.anthropic.com".into(),
                 api_key_env: None,
                 timeout_seconds: 9,
+                max_concurrent: 4,
             },
         );
-        hub.backends.insert(
+        pool.sources.insert(
             "gpu".into(),
-            BackendSetting::Runner {
+            SourceSetting::Runner {
                 runner: "kim/box".into(),
-                backend: "big".into(),
             },
         );
-        let model = |backend: &str, model: &str| ModelSetting {
-            backend: backend.into(),
+        let llm = |tier| ModelKind::Llm {
+            tier,
+            context_window: Some(32768),
+            tools: Some(false),
+        };
+        pool.turn_on("local", "small", llm(Tier::Small));
+        pool.turn_on("local", "nomic", ModelKind::Embedding { dimensions: 768 });
+        pool.turn_on("gpu", "local:big", llm(Tier::Strong));
+        pool.turn_on("claude", "haiku", llm(Tier::Medium));
+        pool.models.push(ensemble_config::PoolModel {
+            source: "local".into(),
+            id: "unasked".into(),
+            kind: ModelKind::Unknown,
+            on: false,
+            missing: true,
+            shared: false,
+        });
+        // Kept in the order of their sources and ids.
+        pool.models
+            .sort_by(|a, b| (&a.source, &a.id).cmp(&(&b.source, &b.id)));
+        let model = |source: &str, model: &str| ModelSetting {
+            source: source.into(),
             model: model.into(),
         };
-        hub.distill.candidates = vec![model("local", "small"), model("gpu", "big")];
+        hub.distill.candidates = vec![model("local", "small"), model("gpu", "local:big")];
         hub.embed = Some(EmbedSetting {
-            backend: "local".into(),
+            source: "local".into(),
             model: "nomic".into(),
             min_similarity: 0.45,
         });
@@ -432,7 +449,7 @@ mod tests {
         };
         const KEY: &[ensemble_ops::Field] = &[ensemble_ops::Field::secret("key", "")];
         let spec = ensemble_ops::Spec {
-            name: "backend.key",
+            name: "source.key",
             summary: "",
             access: ensemble_ops::Access::Local,
             input: KEY,

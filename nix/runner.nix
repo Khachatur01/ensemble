@@ -27,9 +27,9 @@ in
           A file of NAME=value lines put in the runner's environment, such as
           a secret sops-nix or agenix puts in /run: the keys a secrets manager
           keeps, which a backend names with
-          `ensemble-runner backend key <name> --key-env <NAME>`. A path as a
+          `ensemble-runner source key <name> --key-env <NAME>`. A path as a
           string, so the keys never enter the Nix store. A key given to
-          `ensemble-runner backend key` is kept in the runner's database
+          `ensemble-runner source key` is kept in the runner's database
           instead.
         '';
       };

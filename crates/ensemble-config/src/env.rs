@@ -29,10 +29,10 @@ pub fn config_path(org: &Path) -> PathBuf {
     org.join(CONFIG_FILENAME)
 }
 
-/// The variable that holds the API key of the LLM backend `name` when Ensemble
+/// The variable that holds the API key of the source `name` when Ensemble
 /// keeps the key itself, sealed in its database:
-/// `ENSEMBLE_BACKEND_<NAME>_KEY`, its letters upper case and anything else `_`.
-pub fn backend_key_variable(name: &str) -> String {
+/// `ENSEMBLE_SOURCE_<NAME>_KEY`, its letters upper case and anything else `_`.
+pub fn source_key_variable(name: &str) -> String {
     let name: String = name
         .chars()
         .map(|c| {
@@ -43,5 +43,5 @@ pub fn backend_key_variable(name: &str) -> String {
             }
         })
         .collect();
-    format!("ENSEMBLE_BACKEND_{name}_KEY")
+    format!("ENSEMBLE_SOURCE_{name}_KEY")
 }

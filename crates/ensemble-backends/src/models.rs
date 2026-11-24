@@ -1,4 +1,4 @@
-//! Asking an LLM backend which models it serves.
+//! Asking a source of the ANN pool which models it serves, and what each is.
 //!
 //! An agent's harness calls its model; only a light `direct` agent is a request
 //! Ensemble makes itself, through `chat`. This is only the health check:
@@ -6,7 +6,8 @@
 //! key is accepted, it spends no tokens, and its answer says whether the model
 //! an agent names is really there.
 
-use ensemble_config::{BackendSettings, LlmBackend};
+use crate::catalog;
+use ensemble_config::{BackendSettings, LlmBackend, ModelKind, Tier};
 use ensemble_core::port::Error;
 use std::time::Duration;
 
@@ -46,6 +47,134 @@ pub fn models(backend: &LlmBackend) -> Result<Vec<String>, Error> {
     let status = resp.status().as_u16();
     let body = resp.body_mut().read_to_string().unwrap_or_default();
     parse(&backend.name, status, &body)
+}
+
+/// A model a source lists, with what it is as far as the source says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub id: String,
+    pub kind: ModelKind,
+}
+
+/// The models `backend` serves, each with what it is: Anthropic's are LLMs,
+/// Ollama says what each of its can do, and of another OpenAI-compatible
+/// server only the LLMs of a family Ensemble knows are known before they are
+/// turned on.
+pub fn discover(backend: &LlmBackend) -> Result<Vec<Found>, Error> {
+    let ids = models(backend)?;
+    let ollama = match &backend.settings {
+        BackendSettings::OpenAiCompatible { base_url, .. } => ollama_at(base_url),
+        BackendSettings::Anthropic { .. } => None,
+    };
+    Ok(ids
+        .into_iter()
+        .map(|id| {
+            let kind = match (&backend.settings, &ollama) {
+                (BackendSettings::Anthropic { .. }, _) => ModelKind::Llm {
+                    tier: catalog::tier(&id).unwrap_or(Tier::Medium),
+                    context_window: None,
+                    tools: Some(true),
+                },
+                (_, Some(origin)) => ollama_kind(origin, &id),
+                (_, None) => match catalog::family(&id) {
+                    Some(tier) => ModelKind::Llm {
+                        tier,
+                        context_window: None,
+                        tools: None,
+                    },
+                    None => ModelKind::Unknown,
+                },
+            };
+            Found { id, kind }
+        })
+        .collect())
+}
+
+/// An LLM `id` whose source did not say what it is, as Ensemble takes it.
+pub fn llm(id: &str) -> ModelKind {
+    ModelKind::Llm {
+        tier: catalog::tier(id).unwrap_or(Tier::Medium),
+        context_window: None,
+        tools: None,
+    }
+}
+
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(PROBE_TIMEOUT))
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
+/// Where Ollama's own API is, when the server at `base_url` is Ollama: its
+/// origin, without `/v1`, where `/api/version` answers.
+fn ollama_at(base_url: &str) -> Option<String> {
+    let origin = base_url.trim_end_matches('/').trim_end_matches("/v1");
+    let mut resp = agent().get(format!("{origin}/api/version")).call().ok()?;
+    if resp.status().as_u16() != 200 {
+        return None;
+    }
+    let body: serde_json::Value =
+        serde_json::from_str(&resp.body_mut().read_to_string().ok()?).ok()?;
+    body.get("version")?;
+    Some(origin.to_string())
+}
+
+/// What Ollama at `origin` says the model `id` is.
+fn ollama_kind(origin: &str, id: &str) -> ModelKind {
+    let shown = agent()
+        .post(format!("{origin}/api/show"))
+        .header("content-type", "application/json")
+        .send(serde_json::json!({ "model": id }).to_string())
+        .ok()
+        .filter(|r| r.status().as_u16() == 200)
+        .and_then(|mut r| r.body_mut().read_to_string().ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    match shown {
+        Some(shown) => ollama_says(id, &shown),
+        None => ModelKind::Unknown,
+    }
+}
+
+/// What a model is, by what Ollama's `/api/show` answered for it.
+fn ollama_says(id: &str, shown: &serde_json::Value) -> ModelKind {
+    let can = |what: &str| {
+        shown["capabilities"]
+            .as_array()
+            .is_some_and(|c| c.iter().any(|c| c == what))
+    };
+    // Its facts are under its architecture's name, such as
+    // `qwen3.context_length`.
+    let info = |key: &str| {
+        shown["model_info"].as_object().and_then(|info| {
+            info.iter()
+                .find(|(k, _)| k.ends_with(key))
+                .and_then(|(_, v)| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok())
+        })
+    };
+    if can("embedding") {
+        return match info(".embedding_length") {
+            Some(dimensions) if dimensions > 0 => ModelKind::Embedding { dimensions },
+            _ => ModelKind::Unknown,
+        };
+    }
+    if !can("completion") {
+        return ModelKind::Unknown;
+    }
+    let size = shown["details"]["parameter_size"]
+        .as_str()
+        .and_then(catalog::billions)
+        .map(catalog::by_size);
+    ModelKind::Llm {
+        tier: catalog::family(id)
+            .or(size)
+            .or_else(|| catalog::tier(id))
+            .unwrap_or(Tier::Medium),
+        context_window: info(".context_length").filter(|n| *n > 0),
+        tools: Some(can("tools")),
+    }
 }
 
 /// A read that ran out of time is a timeout, not a generic transport failure.
@@ -92,6 +221,32 @@ fn parse(backend: &str, status: u16, body: &str) -> Result<Vec<String>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ollama_says_what_each_model_can_do() {
+        let chat = serde_json::json!({
+            "capabilities": ["completion", "tools"],
+            "details": { "parameter_size": "72.7B" },
+            "model_info": { "qwen2.context_length": 32768 },
+        });
+        assert_eq!(
+            ollama_says("my-qwen", &chat),
+            ModelKind::Llm {
+                tier: Tier::Strong,
+                context_window: Some(32768),
+                tools: Some(true),
+            }
+        );
+        let embedding = serde_json::json!({
+            "capabilities": ["embedding"],
+            "model_info": { "bert.embedding_length": 768 },
+        });
+        assert_eq!(
+            ollama_says("nomic-embed-text", &embedding),
+            ModelKind::Embedding { dimensions: 768 }
+        );
+        assert_eq!(ollama_says("x", &serde_json::json!({})), ModelKind::Unknown);
+    }
 
     #[test]
     fn the_model_ids_are_read_from_data() {

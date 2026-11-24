@@ -1,4 +1,4 @@
-//! The hub's settings operations beside its backends
+//! The hub's settings operations beside its ANN pool
 //! (`ensemble_backends::ops`): what a person means to change, each checked as
 //! it is made, so nobody edits the hub's settings nor knows its keys.
 //!
@@ -25,7 +25,8 @@
 //! [`Kept`]: ensemble_config::kept::Kept
 
 use crate::accounts::HubContext;
-use ensemble_backends::ops::WithBackends;
+use ensemble_backends::ops::WithPool;
+use ensemble_config::ann::Use;
 use ensemble_config::kept::{Change, WithKept};
 use ensemble_config::{
     EmbedSetting, HubSettings, LlmBackend, ModelSetting, ModelsSetting, Permission,
@@ -41,13 +42,13 @@ const PERMISSIONS: &[&str] = Permission::NAMES;
 const NO_CHECK: Field = Field::new(
     "no_check",
     Kind::Flag,
-    "Do not ask the backends whether they serve the models first.",
+    "Do not ask the sources whether they serve the models now.",
 );
 const DISTILL: &[Field] = &[
     Field::new(
         "models",
         Kind::List,
-        "The models that turn shares into notes, in order, each <backend>:<model>, such as central:qwen3.5-72b.",
+        "The models that turn shares into notes, in order, each <source>:<model>, an LLM of the hub's ANN pool that is on, such as central:qwen3.5-72b.",
     )
     .required()
     .positional(),
@@ -66,7 +67,7 @@ const DISTILL: &[Field] = &[
 const EMBED: &[Field] = &[
     Field::text(
         "model",
-        "The embedding model, <backend>:<model>, such as central:nomic-embed-text.",
+        "The embedding model, <source>:<model>, an embedding model of the hub's ANN pool that is on, such as central:nomic-embed-text.",
     )
     .positional(),
     Field::text(
@@ -132,7 +133,7 @@ const SOURCE_FILTER: &[Field] = &[
     Field::new(
         "models",
         Kind::List,
-        "The models that collect and filter, in order, each <backend>:<model>; unchanged when left out.",
+        "The models that collect and filter, in order, each <source>:<model>, an LLM of the hub's ANN pool that is on; unchanged when left out.",
     )
     .positional(),
     Field::text(
@@ -532,9 +533,9 @@ fn distill(c: &HubContext, input: Distill, change: Change) -> Result<Value, Erro
     }
     let mut candidates = Vec::new();
     for given in &input.models {
-        let (backend, model) = model_of(c, given, "models", input.no_check)?;
+        let (source, model) = model_of(c, given, "models", Use::Llm, input.no_check)?;
         candidates.push(ModelSetting {
-            backend: backend.to_string(),
+            source: source.to_string(),
             model: model.to_string(),
         });
     }
@@ -567,9 +568,9 @@ fn source_filter(c: &HubContext, input: SourceFilter, change: Change) -> Result<
     }
     let mut candidates = Vec::new();
     for given in &input.models {
-        let (backend, model) = model_of(c, given, "models", input.no_check)?;
+        let (source, model) = model_of(c, given, "models", Use::Llm, input.no_check)?;
         candidates.push(ModelSetting {
-            backend: backend.to_string(),
+            source: source.to_string(),
             model: model.to_string(),
         });
     }
@@ -680,9 +681,9 @@ fn embed(c: &HubContext, input: Embed, change: Change) -> Result<Value, Error> {
         );
     }
     let given = input.model.as_deref().ok_or_else(|| {
-        Error::invalid("name the model, <backend>:<model>, or say `off`").on("model")
+        Error::invalid("name the model, <source>:<model>, or say `off`").on("model")
     })?;
-    let (backend, model) = split(given, "model")?;
+    let (source, model) = model_of(c, given, "model", Use::Embedding, true)?;
     let now = c.kept()?.read()?.embed.map(|e| e.min_similarity);
     let min = match &input.min_similarity {
         Some(m) => m
@@ -696,25 +697,22 @@ fn embed(c: &HubContext, input: Embed, change: Change) -> Result<Value, Error> {
             })?,
         None => now.unwrap_or(0.5),
     };
-    let backends = c.backends()?;
-    if let Some(b) = backends.direct.get(backend) {
-        if !input.no_check {
-            ensemble_backends::embed::embed(b, model, &["check".to_string()]).map_err(|e| {
-                Error::new(
-                    Code::Unavailable,
-                    format!("{model} on {backend} did not embed: {e}"),
-                )
-                .on("model")
-                .hint("check the model's name, or go on without asking with `no_check`")
-            })?;
-        }
-    } else if !backends.relayed.contains_key(backend) {
-        return Err(no_backend(backend, "model"));
+    if !input.no_check
+        && let Some(b) = c.pool()?.direct.get(source)
+    {
+        ensemble_backends::embed::embed(b, model, &["check".to_string()]).map_err(|e| {
+            Error::new(
+                Code::Unavailable,
+                format!("{source}:{model} did not embed: {e}"),
+            )
+            .on("model")
+            .hint("check the model's name, or go on without asking with `no_check`")
+        })?;
     }
-    let said = format!("notes are found by their meaning too, with {model} on {backend}");
+    let said = format!("notes are found by their meaning too, with {source}:{model}");
     edit(c, change, said, |s| {
         s.embed = Some(EmbedSetting {
-            backend: backend.to_string(),
+            source: source.to_string(),
             model: model.to_string(),
             min_similarity: min,
         });
@@ -987,31 +985,57 @@ fn import(c: &HubContext, text: &str, change: Change) -> Result<Value, Error> {
     Ok(json!({ "said": "the hub's settings are those imported", "note": note }))
 }
 
-/// `given`, `<backend>:<model>`, as one of the hub's backends and a model it
-/// serves, unless not asked to check, or the backend is a runner's, which
-/// only the running hub reaches.
+/// `given`, `<source>:<model>`, as a model of the hub's ANN pool that is on
+/// and of `use_`, and, unless not asked to check, one its source serves now;
+/// a model of a runner only the running hub reaches.
 fn model_of<'g>(
     c: &HubContext,
     given: &'g str,
     field: &str,
+    use_: Use,
     no_check: bool,
 ) -> Result<(&'g str, &'g str), Error> {
-    let (backend, model) = split(given, field)?;
-    let backends = c.backends()?;
-    match backends.direct.get(backend) {
-        Some(b) if !no_check => serves(b, model, field)?,
-        Some(_) => {}
-        None if backends.relayed.contains_key(backend) => {}
-        None => return Err(no_backend(backend, field)),
+    let (source, model) = split(given, field)?;
+    let pool = c.kept_pool()?;
+    let Some(found) = pool.model(source, model) else {
+        return Err(Error::not_found(format!(
+            "there is no model '{source}:{model}' in the hub's ANN pool"
+        ))
+        .on(field)
+        .hint("`model list` lists them; `source add` adds a source and `source refresh` asks the sources again"));
+    };
+    if !found.on {
+        return Err(Error::invalid(format!(
+            "{source}:{model} is off; turn it on first with `model on {source}:{model}`"
+        ))
+        .on(field));
     }
-    Ok((backend, model))
+    let fits = match use_ {
+        Use::Llm => found.usable_llm(),
+        Use::Embedding => found.usable_embedding(),
+    };
+    if !fits {
+        let wanted = match use_ {
+            Use::Llm => "an LLM",
+            Use::Embedding => "an embedding model",
+        };
+        return Err(Error::invalid(format!(
+            "{source}:{model} is not {wanted}: it is {}",
+            found.kind.describe()
+        ))
+        .on(field));
+    }
+    if !no_check && let Some(b) = c.pool()?.direct.get(source) {
+        serves(b, model, field)?;
+    }
+    Ok((source, model))
 }
 
-fn serves(backend: &LlmBackend, model: &str, field: &str) -> Result<(), Error> {
-    let models = ensemble_backends::models::models(backend).map_err(|e| {
+fn serves(source: &LlmBackend, model: &str, field: &str) -> Result<(), Error> {
+    let models = ensemble_backends::models::models(source).map_err(|e| {
         Error::new(
             Code::Unavailable,
-            format!("could not ask {} which models it serves: {e}", backend.name),
+            format!("could not ask {} which models it serves: {e}", source.name),
         )
         .on(field)
         .hint("go on without asking with `no_check`")
@@ -1020,8 +1044,8 @@ fn serves(backend: &LlmBackend, model: &str, field: &str) -> Result<(), Error> {
         return Ok(());
     }
     Err(Error::invalid(format!(
-        "{} does not serve '{model}'; it serves {}",
-        backend.name,
+        "{} does not serve '{model}' now; it serves {}",
+        source.name,
         if models.is_empty() {
             "none".to_string()
         } else {
@@ -1031,25 +1055,19 @@ fn serves(backend: &LlmBackend, model: &str, field: &str) -> Result<(), Error> {
     .on(field))
 }
 
-/// `<backend>:<model>`: the backend's name has no ':', the model's may.
+/// `<source>:<model>`: the source's name has no ':', the model's may.
 fn split<'g>(given: &'g str, field: &str) -> Result<(&'g str, &'g str), Error> {
     given
         .trim()
         .split_once(':')
-        .map(|(b, m)| (b.trim(), m.trim()))
-        .filter(|(b, m)| !b.is_empty() && !m.is_empty())
+        .map(|(s, m)| (s.trim(), m.trim()))
+        .filter(|(s, m)| !s.is_empty() && !m.is_empty())
         .ok_or_else(|| {
             Error::invalid(format!(
-                "'{given}' must be <backend>:<model>, such as central:qwen3.5-72b"
+                "'{given}' must be <source>:<model>, such as central:qwen3.5-72b"
             ))
             .on(field)
         })
-}
-
-fn no_backend(backend: &str, field: &str) -> Error {
-    Error::not_found(format!("there is no backend '{backend}'"))
-        .on(field)
-        .hint("`backend list` lists them; `backend add` adds one")
 }
 
 /// Refuse a name that is not one word of letters, digits, '-' or '_'.

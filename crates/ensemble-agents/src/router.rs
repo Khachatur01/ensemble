@@ -151,7 +151,7 @@ impl Ensemble {
         agent: &'a AgentConfig,
     ) -> (Vec<(&'a LlmBackend, &'a str)>, Vec<usize>) {
         agent
-            .llm_backends()
+            .pool_models()
             .into_iter()
             .enumerate()
             .filter_map(|(i, (b, m))| config.llm_backends.get(b).map(|b| ((b, m), i)))
@@ -386,7 +386,7 @@ impl Ensemble {
         config.llm_backends.get(backend).ok_or_else(|| {
             RouteError::Agent(Error::Unsupported {
                 backend: backend.to_string(),
-                detail: format!("LLM backend for agent '{name}' is not defined"),
+                detail: format!("the source of agent '{name}' is not in the runner's ANN pool"),
             })
         })
     }
@@ -420,14 +420,14 @@ impl Ensemble {
                 .await
             }
             Adapter::Direct(la) => {
-                let backend = Self::backend_of(config, name, la.backend())?;
+                let backend = Self::backend_of(config, name, la.source())?;
                 run(Box::pin(direct::run(
                     agent, la, backend, task, context, progress, cancel,
                 )))
                 .await
             }
             Adapter::Builtin(ba) => {
-                let backend = Self::backend_of(config, name, ba.backend())?;
+                let backend = Self::backend_of(config, name, ba.source())?;
                 run(Box::pin(builtin::run(
                     agent, ba, backend, task, context, workdir, progress, cancel,
                 )))
@@ -435,7 +435,7 @@ impl Ensemble {
             }
             Adapter::OpenCode(oc) => {
                 let backend = oc
-                    .llm_backend()
+                    .source()
                     .map(|b| Self::backend_of(config, name, b))
                     .transpose()?;
                 run(Box::pin(opencode::run(
@@ -553,7 +553,7 @@ impl Ensemble {
                 // No program: its backend, checked below, is all it needs.
                 Adapter::Direct(_) | Adapter::Builtin(_) => {}
             }
-            for (b, model) in a.llm_backends() {
+            for (b, model) in a.pool_models() {
                 backends.entry(b).or_default().push(model);
             }
         }
@@ -654,7 +654,7 @@ agents:
       type: unlimited
     adapter:
       type: opencode
-      model: {{ type: llm_backend, try: [{{ backend: local, name: qwen3.5-9b, context_window: 32768 }}], when_none: fail }}
+      model: {{ type: ann_pool, try: [{{ source: local, name: qwen3.5-9b, context_window: 32768 }}], when_none: fail }}
       tools: [read, edit]
       system_prompt: append
       max_steps: 30
@@ -700,7 +700,7 @@ agents:
     /// A `direct` agent that tries `home`, then `central`, in a fresh folder.
     fn with_fallback(home: &str, central: &str, when_none: &str) -> (Ensemble, TempDir) {
         let yaml = format!(
-            "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ backend: home, model: small }}\n        - {{ backend: central, model: big }}\n      when_none: {when_none}\n      max_tokens: 10\n"
+            "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ source: home, model: small }}\n        - {{ source: central, model: big }}\n      when_none: {when_none}\n      max_tokens: 10\n"
         );
         let cfg = config::parse(&yaml, std::path::Path::new("config.yaml"))
             .and_then(|c| {

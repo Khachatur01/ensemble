@@ -102,7 +102,7 @@ fn start(dir: &HubDir, owner: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     kept::settings(dir).write(&settings, &Change::by_this_computer("init"))?;
     println!(
-        "Made the hub {}: closed to sign-ups, with no LLM backend yet. Its settings are kept in {}.",
+        "Made the hub {}: closed to sign-ups, with no source of models yet. Its settings are kept in {}.",
         hub.owner,
         dir.database().display()
     );
@@ -191,7 +191,7 @@ fn setup(
         }
     }
     println!(
-        "Next: give it a model server with `ensemble-hub backend add <name> --type openai-compatible-api --url <url>`, choose the models that distill shares with `ensemble-hub knowledge models <backend>:<model>`, and watch a tracker with `ensemble-hub tracker add`. `ensemble-hub settings show` shows every setting."
+        "Next: give it a model server with `ensemble-hub source add <name> --type openai-compatible-api --url <url> --max-concurrent <n>`, turn the models you want on with `ensemble-hub model on <name>:<model>`, choose those that distill shares with `ensemble-hub knowledge models <name>:<model>`, and watch a tracker with `ensemble-hub tracker add`. `ensemble-hub settings show` shows every setting."
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -204,35 +204,35 @@ fn check(ctx: &Ctx) -> Result<ExitCode, String> {
     if !ensemble_knowledge::Vault::new(&knowledge.vault).exists() {
         println!("  it is not a git repository yet; `ensemble-hub serve` makes it");
     }
-    // Those of runners are reached only while the hub serves.
+    // The models of runners are reached only while the hub serves.
     let backends = hub.llm.backends(None);
     let candidates: Vec<(&config::LlmBackend, &str)> = knowledge
         .distill
         .fallback
         .candidates
         .iter()
-        .filter_map(|c| backends.get(&c.backend).map(|b| (b, c.model.as_str())))
+        .filter_map(|c| backends.get(&c.source).map(|b| (b, c.model.as_str())))
         .collect();
     let chosen = !knowledge.distill.fallback.candidates.is_empty();
     let distills = match ensemble_backends::resolve::Resolver::default().choose(&candidates) {
         _ if !chosen => {
             println!(
-                "distill: no model is chosen yet, so shares wait; `ensemble-hub knowledge models <backend>:<model>` chooses them"
+                "distill: no model is chosen yet, so shares wait; `ensemble-hub knowledge models <source>:<model>` chooses them"
             );
             true
         }
         Ok(i) => {
             let c = &knowledge.distill.fallback.candidates[i];
             println!(
-                "distill: shares would be distilled by {} on {}",
-                c.model, c.backend
+                "distill: shares would be distilled by {}:{}",
+                c.source, c.model
             );
             true
         }
         Err(refusals) => {
             println!("distill: no model can be used now:");
             for r in refusals {
-                println!("  {} / {}: {}", r.backend, r.model, r.why);
+                println!("  {}:{}: {}", r.backend, r.model, r.why);
             }
             false
         }
@@ -242,28 +242,27 @@ fn check(ctx: &Ctx) -> Result<ExitCode, String> {
     match &knowledge.embed {
         None => println!("recall: by words"),
         Some(e) => {
-            let answered = match backends.get(&e.backend) {
+            let answered = match backends.get(&e.source) {
                 Some(backend) => {
                     ensemble_backends::embed::embed(backend, &e.model, &["check".to_string()])
                         .map(|_| ())
                         .map_err(|e| e.to_string())
                 }
-                None => Err(match hub.llm.runners.get(&e.backend) {
-                    Some(r) => format!(
-                        "it is runner {}'s, which the hub reaches only while it serves",
-                        r.runner
+                None => Err(match hub.llm.relayed.get(&e.source) {
+                    Some(runner) => format!(
+                        "it is runner {runner}'s, which the hub reaches only while it serves"
                     ),
-                    None => format!("no backend '{}'", e.backend),
+                    None => format!("no source '{}'", e.source),
                 }),
             };
             match answered {
                 Ok(()) => println!(
-                    "recall: by words and by meaning, with {} on {}",
-                    e.model, e.backend
+                    "recall: by words and by meaning, with {}:{}",
+                    e.source, e.model
                 ),
                 Err(why) => println!(
-                    "recall: by words alone for now: {} on {} cannot embed: {why}",
-                    e.model, e.backend
+                    "recall: by words alone for now: {}:{} cannot embed: {why}",
+                    e.source, e.model
                 ),
             }
         }
@@ -311,7 +310,7 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
     let calls: std::sync::Arc<crate::calls::Calls> = std::sync::Arc::default();
     let loopback = ensemble_core::runtime::shared()
         .block_on(ensemble_link::loopback::Loopback::start(
-            ensemble_config::llm::routes(&hub.llm.runners),
+            hub.llm.routes(),
             std::sync::Arc::new(crate::calls::HubOpener(calls.clone())),
         ))
         .map_err(|e| format!("serve: the relay's endpoint: {e}"))?;
@@ -381,7 +380,7 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
         .with_tasks(tasks)
         .with_calls(calls.clone());
     server.operations().1.listening(listen);
-    // `runner.backends` lists what the connected runners share.
+    // `runner.models` lists what the connected runners share.
     server.operations().1.when_serving(move || {
         serde_json::Value::Array(
             calls
@@ -390,8 +389,8 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
                 .map(|o| {
                     serde_json::json!({
                         "runner": o.runner,
-                        "backend": o.backend,
-                        "max_calls": o.max_calls,
+                        "source": o.source,
+                        "max_concurrent": o.max_calls,
                         "models": o.models,
                     })
                 })
@@ -417,11 +416,16 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
         if let Ok(accounts) = server.operations().1.accounts() {
             accounts.apply(now.accounts.roles.clone(), now.accounts.rules);
         }
-        loopback.set_names(ensemble_config::llm::routes(&now.llm.runners));
+        loopback.set_names(now.llm.routes());
         memory.apply(&now);
         Some("The running hub uses it now.".into())
     });
     std::thread::scope(|scope| {
+        // What its sources serve now: a model new to one is kept off.
+        scope.spawn(|| {
+            let said = ensemble_backends::ops::refresh_all(server.operations().1);
+            say(&format!("the sources: {}", said.replace('\n', "; ")));
+        });
         scope.spawn(|| memory.work(&STOP, &say));
         for inbox in &inboxes {
             scope.spawn(|| inbox.work(&STOP, &say));

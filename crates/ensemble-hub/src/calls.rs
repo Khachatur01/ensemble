@@ -1,17 +1,20 @@
 //! Model calls relayed through the hub (`ensemble_link::relay`): between
 //! runners, and from the hub to runners. A runner's relay socket says which
-//! of its backends it shares and how many calls it takes at once; a call to
-//! one goes to that socket, and its answer back to whoever made it, the hub
-//! renumbering each call between the two.
+//! models of which of its sources it shares, and how many calls each source
+//! takes at once; a call to one goes to that socket, and its answer back to
+//! whoever made it, the hub renumbering each call between the two.
 //!
-//! Who may call a runner's backend: its owner's other runners, and the hub. A
-//! call waits for a free place among the runner's
-//! `max_shared_calls` for up to [`BUSY_WAIT`], then is answered busy, and the
-//! caller tries the next model of its list. The hub never learns a backend's
-//! address or key: the runner calls its own.
+//! Who may call a runner's models: its owner's other runners, and the hub. A
+//! call waits for a free place among its source's `max_concurrent` for up
+//! to [`BUSY_WAIT`], then is answered busy, and the caller tries the next
+//! model of its list. A call that names no source asks which models the
+//! runner shares, and the hub answers it itself. The hub never learns a
+//! source's address or key: the runner calls its own.
 
-use ensemble_link::relay::{BUSY_WAIT, Frame, Offer, Open, UNAVAILABLE, body_frames};
-use std::collections::HashMap;
+use ensemble_link::relay::{
+    BUSY_WAIT, Frame, Offer, Open, SharedModel, UNAVAILABLE, body_frames, models_answer,
+};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -30,14 +33,18 @@ pub(crate) enum Caller {
 struct Sharer {
     owner: String,
     name: String,
-    shares: Vec<String>,
-    max_calls: u32,
-    /// The models each shared backend serves, as the runner said.
-    models: std::collections::BTreeMap<String, Vec<String>>,
-    /// A place for each call it takes at once.
-    places: Arc<Semaphore>,
+    /// The sources it shares models of, by name.
+    sources: BTreeMap<String, Source>,
     /// What is sent on its socket.
     outbox: UnboundedSender<Frame>,
+}
+
+/// A source a runner shares models of.
+struct Source {
+    max_calls: u32,
+    models: Vec<SharedModel>,
+    /// A place for each call it takes at once.
+    places: Arc<Semaphore>,
 }
 
 impl Sharer {
@@ -45,7 +52,7 @@ impl Sharer {
         format!("{}/{}", self.owner, self.name)
     }
 
-    /// May `caller` call its backends?
+    /// May `caller` call its models?
     fn serves(&self, caller: &Caller) -> bool {
         match caller {
             Caller::Hub => true,
@@ -82,13 +89,13 @@ pub struct Calls {
     next: AtomicU64,
 }
 
-/// A backend a runner offers, as the hub lists it.
+/// A source a runner shares models of, as the hub lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Offered {
     pub(crate) runner: String,
-    pub(crate) backend: String,
+    pub(crate) source: String,
     pub(crate) max_calls: u32,
-    pub(crate) models: Vec<String>,
+    pub(crate) models: Vec<SharedModel>,
 }
 
 impl Calls {
@@ -115,21 +122,30 @@ impl Calls {
             ));
         }
         if let Some(bad) = offer
-            .shares
-            .iter()
-            .find(|b| !ensemble_config::runner::valid_name(b))
+            .sources
+            .keys()
+            .find(|s| !ensemble_config::runner::valid_name(s))
         {
-            return Err(format!("relay: '{bad}' is not a backend's name"));
+            return Err(format!("relay: '{bad}' is not a source's name"));
         }
-        let max_calls = offer.max_shared_calls.max(1);
+        let sources = offer
+            .sources
+            .iter()
+            .map(|(name, s)| {
+                let max_calls = s.max_concurrent.max(1);
+                let source = Source {
+                    max_calls,
+                    models: s.models.clone(),
+                    places: Arc::new(Semaphore::new(max_calls as usize)),
+                };
+                (name.clone(), source)
+            })
+            .collect();
         let (outbox, frames) = unbounded_channel();
         let sharer = Sharer {
             owner: owner.to_string(),
             name,
-            shares: offer.shares.clone(),
-            max_calls,
-            models: offer.models.clone(),
-            places: Arc::new(Semaphore::new(max_calls as usize)),
+            sources,
             outbox,
         };
         let id = sharer.id();
@@ -152,7 +168,9 @@ impl Calls {
             return;
         };
         // Calls waiting for a place there wait no longer.
-        gone.places.close();
+        for source in gone.sources.values() {
+            source.places.close();
+        }
         let ended: Vec<u64> = inner
             .served
             .iter()
@@ -169,22 +187,22 @@ impl Calls {
         inner.made.retain(|(s, _), _| *s != socket);
     }
 
-    /// Every backend the connected runners share, by runner.
+    /// Every source the connected runners share models of, by runner.
     pub(crate) fn offered(&self) -> Vec<Offered> {
         let inner = self.lock();
         let mut out: Vec<Offered> = inner
             .sockets
             .values()
             .flat_map(|s| {
-                s.shares.iter().map(|b| Offered {
+                s.sources.iter().map(|(name, source)| Offered {
                     runner: s.id(),
-                    backend: b.clone(),
-                    max_calls: s.max_calls,
-                    models: s.models.get(b).cloned().unwrap_or_default(),
+                    source: name.clone(),
+                    max_calls: source.max_calls,
+                    models: source.models.clone(),
                 })
             })
             .collect();
-        out.sort_by(|a, b| (&a.runner, &a.backend).cmp(&(&b.runner, &b.backend)));
+        out.sort_by(|a, b| (&a.runner, &a.source).cmp(&(&b.runner, &b.source)));
         out
     }
 
@@ -269,37 +287,62 @@ impl Calls {
                 .iter()
                 .find(|(_, s)| s.id() == open.runner)
                 .map(|(socket, s)| {
-                    (
-                        *socket,
-                        s.shares.contains(&open.backend),
-                        s.serves(&caller),
-                        s.places.clone(),
-                        s.max_calls,
-                    )
+                    let names: Vec<String> = s
+                        .sources
+                        .iter()
+                        .flat_map(|(n, source)| {
+                            source.models.iter().map(move |m| format!("{n}:{}", m.id))
+                        })
+                        .collect();
+                    let source = s
+                        .sources
+                        .get(&open.source)
+                        .map(|source| (source.places.clone(), source.max_calls));
+                    (*socket, s.serves(&caller), names, source)
                 })
         };
         let (server, places) = match found {
             None => return refuse(format!("runner {} is not connected", open.runner)),
             Some((_, false, ..)) => {
                 return refuse(format!(
-                    "runner {} shares no backend '{}'",
-                    open.runner, open.backend
-                ));
-            }
-            Some((_, _, false, ..)) => {
-                return refuse(format!(
-                    "runner {} does not share its backends with you: only with its owner's runners and the hub",
+                    "runner {} does not share its models with you: only with its owner's runners and the hub",
                     open.runner
                 ));
             }
-            Some((server, true, true, places, max)) => {
+            // Which models it shares: the hub knows.
+            Some((_, true, names, _)) if open.source.is_empty() => {
+                let bytes = models_answer(&names);
+                for frame in [
+                    Frame::Head {
+                        call: as_call,
+                        status: 200,
+                        content_type: "application/json".into(),
+                    },
+                    Frame::Reply {
+                        call: as_call,
+                        bytes,
+                    },
+                    Frame::Done { call: as_call },
+                ] {
+                    let _ = answer.send(frame);
+                }
+                return;
+            }
+            Some((_, true, _, None)) => {
+                return refuse(format!(
+                    "runner {} shares no model of a source '{}'",
+                    open.runner, open.source
+                ));
+            }
+            Some((server, true, _, Some((places, max)))) => {
                 match tokio::time::timeout(BUSY_WAIT, places.acquire_owned()).await {
                     Ok(Ok(place)) => (server, place),
                     Ok(Err(_)) => return refuse(format!("runner {} went away", open.runner)),
                     Err(_) => {
                         return refuse(format!(
-                            "runner {} is busy: it takes {max} call(s) at once, and none ended within {}s",
+                            "runner {} is busy: its source '{}' takes {max} call(s) at once, and none ended within {}s",
                             open.runner,
+                            open.source,
                             BUSY_WAIT.as_secs()
                         ));
                     }
@@ -345,7 +388,7 @@ impl Calls {
     }
 }
 
-/// The hub's own calls to runners' backends, for its loopback endpoint
+/// The hub's own calls to runners' models, for its loopback endpoint
 /// (`ensemble_link::loopback`), which its distiller and embedding model use.
 pub struct HubOpener(pub Arc<Calls>);
 
@@ -360,19 +403,31 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    fn offer(name: &str, shares: &[&str], max: u32) -> Offer {
+    /// What runner `name` offers: the model `q` of each of `sources`, each of
+    /// which takes `max` calls at once.
+    fn offer(name: &str, sources: &[&str], max: u32) -> Offer {
         Offer {
             name: name.into(),
-            shares: shares.iter().map(|s| s.to_string()).collect(),
-            max_shared_calls: max,
-            models: Default::default(),
+            sources: sources
+                .iter()
+                .map(|s| {
+                    let shared = ensemble_link::relay::Shared {
+                        max_concurrent: max,
+                        models: vec![SharedModel {
+                            id: "q".into(),
+                            kind: serde_json::json!({ "type": "embedding", "dimensions": 4 }),
+                        }],
+                    };
+                    (s.to_string(), shared)
+                })
+                .collect(),
         }
     }
 
-    fn open(runner: &str, backend: &str) -> Open {
+    fn open(runner: &str, source: &str) -> Open {
         Open {
             runner: runner.into(),
-            backend: backend.into(),
+            source: source.into(),
             method: "POST".into(),
             path: "/chat/completions".into(),
         }
@@ -386,7 +441,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_call_reaches_the_runner_that_shares_the_backend_and_its_answer_comes_back() {
+    async fn a_call_reaches_the_runner_that_shares_the_model_and_its_answer_comes_back() {
         let calls = Arc::new(Calls::default());
         let (gpu, id, mut served) = calls
             .connect("ana", &offer("gpu-box", &["local"], 1))
@@ -416,7 +471,7 @@ mod tests {
         let Frame::Open { call, open: asked } = next(&mut served).await else {
             panic!("an open first")
         };
-        assert_eq!(asked.backend, "local");
+        assert_eq!(asked.source, "local");
         assert_eq!(
             next(&mut served).await,
             Frame::Body {
@@ -479,12 +534,23 @@ mod tests {
             message.contains("only with its owner's runners"),
             "{message}"
         );
-        // The hub may; a backend it does not share, or a runner not there, is
-        // unavailable.
+        // The hub may; a source it shares no model of, or a runner not there,
+        // is unavailable.
         let mut answer = calls.open_as_hub(open("ana/gpu-box", "big"), vec![]);
         assert!(
-            matches!(next(&mut answer).await, Frame::Error { message, .. } if message.contains("shares no backend 'big'"))
+            matches!(next(&mut answer).await, Frame::Error { message, .. } if message.contains("shares no model of a source 'big'"))
         );
+        // Which models it shares, the hub answers itself.
+        let mut answer = calls.open_as_hub(open("ana/gpu-box", ""), vec![]);
+        assert!(matches!(
+            next(&mut answer).await,
+            Frame::Head { status: 200, .. }
+        ));
+        let Frame::Reply { bytes, .. } = next(&mut answer).await else {
+            panic!("the list")
+        };
+        let listed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(listed["data"][0]["id"], "local:q");
         let mut answer = calls.open_as_hub(open("ana/elsewhere", "local"), vec![]);
         assert!(
             matches!(next(&mut answer).await, Frame::Error { message, .. } if message.contains("not connected"))

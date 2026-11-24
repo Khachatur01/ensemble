@@ -1,18 +1,18 @@
 //! What a hub's core and a runner's both keep in their database, as a GitLab
-//! instance keeps its application settings: the LLM backends, the keys of
-//! those, sealed, and the audit log of every change of their settings, made
+//! instance keeps its application settings: the ANN pool, the keys of its
+//! sources, sealed, and the audit log of every change of their settings, made
 //! only through operations. The rest of their settings, typed tables of
 //! their own, the hub and the runner each keep themselves.
 //!
 //! A key is kept sealed, AES-256-GCM, by a master key, `master.key`, a file
 //! beside the database made the first time a key is kept: without the
-//! master key no key in it can be read. The backends name their keys by
+//! master key no key in it can be read. The sources name their keys by
 //! variable, and a variable is looked for in the environment, then among the
 //! keys kept.
 
 use crate::{DB_FILE, Value, keep_secret, optional, rows, secrets, text};
 use ensemble_config::kept::Change;
-use ensemble_config::{BackendSetting, Env};
+use ensemble_config::{AnnPoolSetting, Env, ModelKind, PoolModel, SourceSetting};
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::BTreeMap;
@@ -81,100 +81,166 @@ pub fn audited(change: &Change) -> (&'static str, Vec<Value>) {
         ],
     )
 }
-
-/// The statements that keep `backends` in place of those kept, `shares`
-/// marked as shared.
-pub fn backend_rows(
-    backends: &BTreeMap<String, BackendSetting>,
-    shares: &[String],
-) -> Vec<(&'static str, Vec<Value>)> {
-    let mut out = vec![("DELETE FROM backends", vec![])];
-    for (name, b) in backends {
-        let shared = int(i64::from(shares.contains(name)));
-        let row = match b {
-            BackendSetting::OpenAiCompatible {
+/// The statements that keep `pool` in place of the ANN pool kept.
+pub fn pool_rows(pool: &AnnPoolSetting) -> Vec<(&'static str, Vec<Value>)> {
+    let mut out = vec![
+        ("DELETE FROM ann_sources", vec![]),
+        ("DELETE FROM ann_models", vec![]),
+    ];
+    for (name, s) in &pool.sources {
+        let row = match s {
+            SourceSetting::OpenAiCompatible {
                 base_url,
                 api_key_env,
                 timeout_seconds,
+                max_concurrent,
             }
-            | BackendSetting::Anthropic {
+            | SourceSetting::Anthropic {
                 base_url,
                 api_key_env,
                 timeout_seconds,
+                max_concurrent,
             } => vec![
                 txt(name),
-                txt(b.type_id()),
+                txt(s.type_id()),
                 txt(base_url),
                 optional(api_key_env.as_deref()),
                 int(*timeout_seconds as i64),
+                int(*max_concurrent),
                 Value::Null,
-                Value::Null,
-                shared,
             ],
-            BackendSetting::Runner { runner, backend } => vec![
+            SourceSetting::Runner { runner } => vec![
                 txt(name),
-                txt(b.type_id()),
+                txt(s.type_id()),
+                Value::Null,
                 Value::Null,
                 Value::Null,
                 Value::Null,
                 txt(runner),
-                txt(backend),
-                shared,
             ],
         };
         out.push((
-            "INSERT INTO backends (name, type, base_url, api_key_env, timeout_seconds, runner, backend, shared) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO ann_sources (name, type, base_url, api_key_env, timeout_seconds, max_concurrent, runner) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             row,
+        ));
+    }
+    for m in &pool.models {
+        let flag = |on: bool| int(i64::from(on));
+        let (tier, context_window, tools, dimensions) = match m.kind {
+            ModelKind::Unknown => (Value::Null, Value::Null, Value::Null, Value::Null),
+            ModelKind::Llm {
+                tier,
+                context_window,
+                tools,
+            } => (
+                txt(tier.as_str()),
+                context_window.map_or(Value::Null, int),
+                tools.map_or(Value::Null, flag),
+                Value::Null,
+            ),
+            ModelKind::Embedding { dimensions } => {
+                (Value::Null, Value::Null, Value::Null, int(dimensions))
+            }
+        };
+        out.push((
+            "INSERT INTO ann_models (source, id, kind, tier, context_window, tools, dimensions, turned_on, missing, shared) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            vec![
+                txt(&m.source),
+                txt(&m.id),
+                txt(m.kind.type_id()),
+                tier,
+                context_window,
+                tools,
+                dimensions,
+                flag(m.on),
+                flag(m.missing),
+                flag(m.shared),
+            ],
         ));
     }
     out
 }
 
-/// The backends kept, and the names of those shared.
-pub async fn read_backends(
-    c: &turso::Connection,
-) -> Result<(BTreeMap<String, BackendSetting>, Vec<String>), String> {
-    let mut backends = BTreeMap::new();
-    let mut shares = Vec::new();
+/// The ANN pool kept: its sources, and their models in the order of their
+/// sources and ids.
+pub async fn read_pool(c: &turso::Connection) -> Result<AnnPoolSetting, String> {
+    let mut pool = AnnPoolSetting::default();
     for r in rows(
         c,
-        "SELECT name, type, base_url, api_key_env, timeout_seconds, runner, backend, shared FROM backends ORDER BY name",
+        "SELECT name, type, base_url, api_key_env, timeout_seconds, max_concurrent, runner FROM ann_sources ORDER BY name",
         vec![],
     )
     .await?
     {
-        let name = some_text(&r[0], "backends.name")?;
-        let at = format!("backends.{name}");
+        let name = some_text(&r[0], "ann_sources.name")?;
+        let at = format!("ann_sources.{name}");
         let kind = some_text(&r[1], &at)?;
-        let b = if kind == ensemble_config::llm::RUNNER_BACKEND {
-            BackendSetting::Runner {
-                runner: some_text(&r[5], &format!("{at}.runner"))?,
-                backend: some_text(&r[6], &format!("{at}.backend"))?,
+        let s = if kind == ensemble_config::ann::RUNNER_SOURCE {
+            SourceSetting::Runner {
+                runner: some_text(&r[6], &format!("{at}.runner"))?,
             }
         } else {
             let base_url = some_text(&r[2], &format!("{at}.base_url"))?;
             let api_key_env = text(&r[3]);
             let timeout_seconds = num(&r[4], &format!("{at}.timeout_seconds"))?;
+            let max_concurrent = num(&r[5], &format!("{at}.max_concurrent"))?;
             match kind.as_str() {
-                ensemble_config::ANTHROPIC_API => BackendSetting::Anthropic {
+                ensemble_config::ANTHROPIC_API => SourceSetting::Anthropic {
                     base_url,
                     api_key_env,
                     timeout_seconds,
+                    max_concurrent,
                 },
-                ensemble_config::OPENAI_COMPATIBLE_API => BackendSetting::OpenAiCompatible {
+                ensemble_config::OPENAI_COMPATIBLE_API => SourceSetting::OpenAiCompatible {
                     base_url,
                     api_key_env,
                     timeout_seconds,
+                    max_concurrent,
                 },
                 other => return Err(format!("{at}: the type '{other}' is unknown")),
             }
         };
-        if num::<i64>(&r[7], &format!("{at}.shared"))? != 0 {
-            shares.push(name.clone());
-        }
-        backends.insert(name, b);
+        pool.sources.insert(name, s);
     }
-    Ok((backends, shares))
+    for r in rows(
+        c,
+        "SELECT source, id, kind, tier, context_window, tools, dimensions, turned_on, missing, shared FROM ann_models ORDER BY source, id",
+        vec![],
+    )
+    .await?
+    {
+        let source = some_text(&r[0], "ann_models.source")?;
+        let id = some_text(&r[1], "ann_models.id")?;
+        let at = format!("ann_models.{source}:{id}");
+        let flag = |v: &Value, what: &str| num::<i64>(v, &format!("{at}.{what}")).map(|n| n != 0);
+        let kind = match some_text(&r[2], &format!("{at}.kind"))?.as_str() {
+            "unknown" => ModelKind::Unknown,
+            "llm" => ModelKind::Llm {
+                tier: named(&r[3], &format!("{at}.tier"))?,
+                context_window: match &r[4] {
+                    Value::Null => None,
+                    v => Some(num(v, &format!("{at}.context_window"))?),
+                },
+                tools: match &r[5] {
+                    Value::Null => None,
+                    v => Some(flag(v, "tools")?),
+                },
+            },
+            "embedding" => ModelKind::Embedding {
+                dimensions: num(&r[6], &format!("{at}.dimensions"))?,
+            },
+            other => return Err(format!("{at}: the kind '{other}' is unknown")),
+        };
+        pool.models.push(PoolModel {
+            source,
+            id,
+            kind,
+            on: flag(&r[7], "turned_on")?,
+            missing: flag(&r[8], "missing")?,
+            shared: flag(&r[9], "shared")?,
+        });
+    }
+    Ok(pool)
 }
 
 /// One change of the settings, as the audit log keeps it.
@@ -241,7 +307,7 @@ impl Env for Variables {
 /// The keys kept in the database in a folder, sealed by its master key.
 pub struct Keys {
     dir: PathBuf,
-    /// The command that keeps a backend's key, `ensemble-hub` or
+    /// The command that keeps a source's key, `ensemble-hub` or
     /// `ensemble-runner`, for what is said.
     program: &'static str,
 }
@@ -316,7 +382,7 @@ impl Keys {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && make => make_master(&path)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(format!(
-                    "the keys of {} are sealed by its master key, and {} is not there: put it back from where you keep it, or give each backend its key again with `{} backend key`",
+                    "the keys of {} are sealed by its master key, and {} is not there: put it back from where you keep it, or give each source its key again with `{} source key`",
                     self.dir.display(),
                     path.display(),
                     self.program
@@ -336,7 +402,7 @@ impl Keys {
     fn open(&self, master: &LessSafeKey, name: &str, sealed: &str) -> Result<String, String> {
         let wrong = || {
             format!(
-                "the key {name} cannot be opened with this master key: give the backend its key again with `{} backend key`",
+                "the key {name} cannot be opened with this master key: give the source its key again with `{} source key`",
                 self.program
             )
         };
@@ -412,29 +478,29 @@ mod tests {
         let keys = Keys::new(&dir, "ensemble-hub");
         assert!(keys.all().unwrap().is_empty());
         assert!(!dir.join(MASTER_KEY_FILE).exists(), "made only when needed");
-        keys.keep("ENSEMBLE_BACKEND_CENTRAL_KEY", Some("sk-1"))
+        keys.keep("ENSEMBLE_SOURCE_CENTRAL_KEY", Some("sk-1"))
             .unwrap();
         let mode = std::fs::metadata(dir.join(MASTER_KEY_FILE))
             .unwrap()
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
-        assert_eq!(keys.all().unwrap()["ENSEMBLE_BACKEND_CENTRAL_KEY"], "sk-1");
+        assert_eq!(keys.all().unwrap()["ENSEMBLE_SOURCE_CENTRAL_KEY"], "sk-1");
         let sealed = secrets(&dir).unwrap();
-        assert!(!sealed["ENSEMBLE_BACKEND_CENTRAL_KEY"].contains("sk-1"));
+        assert!(!sealed["ENSEMBLE_SOURCE_CENTRAL_KEY"].contains("sk-1"));
         // Sealed for one name, it is no key of another.
         keep_secret(
             &dir,
-            "ENSEMBLE_BACKEND_OTHER_KEY",
-            Some(&sealed["ENSEMBLE_BACKEND_CENTRAL_KEY"]),
+            "ENSEMBLE_SOURCE_OTHER_KEY",
+            Some(&sealed["ENSEMBLE_SOURCE_CENTRAL_KEY"]),
         )
         .unwrap();
         assert!(keys.all().unwrap_err().contains("cannot be opened"));
-        keys.keep("ENSEMBLE_BACKEND_OTHER_KEY", None).unwrap();
+        keys.keep("ENSEMBLE_SOURCE_OTHER_KEY", None).unwrap();
         // Without the master key, nothing kept can be read.
         std::fs::remove_file(dir.join(MASTER_KEY_FILE)).unwrap();
         let err = keys.all().unwrap_err();
-        assert!(err.contains("master key") && err.contains("`ensemble-hub backend key`"));
+        assert!(err.contains("master key") && err.contains("`ensemble-hub source key`"));
     }
 
     #[test]

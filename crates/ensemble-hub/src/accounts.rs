@@ -20,9 +20,10 @@
 //! once), over the REST API or over the link, on a connection without a token.
 
 use crate::users::{JOIN_HOURS, Kind, Roles, Token, User, Users, UsersError};
-use ensemble_backends::ops::{Backends, KeptBackends, Side, WithBackends};
+use ensemble_backends::models::Found;
+use ensemble_backends::ops::{Side, WithPool};
 use ensemble_config::kept::{Change, Kept, WithKept};
-use ensemble_config::{HubSettings, Permission, Registration};
+use ensemble_config::{AnnPool, AnnPoolSetting, HubSettings, ModelKind, Permission, Registration};
 use ensemble_core::state::HubDir;
 use ensemble_ops::{
     Access, Caller, Code, Error, Field, Kind as FieldKind, Operation, Registry, Said, Spec,
@@ -136,8 +137,8 @@ pub struct HubContext {
     /// What the running hub does once its settings changed, and says of it:
     /// set by the hub ([`HubContext::when_changed`]); nothing otherwise.
     changed: Arc<OnceLock<Box<Changed>>>,
-    /// The backends the connected runners share, as the running hub lists
-    /// them ([`HubContext::when_serving`]); nothing otherwise.
+    /// The models the connected runners share, by source, as the running hub
+    /// lists them ([`HubContext::when_serving`]); nothing otherwise.
     offered: OnceLock<Box<Offered>>,
     /// Where the running hub listens ([`HubContext::listening`]); nothing
     /// otherwise.
@@ -254,8 +255,9 @@ impl HubContext {
         })
     }
 
-    /// Have `runner.backends` list what `offered` returns: the backends the
-    /// runners connected to the running hub share.
+    /// Have `runner.models` list what `offered` returns: the models the
+    /// runners connected to the running hub share, `[{runner, source,
+    /// max_concurrent, models: [{id, kind}]}]`.
     pub fn when_serving(&self, offered: impl Fn() -> Value + Send + Sync + 'static) {
         let _ = self.offered.set(Box::new(offered));
     }
@@ -284,7 +286,7 @@ impl WithKept<HubSettings> for HubContext {
 }
 
 /// Its keys are kept sealed in its database ([`crate::kept`]).
-impl WithBackends for HubContext {
+impl WithPool for HubContext {
     fn can_keep_keys(&self) -> Result<(), Error> {
         crate::kept::keys(&self.dir).ready().map_err(Error::failed)
     }
@@ -300,40 +302,61 @@ impl WithBackends for HubContext {
         crate::kept::variables(&self.dir).ok()?.get(name)
     }
 
-    fn kept_backends(&self) -> Result<KeptBackends, Error> {
-        Ok(KeptBackends {
-            backends: self.settings.read()?.backends,
-            shares: None,
-        })
+    fn kept_pool(&self) -> Result<AnnPoolSetting, Error> {
+        Ok(self.settings.read()?.ann_pool)
     }
 
-    fn change_backends(
+    fn change_pool(
         &self,
         change: Change,
-        edit: &mut dyn FnMut(&mut KeptBackends) -> Result<(), Error>,
+        edit: &mut dyn FnMut(&mut AnnPoolSetting) -> Result<(), Error>,
     ) -> Result<Option<String>, Error> {
-        self.settings.change(change, |s| {
-            let mut kept = KeptBackends {
-                backends: std::mem::take(&mut s.backends),
-                shares: None,
-            };
-            edit(&mut kept)?;
-            s.backends = kept.backends;
-            Ok(())
-        })
+        self.settings.change(change, |s| edit(&mut s.ann_pool))
     }
 
-    fn backends_changed(&self) -> Option<String> {
+    fn pool_changed(&self) -> Option<String> {
         self.settings.changed()
     }
 
-    fn backends(&self) -> Result<Backends, Error> {
-        let hub = self.hub()?;
-        Ok(Backends {
-            direct: hub.llm.direct,
-            relayed: hub.llm.runners,
-            shares: None,
-        })
+    fn pool(&self) -> Result<AnnPool, Error> {
+        Ok(self.hub()?.llm)
+    }
+
+    /// As the runner's relay socket offered them, while the hub runs.
+    fn shared_by(&self, runner: &str) -> Result<Vec<Found>, Error> {
+        let offered = self.offered.get().ok_or_else(|| {
+            Error::new(
+                Code::Unavailable,
+                "only the running hub knows what the connected runners share; start it with `ensemble-hub serve`",
+            )
+        })?();
+        let sources: Vec<&Value> = offered
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|o| o["runner"] == runner)
+            .collect();
+        if sources.is_empty() {
+            return Err(Error::new(
+                Code::Unavailable,
+                format!("{runner} is not connected now, or shares no model"),
+            ));
+        }
+        Ok(sources
+            .iter()
+            .flat_map(|o| {
+                let source = o["source"].as_str().unwrap_or_default();
+                o["models"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(move |m| Found {
+                        id: format!("{source}:{}", m["id"].as_str().unwrap_or_default()),
+                        kind: serde_json::from_value(m["kind"].clone())
+                            .unwrap_or(ModelKind::Unknown),
+                    })
+            })
+            .collect())
     }
 }
 
@@ -342,7 +365,7 @@ pub fn operations() -> Registry<HubContext> {
     let mut all = user_operations();
     all.extend(own_operations());
     all.extend(sign_in_operations());
-    all.push(runner_backends());
+    all.push(runner_models());
     all.extend(crate::served::operations());
     all.extend(ensemble_backends::ops::operations::<HubContext>(
         Side::Hub,
@@ -1027,17 +1050,17 @@ fn sign_in_operations() -> Vec<Operation<HubContext>> {
     ]
 }
 
-/// The backends the connected runners share.
-fn runner_backends() -> Operation<HubContext> {
+/// The models the connected runners share.
+fn runner_models() -> Operation<HubContext> {
     operation(
             Spec {
-                name: "runner.backends",
-                summary: "The backends the connected runners share, with their models: what the hub's `llm.runners` may name.",
+                name: "runner.models",
+                summary: "The models the connected runners share, each as a source of type runner names it: what the hub's ANN pool may reach.",
                 access: ADMIN,
                 input: &[],
             },
             |c: &HubContext, _: &Caller, _: Nothing| match c.offered.get() {
-                Some(offered) => Ok(json!({ "backends": offered() })),
+                Some(offered) => Ok(json!({ "shared": offered() })),
                 None => Err(Error::new(
                     Code::Unavailable,
                     "only the running hub knows which runners are connected; start it with `ensemble-hub serve`",
@@ -1045,33 +1068,33 @@ fn runner_backends() -> Operation<HubContext> {
             },
         )
         .shown(|out| {
-            let lines: Vec<String> = out["backends"]
+            let lines: Vec<String> = out["shared"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|b| {
-                    let models: Vec<&str> = b["models"]
+                .flat_map(|s| {
+                    let runner = s["runner"].as_str().unwrap_or_default().to_string();
+                    let source = s["source"].as_str().unwrap_or_default().to_string();
+                    let most = s["max_concurrent"].clone();
+                    s["models"]
                         .as_array()
+                        .cloned()
+                        .unwrap_or_default()
                         .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .collect();
-                    format!(
-                        "{}  {}  ({} call(s) at once)  models: {}",
-                        b["runner"].as_str().unwrap_or(""),
-                        b["backend"].as_str().unwrap_or(""),
-                        b["max_calls"],
-                        if models.is_empty() {
-                            "-".to_string()
-                        } else {
-                            models.join(", ")
-                        }
-                    )
+                        .map(move |m| {
+                            let kind = serde_json::from_value::<ModelKind>(m["kind"].clone())
+                                .map(|k| k.describe())
+                                .unwrap_or_default();
+                            format!(
+                                "{runner}  {source}:{}  {kind}  ({most} call(s) at once)",
+                                m["id"].as_str().unwrap_or_default()
+                            )
+                        })
                 })
                 .collect();
             Said {
                 out: if lines.is_empty() {
-                    "No connected runner shares a backend.".into()
+                    "No connected runner shares a model.".into()
                 } else {
                     lines.join("\n")
                 },

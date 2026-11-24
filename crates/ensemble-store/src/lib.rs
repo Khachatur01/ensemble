@@ -2,7 +2,7 @@
 //! enter ([`with`]), with the tables its schema makes: the hub has one for
 //! its core and one for each connector that keeps anything, a runner one
 //! for its core. What a hub's core and a runner's both keep, their settings'
-//! audit log, the LLM backends and the keys of those, sealed, is [`kept`].
+//! audit log, the ANN pool and the keys of its sources, sealed, is [`kept`].
 //! [`open`] opens another Turso file, such as the knowledge vault's cache of
 //! its notes' vectors.
 //!
@@ -25,21 +25,33 @@ pub use ensemble_core::state::DB_FILE;
 const WAIT: Duration = Duration::from_secs(5);
 
 /// The tables a hub's core and a runner's both have: the keys kept,
-/// sealed, the LLM backends, and the audit log of their settings.
+/// sealed, the ANN pool, and the audit log of their settings.
 const KEPT_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS secrets (
     name TEXT PRIMARY KEY,
     sealed TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS backends (
+CREATE TABLE IF NOT EXISTS ann_sources (
     name TEXT PRIMARY KEY,
     type TEXT NOT NULL,
     base_url TEXT,
     api_key_env TEXT,
     timeout_seconds INTEGER,
-    runner TEXT,
-    backend TEXT,
-    shared INTEGER NOT NULL
+    max_concurrent INTEGER,
+    runner TEXT
+);
+CREATE TABLE IF NOT EXISTS ann_models (
+    source TEXT NOT NULL,
+    id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    tier TEXT,
+    context_window INTEGER,
+    tools INTEGER,
+    dimensions INTEGER,
+    turned_on INTEGER NOT NULL,
+    missing INTEGER NOT NULL,
+    shared INTEGER NOT NULL,
+    PRIMARY KEY (source, id)
 );
 CREATE TABLE IF NOT EXISTS settings_audit (
     n INTEGER PRIMARY KEY,

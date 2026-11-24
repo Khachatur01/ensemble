@@ -1,8 +1,8 @@
-//! Where the runner keeps its settings, the keys of its backends and its hub
+//! Where the runner keeps its settings, the keys of its sources and its hub
 //! tokens: in typed tables of its core's database,
 //! `<config-dir>/runner/core/database.db`, so that its operations change
 //! them, and where it runs, such as the NixOS module, only runs it. The
-//! backends, the keys, sealed by the `master.key` beside the database, and
+//! ANN pool, the keys, sealed by the `master.key` beside the database, and
 //! the audit log are kept as a hub's are ([`ensemble_store::kept`]). Its
 //! teams are the folders of its teams directory, beside its core.
 //!
@@ -12,26 +12,25 @@ use ensemble_config::kept::{Change, Keep};
 use ensemble_config::{Runner, RunnerSettings};
 use ensemble_core::state::RunnerDir;
 use ensemble_link::tokens::normal;
-use ensemble_store::kept::{self, audited, backend_rows, int, num, read_backends, some_text, txt};
+use ensemble_store::kept::{self, audited, pool_rows, read_pool, some_text, txt};
 use ensemble_store::{optional, rows, text, transaction};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// What keeps a backend's key, for what is said.
+/// What keeps a source's key, for what is said.
 const PROGRAM: &str = "ensemble-runner";
 
 /// What the runner's settings are called in what is said.
 pub const SETTINGS_NAME: &str = "the runner's settings";
 
-/// The tables of a runner's settings, besides the backends, and of its hub
+/// The tables of a runner's settings, besides its ANN pool, and of its hub
 /// tokens, each sealed by the master key.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS runner_settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     name TEXT NOT NULL,
     workspace TEXT NOT NULL,
-    hub TEXT,
-    max_shared_calls INTEGER NOT NULL
+    hub TEXT
 );
 CREATE TABLE IF NOT EXISTS hub_tokens (
     url TEXT PRIMARY KEY,
@@ -104,21 +103,18 @@ impl Keep<RunnerSettings> for RunnerStore {
         core(&self.dir, async |c| {
             let found = rows(
                 c,
-                "SELECT name, workspace, hub, max_shared_calls FROM runner_settings WHERE id = 1",
+                "SELECT name, workspace, hub FROM runner_settings WHERE id = 1",
                 vec![],
             )
             .await?;
             let Some(r) = found.first() else {
                 return Ok(None);
             };
-            let (backends, shares) = read_backends(c).await?;
             Ok(Some(RunnerSettings {
                 name: some_text(&r[0], "name")?,
                 workspace: some_text(&r[1], "workspace")?,
                 hub: text(&r[2]),
-                backends,
-                shares,
-                max_shared_calls: num(&r[3], "max_shared_calls")?,
+                ann_pool: read_pool(c).await?,
             }))
         })
     }
@@ -127,16 +123,11 @@ impl Keep<RunnerSettings> for RunnerStore {
         let mut statements = vec![
             ("DELETE FROM runner_settings", vec![]),
             (
-                "INSERT INTO runner_settings (id, name, workspace, hub, max_shared_calls) VALUES (1, ?1, ?2, ?3, ?4)",
-                vec![
-                    txt(&s.name),
-                    txt(&s.workspace),
-                    optional(s.hub.as_deref()),
-                    int(s.max_shared_calls),
-                ],
+                "INSERT INTO runner_settings (id, name, workspace, hub) VALUES (1, ?1, ?2, ?3)",
+                vec![txt(&s.name), txt(&s.workspace), optional(s.hub.as_deref())],
             ),
         ];
-        statements.extend(backend_rows(&s.backends, &s.shares));
+        statements.extend(pool_rows(&s.ann_pool));
         statements.push(audited(change));
         core(&self.dir, async |c| transaction(c, statements).await)
     }
@@ -207,7 +198,7 @@ impl Tokens {
     }
 }
 
-/// What the token of the hub at `url` is sealed as: no key of a backend's.
+/// What the token of the hub at `url` is sealed as: no key of a source's.
 fn sealed_as(url: &str) -> String {
     format!("hub token {url}")
 }
@@ -215,26 +206,47 @@ fn sealed_as(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ensemble_config::BackendSetting;
+    use ensemble_config::{ModelKind, SourceSetting};
     use ensemble_core::workspace::testing::TempDir;
 
     #[test]
-    fn a_runners_settings_are_kept_with_its_shares_and_no_table_of_the_hub() {
+    fn a_runners_settings_are_kept_with_its_pool_and_no_table_of_the_hub() {
         let tmp = TempDir::new();
         let dir = RunnerDir::new(tmp.0.join("runner"));
         let store = settings(&dir);
         assert_eq!(store.read().unwrap(), None);
         let mut runner = RunnerSettings::starting("laptop", "~/ensemble");
         runner.hub = Some("ws://127.0.0.1:7700".into());
-        runner.backends.insert(
+        runner.ann_pool.sources.insert(
             "local".into(),
-            BackendSetting::OpenAiCompatible {
+            SourceSetting::OpenAiCompatible {
                 base_url: "http://127.0.0.1:1/v1".into(),
                 api_key_env: None,
                 timeout_seconds: 5,
+                max_concurrent: 2,
             },
         );
-        runner.shares = vec!["local".into()];
+        runner.ann_pool.turn_on(
+            "local",
+            "small",
+            ModelKind::Llm {
+                tier: ensemble_config::Tier::Small,
+                context_window: Some(8192),
+                tools: Some(true),
+            },
+        );
+        runner
+            .ann_pool
+            .turn_on("local", "e", ModelKind::Embedding { dimensions: 8 });
+        runner.ann_pool.model_mut("local", "small").unwrap().shared = true;
+        runner.ann_pool.models.push(ensemble_config::PoolModel {
+            source: "local".into(),
+            id: "z".into(),
+            kind: ModelKind::Unknown,
+            on: false,
+            missing: true,
+            shared: false,
+        });
         store
             .write(&runner, &Change::by_this_computer("init"))
             .unwrap();

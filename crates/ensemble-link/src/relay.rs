@@ -1,12 +1,12 @@
 //! Model calls relayed through the hub: the frames of a runner's second
-//! WebSocket, at [`PATH`], beside its link. A call to a backend another runner
+//! WebSocket, at [`PATH`], beside its link. A call to a model another runner
 //! shares goes from the caller to the hub, from the hub to the runner that
-//! serves it, which calls its own backend, and its answer streams back the
-//! same way. The hub calls runners' backends on this path too, from its side.
+//! serves it, which calls its own source, and its answer streams back the
+//! same way. The hub calls runners' models on this path too, from its side.
 //!
 //! The runner says what it shares first ([`Offer`]), and the hub answers with
 //! its name as the hub knows it, or why it refuses, and closes. Then each
-//! side may start calls: a runner to reach others' backends, the hub to have
+//! side may start calls: a runner to reach others' models, the hub to have
 //! the runner serve one of its own. Every call is numbered by whoever started
 //! it, and its frames go one way or the other:
 //!
@@ -33,7 +33,7 @@ pub const PATH: &str = "/relay";
 pub const BUSY_WAIT: Duration = Duration::from_secs(10);
 /// The most of a body sent in one frame.
 pub const CHUNK: usize = 64 * 1024;
-/// The status of an answer that says the backend cannot be reached now: its
+/// The status of an answer that says the model cannot be reached now: its
 /// runner is not connected, or busy, or the call may not use it. The caller
 /// tries the next model of its list.
 pub const UNAVAILABLE: u16 = 503;
@@ -43,23 +43,38 @@ pub const UNAVAILABLE: u16 = 503;
 pub struct Offer {
     /// Its name, which the hub knows it by as `<owner>/<name>`.
     pub name: String,
-    /// The backends of its `llm.direct` it shares.
-    pub shares: Vec<String>,
-    /// The most calls of others to them at once.
-    pub max_shared_calls: u32,
-    /// The models each serves, as its server listed them when the runner
-    /// connected; none for one that did not answer.
-    #[serde(default)]
-    pub models: std::collections::BTreeMap<String, Vec<String>>,
+    /// The sources of its own it shares models of, by name.
+    pub sources: std::collections::BTreeMap<String, Shared>,
 }
 
-/// What a call asks for: a request to `backend` of `runner`, at `path` of
-/// the backend's base URL.
+/// One source a runner shares models of.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shared {
+    /// The most calls to it at once, the runner's own and others' together;
+    /// the hub keeps others' waiting for a place among them.
+    pub max_concurrent: u32,
+    /// The models of it shared.
+    pub models: Vec<SharedModel>,
+}
+
+/// A model a runner shares, and what it is, as its settings say: a model's
+/// `kind` as the ANN pool keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedModel {
+    pub id: String,
+    pub kind: Value,
+}
+
+/// What a call asks for: a request to the model of `source` of `runner`
+/// the request's body names, at `path` of the source's base URL. With no
+/// source, it asks the runner which models it shares: `GET /models`, which
+/// the hub answers itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Open {
     /// `<owner>/<name>`, as the hub knows the runner.
     pub runner: String,
-    pub backend: String,
+    #[serde(default)]
+    pub source: String,
     pub method: String,
     /// Such as `/chat/completions`.
     pub path: String,
@@ -250,6 +265,33 @@ pub fn body_frames(call: u64, body: &[u8]) -> Vec<Frame> {
         .collect()
 }
 
+/// The source of the model a request's `body` names as the runner that
+/// shares it names it, `<source>:<id>`, and the body naming it `<id>`, as
+/// that source serves it; none for a body that names no model so.
+pub fn routed(body: &[u8]) -> Option<(String, Vec<u8>)> {
+    let mut json: Value = serde_json::from_slice(body).ok()?;
+    let named = json.get("model")?.as_str()?;
+    let (source, id) = named.split_once(':')?;
+    if source.is_empty() || id.is_empty() {
+        return None;
+    }
+    let source = source.to_string();
+    json["model"] = Value::String(id.to_string());
+    Some((source, serde_json::to_vec(&json).ok()?))
+}
+
+/// What `GET /models` of a runner answers: the models it shares, each named
+/// `<source>:<id>`, as an OpenAI-compatible list.
+pub fn models_answer(names: &[String]) -> Vec<u8> {
+    let data: Vec<Value> = names
+        .iter()
+        .map(|n| json!({ "id": n, "object": "model" }))
+        .collect();
+    json!({ "object": "list", "data": data })
+        .to_string()
+        .into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,7 +300,7 @@ mod tests {
     fn every_frame_comes_back_as_it_went() {
         let open = Open {
             runner: "ana/gpu-box".into(),
-            backend: "local".into(),
+            source: "local".into(),
             method: "POST".into(),
             path: "/chat/completions".into(),
         };
@@ -293,5 +335,16 @@ mod tests {
         assert_eq!(frames.len(), 3);
         assert_eq!(frames[2], Frame::End { call: 3 });
         assert_eq!(body_frames(3, b""), [Frame::End { call: 3 }]);
+    }
+
+    #[test]
+    fn a_model_is_routed_to_its_source_as_the_runner_that_shares_it_names_it() {
+        let (source, body) = routed(br#"{"model":"ollama:qwen3.5:9b","stream":true}"#).unwrap();
+        assert_eq!(source, "ollama");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["model"], "qwen3.5:9b");
+        assert_eq!(body["stream"], true);
+        assert_eq!(routed(br#"{"model":"qwen"}"#), None);
+        assert_eq!(routed(b""), None);
     }
 }

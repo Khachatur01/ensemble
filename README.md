@@ -6,7 +6,7 @@ the REST API, trackers whose issues become tasks, and the **runners** that do
 the work, with your helper teams, on the computers you have.
 
 - **The hub** is the core: accounts, their roles and what each may do, the
-  port it listens on, and the LLM backends it uses. It runs no agents and has
+  port it listens on, and its ANN pool, the models it uses. It runs no agents and has
   no team. It is its own process, `ensemble-hub serve`, on a server for a team
   or on your own computer when you work alone.
 - **Connectors** are everything that reaches the hub, each always on: the
@@ -33,7 +33,7 @@ the work, with your helper teams, on the computers you have.
         │ MCP /mcp             │ REST /api/v1/         │             │
         ▼                      ▼                       ▼             ▼
    ┌──────────────────────────── hub ─────────────────────────────────┐
-   │ core: accounts · roles · the port · LLM backends                  │
+   │ core: accounts · roles · the port · ANN pool                      │
    │ connectors: rest · mcp · runners · knowledge · tasks · sources    │
    └──────────────────────────────────────────────────────────────────┘
         ║ the runners' link: WebSockets at /link and /relay
@@ -78,7 +78,7 @@ A team can mix them, and a task goes to any of them the same way.
   your agent (Claude Code, OpenCode, Codex, ...)
         |  MCP over HTTP: share, recall, make and follow tasks
         v
-  ensemble-hub serve   core: accounts, roles, the port, LLM backends
+  ensemble-hub serve   core: accounts, roles, the port, ANN pool
         ^              connectors: rest, mcp, runners, knowledge, tasks, sources
         |
         |  the runners' connector: a WebSocket at /link (tasks leased, how
@@ -160,7 +160,7 @@ $ ensemble-ui --hub http://127.0.0.1:7700           # serves the UI on 127.0.0.1
 A new hub listens on this computer alone (`127.0.0.1:7700`; `serve
 --http-host` and `--http-port` say otherwise), closed to sign-ups, with no model
 yet: give it one when you want shares distilled into notes
-(`ensemble-hub backend add`, `ensemble-hub knowledge models`; see
+(`ensemble-hub source add`, `ensemble-hub model on`, `ensemble-hub knowledge models`; see
 [Changing settings](#changing-settings)).
 
 The token's answer gives the line that adds the hub to your agent
@@ -222,8 +222,8 @@ several; a path that leaves the repository is refused.
 ## The hub
 
 The **hub** is the center of the system. Its core is small: the accounts,
-their roles and what each may do; the one port it listens on; and the LLM
-backends it uses. Everything else is a connector (see
+their roles and what each may do; the one port it listens on; and its ANN
+pool, the sources of models it calls. Everything else is a connector (see
 [Connectors](#connectors)). It has no helper team and runs no agents. It is
 always its own process, `ensemble-hub serve`: a team runs one on a server, and
 one person runs one on their own computer beside their runner. The hub and
@@ -236,7 +236,7 @@ readable only by you:
 ```text
 ~/.local/state/ensemble/hub/
   core/
-    database.db    its settings and who changed them, its backends' keys (sealed),
+    database.db    its settings and who changed them, its sources' keys (sealed),
                    accounts and their tokens (Turso)
     master.key     what seals the keys in database.db: back it up
   knowledge/
@@ -260,7 +260,8 @@ On the hub's computer:
 $ ensemble-hub serve                      # makes its settings and vault the first time; until Ctrl-C or SIGTERM
 $ ensemble-hub setup                      # its first admin, whose token it prints once
 $ ensemble-hub user password root         # typed without echo
-$ ensemble-hub backend add central --type openai-compatible-api --url http://127.0.0.1:8000/v1
+$ ensemble-hub source add central --type openai-compatible-api --url http://127.0.0.1:8000/v1 --max-concurrent 4
+$ ensemble-hub model on central:qwen3.5-72b             # a model is off until it is turned on
 $ ensemble-hub knowledge models central:qwen3.5-72b   # the models that turn shares into notes
 $ ensemble-hub check                      # says which model would distill shares now
 ```
@@ -271,18 +272,32 @@ was just set up, given a model server:
 
 ```text
 $ ensemble-hub settings show
-backends:
-  central:
-    api_key_env: none
-    base_url: http://127.0.0.1:8000/v1
-    timeout_seconds: 300
-    type: openai-compatible-api
+ann_pool:
+  models:
+    -
+      id: qwen3.5-72b
+      kind:
+        context_window: none
+        tier: strong
+        tools: none
+        type: llm
+      missing: false
+      on: true
+      shared: false
+      source: central
+  sources:
+    central:
+      api_key_env: none
+      base_url: http://127.0.0.1:8000/v1
+      max_concurrent: 4
+      timeout_seconds: 300
+      type: openai-compatible-api
 distill:
   max_tokens: 4000
   try:
     -
-      backend: central
       model: qwen3.5-72b
+      source: central
   when_none: wait
 embed: none
 lockout_failures: 5
@@ -301,8 +316,8 @@ source_filter: none
 trackers: none
 ```
 
-Its core is its owner, its accounts and roles, and the LLM
-backends it uses; the rest reaches it through connectors, each always on: the
+Its core is its owner, its accounts and roles, and its ANN pool, the
+sources of models it calls; the rest reaches it through connectors, each always on: the
 REST API at `/api/v1/`, MCP at `/mcp`, the runners' link, knowledge, tasks
 and sources. `ensemble-hub settings history` says who changed what, when,
 and with which operation. The hub's command line, `ensemble-hub …` on its
@@ -332,11 +347,15 @@ with a new token or join code name the address the request reached it at
 (through a proxy, from its `X-Forwarded-Proto` and `X-Forwarded-Host`), or,
 from the command line, where the running hub listens.
 
-**The LLM backends** are the models the hub itself calls, such as to distill
-knowledge: its own, with the keys it keeps, and those runners share through
-it (`type: runner`, see [Sharing LLM backends](#sharing-llm-backends)). A connector names one by its
-name alone. `ensemble-hub backend add` adds one and keeps its key for you
-(see [Changing settings](#changing-settings)).
+**The ANN pool** holds the models the hub itself calls, such as to distill
+knowledge, in two layers: **sources**, its own servers and APIs, with the
+keys it keeps, and runners that share models through it (`type: runner`, see
+[Sharing models](#sharing-models)); and the **models** each serves, an LLM
+or an embedding model, found by asking the source. A model a source newly
+lists is off until someone turns it on, and only a model that is on, and of
+the kind its use needs, may be named, as `<source>:<model>`. `ensemble-hub
+source add` adds a source and keeps its key for you, and `ensemble-hub
+model on` turns a model on (see [Changing settings](#changing-settings)).
 
 **Permissions.** The permissions are `share` (keep knowledge in the vault),
 `recall` (read its notes), `tasks` (make and follow tasks, have your runners
@@ -420,7 +439,7 @@ for scripts. JSON in and out.
 | `DELETE /api/v1/users/{name}` | admin | removes an account, or turns a sign-up down |
 
 | `GET /api/v1/ops` | any token | the operations it may run, each with the JSON Schema of its input (secrets `writeOnly`) and its fields in order, for a UI to make its forms from |
-| `POST /api/v1/ops/{name}` `{…its input}` | as the operation says | runs any operation by its name, such as `backend.add`, `knowledge.models` or `tracker.add` |
+| `POST /api/v1/ops/{name}` `{…its input}` | as the operation says | runs any operation by its name, such as `source.add`, `knowledge.models` or `tracker.add` |
 | `GET /api/v1/openapi.json` | anyone | this API as an OpenAPI 3.1 document: every path above and every operation, with its body and who may call it |
 
 Point an OpenAPI tool at `/api/v1/openapi.json` to browse the API or make a
@@ -461,8 +480,9 @@ hub. It shows what your account may do:
 - For an admin, **Users**: the accounts, sign-ups waiting to be let in, and
   what an admin does to an account; and **Settings**, a section each, filled
   in with each setting as it is now: the hub and its logins and sign-ups;
-  the roles, a box for each permission; the model backends, each tested,
-  given a key or taken out; the models of the knowledge vault and the source
+  the roles, a box for each permission; the models: each source tested,
+  asked again, given a key or taken out, and each of its models turned on or
+  off and said how strong it is; the models of the knowledge vault and the source
   filter; the trackers; who changed what; and a page for each operation of
   the settings no section shows yet.
 
@@ -470,8 +490,8 @@ Every form is made from what `GET /api/v1/ops` says of the operation it runs,
 so the UI does nothing the API does not, and a new operation's form comes
 with it. What a field may be is picked, not typed, where the hub says or
 knows it: a role from the hub's roles, permissions and a token's scopes as
-boxes, an agent from those connected now, a model from those the backends
-serve. A form asks only for what the choices made so far need, folds away
+boxes, an agent from those connected now, a model from those of the pool
+that are on and of the kind the field needs. A form asks only for what the choices made so far need, folds away
 what is seldom needed, has a new password typed twice, and asks before it
 removes, revokes or cancels anything. A browser signs in with
 `POST /api/v1/session`: the hub keeps the
@@ -677,8 +697,9 @@ earlier decisions or setup may matter, and gets the matching notes, best first,
 within `max_notes` and `max_chars`, marked as reference data.
 The search is by words (BM25, a
 title's words counting more), with no index to keep, and, with an embedding
-model, by what the notes mean: `ensemble-hub knowledge embedding <backend>:<model>` names one
-an `openai-compatible-api` backend serves at `/embeddings` (Ollama's
+model, by what the notes mean: `ensemble-hub knowledge embedding <source>:<model>` names one,
+an embedding model of the hub's ANN pool that is on, which an `openai-compatible-api`
+source serves at `/embeddings` (Ollama's
 `nomic-embed-text`, say), and notes at least `min_similarity` alike to the
 query are found too, in other words than yours. A note found both ways comes
 first. The hub embeds each note once, after it writes it, and keeps the vectors
@@ -800,9 +821,11 @@ each:
 ```console
 $ ensemble-runner settings name gpu-box                       # a hub knows it as <you>/gpu-box
 $ ensemble-runner settings workspace ~/ensemble               # its git repositories; ~/ is your home
-$ ensemble-runner backend add local --type openai-compatible-api --url http://127.0.0.1:11434/v1 --share
-$ ensemble-runner backend add team-gpu --type runner --runner kim/workstation --runner-backend big
-$ ensemble-runner settings shared-calls 1                     # the most calls of others to what it shares, at once
+$ ensemble-runner source add local --type openai-compatible-api --url http://127.0.0.1:11434/v1 --max-concurrent 1
+$ ensemble-runner model list                                  # its models, each off until turned on
+$ ensemble-runner model on local:qwen3.5:9b --tier medium     # how strong it is, if Ensemble does not know
+$ ensemble-runner model share local:qwen3.5:9b               # offered to the hub and your other runners
+$ ensemble-runner source add team-gpu --type runner --runner kim/workstation
 $ ensemble-runner login wss://hub.example.com --user kim     # once: it names this hub
 $ git clone git@github.com:acme/shop.git ~/ensemble/shop      # a project of its workspace, or let a task name it
 $ ensemble-runner serve                                       # until Ctrl-C or SIGTERM
@@ -864,42 +887,43 @@ Tasks of a `shared` agent share the repository, so give two of them that
 change the same files to an agent with `max_concurrent: 1`, or `isolation:
 worktree`.
 
-### Sharing LLM backends
+### Sharing models
 
 A hub may run on a small machine and need a strong model, and so may a
-runner. A runner may offer some of its own backends through the hub
-(`ensemble-runner backend share`), and the hub and other runners use them:
-each adds one as a backend of `type: runner`, naming the runner,
-`<owner>/<name>`, and its name there. Then it names it like any backend, by
-the name it gave it, in a `try` list, the distiller or a team. A backend's
-name is unique among all of a hub's or a runner's.
+runner. A runner may share some models of its own servers through the hub
+(`ensemble-runner model share`), and the hub and your other runners use them:
+each adds the runner as a source of `type: runner`, naming it
+`<owner>/<name>`, and turns on the models it wants. A model of it is named as
+the runner names it, after the source's name: `gpu:local:qwen3.5:72b`.
 
 ```console
-$ ensemble-runner backend share local                      # on ana's gpu box
-$ ensemble-hub runner backends                             # what the connected runners share, with their models
-ana/gpu-box  local  (1 call(s) at once)  models: qwen3.5:72b
-$ ensemble-hub backend add gpu --type runner --runner ana/gpu-box --runner-backend local
+$ ensemble-runner model share local:qwen3.5:72b            # on ana's gpu box
+$ ensemble-hub runner models                               # what the connected runners share
+ana/gpu-box  local:qwen3.5:72b  llm, strong  (1 call(s) at once)
+$ ensemble-hub source add gpu --type runner --runner ana/gpu-box
+$ ensemble-hub model on gpu:local:qwen3.5:72b
 ```
 
 - **Who may use it.** The hub, and its owner's other runners.
 - **What they learn.** Nothing of its address or key: the runner calls its own
-  server, and only for what an agent needs of it (its models, chats,
-  completions and embeddings). Whoever runs it sees what is sent to it:
-  choosing a runner's backend is a decision of trust.
+  server, and only for what an agent needs of a shared model (chats,
+  completions and embeddings); it refuses a call to a model it does not
+  share. Whoever runs it sees what is sent to it: choosing a runner's model
+  is a decision of trust.
 - **How it goes.** Calls go on a second WebSocket of each runner, beside its
   link, so a long prompt or a busy stream never holds up its tasks. The hub
-  and a runner that reaches others' backends serve them on loopback, where
-  each looks like any OpenAI-compatible backend to the agents. Through the hub
-  a call takes a few milliseconds longer than one made directly.
-- **When it cannot.** A runner takes `max_shared_calls` calls of others at
-  once (`ensemble-runner settings shared-calls`); the hub keeps the next waiting for up to 10 seconds, then answers that
-  it is busy. Busy, offline or not shared, the backend is unavailable and the
-  `try` list's next model is used.
+  and a runner that reaches other runners serve them on loopback, where each
+  looks like any OpenAI-compatible server to the agents. Through the hub a
+  call takes a few milliseconds longer than one made directly.
+- **When it cannot.** Each source takes `max_concurrent` calls at once, the
+  runner's own and others' together; the hub keeps the next waiting for up to
+  10 seconds, then answers that it is busy. Busy, offline or not shared, the
+  model is unavailable and the `try` list's next model is used.
 
 ## Helper teams
 
-A helper team is one directory with one file in it: `config.yaml`, the llm
-backends and the agents. Commit it; it holds no secrets. The runner runs every
+A helper team is one directory with one file in it: `config.yaml`, its
+agents and the models they run on. Commit it; it holds no secrets. The runner runs every
 team in its teams directory (`~/.local/state/ensemble/runner/teams/`, see
 [Teams](#teams)) as one helper team: each name of a team, its agents, model
 servers, limits and gates, is `<team>/<name>`, so two teams may both have a
@@ -914,7 +938,7 @@ repository:
 
 | where | |
 | --- | --- |
-| `core/` | its `database.db`, with its settings, its backends' keys and its hub tokens, sealed by `master.key` beside it |
+| `core/` | its `database.db`, with its settings, its ANN pool, its sources' keys and its hub tokens, sealed by `master.key` beside it |
 | `teams/` | its helper teams, a folder each |
 | `workdirs/<folder>-<hash>/runs/` | what tasks did as they ran on this computer, for one repository of the workspace |
 | `.../worktrees/` | a git worktree per task of an agent with `isolation: worktree` |
@@ -943,9 +967,9 @@ agents:
     adapter:
       type: opencode
       model:
-        type: llm_backend
+        type: ann_pool
         try:
-          - backend: local
+          - source: local
             name: qwen3.5-9b
             context_window: 262144
         when_none: fail
@@ -991,22 +1015,25 @@ one professional a task can go to. It has:
 | `budget` | how much it may run in an hour: `{ type: unlimited }`, `{ type: per_hour, delegations: 20 }` (runs), or `{ type: per_hour_tokens, tokens: 2000000 }` (the tokens its runs reported). A task and each gate retry count, across every repository (`usage.json` in the helper team's state directory). Over it, a task waits until its agent may run again, and a gate retry is not made |
 | `adapter` | what runs it. `type` decides which other fields the adapter takes |
 
-An **LLM backend** is a model server of yours, or one your company runs. Each
-runner keeps the backends it has (`ensemble-runner backend add`, see
-[Sharing LLM backends](#sharing-llm-backends)), with their addresses and keys,
-and a team names them by name alone: an OpenCode agent in its model (`type:
-llm_backend`), and a `builtin` or `direct` agent in its adapter. So one team
-runs on every runner that defines the backends it names, each with its own
-servers and keys, and Ensemble hands the agent's CLI the endpoint and key for
+A **source** is a model server of yours, or one your company runs, and its
+models are LLMs or embedding models. Each runner keeps the sources it has in
+its ANN pool (`ensemble-runner source add`, see [Sharing models](#sharing-models)),
+with their addresses and keys, and turns on the models it lets its teams use
+(`ensemble-runner model on`). A team names a model by its source and its id
+there: an OpenCode agent in its model (`type: ann_pool`), and a `builtin` or
+`direct` agent in its adapter; the model must be an LLM of the pool that is
+on. So one team runs on every runner that has the models it names on, each
+with its own servers and keys, and Ensemble hands the agent's CLI the endpoint and key for
 each run, so you never configure the same server again in the CLI's own
 settings. The team above names `local`, which a runner adds like this, its
-key asked for when the server wants one:
+key asked for when the server wants one, and whose model it turns on:
 
 ```console
-$ ensemble-runner backend add local --type openai-compatible-api --url http://127.0.0.1:8888/v1 --timeout 600
+$ ensemble-runner source add local --type openai-compatible-api --url http://127.0.0.1:8888/v1 --max-concurrent 1 --timeout 600
+$ ensemble-runner model on local:qwen3.5-9b
 ```
 
-A backend has a `type`:
+A source has a `type`:
 
 - `openai-compatible-api`: any `/chat/completions` endpoint: llama-server, vLLM,
   Ollama, Unsloth, a hosted API. `opencode`, `builtin` and `direct` agents can
@@ -1014,32 +1041,35 @@ A backend has a `type`:
 - `anthropic-api`: Anthropic's own Messages API (`base_url:
   https://api.anthropic.com`, the key sent as `x-api-key`). `builtin` and `direct` agents
   can run on it; OpenCode needs an openai-compatible one, and a config that says
-  otherwise is refused by name. Claude Code uses your own login, not a backend.
+  otherwise is refused by name. Claude Code uses your own login, not a source.
+- `runner`: another runner of yours, whose shared models are reached through
+  the hub (see [Sharing models](#sharing-models)).
 
-Either requires `base_url` (the URL itself; no variable overrides it) and
-`timeout_seconds` (per request), and takes `api_key_env`, the name of the
-variable holding the key, when the server wants one. `ensemble-runner agent
+A server or an API requires `base_url` (the URL itself; no variable overrides
+it), `timeout_seconds` (per request) and `max_concurrent` (the most calls it
+takes at once), and takes `api_key_env`, the name of the variable holding the
+key, when the server wants one. `ensemble-runner agent
 health` asks each for the models it serves.
 
-An agent on backends lists its models in **`try`**, in order, and says in
+An agent on the ANN pool lists its models in **`try`**, in order, and says in
 **`when_none`** what happens when none of them can be used:
 
 ```yaml
 model:
-  type: llm_backend
+  type: ann_pool
   try:
-    - { backend: local, name: qwen3.5-9b, context_window: 32768 }
-    - { backend: central, name: qwen3.5-72b, context_window: 131072 }
+    - { source: local, name: qwen3.5-9b, context_window: 32768 }
+    - { source: central, name: qwen3.5-72b, context_window: 131072 }
   when_none: wait
 ```
 
-Each run uses the first model whose backend answers and serves it, so a shared
+Each run uses the first model whose source answers and serves it, so a shared
 helper team keeps working on whatever each person has: your own server when it
 is on, the company's otherwise. With one model there is nothing to choose, and
-it is simply used. With several, Ensemble asks each backend which models it
-serves (`GET /models`), at most once a minute per backend. When none works,
-`fail` makes the task fail, saying what each backend answered; `wait` keeps
-the task in the queue, noted in its log (`waiting for a backend`), and tries
+it is simply used. With several, Ensemble asks each source which models it
+serves (`GET /models`), at most once a minute per source. When none works,
+`fail` makes the task fail, saying what each source answered; `wait` keeps
+the task in the queue, noted in its log (`waiting for a model`), and tries
 again later. A run on a later model says so in what it reports (`opencode on
 central (fallback 2 of 2)`), and `ensemble-runner agent show <agent> --probe`
 says which model a run would use now.
@@ -1086,12 +1116,12 @@ agents:
     adapter:
       type: opencode
       model:
-        type: llm_backend      # models the runner's LLM backends serve
+        type: ann_pool         # LLMs of the runner's ANN pool that are on
         try:                   # in order; a run uses the first that works
-          - backend: local
+          - source: local
             name: qwen3.5-9b       # the id the server serves
             context_window: 262144 # what the server runs it with
-        when_none: fail        # or wait: a task waits for a backend
+        when_none: fail        # or wait: a task waits for a model
       tools: [read, glob, grep, list, edit, "bash(git *)"]
       system_prompt: append
       max_steps: 30
@@ -1140,8 +1170,8 @@ OpenCode also reads your global `~/.config/opencode/AGENTS.md` and
 `~/.claude/CLAUDE.md` into every agent. Set `OPENCODE_DISABLE_CLAUDE_CODE=1`
 in the environment you start Ensemble from to keep `.claude` files out.
 
-With a model of type `llm_backend`, the same inline config also defines that
-backend as an OpenCode provider (`@ai-sdk/openai-compatible`, its base URL, its
+With a model of type `ann_pool`, the same inline config also defines its
+source as an OpenCode provider (`@ai-sdk/openai-compatible`, its base URL, its
 key, its `timeout_seconds`) serving the agent's model with `context_window` as
 its limit, so OpenCode knows when to compact. Nothing is written to disk. See it
 with `ensemble-runner agent show <agent>`:
@@ -1169,7 +1199,7 @@ Your own OpenCode configuration (providers, models, the project's
 ### The `direct` adapter
 
 A light agent: no CLI, no tools, no loop. The task (after its context) and the
-agent's prompt (as the system prompt) go straight to an LLM backend as one
+agent's prompt (as the system prompt) go straight to an LLM of the ANN pool as one
 `/chat/completions` request, and the answer comes back. It reads and changes
 nothing, so it suits cheap work on what it is given: summarising a log,
 classifying findings, drafting a commit message, on a small local model.
@@ -1186,15 +1216,15 @@ agents:
     adapter:
       type: direct
       try:                   # in order; a run uses the first that works
-        - backend: local     # one of the runner's LLM backends
-          model: qwen3.5:9b  # the id the server serves
-      when_none: fail        # or wait: a task waits for a backend
+        - source: local      # a source of the runner's ANN pool
+          model: qwen3.5:9b  # the id the server serves; on in the pool
+      when_none: fail        # or wait: a task waits for a model
       max_tokens: 1000       # an answer cut off here is marked unfinished
 ```
 
-The request waits up to the backend's `timeout_seconds`, and the agent's
+The request waits up to the source's `timeout_seconds`, and the agent's
 `max_seconds` or a cancel ends the wait sooner. `ensemble-runner agent show
-<agent>` prints the request; `health` checks the backend serves the model.
+<agent>` prints the request; `health` checks the source serves the model.
 
 ### The `builtin` adapter
 
@@ -1217,7 +1247,7 @@ agents:
     adapter:
       type: builtin
       try:                       # in order; a run uses the first that works
-        - backend: local         # one of the runner's LLM backends, of either type
+        - source: local          # a source of the runner's ANN pool, of either type
           model: qwen3-coder:30b
           context_window: 65536  # the loop compacts before it outgrows it
       when_none: fail
@@ -1293,7 +1323,7 @@ dontAsk` Claude Code denies any tool not listed instead of waiting for a person
 who is not there, and the result says which it was denied. `tools` takes
 Claude Code's names and rules (`Read`, `Edit`, `Write`, `Bash`,
 `Bash(git diff:*)`, `WebFetch`), one per entry. `[Read, Grep, Glob]` is
-read-only. It has no `model` of type `llm_backend`, no `max_steps`: those
+read-only. It has no `model` of type `ann_pool`, no `max_steps`: those
 settings belong to the `opencode` adapter and are refused here.
 
 It runs on your own subscription, through the official CLI's supported
@@ -1571,16 +1601,16 @@ environment, as always.
 API keys are named by the **variable** that holds them (`api_key_env`), never
 written in the runner's settings or the hub's: there is no `api_key` field,
 and a config that tries one is rejected by name, before it reaches a commit.
-`backend add` and `backend key` write both for you: the key where it is kept,
+`source add` and `source key` write both for you: the key where it is kept,
 and its variable in the settings (see [Changing settings](#changing-settings)).
 
-A key given to `backend add` or `backend key` is kept sealed in the runner's
+A key given to `source add` or `source key` is kept sealed in the runner's
 database, with AES-256-GCM, by its master key,
 `~/.local/state/ensemble/runner/core/master.key`, made the first time a key is
 kept and readable by you alone; so are the runner's hub tokens, which
 `ensemble-runner login` and `join` keep. A hub keeps the keys it is given the
 same way, by its own `hub/core/master.key`, as a GitLab instance keeps its
-secrets. Back up the whole folder; without `master.key`, give each backend
+secrets. Back up the whole folder; without `master.key`, give each source
 its key again, and sign the runner in again.
 
 A key a secrets manager keeps is read from the environment, and named with
@@ -1591,8 +1621,8 @@ environment (`environmentFile` in Nix, systemd's `EnvironmentFile=`). A
 variable set in the environment wins over a key the hub or the runner keeps.
 
 The helper team holds no secrets, so nothing is read from beside it, and a
-pulled or shared helper team cannot carry keys by accident. A backend's key
-reaches an agent's CLI only as that backend's provider key in
+pulled or shared helper team cannot carry keys by accident. A source's key
+reaches an agent's CLI only as that source's provider key in
 `OPENCODE_CONFIG_CONTENT`, in the CLI's environment for that run, so it
 cannot change how the CLIs log in. `ensemble-runner agent show` and
 `ensemble-runner team check` never print a key.
@@ -1626,12 +1656,12 @@ ensemble: team 'web': ~/.local/state/ensemble/runner/teams/web/config.yaml is in
   - agents.coder: `max_seconds` must be greater than 0
 ```
 
-A team that is valid is then checked against the runner's backends:
+A team that is valid is then checked against the runner's ANN pool:
 
 ```console
 $ ensemble-runner team check
 ensemble: team 'web': ~/.local/state/ensemble/runner/teams/web/config.yaml is invalid:
-  - agents.coder.adapter.model.try[0]: LLM backend 'lcoal' is not defined in the runner's `llm`. Defined LLM backends: local.
+  - agents.coder.adapter.model.try[0]: there is no source 'lcoal' in the ANN pool. Its sources: local.
 ```
 
 A typo'd key is an error, never a silent default, and a missing key is an
@@ -1648,40 +1678,53 @@ Only a helper team's `config.yaml` is a file, as it is shared in git.
 ### By what you mean
 
 ```console
-$ ensemble-hub backend add central --type openai-compatible-api --url http://127.0.0.1:8888/v1
-The backend's API key (empty for none): ••••••       # asked when it wants one, without echo
-added backend central, which serves unsloth/Qwen3.5-9B-GGUF, unsloth/embeddinggemma-2-GGUF
-$ ensemble-hub backend key central                   # a new key, or empty to take it out
-$ ensemble-hub backend list | test [name] | remove <name>
-$ ensemble-hub knowledge models central:unsloth/Qwen3.5-9B-GGUF claude:claude-haiku-4-5
-$ ensemble-hub knowledge embedding central:unsloth/embeddinggemma-2-GGUF   # or --off
+$ ensemble-hub source add central --type openai-compatible-api --url http://127.0.0.1:11434/v1 --max-concurrent 2
+The source's API key (empty for none): ••••••       # asked when it wants one, without echo
+added source central, which serves central:qwen3.5:9b, central:embeddinggemma; they are off until you turn them on, as `model on central:qwen3.5:9b`
+$ ensemble-hub source key central                   # a new key, or empty to take it out
+$ ensemble-hub source list | test [name] | refresh [name] | remove <name>
+$ ensemble-hub model list [source]                  # each model: what it is, on or off, missing
+$ ensemble-hub model on central:qwen3.5:9b --tier medium   # model off | set
+$ ensemble-hub model on central:embeddinggemma
+$ ensemble-hub knowledge models central:qwen3.5:9b claude:claude-haiku-4-5
+$ ensemble-hub knowledge embedding central:embeddinggemma   # or --off
 $ ensemble-hub knowledge recall --max-notes 8 --max-chars 6000
 $ ensemble-hub tracker add issues --type local_markdown --dir issues      # tracker list | remove
 $ ensemble-hub role set auditor recall,share                              # role remove
 $ ensemble-hub registration set approval --max-pending 20                 # or closed
 $ ensemble-hub source filter central:qwen3.5-72b --prompt "Salaries; clients' names."  # or --off
 $ ensemble-hub source try "Bob: deploys go out on Tuesdays now"
-$ ensemble-runner backend add local --type openai-compatible-api --url http://127.0.0.1:11434/v1 --share
-$ ensemble-runner backend share local | unshare local
+$ ensemble-runner source add local --type openai-compatible-api --url http://127.0.0.1:11434/v1 --max-concurrent 1
+$ ensemble-runner model share local:qwen3.5:9b      # model unshare
 ```
 
-- **A backend is asked first.** `backend add` asks it which models it serves
+- **A source is asked first.** `source add` asks it which models it serves
   before anything is written, so a wrong address or key is said at once;
   `--no-check` adds it anyway. One that answers that it wants a key has the
-  key asked for. `--type runner` names one a runner shares through the hub
-  (`--runner <owner>/<name>`), which the hub or the runner reaches only while
-  it runs.
+  key asked for. `--type runner` names another runner of yours, whose shared
+  models the hub or the runner reaches through the hub (`--runner
+  <owner>/<name>`), only while it runs. Its sources are asked again on
+  `source refresh` and whenever the hub or the runner starts.
+- **A model is off until it is turned on.** What each model is, an LLM or an
+  embedding model, is what Ollama says of it, what Ensemble knows of its
+  family, or, when nothing says, asked once as it is turned on. An LLM's tier,
+  small, medium or strong, comes from a catalog of known families and sizes,
+  else from Ollama's, else medium; `model on --tier` or `model set` says it.
+  A model a source no longer lists is marked missing, never forgotten.
 - **Keys are kept for you.** A key you give is kept under a variable Ensemble
-  names after the backend (`ENSEMBLE_BACKEND_CENTRAL_KEY`), and the backend
-  names that variable; `backend remove` takes it out too. The hub and the
+  names after the source (`ENSEMBLE_SOURCE_CENTRAL_KEY`), and the source
+  names that variable; `source remove` takes it out too. The hub and the
   runner each keep it sealed in their database, by their `master.key` (see
   [Secrets](#secrets)). A key you keep elsewhere already, such as one a
   secrets manager puts in the environment (`environmentFile` in Nix), is
   named instead with `--key-env NAME`.
-- **Models are checked too.** `knowledge models` asks each backend whether it
-  serves its model, and `knowledge embedding` asks the model to embed once.
-- **What something uses stays.** A backend the distiller, the embedding model
-  or a runner's team uses is not removed, nor a role an account has.
+- **Models are checked too.** `knowledge models` takes only LLMs of the pool
+  that are on, and asks each source whether it serves its model now;
+  `knowledge embedding` takes only an embedding model that is on, and asks it
+  to embed once.
+- **What something uses stays.** A source or a model the distiller, the
+  embedding model or a runner's team uses is not removed nor turned off, nor
+  a role an account has.
 
 ### Every other setting
 
@@ -1691,7 +1734,6 @@ $ ensemble-hub settings sessions 12                  # hours a login lasts
 $ ensemble-hub settings lockout --failures 5 --minutes 15
 $ ensemble-runner settings name laptop
 $ ensemble-runner settings workspace ~/code
-$ ensemble-runner settings shared-calls 2
 $ ensemble-hub settings show [--json]                # every setting; ensemble-runner's alike
 $ ensemble-hub settings history                      # who changed what, when, with which operation
 $ ensemble-hub settings import "$(cat hub.json)"     # settings another hub's `settings show --json` printed
@@ -1783,7 +1825,7 @@ team pull`, `ensemble-runner settings …` and the rest, as themselves, with no
 `sudo`.
 
 Neither has settings in Nix, as one runs a GitLab instance: the settings of
-each, and the keys of its backends, are kept in its `core/database.db`,
+each, and the keys of its sources, are kept in its `core/database.db`,
 sealed by its `master.key`, and changed with its commands (a hub's also with
 its REST API or a web UI). Back up their folders.
 
@@ -1808,7 +1850,7 @@ its REST API or a web UI). Back up their folders.
 The first time it starts, `ensemble-runner serve` makes a runner named for
 this computer, working for her in `~/ensemble`, offering nothing.
 Then, as `ana`: `ensemble-runner login <url> --user ana`, `ensemble-runner
-backend add …`, `ensemble-runner settings …`, and its teams with
+source add …`, `ensemble-runner model on …`, `ensemble-runner settings …`, and its teams with
 `ensemble-runner team pull`, `link` or `new`; the running runner uses each at
 once. `ensemble-runner` is put on the system's `PATH`, for managing it;
 `services.ensemble.runner.package` is the package it comes from.
@@ -1832,12 +1874,12 @@ at boot without a login, and, as a user service, it has their
 ```
 
 The module only runs the hub, as one runs a GitLab instance: its settings and
-the keys of its backends are kept in its `database.db`, and changed with
+the keys of its sources are kept in its `database.db`, and changed with
 `ensemble-hub …` as `user`, its REST API or a web UI, never in Nix; only
 where it listens is. The first time it starts, `ensemble-hub serve` makes the
 settings a new hub starts with, every one of them, named for `user`, and its
 vault. Then, as `user`: `ensemble-hub setup`, which adds the first admin, and
-`ensemble-hub backend add …`,
+`ensemble-hub source add …`, `ensemble-hub model on …`,
 `ensemble-hub knowledge models …` and the rest. To reach it from other
 computers, give the module `listenAddress = "0.0.0.0";` and
 `openFirewall = true;`. Back up the hub's folder: without `core/master.key`,
@@ -1973,8 +2015,10 @@ $ ensemble-runner join <wss://url> <code>   # the same with a join code
 $ ensemble-runner logout <wss://url>
 $ ensemble-runner peers                     # the other runners of your hub you may use now
 $ ensemble-runner settings show|history [--json]   # its settings, and who changed them
-$ ensemble-runner settings name|workspace|shared-calls <value>
+$ ensemble-runner settings name|workspace <value>
 $ ensemble-runner settings import <json>   # settings `settings show --json` printed, whole
+$ ensemble-runner source list|add|test|key|refresh|remove   # the sources of its ANN pool, and their keys
+$ ensemble-runner model list|on|off|set|share|unshare   # their models: which are on, what each is, which it shares
 
 # Its helper teams
 $ ensemble-runner team list                 # each team, where it comes from, its agents
@@ -1992,9 +2036,9 @@ $ ensemble-runner team config <name> get|set|unset|edit|path   # a team's config
 $ ensemble-runner agent list                # the routing table
 $ ensemble-runner agent show <team>/<agent> [--probe]   # how it starts, keys hidden; --probe: which model a run would use now
 $ ensemble-runner agent run <team>/<agent> <task> [--context C]   # one task to one agent, in --dir
-$ ensemble-runner agent health              # every CLI starts, every backend serves its models? non-zero if not
+$ ensemble-runner agent health              # every CLI starts, every source serves its models? non-zero if not
 $ ensemble-runner agent stats [--since 7d] [--json]   # runs, failures, time, tokens
-$ ensemble-runner agent add <team>/<name> --adapter A [--model M] [--backend B] [--prompt P] [--writes]
+$ ensemble-runner agent add <team>/<name> --adapter A [--model M] [--source S] [--prompt P] [--writes]
 $ ensemble-runner agent remove <team>/<name>
 
 # A hub this computer runs
@@ -2017,6 +2061,9 @@ $ ensemble-hub knowledge status|distill|rebuild
 $ ensemble-hub settings show|history [--json]    # its settings, and who changed them
 $ ensemble-hub settings owner|sessions|lockout …
 $ ensemble-hub settings import <json>     # settings `settings show --json` printed, whole
+$ ensemble-hub source list|add|test|key|refresh|remove   # the sources of its ANN pool, and their keys
+$ ensemble-hub model list|on|off|set      # their models: which are on, and what each is
+$ ensemble-hub runner models              # the models the connected runners share
 
 $ ensemble-runner completions zsh|bash|fish|elvish|powershell   # a completion script for your shell
 $ ensemble-hub completions zsh|bash|fish|elvish|powershell
@@ -2088,14 +2135,14 @@ scripts stand in for the CLIs.
 | --- | --- |
 | `crates/ensemble-config/src/tests.rs` | every validation rule, environment precedence, secrets, typos, the schema kept in step with the code |
 | `crates/ensemble-agents/src/external/` | each CLI's command line, generated config and event stream, denials, limits, failures, the time limit killing the process tree |
-| `crates/ensemble-agents/src/router.rs`, `crates/ensemble-backends/` | routing, `health` and its model check, the chat request in both formats |
+| `crates/ensemble-agents/src/router.rs`, `crates/ensemble-backends/` | routing, `health` and its model check, the chat request in both formats; what a source lists, as Ollama says or the catalog knows; a model new to a source kept off, and one gone marked missing |
 | `crates/ensemble-knowledge/` | shares kept as they arrived, notes and the log, commits by the lock holder, the secret check; the pipeline against a stub model: new notes, merges, chatter skipped, unusable answers to review, waiting for a model, rebuild |
 | `ui/server/` | the app's files served with its pages and nothing outside them, a call to the API passed on as from the hub's origin only from a page of the UI, the hub's cookies Secure behind TLS |
 | `crates/ensemble-hub/` | sign-up, approval and the REST API's codes, a browser's session in a cookie no page of another origin may use, an account's tasks, runners and knowledge as operations, tokens kept as hashes and revoked at once, join codes spent once and before they expire, a runner signing in over the link with a password (and the lockout) or a code, a link without a token refused all else, a runner of another protocol version refused with what to update, roles checked per request, shares under the signed-in name; the hub's MCP: a token needed, the tools a token allows, share and recall as its account, tasks made and followed, with a `repository` and a `gate`; every connected runner listed to its owner alone with all its agents, model calls streamed from a runner; tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the runner holding the lease, questions, hand-offs, cancelling, tasks given back and blocked until a runner that has not connects or they are assigned again, the answer to where a project is kept as its repository, the tasks waiting for a runner's agents in every project, the notes recalled into a new task, over the link as the signed-in account; the inbox: markdown issues read and written with only the status line changed, issues to tasks of the account matched by tracker name, questions and answers through comments, results posted once, a closed issue cancelling its task |
 | `crates/ensemble-link/` | the token file 0600, the link opened again when it breaks, a hub of another protocol version named with what to update |
 | `crates/ensemble-core/` | the state directories and their hashes, the worker lock, run records |
 | `crates/ensemble-tasks/` | tickets, questions and hand-offs in a reply, run logs |
-| `crates/ensemble-hub/tests/queue.rs` | the worker of a repository: tasks run within `max_concurrent` and shared limits, closing the worker interrupting running tasks, cancel, `after`, gates, worktrees, `repo`, questions and answers, the backlog and `assign`, hand-offs, budgets, waiting for a backend |
+| `crates/ensemble-hub/tests/queue.rs` | the worker of a repository: tasks run within `max_concurrent` and shared limits, closing the worker interrupting running tasks, cancel, `after`, gates, worktrees, `repo`, questions and answers, the backlog and `assign`, hand-offs, budgets, waiting for a model |
 | `tests/workspace.rs` | the crates depend on each other in one direction only, and the runner on none of the hub's |
 | `tests/end_to_end.rs` | the real executables, `ensemble-hub` and `ensemble-runner`: their commands, `show`, `health` against a stub server, an agent changing a file; setup and doctor; the runner working on the tasks of a repository in its workspace, a task made through the hub's MCP; a task resumed when the runner starts again; a task stopped on one computer and carried on by another from its pushed branch; an issue from the tracker worked on a member's runner; a repository added to the workspace while the runner runs, a runner listed with its agents, and a task's notes in its agent's prompt; a task's repository cloned and its branch pushed there; a runner asking where a project is and cloning the answer; a task whose repository cannot be cloned given back and blocked; a runner's models through the hub; signing in and joining with a code, a hub refusing another protocol or a bad token, settings changed from the command line, reloads of teams and settings |
 | `crates/ensemble-agents/tests/fixtures/` | saved event streams per CLI version, replayed through each adapter's parser (see its README) |
@@ -2106,7 +2153,7 @@ scripts stand in for the CLIs.
 
 - **Five adapters so far.** `claude-code`, `opencode`, `codex`, `builtin` and
   `direct`.
-- **Only `opencode`, `builtin` and `direct` agents run on an LLM backend**, and
+- **Only `opencode`, `builtin` and `direct` agents run on the ANN pool**, and
   an Anthropic one only a `builtin` or `direct` agent. Claude Code and Codex use your own login.
 - **Flat teams.** A helper team is a list of agents with no hierarchy. A runner
   runs all its teams at once; a task names its agent by `<team>/<agent>`.

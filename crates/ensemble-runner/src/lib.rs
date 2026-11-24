@@ -113,7 +113,7 @@ impl Ctx {
         Ok(Ctx { dir })
     }
 
-    /// The runner's teams, as one helper team on its LLM backends, saying
+    /// The runner's teams, as one helper team on its ANN pool, saying
     /// which wait for approval. Those it reaches through the hub are there
     /// only while `ensemble-runner serve` serves them; without runner settings,
     /// there are none.

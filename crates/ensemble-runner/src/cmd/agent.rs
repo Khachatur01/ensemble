@@ -32,7 +32,7 @@ pub fn run(ctx: &Ctx, command: AgentCommand) -> Result<ExitCode, String> {
             agent,
             adapter,
             model,
-            backend,
+            source,
             prompt,
             writes,
         } => add(
@@ -41,7 +41,7 @@ pub fn run(ctx: &Ctx, command: AgentCommand) -> Result<ExitCode, String> {
                 adapter: &adapter,
                 prompt: prompt.as_deref(),
                 model: model.as_deref(),
-                backend: backend.as_deref(),
+                source: source.as_deref(),
                 writes,
             },
         ),
@@ -140,7 +140,7 @@ fn show(config: &Config, name: &str, probe: bool) -> Result<ExitCode, String> {
             println!("{}", command_line(&cx.command, &argv));
         }
         Adapter::Direct(la) => {
-            let (path, body) = match config.llm_backends.get(la.backend()) {
+            let (path, body) = match config.llm_backends.get(la.source()) {
                 Some(backend) => {
                     let (path, body) = ensemble_agents::external::direct::request_for(
                         backend, agent, la, TASK, None,
@@ -148,7 +148,7 @@ fn show(config: &Config, name: &str, probe: bool) -> Result<ExitCode, String> {
                     (format!("{}{path}", backend.settings.base_url()), body)
                 }
                 None => (
-                    format!("<undefined backend {}>", la.backend()),
+                    format!("<no source {}>", la.source()),
                     ensemble_agents::external::direct::request(agent, la, TASK, None),
                 ),
             };
@@ -159,7 +159,7 @@ fn show(config: &Config, name: &str, probe: bool) -> Result<ExitCode, String> {
             );
         }
         Adapter::OpenCode(oc) => {
-            let backend = oc.llm_backend().and_then(|b| config.llm_backends.get(b));
+            let backend = oc.source().and_then(|b| config.llm_backends.get(b));
             let argv = opencode::arguments(agent, oc, backend, TASK);
             println!("{}", command_line(&oc.command, &argv));
             let mut inline = opencode::config(
@@ -177,8 +177,8 @@ fn show(config: &Config, name: &str, probe: bool) -> Result<ExitCode, String> {
             );
         }
         Adapter::Builtin(ba) => {
-            let backend = config.llm_backends.get(ba.backend()).map_or_else(
-                || format!("<undefined backend {}>", ba.backend()),
+            let backend = config.llm_backends.get(ba.source()).map_or_else(
+                || format!("<no source {}>", ba.source()),
                 |b| b.settings.base_url().to_string(),
             );
             println!(
@@ -205,11 +205,11 @@ fn show(config: &Config, name: &str, probe: bool) -> Result<ExitCode, String> {
         }
     );
     for (i, c) in fallback.candidates.iter().enumerate() {
-        println!("  {}. {} / {}", i + 1, c.backend, c.model);
+        println!("  {}. {}:{}", i + 1, c.source, c.model);
     }
     if probe {
         let candidates: Vec<(&config::LlmBackend, &str)> = agent
-            .llm_backends()
+            .pool_models()
             .into_iter()
             .filter_map(|(b, m)| config.llm_backends.get(b).map(|b| (b, m)))
             .collect();

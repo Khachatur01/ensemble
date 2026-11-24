@@ -1,19 +1,23 @@
 //! The runner's relay socket to its hub (`ensemble_link::relay`), beside its
-//! link. On it, the runner serves others' calls to the backends it shares
-//! (`llm.direct.shares`), calling its own backend, and carries its agents'
-//! calls to the backends of other runners it reaches through the hub
-//! (`llm.hub`), which a loopback endpoint of its own serves them
-//! (`ensemble_link::loopback`). `ensemble-runner serve` keeps it when
-//! runner.yaml names a hub and shares or reaches a backend there.
+//! link. On it, the runner serves others' calls to the models it shares,
+//! calling its own source, and carries its agents' calls to the models of
+//! other runners it reaches through the hub (sources of type `runner`), which
+//! a loopback endpoint of its own serves them (`ensemble_link::loopback`).
+//! `ensemble-runner serve` keeps it when the runner names a hub and shares a
+//! model or reaches another runner there.
 //!
-//! A shared backend is asked only for what an agent needs of it: its models,
-//! chats, completions and embeddings, never another path of its server.
+//! A shared model is asked only for what an agent needs of it: chats,
+//! completions and embeddings, never another path of its server nor another
+//! model of it.
 
-use ensemble_config::{BackendSettings, LlmBackend, Runner};
+use ensemble_backends::models::Found;
+use ensemble_config::{BackendSettings, LlmBackend, ModelKind, Runner};
 use ensemble_core::runtime;
 use ensemble_link::client::{Failure, Token, relay_socket};
 use ensemble_link::loopback::Opener;
-use ensemble_link::relay::{CHUNK, Frame, Message, Offer, Open, UNAVAILABLE, body_frames};
+use ensemble_link::relay::{
+    CHUNK, Frame, Message, Offer, Open, Shared, SharedModel, UNAVAILABLE, body_frames,
+};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -24,7 +28,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Why a socket ended when the token was replaced.
 const REPLACED: &str = "signed in again with a new token";
-/// What of a shared backend a call may ask for.
+/// What of a shared model a call may ask for.
 const SERVED: [(&str, &str); 4] = [
     ("GET", "/models"),
     ("POST", "/chat/completions"),
@@ -37,8 +41,9 @@ pub struct Relay {
     url: String,
     token: Token,
     offer: Offer,
-    /// The runner's own backends it shares, by name.
-    shared: BTreeMap<String, LlmBackend>,
+    /// The runner's own sources it shares models of, by name, each with the
+    /// ids of those models.
+    shared: BTreeMap<String, (LlmBackend, Vec<String>)>,
     /// What is sent on the socket now; none while it is down.
     outbox: Mutex<Option<UnboundedSender<Frame>>>,
     /// Where the answers of the calls it made go, by its number for each.
@@ -53,20 +58,32 @@ impl Relay {
     /// The relay of `runner`, reaching the hub at `url` with `token`, and
     /// again with the new one when it is replaced.
     pub fn new(url: &str, token: Token, runner: &Runner) -> Relay {
-        let shared = runner
-            .llm
-            .shared()
-            .into_iter()
-            .map(|b| (b.name.clone(), b.clone()))
-            .collect();
+        let mut shared = BTreeMap::new();
+        let mut sources = BTreeMap::new();
+        for s in runner.llm.shared() {
+            let ids: Vec<String> = s.models.iter().map(|m| m.id.clone()).collect();
+            sources.insert(
+                s.source.name.clone(),
+                Shared {
+                    max_concurrent: s.max_concurrent,
+                    models: s
+                        .models
+                        .iter()
+                        .map(|m| SharedModel {
+                            id: m.id.clone(),
+                            kind: serde_json::to_value(m.kind).unwrap_or_default(),
+                        })
+                        .collect(),
+                },
+            );
+            shared.insert(s.source.name.clone(), (s.source.clone(), ids));
+        }
         Relay {
             url: url.to_string(),
             token,
             offer: Offer {
                 name: runner.name.clone(),
-                shares: runner.llm.shares.clone(),
-                max_shared_calls: runner.llm.max_shared_calls,
-                models: BTreeMap::new(),
+                sources,
             },
             shared,
             outbox: Mutex::new(None),
@@ -122,12 +139,8 @@ impl Relay {
         let mut socket = relay_socket(&self.url, &self.token.get())
             .await
             .map_err(Failure::Broken)?;
-        // What each shared backend serves now, for the hub to list.
-        let mut offer = self.offer.clone();
-        for (name, backend) in &self.shared {
-            offer.models.insert(name.clone(), models_of(backend).await);
-        }
-        let offer = serde_json::to_string(&offer).map_err(|e| Failure::Broken(e.to_string()))?;
+        let offer =
+            serde_json::to_string(&self.offer).map_err(|e| Failure::Broken(e.to_string()))?;
         socket
             .send(Message::text(offer))
             .await
@@ -143,10 +156,15 @@ impl Relay {
         if let Some(e) = answer["error"].as_str() {
             return Err(Failure::Hub(e.to_string()));
         }
-        if !self.offer.shares.is_empty() {
+        if !self.shared.is_empty() {
+            let names: Vec<String> = self
+                .shared
+                .iter()
+                .flat_map(|(source, (_, ids))| ids.iter().map(move |id| format!("{source}:{id}")))
+                .collect();
             say(&format!(
                 "sharing {} through the hub as {}",
-                self.offer.shares.join(", "),
+                names.join(", "),
                 answer["runner"].as_str().unwrap_or("?")
             ));
         }
@@ -218,11 +236,11 @@ impl Relay {
         }
         match frame {
             Frame::Open { open, .. } => {
-                let Some(backend) = self.shared.get(&open.backend).cloned() else {
+                let Some((source, ids)) = self.shared.get(&open.source).cloned() else {
                     self.send(Frame::error(
                         call,
                         404,
-                        format!("this runner shares no backend '{}'", open.backend),
+                        format!("this runner shares no model of a source '{}'", open.source),
                     ));
                     return;
                 };
@@ -231,7 +249,7 @@ impl Relay {
                         call,
                         404,
                         format!(
-                            "a shared backend serves its models, chats, completions and embeddings, not {} {}",
+                            "a shared model serves chats, completions and embeddings, not {} {}",
                             open.method, open.path
                         ),
                     ));
@@ -240,7 +258,7 @@ impl Relay {
                 let (up, request) = unbounded_channel();
                 self.serving.lock().unwrap().insert(call, up);
                 let relay = self.clone();
-                tokio::spawn(async move { relay.serve(call, backend, open, request).await });
+                tokio::spawn(async move { relay.serve(call, source, ids, open, request).await });
             }
             frame => {
                 let mut serving = self.serving.lock().unwrap();
@@ -255,12 +273,14 @@ impl Relay {
         }
     }
 
-    /// Serve call `call` with this runner's `backend`: read its request as it
-    /// comes, ask the backend, and send its answer back as it comes.
+    /// Serve call `call` with this runner's source `backend`, of which the models
+    /// `ids` are shared: read its request as it comes, ask the source for the
+    /// one shared model it names, and send its answer back as it comes.
     async fn serve(
         self: Arc<Self>,
         call: u64,
         backend: LlmBackend,
+        ids: Vec<String>,
         open: Open,
         mut request: UnboundedReceiver<Frame>,
     ) {
@@ -274,11 +294,44 @@ impl Relay {
                 Some(_) => {}
             }
         }
+        if open.method == "GET" {
+            let names: Vec<String> = ids
+                .iter()
+                .map(|id| format!("{}:{id}", backend.name))
+                .collect();
+            let answer = ensemble_link::relay::models_answer(&names);
+            self.send(Frame::Head {
+                call,
+                status: 200,
+                content_type: "application/json".into(),
+            });
+            self.send(Frame::Reply {
+                call,
+                bytes: answer,
+            });
+            self.send(Frame::Done { call });
+            return;
+        }
+        let named = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|b| b["model"].as_str().map(String::from));
+        if !named.as_ref().is_some_and(|m| ids.contains(m)) {
+            self.send(Frame::error(
+                call,
+                404,
+                format!(
+                    "this runner does not share {}:{}",
+                    backend.name,
+                    named.unwrap_or_default()
+                ),
+            ));
+            return;
+        }
         let BackendSettings::OpenAiCompatible { base_url, api_key } = &backend.settings else {
             self.send(Frame::error(
                 call,
                 404,
-                "a runner shares OpenAI-compatible backends alone",
+                "a runner shares models of OpenAI-compatible sources alone",
             ));
             return;
         };
@@ -310,7 +363,7 @@ impl Relay {
                 self.send(Frame::error(
                     call,
                     502,
-                    format!("the backend '{}' did not answer: {e}", backend.name),
+                    format!("the source '{}' did not answer: {e}", backend.name),
                 ));
                 return;
             }
@@ -350,10 +403,7 @@ impl Relay {
                     self.send(Frame::error(
                         call,
                         502,
-                        format!(
-                            "the answer of the backend '{}' broke off: {e}",
-                            backend.name
-                        ),
+                        format!("the answer of the source '{}' broke off: {e}", backend.name),
                     ));
                     return;
                 }
@@ -362,7 +412,7 @@ impl Relay {
     }
 }
 
-/// The calls of the runner's agents to backends it reaches through the hub,
+/// The calls of the runner's agents to models it reaches through the hub,
 /// for its loopback endpoint.
 pub struct RelayOpener(pub Arc<Relay>);
 
@@ -379,38 +429,25 @@ impl Opener for RelayOpener {
             let _ = answer.send(Frame::error(
                 call,
                 UNAVAILABLE,
-                "this runner is not connected to its hub, which the backend is reached through",
+                "this runner is not connected to its hub, which the model is reached through",
             ));
         }
         answers
     }
 }
 
-/// The models `backend` lists, or none when it does not answer in a few
-/// seconds.
-async fn models_of(backend: &LlmBackend) -> Vec<String> {
-    let BackendSettings::OpenAiCompatible { base_url, api_key } = &backend.settings else {
-        return Vec::new();
-    };
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-    else {
-        return Vec::new();
-    };
-    let mut req = client.get(format!("{base_url}/models"));
-    if let Some(key) = api_key {
-        req = req.header("authorization", format!("Bearer {key}"));
-    }
-    let Ok(resp) = req.send().await else {
-        return Vec::new();
-    };
-    let text = resp.text().await.unwrap_or_default();
-    let listed: Value = serde_json::from_str(&text).unwrap_or_default();
-    listed["data"]
+/// The models a runner shares, as the hub lists them, `[{source, id, kind}]`:
+/// each as that runner names it, `<source>:<id>`, and what it is.
+pub fn shared_models(listed: &Value) -> Vec<Found> {
+    listed
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|m| m["id"].as_str().map(String::from))
+        .filter_map(|m| {
+            Some(Found {
+                id: format!("{}:{}", m["source"].as_str()?, m["id"].as_str()?),
+                kind: serde_json::from_value(m["kind"].clone()).unwrap_or(ModelKind::Unknown),
+            })
+        })
         .collect()
 }

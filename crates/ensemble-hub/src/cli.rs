@@ -14,7 +14,7 @@ Files, in --config-dir (by default ~/.local/state/ensemble):
 
 The hub's settings are kept in its core's database, and changed with its
 commands, its REST API or a web UI; `settings show` shows them, `settings
-history` who changed what. `backend add` and `backend key` keep a backend's
+history` who changed what. `source add` and `source key` keep a source's
 key sealed there by master.key: back up both, as without master.key no key can
 be read. A key a secrets manager keeps is read from the environment. Client
 agents reach the hub over MCP, with an account's token.";
@@ -39,12 +39,15 @@ pub fn command<H>(hub: &Registry<H>) -> clap::Command {
         ("user", "The hub's accounts."),
         ("role", "The hub's roles."),
         ("runner", "The runners connected to the hub."),
-        ("backend", "The LLM backends the hub uses, and their keys."),
         ("tracker", "The trackers whose issues become tasks."),
         ("registration", "How people join the hub."),
         (
             "source",
-            "How what sources bring in is collected and filtered.",
+            "The sources of the hub's ANN pool and their keys; and how what knowledge sources bring in is collected and filtered (`filter`, `try`).",
+        ),
+        (
+            "model",
+            "The models of the hub's ANN pool: which are on, and what each is.",
         ),
         (
             "settings",
@@ -70,7 +73,7 @@ pub enum Command {
         yes: bool,
     },
     /// Make the settings a new hub starts with, and its vault: on this
-    /// computer alone, closed to sign-ups, with no backend or model yet.
+    /// computer alone, closed to sign-ups, with no source or model yet.
     Init {
         /// Make them anew in place of those there are.
         #[arg(long, conflicts_with = "keep")]

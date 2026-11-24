@@ -67,7 +67,7 @@ struct Inner {
     busy: HashMap<String, u32>,
     /// When each agent with a budget started its runs in the last hour.
     usage: BTreeMap<String, Vec<u64>>,
-    /// Tasks already noted as waiting for a backend, so the note is written
+    /// Tasks already noted as waiting for a model, so the note is written
     /// once per wait, not once per scan.
     backend_waits: HashSet<String>,
     /// Whether the hub could not be reached at the last look, so that is said
@@ -373,7 +373,7 @@ impl<'e> Queue<'e> {
                 }
                 if let Some(Some(why)) = blocked.get(ticket.agent.as_str()) {
                     if inner.backend_waits.insert(ticket.id.clone()) {
-                        self.note(&ticket.id, &format!("waiting for a backend: {why}"));
+                        self.note(&ticket.id, &format!("waiting for a model: {why}"));
                     }
                     continue;
                 }

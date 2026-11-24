@@ -26,7 +26,7 @@ fn claude(c: &Config, agent: &str) -> ClaudeCodeAdapter {
     }
 }
 
-/// OpenCode agents on two LLM backends, and one Claude Code agent. Every
+/// OpenCode agents on two sources, and one Claude Code agent. Every
 /// setting is written, as it has to be.
 const REFERENCE: &str = r#"
 version: 1
@@ -42,9 +42,9 @@ agents:
     adapter:
       type: opencode
       model:
-        type: llm_backend
+        type: ann_pool
         try:
-          - { backend: openai-local, name: qwen3-coder, context_window: 32768 }
+          - { source: openai-local, name: qwen3-coder, context_window: 32768 }
         when_none: fail
       tools: [read, glob, grep, list]
       system_prompt: append
@@ -59,9 +59,9 @@ agents:
     adapter:
       type: opencode
       model:
-        type: llm_backend
+        type: ann_pool
         try:
-          - { backend: openai-remote, name: qwen3-coder, context_window: 32768 }
+          - { source: openai-remote, name: qwen3-coder, context_window: 32768 }
         when_none: fail
       tools: [read, edit, bash]
       system_prompt: append
@@ -82,28 +82,31 @@ agents:
       command: claude
 "#;
 
-/// The backends of the runner the teams of these tests run on: two
+/// The sources of the runner the teams of these tests run on: two
 /// OpenAI-compatible ones of REFERENCE's, two more and an Anthropic one of
 /// `with_fallback`'s, and Anthropic's API as `claude-api`.
 const RUNNER_BACKENDS: &str = r#"
-      openai-local: { type: openai-compatible-api, base_url: "http://127.0.0.1:8000/v1", api_key_env: OPENAI_LOCAL_API_KEY, timeout_seconds: 600 }
-      openai-remote: { type: openai-compatible-api, base_url: "http://10.10.10.5:8000/v1", api_key_env: OPENAI_REMOTE_API_KEY, timeout_seconds: 300 }
-      home: { type: openai-compatible-api, base_url: "http://127.0.0.1:1/v1", timeout_seconds: 5 }
-      central: { type: openai-compatible-api, base_url: "http://127.0.0.1:2/v1", timeout_seconds: 5 }
-      claude: { type: anthropic-api, base_url: "https://api.anthropic.com", timeout_seconds: 5 }
-      claude-api: { type: anthropic-api, base_url: "https://api.anthropic.com/", api_key_env: ANTHROPIC_API_KEY, timeout_seconds: 90 }
+      openai-local: { type: openai-compatible-api, base_url: "http://127.0.0.1:8000/v1", api_key_env: OPENAI_LOCAL_API_KEY, timeout_seconds: 600, max_concurrent: 1 }
+      openai-remote: { type: openai-compatible-api, base_url: "http://10.10.10.5:8000/v1", api_key_env: OPENAI_REMOTE_API_KEY, timeout_seconds: 300, max_concurrent: 1 }
+      home: { type: openai-compatible-api, base_url: "http://127.0.0.1:1/v1", timeout_seconds: 5, max_concurrent: 1 }
+      central: { type: openai-compatible-api, base_url: "http://127.0.0.1:2/v1", timeout_seconds: 5, max_concurrent: 1 }
+      claude: { type: anthropic-api, base_url: "https://api.anthropic.com", timeout_seconds: 5, max_concurrent: 1 }
+      claude-api: { type: anthropic-api, base_url: "https://api.anthropic.com/", api_key_env: ANTHROPIC_API_KEY, timeout_seconds: 90, max_concurrent: 1 }
 "#;
 
-/// A runner without a hub whose backends are `backends`, the lines of a YAML
+/// A runner without a hub whose sources are `sources`, the lines of a YAML
 /// mapping indented six spaces, or `{}`, its keys read from `env`.
-fn runner_on(backends: &str, env: &dyn Env) -> Result<Runner, ConfigError> {
-    let backends: BTreeMap<String, BackendSetting> =
-        serde_norway::from_str(backends).map_err(|e| ConfigError::Syntax {
+fn runner_on(sources: &str, env: &dyn Env) -> Result<Runner, ConfigError> {
+    let sources: BTreeMap<String, SourceSetting> =
+        serde_norway::from_str(sources).map_err(|e| ConfigError::Syntax {
             path: PathBuf::from("database.db"),
             detail: e.to_string(),
         })?;
     RunnerSettings {
-        backends,
+        ann_pool: AnnPoolSetting {
+            sources,
+            models: Vec::new(),
+        },
         ..RunnerSettings::starting("laptop", "/code")
     }
     .resolve(&ensemble_core::state::RunnerDir::new("/r"), env)
@@ -134,14 +137,14 @@ fn refusal(doc: &str) -> String {
     }
 }
 
-/// The problems of the runner whose backends are `backends`.
-fn runner_problems(backends: &str) -> String {
-    problems_of(runner_on(backends, &env(&[])).unwrap_err()).join("\n")
+/// The problems of the runner whose sources are `sources`.
+fn runner_problems(sources: &str) -> String {
+    problems_of(runner_on(sources, &env(&[])).unwrap_err()).join("\n")
 }
 
-/// The message of the runner whose backends serde refuses.
-fn runner_refusal(backends: &str) -> String {
-    match runner_on(backends, &env(&[])).unwrap_err() {
+/// The message of the runner whose sources serde refuses.
+fn runner_refusal(sources: &str) -> String {
+    match runner_on(sources, &env(&[])).unwrap_err() {
         ConfigError::Syntax { detail, .. } => detail,
         other => panic!("expected Syntax, got: {other}"),
     }
@@ -150,19 +153,19 @@ fn runner_refusal(backends: &str) -> String {
 #[test]
 fn the_reference_config_loads() {
     let c = parse(REFERENCE, &p()).expect("reference config must load");
-    assert!(c.llm_backends.is_empty(), "a team defines no backend");
+    assert!(c.llm_backends.is_empty(), "a team defines no source");
     let c = team(REFERENCE).unwrap();
     assert_eq!(c.version, 1);
     assert_eq!(c.llm_backends.len(), 6, "the runner's, every one");
     assert_eq!(c.llm_backends["openai-remote"].timeout_seconds, 300);
     assert_eq!(c.agent_names(), vec!["coder", "planner", "reviewer"]);
     let coder = &c.agents["coder"];
-    assert_eq!(coder.llm_backend(), Some("openai-remote"));
+    assert_eq!(coder.source(), Some("openai-remote"));
     assert_eq!(coder.runs_on(), "opencode on openai-remote");
     assert_eq!(coder.context_window(), Some(32768));
     assert_eq!(coder.max_seconds, 900);
     assert!(coder.can_change_files());
-    assert_eq!(c.agents["reviewer"].llm_backend(), None);
+    assert_eq!(c.agents["reviewer"].source(), None);
     assert_eq!(c.agents["reviewer"].context_window(), None);
 }
 
@@ -184,7 +187,7 @@ fn a_missing_setting_is_refused_by_name_and_place() {
         ("      max_turns: 30\n", "agents.reviewer", "max_turns"),
         ("      command: claude\n", "agents.reviewer", "command"),
         (
-            "{ backend: openai-remote, name: qwen3-coder, context_window: 32768 }",
+            "{ source: openai-remote, name: qwen3-coder, context_window: 32768 }",
             "agents.coder",
             "context_window",
         ),
@@ -193,7 +196,7 @@ fn a_missing_setting_is_refused_by_name_and_place() {
         let kept = match key {
             "max_steps" => "      command: opencode\n  reviewer:",
             "system_prompt" => "      max_steps: 30\n      command: opencode\n  reviewer:",
-            "context_window" => "{ backend: openai-remote, name: qwen3-coder }",
+            "context_window" => "{ source: openai-remote, name: qwen3-coder }",
             _ => "",
         };
         let doc = REFERENCE.replacen(line, kept, 1);
@@ -207,30 +210,30 @@ fn a_missing_setting_is_refused_by_name_and_place() {
 }
 
 #[test]
-fn a_config_without_its_agents_is_refused_and_one_defining_backends_too() {
+fn a_config_without_its_agents_is_refused_and_one_defining_sources_too() {
     let detail = refusal("version: 1\nlimits: {}\ngates: {}\n");
     assert!(detail.contains("`agents` is required"), "{detail}");
     let detail = refusal("version: 1\nlimits: {}\nagents: {}\n");
     assert!(detail.contains("`gates` is required"), "{detail}");
     assert!(team("version: 1\nlimits: {}\ngates: {}\nagents: {}\n").is_ok());
-    // A team names backends; the runner defines them.
+    // A team names sources; the runner keeps them.
     let detail = refusal("version: 1\nllm_backends: {}\nlimits: {}\ngates: {}\nagents: {}\n");
     assert!(detail.contains("unknown field `llm_backends`"), "{detail}");
 }
 
 #[test]
-fn a_backend_missing_a_setting_is_refused_by_name_and_place() {
-    for (backend, key) in [
+fn a_source_missing_a_setting_is_refused_by_name_and_place() {
+    for (source, key) in [
         (
             "      x: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\" }",
             "timeout_seconds",
         ),
         (
-            "      x: { type: openai-compatible-api, timeout_seconds: 5 }",
+            "      x: { type: openai-compatible-api, timeout_seconds: 5, max_concurrent: 1 }",
             "base_url",
         ),
     ] {
-        let detail = runner_refusal(backend);
+        let detail = runner_refusal(source);
         assert!(
             detail.contains(&format!("missing field `{key}`")),
             "{key}: {detail}"
@@ -247,7 +250,7 @@ fn a_setting_of_another_adapter_type_is_unknown_and_so_is_a_stray_context_window
     let detail = refusal(&doc);
     assert!(detail.contains("max_steps"), "{detail}");
 
-    // The window belongs to the model on an LLM backend, nowhere else.
+    // The window belongs to a model of the pool, nowhere else.
     let doc = REFERENCE.replace(
         "    adapter:\n      type: claude-code",
         "    context_window: 8000\n    adapter:\n      type: claude-code",
@@ -262,7 +265,7 @@ fn a_setting_of_another_adapter_type_is_unknown_and_so_is_a_stray_context_window
 }
 
 #[test]
-fn an_opencode_model_is_a_provider_model_or_an_llm_backend_model() {
+fn an_opencode_model_is_a_provider_model_or_a_model_of_the_pool() {
     let doc = |model: &str| {
         format!(
             "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n"
@@ -271,55 +274,52 @@ fn an_opencode_model_is_a_provider_model_or_an_llm_backend_model() {
     let c = team(&doc("{ type: provider, name: opencode/big-pickle }")).unwrap();
     let oc = opencode(&c, "x");
     assert_eq!(oc.model_id(), "opencode/big-pickle");
-    assert_eq!((oc.llm_backend(), oc.context_window()), (None, None));
+    assert_eq!((oc.source(), oc.context_window()), (None, None));
 
     let detail = refusal(&doc("{ type: local }"));
     assert!(
         detail.contains("unknown variant `local`")
             && detail.contains("provider")
-            && detail.contains("llm_backend"),
+            && detail.contains("ann_pool"),
         "{detail}"
     );
     let detail = refusal(&doc("opencode/big-pickle"));
     assert!(detail.contains("agents.x"), "{detail}");
 }
 
-/// Two openai-compatible backends and an Anthropic one, and one agent of each
-/// kind that runs on a backend, with `try` and `when_none` as given.
+/// Two openai-compatible sources and an Anthropic one, and one agent of each
+/// kind that runs on the pool, with `try` and `when_none` as given.
 fn with_fallback(opencode_try: &str, direct_try: &str, when_none: &str) -> String {
     format!(
-        "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: opencode\n      model:\n        type: llm_backend\n        try: {opencode_try}\n        when_none: {when_none}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try: {direct_try}\n      when_none: {when_none}\n      max_tokens: 10\n"
+        "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: opencode\n      model:\n        type: ann_pool\n        try: {opencode_try}\n        when_none: {when_none}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try: {direct_try}\n      when_none: {when_none}\n      max_tokens: 10\n"
     )
 }
 
 #[test]
 fn an_agent_lists_its_models_in_order_and_says_what_happens_when_none_works() {
     let doc = with_fallback(
-        "[{ backend: home, name: small, context_window: 8 }, { backend: central, name: big, context_window: 64 }]",
-        "[{ backend: home, model: small }, { backend: claude, model: haiku }]",
+        "[{ source: home, name: small, context_window: 8 }, { source: central, name: big, context_window: 64 }]",
+        "[{ source: home, model: small }, { source: claude, model: haiku }]",
         "wait",
     );
     let c = team(&doc).unwrap();
     let coder = &c.agents["coder"];
-    assert_eq!(
-        coder.llm_backends(),
-        [("home", "small"), ("central", "big")]
-    );
+    assert_eq!(coder.pool_models(), [("home", "small"), ("central", "big")]);
     assert_eq!(coder.fallback().unwrap().when_none, WhenNone::Wait);
     assert_eq!(
-        (coder.llm_backend(), coder.model(), coder.context_window()),
+        (coder.source(), coder.model(), coder.context_window()),
         (Some("home"), "small", Some(8)),
         "what it says it runs on is its first model"
     );
     let bound = coder.bound_to(1);
     assert_eq!(
-        (bound.llm_backend(), bound.model(), bound.context_window()),
+        (bound.source(), bound.model(), bound.context_window()),
         (Some("central"), "big", Some(64))
     );
-    assert_eq!(bound.llm_backends().len(), 1);
+    assert_eq!(bound.pool_models().len(), 1);
     let summariser = &c.agents["summariser"];
     assert_eq!(
-        summariser.llm_backends(),
+        summariser.pool_models(),
         [("home", "small"), ("claude", "haiku")]
     );
     assert_eq!(summariser.bound_to(1).runs_on(), "direct on claude");
@@ -329,7 +329,7 @@ fn an_agent_lists_its_models_in_order_and_says_what_happens_when_none_works() {
 fn every_model_in_a_try_list_is_checked() {
     let joined = joined_problems(&with_fallback(
         "[]",
-        "[{ backend: home, model: small }, { backend: nowhere, model: \"\" }]",
+        "[{ source: home, model: small }, { source: nowhere, model: \"\" }]",
         "fail",
     ));
     assert!(
@@ -340,21 +340,21 @@ fn every_model_in_a_try_list_is_checked() {
         joined.contains("agents.summariser.adapter.try[1]: `model` is empty"),
         "{joined}"
     );
-    // Its backends are checked against the runner's once the team is valid.
+    // Its sources are checked against the runner's once the team is valid.
     let joined = joined_problems(&with_fallback(
-        "[{ backend: home, name: small, context_window: 8 }, { backend: claude, name: haiku, context_window: 8 }]",
-        "[{ backend: home, model: small }, { backend: nowhere, model: big }]",
+        "[{ source: home, name: small, context_window: 8 }, { source: claude, name: haiku, context_window: 8 }]",
+        "[{ source: home, model: small }, { source: nowhere, model: big }]",
         "fail",
     ));
     for wanted in [
-        "agents.summariser.adapter.try[1]: LLM backend 'nowhere' is not defined in the runner's `llm`",
-        "agents.coder.adapter.model.try[1]: LLM backend 'claude' is of type 'anthropic-api'",
+        "agents.summariser.adapter.try[1]: there is no source 'nowhere'",
+        "agents.coder.adapter.model.try[1]: the source 'claude' is of type 'anthropic-api'",
     ] {
         assert!(joined.contains(wanted), "{wanted}: {joined}");
     }
     let joined = joined_problems(&with_fallback(
-        "[{ backend: home, name: small, context_window: 8 }, { backend: claude, name: haiku, context_window: 0 }]",
-        "[{ backend: home, model: small }]",
+        "[{ source: home, name: small, context_window: 8 }, { source: claude, name: haiku, context_window: 0 }]",
+        "[{ source: home, model: small }]",
         "fail",
     ));
     assert!(
@@ -363,8 +363,8 @@ fn every_model_in_a_try_list_is_checked() {
         "{joined}"
     );
     let detail = refusal(&with_fallback(
-        "[{ backend: home, name: small, context_window: 8 }]",
-        "[{ backend: home, model: small }]",
+        "[{ source: home, name: small, context_window: 8 }]",
+        "[{ source: home, model: small }]",
         "retry",
     ));
     assert!(
@@ -397,25 +397,25 @@ fn opencode_s_own_prompt_is_kept_or_replaced_and_only_a_prompt_replaces_it() {
 }
 
 #[test]
-fn the_window_of_an_llm_backend_model_must_be_positive() {
+fn the_window_of_a_model_of_the_pool_must_be_positive() {
     let zero = REFERENCE.replacen("context_window: 32768", "context_window: 0", 1);
     assert!(joined_problems(&zero).contains("greater than 0"));
 }
 
 #[test]
-fn an_agent_naming_an_undefined_backend_is_fatal_and_lists_the_real_ones() {
-    let doc = REFERENCE.replace("backend: openai-remote", "backend: opanai-remote");
+fn an_agent_naming_an_undefined_source_is_fatal_and_lists_the_real_ones() {
+    let doc = REFERENCE.replace("source: openai-remote", "source: opanai-remote");
     let joined = joined_problems(&doc);
     assert!(
-        joined.contains("LLM backend 'opanai-remote' is not defined")
+        joined.contains("there is no source 'opanai-remote'")
             && joined.contains("openai-local, openai-remote"),
         "{joined}"
     );
 }
 
 #[test]
-fn a_backend_no_agent_uses_is_not_an_error() {
-    let doc = REFERENCE.replace("backend: openai-remote", "backend: openai-local");
+fn a_source_no_agent_uses_is_not_an_error() {
+    let doc = REFERENCE.replace("source: openai-remote", "source: openai-local");
     assert!(team(&doc).is_ok());
 }
 
@@ -515,14 +515,14 @@ fn the_schema_names_exactly_the_keys_the_config_accepts() {
             "direct adapter",
         ),
         (
-            "opencode_llm_backend_model",
+            "opencode_ann_pool_model",
             accepted_keys::<RawBackendModel>(),
-            "opencode llm_backend model",
+            "opencode ann_pool model",
         ),
         (
-            "opencode_llm_backend_candidate",
+            "opencode_ann_pool_candidate",
             accepted_keys::<RawBackendCandidate>(),
-            "opencode llm_backend model's try entry",
+            "opencode ann_pool model's try entry",
         ),
         (
             "direct_candidate",
@@ -570,8 +570,8 @@ fn the_schema_requires_every_key_but_the_optional_two() {
         ("opencode_adapter", vec![]),
         ("opencode_provider_model", vec![]),
         ("direct_adapter", vec![]),
-        ("opencode_llm_backend_model", vec![]),
-        ("opencode_llm_backend_candidate", vec![]),
+        ("opencode_ann_pool_model", vec![]),
+        ("opencode_ann_pool_candidate", vec![]),
         ("direct_candidate", vec![]),
     ] {
         assert_eq!(schema_required(&defs[def]), optional(def, &keys), "{def}");
@@ -590,7 +590,7 @@ fn the_schemas_choices_are_the_codes() {
     assert_eq!(tag("opencode_adapter"), OPENCODE_AGENT);
     assert_eq!(tag("direct_adapter"), DIRECT_AGENT);
     assert_eq!(tag("opencode_provider_model"), PROVIDER_MODEL);
-    assert_eq!(tag("opencode_llm_backend_model"), LLM_BACKEND_MODEL);
+    assert_eq!(tag("opencode_ann_pool_model"), ANN_POOL_MODEL);
     assert_eq!(schema["properties"]["version"]["const"], SUPPORTED_VERSION);
 }
 
@@ -603,10 +603,10 @@ fn a_team_reads_no_keys_even_from_a_dotenv_beside_it() {
     assert!(c.llm_backends.is_empty());
 }
 
-/// The sample team on a runner with the backends it names.
+/// The sample team on a runner with the sources it names.
 fn sample_team() -> Config {
     let runner = runner_on(
-        "local: { type: openai-compatible-api, base_url: \"http://127.0.0.1:11434/v1\", timeout_seconds: 600 }\ncentral: { type: openai-compatible-api, base_url: \"https://llm.example.com/v1\", timeout_seconds: 600 }",
+        "local: { type: openai-compatible-api, base_url: \"http://127.0.0.1:11434/v1\", timeout_seconds: 600, max_concurrent: 1 }\ncentral: { type: openai-compatible-api, base_url: \"https://llm.example.com/v1\", timeout_seconds: 600, max_concurrent: 1 }",
         &env(&[]),
     )
     .expect("the sample runner loads");
@@ -632,13 +632,13 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
         );
     }
     assert!(
-        c.agents.values().any(|a| a.llm_backend().is_some()),
-        "the sample has no agent on an LLM backend"
+        c.agents.values().any(|a| a.source().is_some()),
+        "the sample has no agent on the ANN pool"
     );
     assert!(
         c.agents
             .values()
-            .any(|a| a.kind() == OPENCODE_AGENT && a.llm_backend().is_none()),
+            .any(|a| a.kind() == OPENCODE_AGENT && a.source().is_none()),
         "the sample has no agent on a provider"
     );
 
@@ -691,10 +691,10 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
                 .collect(),
         ),
         ("opencode_provider_model", models(PROVIDER_MODEL)),
-        ("opencode_llm_backend_model", models(LLM_BACKEND_MODEL)),
+        ("opencode_ann_pool_model", models(ANN_POOL_MODEL)),
         (
-            "opencode_llm_backend_candidate",
-            models(LLM_BACKEND_MODEL)
+            "opencode_ann_pool_candidate",
+            models(ANN_POOL_MODEL)
                 .into_iter()
                 .flat_map(|m| m["try"].as_array().unwrap())
                 .collect(),
@@ -710,7 +710,7 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
         assert_eq!(missing(def, objects), Vec::<String>::new(), "{def}");
     }
     assert!(
-        models(LLM_BACKEND_MODEL)
+        models(ANN_POOL_MODEL)
             .iter()
             .any(|m| m["try"].as_array().unwrap().len() > 1),
         "the sample shows no agent with a fallback model"
@@ -809,7 +809,8 @@ agents:
 "#;
     let joined = joined_problems(bad);
     assert!(
-        joined.contains("must be provider/model") && joined.contains("or run on an LLM backend"),
+        joined.contains("must be provider/model")
+            && joined.contains("or run on a model of the ANN pool"),
         "{joined}"
     );
     assert!(
@@ -823,7 +824,7 @@ agents:
 }
 
 #[test]
-fn on_an_llm_backend_the_model_is_the_endpoints_own_id() {
+fn in_the_pool_the_model_is_the_sources_own_id() {
     // No provider prefix: Ensemble names the provider.
     let c = team(REFERENCE).unwrap();
     assert_eq!(opencode(&c, "planner").model_id(), "qwen3-coder");
@@ -886,21 +887,21 @@ fn a_budget_is_unlimited_or_a_number_of_runs_per_hour() {
 }
 
 #[test]
-fn an_llm_agent_is_one_request_to_a_defined_backend() {
+fn an_llm_agent_is_one_request_to_a_defined_source() {
     let doc = format!(
-        "{REFERENCE}  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: direct\n      try: [{{ backend: openai-local, model: small }}]\n      when_none: fail\n      max_tokens: 400\n"
+        "{REFERENCE}  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: direct\n      try: [{{ source: openai-local, model: small }}]\n      when_none: fail\n      max_tokens: 400\n"
     );
     let c = team(&doc).unwrap();
     let a = &c.agents["summariser"];
     assert_eq!(
-        (a.kind(), a.model(), a.llm_backend()),
+        (a.kind(), a.model(), a.source()),
         (DIRECT_AGENT, "small", Some("openai-local"))
     );
     assert_eq!(a.runs_on(), "direct on openai-local");
     assert!(!a.has_tools() && !a.can_change_files());
     let bad = doc.replace(
-        "try: [{ backend: openai-local, model: small }]\n      when_none: fail\n      max_tokens: 400",
-        "try: [{ backend: openai-local, model: small }]\n      when_none: fail\n      max_tokens: 0",
+        "try: [{ source: openai-local, model: small }]\n      when_none: fail\n      max_tokens: 400",
+        "try: [{ source: openai-local, model: small }]\n      when_none: fail\n      max_tokens: 0",
     );
     let joined = joined_problems(&bad);
     assert!(
@@ -908,14 +909,11 @@ fn an_llm_agent_is_one_request_to_a_defined_backend() {
         "{joined}"
     );
     let nowhere = doc.replace(
-        "backend: openai-local, model: small",
-        "backend: nowhere, model: small",
+        "source: openai-local, model: small",
+        "source: nowhere, model: small",
     );
     let joined = joined_problems(&nowhere);
-    assert!(
-        joined.contains("LLM backend 'nowhere' is not defined"),
-        "{joined}"
-    );
+    assert!(joined.contains("there is no source 'nowhere'"), "{joined}");
     let tools = doc.replace(
         "      max_tokens: 400\n",
         "      max_tokens: 400\n      tools: [read]\n",
@@ -964,7 +962,7 @@ fn api_keys_are_read_from_the_environment_never_the_file() {
     );
     // And an unset one is simply absent, not an empty bearer token.
     assert_eq!(r.llm.direct["openai-remote"].settings.api_key(), None);
-    // A backend may name no key at all.
+    // A source may name no key at all.
     assert_eq!(r.llm.direct["home"].settings.api_key(), None);
 }
 
@@ -1003,7 +1001,7 @@ fn an_agent_with_an_empty_model_is_fatal() {
 }
 
 #[test]
-fn an_unknown_backend_type_lists_the_known_ones() {
+fn an_unknown_source_type_lists_the_known_ones() {
     let detail = runner_refusal("      x: { type: ollama }");
     assert!(detail.contains("ollama"), "{detail}");
     assert!(detail.contains(OPENAI_COMPATIBLE_API), "{detail}");
@@ -1012,11 +1010,11 @@ fn an_unknown_backend_type_lists_the_known_ones() {
 #[test]
 fn a_base_url_without_a_scheme_or_a_zero_timeout_is_refused() {
     let said = runner_problems(
-        "      x: { type: openai-compatible-api, base_url: \"127.0.0.1:8000/v1\", timeout_seconds: 0 }",
+        "      x: { type: openai-compatible-api, base_url: \"127.0.0.1:8000/v1\", timeout_seconds: 0, max_concurrent: 1 }",
     );
     for wanted in [
-        "backends.x: `base_url` '127.0.0.1:8000/v1' must start with http://",
-        "backends.x: `timeout_seconds` must be greater than 0",
+        "ann_pool.sources.x: `base_url` '127.0.0.1:8000/v1' must start with http://",
+        "ann_pool.sources.x: `timeout_seconds` must be greater than 0",
     ] {
         assert!(said.contains(wanted), "{wanted}: {said}");
     }
@@ -1025,7 +1023,7 @@ fn a_base_url_without_a_scheme_or_a_zero_timeout_is_refused() {
 #[test]
 fn trailing_slashes_are_normalised_away() {
     let r = runner_on(
-        "      x: { type: openai-compatible-api, base_url: \"http://127.0.0.1:8000/v1/\", timeout_seconds: 5 }",
+        "      x: { type: openai-compatible-api, base_url: \"http://127.0.0.1:8000/v1/\", timeout_seconds: 5, max_concurrent: 1 }",
         &env(&[]),
     )
     .unwrap();
@@ -1063,7 +1061,7 @@ agents:
       type: unlimited
     adapter:
       type: opencode
-      model: { type: llm_backend, try: [{ backend: missing, name: "", context_window: 0 }], when_none: fail }
+      model: { type: ann_pool, try: [{ source: missing, name: "", context_window: 0 }], when_none: fail }
       tools: []
       system_prompt: append
       max_steps: 1
@@ -1223,7 +1221,7 @@ fn a_codex_agent_is_what_its_adapter_says_and_its_sandbox_is_one_codex_has() {
 }
 
 #[test]
-fn an_anthropic_backend_loads_and_only_an_llm_agent_may_run_on_it() {
+fn an_anthropic_source_loads_and_only_an_llm_agent_may_run_on_it() {
     let r = runner_on(RUNNER_BACKENDS, &env(&[("ANTHROPIC_API_KEY", "sk-ant")])).unwrap();
     let b = &r.llm.direct["claude-api"];
     assert_eq!(b.type_id(), ANTHROPIC_API);
@@ -1233,16 +1231,16 @@ fn an_anthropic_backend_loads_and_only_an_llm_agent_may_run_on_it() {
 
     // An llm agent may name it.
     let llm = REFERENCE.replace(
-        "      type: opencode\n      model:\n        type: llm_backend\n        try:\n          - { backend: openai-remote, name: qwen3-coder, context_window: 32768 }\n        when_none: fail\n      tools: [read, edit, bash]\n      system_prompt: append\n      max_steps: 30\n      command: opencode",
-        "      type: direct\n      try: [{ backend: claude-api, model: claude-haiku-4-5 }]\n      when_none: fail\n      max_tokens: 500",
+        "      type: opencode\n      model:\n        type: ann_pool\n        try:\n          - { source: openai-remote, name: qwen3-coder, context_window: 32768 }\n        when_none: fail\n      tools: [read, edit, bash]\n      system_prompt: append\n      max_steps: 30\n      command: opencode",
+        "      type: direct\n      try: [{ source: claude-api, model: claude-haiku-4-5 }]\n      when_none: fail\n      max_tokens: 500",
     );
     let c = team(&llm).unwrap();
-    assert_eq!(c.agents["coder"].llm_backend(), Some("claude-api"));
+    assert_eq!(c.agents["coder"].source(), Some("claude-api"));
 
     // An OpenCode agent may not: it needs an openai-compatible one.
     let oc = REFERENCE.replace(
-        "{ backend: openai-remote, name: qwen3-coder,",
-        "{ backend: claude-api, name: claude-haiku-4-5,",
+        "{ source: openai-remote, name: qwen3-coder,",
+        "{ source: claude-api, name: claude-haiku-4-5,",
     );
     let joined = joined_problems(&oc);
     assert!(
@@ -1255,19 +1253,33 @@ fn an_anthropic_backend_loads_and_only_an_llm_agent_may_run_on_it() {
 // The hub's settings
 // ---------------------------------------------------------------------------
 
-/// A hub of Ana's with one backend, `local`, which distills.
+/// An LLM of the pool, as a test turns it on.
+fn llm() -> ModelKind {
+    ModelKind::Llm {
+        tier: Tier::Medium,
+        context_window: None,
+        tools: None,
+    }
+}
+
+/// An OpenAI-compatible server on loopback, as a source.
+fn server(port: u16) -> SourceSetting {
+    SourceSetting::OpenAiCompatible {
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        api_key_env: None,
+        timeout_seconds: 5,
+        max_concurrent: 1,
+    }
+}
+
+/// A hub of Ana's with one source, `local`, which serves `small`, an LLM
+/// that is on and distills.
 fn hub_settings() -> HubSettings {
     let mut hub = HubSettings::starting("Ana");
-    hub.backends.insert(
-        "local".into(),
-        BackendSetting::OpenAiCompatible {
-            base_url: "http://127.0.0.1:1/v1".into(),
-            api_key_env: None,
-            timeout_seconds: 5,
-        },
-    );
+    hub.ann_pool.sources.insert("local".into(), server(1));
+    hub.ann_pool.turn_on("local", "small", llm());
     hub.distill.candidates = vec![ModelSetting {
-        backend: "local".into(),
+        source: "local".into(),
         model: "small".into(),
     }];
     hub
@@ -1282,13 +1294,13 @@ fn hub_problems(hub: &HubSettings) -> String {
 }
 
 #[test]
-fn a_new_hub_starts_on_this_computer_closed_with_no_backend_and_loads() {
+fn a_new_hub_starts_on_this_computer_closed_with_no_source_and_loads() {
     let hub = HubSettings::starting("Ana")
         .resolve(&ensemble_core::state::HubDir::new("/hubs/ana"), &env(&[]))
         .unwrap();
     assert_eq!(hub.owner, "Ana");
     assert_eq!(hub.accounts.rules.registration, Registration::Closed);
-    assert!(hub.llm.direct.is_empty() && hub.llm.runners.is_empty());
+    assert!(hub.llm.direct.is_empty() && hub.llm.relayed.is_empty());
     let k = &hub.connectors.knowledge;
     assert_eq!(
         k.vault,
@@ -1310,7 +1322,7 @@ fn a_hub_names_every_problem_of_its_settings() {
     hub.session_hours = 0;
     hub.roles
         .insert("two words".into(), vec![Permission::Recall]);
-    hub.distill.candidates[0].backend = "nowhere".into();
+    hub.distill.candidates[0].source = "nowhere".into();
     hub.recall_max_notes = 0;
     let said = hub_problems(&hub);
     for wanted in [
@@ -1318,7 +1330,7 @@ fn a_hub_names_every_problem_of_its_settings() {
         "registration: `max_pending` must be greater than 0",
         "session_hours: must be greater than 0",
         "the role name 'two words' must be one word",
-        "distill.try[0]: LLM backend 'nowhere' is not defined among the backends",
+        "distill.try[0]: there is no source 'nowhere' in the ANN pool",
         "recall: the most notes",
     ] {
         assert!(said.contains(wanted), "{wanted}: {said}");
@@ -1326,18 +1338,12 @@ fn a_hub_names_every_problem_of_its_settings() {
 }
 
 #[test]
-fn an_embedding_model_is_an_openai_compatible_backend_and_a_similarity_from_0_to_1() {
+fn a_hub_uses_only_a_model_of_its_pool_that_is_on_and_of_the_kind_it_needs() {
     let mut hub = hub_settings();
-    hub.backends.insert(
-        "claude".into(),
-        BackendSetting::Anthropic {
-            base_url: "https://api.anthropic.com".into(),
-            api_key_env: None,
-            timeout_seconds: 5,
-        },
-    );
+    hub.ann_pool
+        .turn_on("local", "nomic", ModelKind::Embedding { dimensions: 8 });
     hub.embed = Some(EmbedSetting {
-        backend: "local".into(),
+        source: "local".into(),
         model: "nomic".into(),
         min_similarity: 0.5,
     });
@@ -1354,16 +1360,73 @@ fn an_embedding_model_is_an_openai_compatible_backend_and_a_similarity_from_0_to
         500
     );
     hub.embed = Some(EmbedSetting {
-        backend: "claude".into(),
-        model: "nomic".into(),
+        source: "local".into(),
+        model: "small".into(),
         min_similarity: 1.5,
     });
+    hub.distill.candidates.push(ModelSetting {
+        source: "local".into(),
+        model: "nomic".into(),
+    });
+    hub.ann_pool.models.push(PoolModel {
+        source: "local".into(),
+        id: "new".into(),
+        kind: ModelKind::Unknown,
+        on: false,
+        missing: false,
+        shared: false,
+    });
+    hub.distill.candidates.push(ModelSetting {
+        source: "local".into(),
+        model: "new".into(),
+    });
     let said = hub_problems(&hub);
-    assert!(
-        said.contains("'claude' is not an openai-compatible-api backend"),
-        "{said}"
+    for wanted in [
+        "embed: local:small is not an embedding model: it is llm, medium",
+        "must be from 0 to 1",
+        "distill.try[1]: local:nomic is not an LLM: it is embedding, 8 dimensions",
+        "distill.try[2]: local:new is off; `model on local:new` turns it on",
+    ] {
+        assert!(said.contains(wanted), "{wanted}: {said}");
+    }
+}
+
+#[test]
+fn a_model_of_the_pool_is_known_on_and_of_one_of_its_sources_once() {
+    let mut hub = hub_settings();
+    hub.ann_pool.sources.insert(
+        "busy".into(),
+        SourceSetting::OpenAiCompatible {
+            base_url: "http://127.0.0.1:2/v1".into(),
+            api_key_env: None,
+            timeout_seconds: 5,
+            max_concurrent: 0,
+        },
     );
-    assert!(said.contains("must be from 0 to 1"), "{said}");
+    let unknown = |source: &str, id: &str, on| PoolModel {
+        source: source.into(),
+        id: id.into(),
+        kind: ModelKind::Unknown,
+        on,
+        missing: false,
+        shared: false,
+    };
+    hub.ann_pool.models.push(unknown("local", "odd", true));
+    hub.ann_pool.models.push(unknown("gone", "x", false));
+    hub.ann_pool.models.push(PoolModel {
+        shared: true,
+        ..hub.ann_pool.models[0].clone()
+    });
+    let said = hub_problems(&hub);
+    for wanted in [
+        "ann_pool.sources.busy: `max_concurrent` must be greater than 0",
+        "ann_pool.models.local:odd: is on, and what it is is not known",
+        "ann_pool.models.gone:x: there is no source 'gone'",
+        "ann_pool.models.local:small: is listed twice",
+        "ann_pool.models.local:small: a hub shares no model",
+    ] {
+        assert!(said.contains(wanted), "{wanted}: {said}");
+    }
 }
 
 #[test]
@@ -1429,38 +1492,41 @@ fn a_hub_inbox_names_its_tracker_and_label_and_each_tracker_its_own_folder() {
 }
 
 #[test]
-fn a_hub_reaches_backends_runners_share_and_names_them_alone() {
+fn a_hub_reaches_the_models_a_runner_shares_as_that_runner_names_them() {
     let mut hub = hub_settings();
-    hub.backends.insert(
+    hub.ann_pool.sources.insert(
         "gpu".into(),
-        BackendSetting::Runner {
+        SourceSetting::Runner {
             runner: "ana/gpu-box".into(),
-            backend: "local".into(),
         },
     );
+    hub.ann_pool.turn_on("gpu", "local:big", llm());
     hub.distill.candidates.push(ModelSetting {
-        backend: "gpu".into(),
-        model: "big".into(),
+        source: "gpu".into(),
+        model: "local:big".into(),
     });
     let resolved = hub
         .resolve(&ensemble_core::state::HubDir::new("/h"), &env(&[]))
         .unwrap();
-    assert_eq!(
-        resolved.llm.runners["gpu"],
-        Relayed {
-            runner: "ana/gpu-box".into(),
-            backend: "local".into()
-        }
-    );
+    assert_eq!(resolved.llm.relayed["gpu"], "ana/gpu-box");
     assert!(!resolved.llm.direct.contains_key("gpu"));
-    hub.backends.insert(
+    let relay = RelayAt {
+        base_url: "http://127.0.0.1:9".into(),
+        key: "k".into(),
+    };
+    assert_eq!(
+        resolved.llm.backends(Some(&relay))["gpu"]
+            .settings
+            .base_url(),
+        "http://127.0.0.1:9/gpu"
+    );
+    hub.ann_pool.sources.insert(
         "bad".into(),
-        BackendSetting::Runner {
+        SourceSetting::Runner {
             runner: "gpu-box".into(),
-            backend: "local".into(),
         },
     );
-    assert!(hub_problems(&hub).contains("backends.bad.runner: 'gpu-box' must be a runner"));
+    assert!(hub_problems(&hub).contains("ann_pool.sources.bad.runner: 'gpu-box' must be a runner"));
 }
 
 #[test]
@@ -1471,7 +1537,21 @@ fn settings_are_written_as_json_and_an_unknown_one_is_refused() {
         json["registration"],
         serde_json::json!({ "type": "closed" })
     );
-    assert_eq!(json["backends"]["local"]["type"], "openai-compatible-api");
+    assert_eq!(
+        json["ann_pool"]["sources"]["local"]["type"],
+        "openai-compatible-api"
+    );
+    assert_eq!(
+        json["ann_pool"]["models"][0],
+        serde_json::json!({
+            "source": "local",
+            "id": "small",
+            "kind": { "type": "llm", "tier": "medium", "context_window": null, "tools": null },
+            "on": true,
+            "missing": false,
+            "shared": false,
+        })
+    );
     assert_eq!(json["distill"]["try"][0]["model"], "small");
     assert_eq!(
         serde_json::from_value::<HubSettings>(json.clone()).unwrap(),
@@ -1500,7 +1580,7 @@ fn a_new_runner_works_in_its_workspace_and_loads() {
     let r = runner_with(|_| {}).unwrap();
     assert_eq!(r.name, "laptop");
     assert!(r.workspace.ends_with("ensemble") && r.hub.is_none());
-    assert!(r.llm.direct.is_empty() && r.llm.shares.is_empty());
+    assert!(r.llm.direct.is_empty() && r.llm.models.is_empty());
     let relative = runner_with(|r| r.workspace = "work".into()).unwrap();
     assert_eq!(
         relative.workspace,
@@ -1521,58 +1601,114 @@ fn a_new_runner_works_in_its_workspace_and_loads() {
 }
 
 #[test]
-fn a_runner_shares_its_openai_compatible_backends_and_reaches_others_through_its_hub() {
-    let local = BackendSetting::OpenAiCompatible {
-        base_url: "http://127.0.0.1:1/v1".into(),
+fn a_runner_shares_models_of_its_openai_compatible_servers_and_reaches_others_through_its_hub() {
+    let claude = SourceSetting::Anthropic {
+        base_url: "https://api.anthropic.com".into(),
         api_key_env: None,
         timeout_seconds: 5,
+        max_concurrent: 2,
     };
-    let gpu = BackendSetting::Runner {
+    let gpu = SourceSetting::Runner {
         runner: "kim/gpu-box".into(),
-        backend: "big".into(),
+    };
+    let pool = |r: &mut RunnerSettings| {
+        r.ann_pool.sources.insert("local".into(), server(1));
+        r.ann_pool.sources.insert("claude".into(), claude.clone());
+        r.ann_pool.sources.insert("gpu".into(), gpu.clone());
+        r.ann_pool.turn_on("local", "small", llm());
+        r.ann_pool.turn_on("local", "other", llm());
+        r.ann_pool.turn_on("claude", "haiku", llm());
+        r.ann_pool.model_mut("local", "small").unwrap().shared = true;
     };
     let r = runner_with(|r| {
         r.hub = Some("ws://127.0.0.1:7700".into());
-        r.backends.insert("local".into(), local.clone());
-        r.backends.insert("gpu".into(), gpu.clone());
-        r.shares = vec!["local".into()];
+        pool(r);
     })
     .unwrap();
-    assert_eq!(r.llm.shares, ["local"]);
-    assert_eq!(r.llm.hub["gpu"].runner, "kim/gpu-box");
+    let shared = r.llm.shared();
+    assert_eq!(shared.len(), 1);
+    assert_eq!(shared[0].source.name, "local");
+    assert_eq!(shared[0].max_concurrent, 1);
+    assert_eq!(
+        shared[0]
+            .models
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>(),
+        ["small"]
+    );
+    assert_eq!(r.llm.relayed["gpu"], "kim/gpu-box");
     assert_eq!(
         r.llm.backends(None).len(),
-        1,
+        2,
         "gpu only while it is relayed"
     );
     let said = runner_with(|r| {
-        r.backends.insert("local".into(), local.clone());
-        r.backends.insert("gpu".into(), gpu.clone());
-        r.shares = vec!["local".into(), "gpu".into(), "local".into()];
-        r.max_shared_calls = 0;
+        pool(r);
+        r.ann_pool.model_mut("claude", "haiku").unwrap().shared = true;
+        r.ann_pool.model_mut("local", "other").unwrap().on = false;
+        r.ann_pool.model_mut("local", "other").unwrap().shared = true;
     })
     .unwrap_err()
     .to_string();
     for wanted in [
-        "shares: 'gpu' is not an openai-compatible-api backend of its own",
-        "shares: 'local' is listed twice",
-        "max_shared_calls: must be greater than 0",
-        "shares: a runner offers its backends through a hub",
-        "backends: those of type runner are reached through a hub",
+        "ann_pool.models.claude:haiku: is shared, and only a model of an openai-compatible-api source of the runner's own may be",
+        "ann_pool.models.local:other: is shared, and off",
+        "ann_pool: a runner shares its models through a hub, and it names no hub",
+        "ann_pool: a source that is another runner is reached through a hub",
     ] {
         assert!(said.contains(wanted), "{wanted}: {said}");
     }
 }
 
 #[test]
-fn a_builtin_agent_runs_on_llm_backends_with_tools_it_has() {
+fn a_team_on_a_runners_pool_names_llms_of_it_that_are_on() {
+    let r = runner_with(|r| {
+        r.ann_pool.sources.insert("home".into(), server(1));
+        r.ann_pool.turn_on("home", "small", llm());
+        r.ann_pool
+            .turn_on("home", "e", ModelKind::Embedding { dimensions: 4 });
+    })
+    .unwrap();
+    let doc = |model: &str| {
+        format!(
+            "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  s:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: direct, try: [{{ source: home, model: {model} }}], when_none: fail, max_tokens: 10 }}\n"
+        )
+    };
+    let team = parse(&doc("small"), &p())
+        .unwrap()
+        .with_pool(&r.llm, None)
+        .unwrap();
+    assert_eq!(team.llm_backends.len(), 1);
+    let said = parse(&doc("e"), &p())
+        .unwrap()
+        .with_pool(&r.llm, None)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        said.contains("agents.s.adapter.try[0]: home:e is not an LLM"),
+        "{said}"
+    );
+    let said = parse(&doc("big"), &p())
+        .unwrap()
+        .with_pool(&r.llm, None)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        said.contains("home:big is not a model of the ANN pool"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_builtin_agent_runs_on_the_pool_with_tools_it_has() {
     let doc = format!(
-        "{REFERENCE}  fixer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: builtin\n      try:\n        - backend: openai-local\n          model: small\n          context_window: 32768\n      when_none: fail\n      tools: [read, grep]\n      max_steps: 10\n      max_tokens: 400\n"
+        "{REFERENCE}  fixer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: builtin\n      try:\n        - source: openai-local\n          model: small\n          context_window: 32768\n      when_none: fail\n      tools: [read, grep]\n      max_steps: 10\n      max_tokens: 400\n"
     );
     let c = team(&doc).unwrap();
     let a = &c.agents["fixer"];
     assert_eq!(
-        (a.kind(), a.model(), a.llm_backend()),
+        (a.kind(), a.model(), a.source()),
         (BUILTIN_AGENT, "small", Some("openai-local"))
     );
     assert_eq!(a.runs_on(), "builtin on openai-local");
@@ -1597,10 +1733,10 @@ fn a_builtin_agent_runs_on_llm_backends_with_tools_it_has() {
 }
 
 #[test]
-fn a_backends_key_is_named_for_it() {
+fn a_sources_key_is_named_for_it() {
     assert_eq!(
-        backend_key_variable("team-gpu.2"),
-        "ENSEMBLE_BACKEND_TEAM_GPU_2_KEY"
+        source_key_variable("team-gpu.2"),
+        "ENSEMBLE_SOURCE_TEAM_GPU_2_KEY"
     );
 }
 

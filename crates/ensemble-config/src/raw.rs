@@ -120,7 +120,7 @@ pub(crate) enum RawAdapter {
 }
 
 /// A light agent: the task, and the agent's prompt as the system prompt,
-/// sent to an LLM backend as one chat request, with no CLI in between. It has
+/// sent to an LLM of the ANN pool as one chat request, with no CLI in between. It has
 /// no tools, so it reads and changes nothing; it answers from what it is given.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -134,7 +134,7 @@ pub(crate) struct RawDirectAdapter {
     pub(crate) max_tokens: u32,
 }
 
-/// An agent loop in Ensemble itself, on an LLM backend, with tools of its own.
+/// An agent loop in Ensemble itself, on an LLM of the ANN pool, with tools of its own.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawBuiltinAdapter {
@@ -155,8 +155,8 @@ pub(crate) struct RawBuiltinAdapter {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawBuiltinCandidate {
-    /// Which of the runner's LLM backends serves the model.
-    pub(crate) backend: String,
+    /// Which source of the runner's ANN pool serves the model.
+    pub(crate) source: String,
     /// The id the endpoint serves the model under.
     pub(crate) model: String,
     /// Tokens of context the server runs the model with: the loop compacts
@@ -167,9 +167,9 @@ pub(crate) struct RawBuiltinCandidate {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawDirectCandidate {
-    /// Which LLM backend serves the model: a name of the runner's, or of the
+    /// Which source serves the model: one of the runner's ANN pool, or of the
     /// hub's for its distiller.
-    pub(crate) backend: String,
+    pub(crate) source: String,
     /// The id the endpoint serves the model under.
     pub(crate) model: String,
 }
@@ -209,14 +209,14 @@ pub(crate) struct RawOpenCodeAdapter {
 }
 
 /// The model of an OpenCode agent: one OpenCode is already set up for, or one
-/// served by an LLM backend of this config.
+/// of the runner's ANN pool.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub(crate) enum RawOpenCodeModel {
     #[serde(rename = "provider")]
     Provider(RawProviderModel),
-    #[serde(rename = "llm_backend")]
-    LlmBackend(RawBackendModel),
+    #[serde(rename = "ann_pool")]
+    Pool(RawBackendModel),
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,9 +240,9 @@ pub(crate) struct RawBackendModel {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawBackendCandidate {
-    /// Which of the runner's LLM backends serves the model. Ensemble gives
+    /// Which source of the runner's ANN pool serves the model. Ensemble gives
     /// OpenCode the endpoint and key for the run.
-    pub(crate) backend: String,
+    pub(crate) source: String,
     /// The id the endpoint serves the model under, as its /models lists it.
     pub(crate) name: String,
     /// Tokens of context the server really runs the model with. OpenCode

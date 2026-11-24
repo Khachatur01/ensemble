@@ -3,8 +3,8 @@
 //! as a GitLab instance keeps its application settings. A hub is always a
 //! server (`ensemble-hub serve`), for a team or for one person on their own
 //! computer; where it listens is what `serve` is given, not a setting. Its
-//! core is its accounts, their roles and what each may do, and the LLM
-//! backends it uses. Everything else
+//! core is its accounts, their roles and what each may do, and its ANN
+//! pool, the sources it calls and their models. Everything else
 //! reaches it through a **connector**, each always on: the REST API, MCP, the
 //! runners' link, knowledge, tasks and sources.
 //!
@@ -12,9 +12,9 @@
 //! ([`HubSettings::starting`]), and secrets are named by the variable that
 //! holds them.
 
-use super::llm::BackendSetting;
+use super::ann::{AnnPoolSetting, Use, check_model};
 use super::raw::{self, RawDirectAdapter};
-use super::validate::{check_candidates, direct_adapter};
+use super::validate::direct_adapter;
 use super::*;
 use ensemble_core::state::HubDir;
 use serde::{Deserialize, Serialize};
@@ -24,9 +24,9 @@ use serde::{Deserialize, Serialize};
 pub struct Hub {
     /// The hub's name, for its log and its listings.
     pub owner: String,
-    /// The LLM backends the hub uses: its own, and runners' it reaches over
+    /// The hub's ANN pool: its own sources, and runners it reaches over
     /// their links.
-    pub llm: HubLlm,
+    pub llm: AnnPool,
     pub accounts: Accounts,
     pub connectors: Connectors,
     /// Where it was loaded from, for error messages.
@@ -176,9 +176,8 @@ pub struct Recall {
 /// their words.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Embed {
-    /// One of the hub's LLM backends, OpenAI-compatible: it serves
-    /// `/embeddings`.
-    pub backend: String,
+    /// The source of an embedding model of the hub's ANN pool.
+    pub source: String,
     pub model: String,
     /// How alike a note must be to the query to be found by its meaning, in
     /// thousandths of cosine similarity.
@@ -208,8 +207,8 @@ pub struct HubSettings {
     pub lockout_minutes: u32,
     /// What each role may do, by the role's name.
     pub roles: BTreeMap<String, Vec<Permission>>,
-    /// The LLM backends the hub uses, by name.
-    pub backends: BTreeMap<String, BackendSetting>,
+    /// The sources the hub calls and the models they serve.
+    pub ann_pool: AnnPoolSetting,
     /// The models that turn shares into notes. An empty `try` keeps shares
     /// waiting until one is chosen.
     pub distill: ModelsSetting,
@@ -242,11 +241,11 @@ pub struct ModelsSetting {
     pub max_tokens: u32,
 }
 
-/// One model, by the backend that serves it and its id there.
+/// One model of the ANN pool, by the source that serves it and its id there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSetting {
-    pub backend: String,
+    pub source: String,
     pub model: String,
 }
 
@@ -254,7 +253,7 @@ pub struct ModelSetting {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmbedSetting {
-    pub backend: String,
+    pub source: String,
     pub model: String,
     /// How alike a note must be to be found by its meaning: 0 to 1.
     pub min_similarity: f64,
@@ -284,7 +283,7 @@ pub struct SourceFilterSetting {
 
 impl HubSettings {
     /// The settings a new hub starts with: `owner`'s, on this computer
-    /// alone, closed to sign-ups, with no backend, model or tracker yet.
+    /// alone, closed to sign-ups, with no source, model or tracker yet.
     /// Shares wait until a model is chosen; recall finds notes by their words.
     pub fn starting(owner: &str) -> Self {
         let roles = [
@@ -313,7 +312,7 @@ impl HubSettings {
                 .into_iter()
                 .map(|(name, can)| (name.to_string(), can))
                 .collect(),
-            backends: BTreeMap::new(),
+            ann_pool: AnnPoolSetting::default(),
             distill: ModelsSetting {
                 candidates: Vec::new(),
                 when_none: WhenNone::Wait,
@@ -335,9 +334,7 @@ impl HubSettings {
         if self.owner.trim().is_empty() {
             problems.push("owner: is empty; name the hub, such as acme or ana".into());
         }
-        let (direct, runners) = crate::llm::backends(&self.backends, env, &mut problems);
-        let llm = HubLlm { direct, runners };
-        let kinds = crate::llm::kept_kinds(&self.backends);
+        let llm = crate::ann::pool(&self.ann_pool, false, env, &mut problems);
         let registration = match self.registration {
             RegistrationSetting::Approval { max_pending } => {
                 if max_pending == 0 {
@@ -370,33 +367,37 @@ impl HubSettings {
             },
             roles: self.roles.clone(),
         };
-        let distill = models("distill", &self.distill, true, &kinds, &mut problems);
+        let distill = models(
+            "distill",
+            &self.distill,
+            true,
+            &self.ann_pool,
+            &mut problems,
+        );
         if self.recall_max_notes == 0 || self.recall_max_chars == 0 {
             problems.push("recall: the most notes and characters must be greater than 0".into());
         }
         let embed = self.embed.as_ref().map(|e| {
-            match kinds.get(&e.backend) {
-                None => problems.push(format!(
-                    "embed.backend: '{}' is not one of the hub's backends",
-                    e.backend
-                )),
-                Some(&OPENAI_COMPATIBLE_API) => {}
-                Some(_) => problems.push(format!(
-                    "embed.backend: '{}' is not an openai-compatible-api backend, which is what serves /embeddings",
-                    e.backend
-                )),
-            }
             if e.model.trim().is_empty() {
                 problems.push("embed.model: is empty".into());
+            } else {
+                check_model(
+                    "embed",
+                    &e.source,
+                    e.model.trim(),
+                    Use::Embedding,
+                    false,
+                    &self.ann_pool.known(),
+                    &mut problems,
+                );
             }
             if !(0.0..=1.0).contains(&e.min_similarity) {
                 problems.push("embed.min_similarity: must be from 0 to 1, such as 0.5".into());
             }
             Embed {
-                backend: e.backend.clone(),
+                source: e.source.clone(),
                 model: e.model.trim().to_string(),
-                min_similarity_permille: (e.min_similarity.clamp(0.0, 1.0) * 1000.0).round()
-                    as u32,
+                min_similarity_permille: (e.min_similarity.clamp(0.0, 1.0) * 1000.0).round() as u32,
             }
         });
         let knowledge = Knowledge {
@@ -458,7 +459,7 @@ impl HubSettings {
         let tasks = Tasks { trackers };
         let sources = Sources {
             filter: self.source_filter.as_ref().map(|f| {
-                let model = models("source_filter", &f.models, false, &kinds, &mut problems);
+                let model = models("source_filter", &f.models, false, &self.ann_pool, &mut problems);
                 if f.prompt.trim().is_empty() {
                     problems.push(
                         "source_filter.prompt: is empty; say what is confidential, such as salaries and clients' names".into(),
@@ -490,13 +491,13 @@ impl HubSettings {
     }
 }
 
-/// `kept` as a model list, checked against the backends of `kinds`; with
+/// `kept` as a model list, each an LLM of `pool` that is on; with
 /// `may_be_empty`, an empty `try` is no problem.
 fn models(
     at: &str,
     kept: &ModelsSetting,
     may_be_empty: bool,
-    kinds: &BTreeMap<String, &'static str>,
+    pool: &AnnPoolSetting,
     problems: &mut Vec<String>,
 ) -> DirectAdapter {
     let raw = RawDirectAdapter {
@@ -504,7 +505,7 @@ fn models(
             .candidates
             .iter()
             .map(|c| raw::RawDirectCandidate {
-                backend: c.backend.clone(),
+                source: c.source.clone(),
                 model: c.model.clone(),
             })
             .collect(),
@@ -519,13 +520,17 @@ fn models(
             .into_iter()
             .filter(|p| !(may_be_empty && p.starts_with(&empty))),
     );
-    check_candidates(
-        &format!("{at}.try"),
-        &adapter.fallback.candidates,
-        false,
-        kinds,
-        " among the backends",
-        problems,
-    );
+    let known = pool.known();
+    for (i, c) in adapter.fallback.candidates.iter().enumerate() {
+        check_model(
+            &format!("{at}.try[{i}]"),
+            &c.source,
+            &c.model,
+            Use::Llm,
+            false,
+            &known,
+            problems,
+        );
+    }
     adapter
 }

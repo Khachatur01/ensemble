@@ -81,9 +81,9 @@ in
           A file of NAME=value lines put in the hub's environment, such as a
           secret sops-nix or agenix puts in /run: the keys a secrets manager
           keeps, which a backend names with
-          `ensemble-hub backend key <name> --key-env <NAME>`. A path as a
+          `ensemble-hub source key <name> --key-env <NAME>`. A path as a
           string, so the keys never enter the Nix store. A key given to
-          `ensemble-hub backend key` is kept in the hub's database instead.
+          `ensemble-hub source key` is kept in the hub's database instead.
         '';
       };
 

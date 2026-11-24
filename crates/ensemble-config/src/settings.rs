@@ -455,9 +455,9 @@ llm:
 
     #[test]
     fn keys_inside_lists_are_not_walked() {
-        let text = "try:\n  - backend: local\n    model: small\nwhen_none: fail\n";
+        let text = "try:\n  - source: local\n    model: small\nwhen_none: fail\n";
         let out = set(text, "try.backend", "x").unwrap();
-        assert!(out.contains("  - backend: local\n"), "{out}");
+        assert!(out.contains("  - source: local\n"), "{out}");
         assert_eq!(
             set(text, "when_none", "wait").unwrap(),
             text.replace("fail", "wait")
