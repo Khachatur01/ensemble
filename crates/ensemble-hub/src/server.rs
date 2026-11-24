@@ -342,18 +342,12 @@ impl<'a> Server<'a> {
                 return Ok(());
             }
         };
-        let permissions = match blocking(|| self.permissions(session)) {
-            Ok(p) => p,
-            Err(e) => {
-                say_no(&mut sender, e).await;
-                return Ok(());
-            }
-        };
-        let connected = self.calls.connect(
-            &session.user,
-            &offer,
-            permissions.contains(&Permission::Host),
-        );
+        // Its token must still be good.
+        if let Err(e) = blocking(|| self.permissions(session)) {
+            say_no(&mut sender, e).await;
+            return Ok(());
+        }
+        let connected = self.calls.connect(&session.user, &offer);
         let (socket, runner, mut outbox) = match connected {
             Ok(c) => c,
             Err(e) => {
@@ -372,7 +366,6 @@ impl<'a> Server<'a> {
         ));
         let caller = crate::calls::Caller::Account {
             name: session.user.clone(),
-            compute: permissions.contains(&Permission::Compute),
         };
         let mut ended = sender
             .send(Message::text(json!({ "runner": runner }).to_string()))
@@ -535,25 +528,12 @@ impl<'a> Server<'a> {
                 .and_then(|()| Ok(json!({ "text": self.memory.recall_as(user, text("query")?) }))),
             method if TASK_METHODS.contains(&method) => {
                 may(Permission::Tasks).and_then(|()| match self.tasks {
-                    Some(tasks) => self.ask_tasks(
-                        tasks,
-                        user,
-                        permissions.contains(&Permission::Host),
-                        method,
-                        &req.params,
-                    ),
+                    Some(tasks) => self.ask_tasks(tasks, user, method, &req.params),
                     None => Err("this hub keeps no tasks".into()),
                 })
             }
-            RUNNER => self.routes.register(
-                conn,
-                user,
-                &req.params,
-                permissions.contains(&Permission::Host),
-            ),
-            RUNNERS => Ok(self
-                .routes
-                .listed(user, permissions.contains(&Permission::Compute))),
+            RUNNER => self.routes.register(conn, user, &req.params),
+            RUNNERS => Ok(self.routes.listed(user)),
             other => Err(format!("no method `{other}`")),
         };
         match result {
@@ -565,50 +545,18 @@ impl<'a> Server<'a> {
 
 impl Server<'_> {
     /// Pass a task method to `tasks`, asked by the account `user`, with who
-    /// is connected now: the runners that may take each account's tasks, and
-    /// the runner the request names (`runner`, by its name or as
-    /// `<account>/<name>`) as a lender, when it works for the hub and the
-    /// token `may_host`. Whether an account's role has `compute` is read
-    /// from the accounts as they are now.
+    /// is connected now: the runners that may take its tasks.
     fn ask_tasks(
         &self,
         tasks: &dyn TaskService,
         user: &str,
-        may_host: bool,
         method: &str,
         params: &Value,
     ) -> Result<Value, String> {
-        // The accounts, read once and only when a runner of another works
-        // for the hub.
-        let accounts = std::sync::OnceLock::new();
-        let compute = |account: &str| {
-            let read = accounts.get_or_init(|| self.users().ok().map(|u| (u, self.roles())));
-            read.as_ref().is_some_and(|(users, roles)| {
-                users.get(account).is_some_and(|u| {
-                    u.status == crate::users::Status::Active
-                        && roles
-                            .get(&u.role)
-                            .is_some_and(|p| p.contains(&Permission::Compute))
-                })
-            })
-        };
-        let runners = |account: &str| self.routes.present(account, || compute(account));
-        let lender = params
-            .get("runner")
-            .and_then(Value::as_str)
-            .map(|r| {
-                let r = r.trim();
-                r.strip_prefix(user)
-                    .and_then(|rest| rest.strip_prefix('/'))
-                    .unwrap_or(r)
-            })
-            .filter(|_| may_host)
-            .and_then(|name| self.routes.lender(user, name));
+        let runners = |account: &str| self.routes.present(account);
         let asker = Asker {
             user,
-            lender,
             runners: &runners,
-            compute: &compute,
         };
         tasks.handle(&asker, method, params)
     }
@@ -669,10 +617,10 @@ pub mod testing {
     /// The password of every account of the test hub.
     pub const PASSWORD: &str = "correct horse battery";
 
-    /// A hub server on loopback, with `ana` a member (with `tasks` and
-    /// `compute`), `rex` a reader and `root` an admin (with `tasks` and
-    /// `host`), each with a token and [`PASSWORD`]. It locks a name
-    /// after 3 failed logins, takes 2 sign-ups at a time, and serves MCP.
+    /// A hub server on loopback, with `ana` a member (with `tasks`), `rex` a
+    /// reader and `root` an admin (with `tasks`), each with a token and
+    /// [`PASSWORD`]. It locks a name after 3 failed logins, takes 2 sign-ups
+    /// at a time, and serves MCP.
     pub struct Running {
         pub tmp: TempDir,
         pub url: String,
@@ -716,8 +664,8 @@ pub mod testing {
         s.lockout_failures = 3;
         s.lockout_minutes = 1;
         s.roles = [
-            ("admin", vec![Admin, Recall, Tasks, Host]),
-            ("member", vec![Share, Recall, Tasks, Compute]),
+            ("admin", vec![Admin, Recall, Tasks]),
+            ("member", vec![Share, Recall, Tasks]),
             ("reader", vec![Recall]),
         ]
         .into_iter()

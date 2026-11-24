@@ -23,12 +23,6 @@
 //! **blocked** until one that has not connects, or it is assigned or answered
 //! again.
 //!
-//! A runner that works for the hub also works on **other accounts' tasks**,
-//! with the agents it lends: a task that no connected runner of its account
-//! with its agent takes, because there is none or each gave it back. Such a
-//! board names the task's account ([`RemoteBoard::of_account`]), and the
-//! runner names itself `<its account>/<its name>` on it.
-//!
 //! [`Board`] is what the queue uses; a runner reaches the hub's tasks over the
 //! link ([`RemoteBoard`]). The hub keeps them in its database
 //! (`ensemble_hub::board`).
@@ -164,9 +158,6 @@ pub trait Board: Send + Sync {
 pub struct RemoteBoard {
     link: Link,
     project: String,
-    /// The account whose tasks they are, when not the signed-in one's, and
-    /// the runner that acts on them.
-    account: Option<(String, String)>,
 }
 
 impl RemoteBoard {
@@ -180,24 +171,11 @@ impl RemoteBoard {
         RemoteBoard {
             link: Link::with_token(url, token),
             project: project.to_string(),
-            account: None,
         }
-    }
-
-    /// The same project's tasks of `account`, another account than the one
-    /// signed in, acted on by `runner`, a runner that works for the hub, by
-    /// its name on others' tasks (`<its account>/<its name>`).
-    pub fn of_account(mut self, account: &str, runner: &str) -> Self {
-        self.account = Some((account.to_string(), runner.to_string()));
-        self
     }
 
     async fn ask(&self, method: &str, mut params: Value) -> Result<Value, String> {
         params["project"] = json!(self.project);
-        if let Some((account, runner)) = &self.account {
-            params["account"] = json!(account);
-            params["runner"] = json!(runner);
-        }
         self.link.ask(method, params).await
     }
 }
@@ -211,10 +189,7 @@ fn read<T: serde::de::DeserializeOwned>(value: &Value, key: &str) -> Result<T, S
 #[async_trait]
 impl Board for RemoteBoard {
     fn place(&self) -> String {
-        match &self.account {
-            Some((account, _)) => format!("the hub {}, for {account}", self.link.url()),
-            None => format!("the hub {}", self.link.url()),
-        }
+        format!("the hub {}", self.link.url())
     }
     async fn scan(&self) -> Result<Vec<Task>, String> {
         read(&self.ask(TASKS, json!({})).await?, "tasks")
@@ -266,26 +241,17 @@ impl Board for RemoteBoard {
     }
 }
 
-/// A task that waits for one of a runner's agents: its account, its project,
-/// and the task.
+/// A task that waits for one of a runner's agents: its project, and the task.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Waiting {
-    pub account: String,
     pub project: String,
     pub task: Task,
 }
 
 /// The tasks, in every project, that wait for one of `agents` and that
-/// `runner` has not given back, over `link`: the account's own and, for a
-/// runner that works for the hub, other accounts' it may take. What a runner
-/// looks at for the projects it has no folder for. With them, the runner's
-/// name on other accounts' tasks, `<its account>/<runner>`.
-pub async fn waiting(
-    link: &Link,
-    runner: &str,
-    agents: &[String],
-) -> Result<(String, Vec<Waiting>), String> {
+/// `runner` has not given back, over `link`: what a runner looks at for the
+/// projects it has no folder for.
+pub async fn waiting(link: &Link, runner: &str, agents: &[String]) -> Result<Vec<Waiting>, String> {
     let params = json!({ "runner": runner, "agents": agents });
-    let found = link.ask(TASKS_WAITING, params).await?;
-    Ok((read(&found, "runner")?, read(&found, "tasks")?))
+    read(&link.ask(TASKS_WAITING, params).await?, "tasks")
 }

@@ -391,7 +391,6 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
                     serde_json::json!({
                         "runner": o.runner,
                         "backend": o.backend,
-                        "works_for": if o.for_hub { "hub" } else { "owner" },
                         "max_calls": o.max_calls,
                         "models": o.models,
                     })

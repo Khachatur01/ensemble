@@ -122,7 +122,7 @@ const ROLE_SET: &[Field] = &[
     Field::new(
         "permissions",
         Kind::Choices(PERMISSIONS),
-        "What it may do: share, recall, tasks, admin, compute, host.",
+        "What it may do: share, recall, tasks, admin.",
     )
     .required()
     .positional(),

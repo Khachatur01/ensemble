@@ -407,7 +407,7 @@ mod tests {
             (err.code, err.field.as_deref()),
             (Code::Invalid, Some("value"))
         );
-        let err = run("config.get", json!({ "key": "works_for" })).unwrap_err();
+        let err = run("config.get", json!({ "key": "colour" })).unwrap_err();
         assert_eq!(err.code, Code::NotFound);
         assert_eq!(
             run("config.path", json!({})).unwrap()["path"],

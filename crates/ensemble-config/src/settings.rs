@@ -350,7 +350,6 @@ mod tests {
 # This computer's runner.
 version: 1
 name: laptop        # its name
-works_for: owner
 llm:
   # what it uses
   hub:

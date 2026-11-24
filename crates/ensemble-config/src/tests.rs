@@ -616,16 +616,6 @@ fn sample_team() -> Config {
 }
 
 #[test]
-fn only_agents_on_llm_backends_may_work_for_other_accounts() {
-    let c = sample_team();
-    // OpenCode on an LLM backend, `direct` and `builtin`; never OpenCode on a
-    // provider of its own, Codex or Claude Code, which use their CLI's login.
-    assert_eq!(c.lendable_agents(), ["coder", "patcher", "summariser"]);
-    assert!(!c.agents["explorer"].lendable());
-    assert!(!c.agents["fixer"].lendable() && !c.agents["reviewer"].lendable());
-}
-
-#[test]
 fn the_sample_loads_and_sets_every_setting_the_schema_has() {
     let c = sample_team();
     let kinds: Vec<&str> = c.agents.values().map(|a| a.kind()).collect();
@@ -1309,7 +1299,7 @@ fn a_new_hub_starts_on_this_computer_closed_with_no_backend_and_loads() {
     assert_eq!(k.distill.fallback.when_none, WhenNone::Wait);
     assert!(k.embed.is_none() && hub.connectors.sources.filter.is_none());
     assert!(hub.connectors.tasks.trackers.is_empty());
-    assert_eq!(hub.accounts.roles["admin"].len(), 6);
+    assert_eq!(hub.accounts.roles["admin"].len(), 4);
 }
 
 #[test]
@@ -1506,9 +1496,9 @@ fn runner_with(edit: impl FnOnce(&mut RunnerSettings)) -> Result<Runner, ConfigE
 }
 
 #[test]
-fn a_new_runner_works_for_its_owner_in_its_workspace_and_loads() {
+fn a_new_runner_works_in_its_workspace_and_loads() {
     let r = runner_with(|_| {}).unwrap();
-    assert_eq!((r.name.as_str(), r.works_for), ("laptop", WorksFor::Owner));
+    assert_eq!(r.name, "laptop");
     assert!(r.workspace.ends_with("ensemble") && r.hub.is_none());
     assert!(r.llm.direct.is_empty() && r.llm.shares.is_empty());
     let relative = runner_with(|r| r.workspace = "work".into()).unwrap();
@@ -1519,7 +1509,6 @@ fn a_new_runner_works_for_its_owner_in_its_workspace_and_loads() {
     );
     let said = runner_with(|r| {
         r.name = "a b".into();
-        r.works_for = WorksFor::Hub;
         r.hub = Some("https://hub".into());
     })
     .unwrap_err()
@@ -1527,13 +1516,6 @@ fn a_new_runner_works_for_its_owner_in_its_workspace_and_loads() {
     assert!(said.contains("name: 'a b' must be letters"), "{said}");
     assert!(
         said.contains("hub: 'https://hub' must start with ws://"),
-        "{said}"
-    );
-    let said = runner_with(|r| r.works_for = WorksFor::Hub)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        said.contains("works_for: a runner works for the accounts of a hub"),
         "{said}"
     );
 }

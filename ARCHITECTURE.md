@@ -10,9 +10,8 @@ end are open; everything else is decided unless marked otherwise. Part two's
 is a pure worker, clients reach the hub alone, each is an executable of its
 own, a runner signs in and joins over its link alone, it finds or clones the
 project a task names in its workspace, asks when it cannot, and gives a task
-back when its computer cannot reach the repository, and a runner that works
-for the hub takes other accounts' tasks that none of their own runners take,
-and runners share LLM backends through it. "The hub's core and its
+back when its computer cannot reach the repository, and runners share LLM
+backends through it. "The hub's core and its
 connectors" (decided 2026-11-19) is built: the hub's settings are the core
 (accounts, the port, the LLM backends) and the connectors, every one always
 on. "Settings in the database" (decided 2026-11-20) is built: the hub keeps
@@ -44,11 +43,8 @@ executables, `ensemble-hub` and `ensemble-runner`, in these roles:
   helper teams, runs their agents (agent CLIs, Ensemble's own loop) on the
   tasks the hub keeps for its owner, like a member of a team handed work: in
   the project's git repository in its workspace, cloned there when it has
-  none. It defines the LLM backends its teams run on, and may share some through the hub. One that works for
-  its owner (`works_for: owner`) takes its owner's tasks alone; one that works
-  for the hub (`works_for: hub`) also takes the tasks of others on the hub
-  that none of their own runners take, with its agents on LLM backends, so a team spreads its load over every machine it
-  has. It serves no client. It is its own process too, `ensemble-runner
+  none. It defines the LLM backends its teams run on, and may share some
+  through the hub. It takes its owner's tasks alone. It serves no client. It is its own process too, `ensemble-runner
   serve`, one per computer, and its executable holds nothing of the hub's.
 - **The helper teams**: each a `config.yaml` in the runner's teams directory,
   its agents named `<team>/<agent>`, each run by an adapter (an agent CLI
@@ -103,7 +99,7 @@ Each process is one of the two executables. What runs in each:
 
 | command | what it runs | ends |
 | --- | --- | --- |
-| `ensemble-runner serve` | the runner, one per computer: a worker per git repository directly inside its workspace, each running the tasks the hub keeps for the repository's project, and, for a runner that works for the hub, one per repository of another account's in `<workspace>/.for/<account>/`; every 30 seconds, the workspace looked at again and the hub asked for the tasks of its agents in projects it has no folder for, whose repositories it clones, asks about or gives back; a socket for the operations `ensemble-runner …` asks of it and for reloading its teams; and with the hub its settings name, a link that says it is connected, with its agents (`Worker`), and, when it shares backends or reaches others', a relay socket for model calls (`Relay`) | on SIGINT or SIGTERM; a change to its settings has it start again in the same process |
+| `ensemble-runner serve` | the runner, one per computer: a worker per git repository directly inside its workspace, each running the tasks the hub keeps for the repository's project; every 30 seconds, the workspace looked at again and the hub asked for the tasks of its agents in projects it has no folder for, whose repositories it clones, asks about or gives back; a socket for the operations `ensemble-runner …` asks of it and for reloading its teams; and with the hub its settings name, a link that says it is connected, with its agents (`Worker`), and, when it shares backends or reaches others', a relay socket for model calls (`Relay`) | on SIGINT or SIGTERM; a change to its settings has it start again in the same process |
 | `ensemble-hub serve` | the hub, from `hub/` in `--config-dir` (`~/.local/state/ensemble/hub/`), made the first time when there is none: one port (`--http-host`, `--http-port`) for the runners' link at `/link` and their relay sockets at `/relay`, the REST API under `/api/v1/` and MCP for client agents at `/mcp`; a socket for the operations `ensemble-hub …` asks of it; the tasks; the vault's distiller; the tracker inbox | on SIGINT or SIGTERM; a change to its settings it cannot use as it runs has it start again in the same process |
 | everything else | one command: read the config and the state, or ask the running process over its socket, do one thing, print | at once |
 
@@ -131,9 +127,9 @@ and the runner on none of the hub's alone: `ensemble-knowledge` and
 | `ensemble-knowledge` | the hub's knowledge, the hub's alone | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); notes by meaning, with their vectors in `.ensemble/embeddings.db` (`meaning.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait (`lib.rs`) |
 | `ensemble-link` | what the runner and the hub share of the link | the frames of the link (`protocol.rs`); bytes as text, for a model's answer (`base64.rs`); the runner's side, `Connection` and `Link`, one reconnecting, which says who its token is, and signing in without a token, for one (`client.rs`); the token file (`tokens.rs`) |
 | `ensemble-agents` | running one agent once | the adapters (`external/`): `claude_code.rs`, `opencode.rs`, `codex.rs`, `builtin.rs`, `direct.rs`, the subprocess runner (`process.rs`) and gates (`gate.rs`); a git worktree per task (`worktree.rs`); the router: agents to adapters, models, records, `health` (`router.rs`) |
-| `ensemble-tasks` | the work of the helper teams, as a runner does it | tickets and tasks as the hub has them (`tasks.rs`); how they are leased and given back: the `Board` trait, a runner's `RemoteBoard`, over the link, for its account or, for a runner that works for the hub, another's, and the tasks waiting for its agents in every project (`board.rs`); what a runner keeps of its runs (`runs.rs`); the worker that runs a repository's tasks within slots and budgets, another account's with the agents it lends alone (`queue.rs`); one run of an agent and what it came to (`delegation.rs`) |
-| `ensemble-runner` | the runner, and its executable | `main` and the global options (`lib.rs`); where it keeps its settings and keys (`kept.rs`); the command line, parsed with clap (`cli.rs`), and what each group of commands does (`cmd/`: `runner`, `team`, `agent`, a team's `config`); the runner's workers, the repositories it clones for tasks, its own and other accounts' (in `.for/`), what it asks and gives back, its socket and reload (`daemon.rs`); `Worker`: the link that says the runner is connected, with its agents and those it lends (`worker.rs`); `Relay`: its relay socket, serving others' calls to the backends it shares and carrying its agents' calls to others' (`relay.rs`); what `setup` and `doctor` find and check (`setup.rs`); the runner's teams, loaded, made, linked, pulled and approved (`teams.rs`), over git repositories pinned and trusted per commit (`remote.rs`) |
-| `ensemble-hub` | the hub, and its executable | `main` and the global options (`lib.rs`); the command line (`cli.rs`) and what its commands do (`cmd.rs`); MCP over HTTP for client agents (`mcp.rs`); the hub's operations, its accounts, tokens, join codes, sessions and settings (`accounts.rs`); its settings and its backends' keys in its database, sealed by `master.key` (`kept.rs`); accounts, and hashed tokens and join codes (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API, each route one of the operations (`api.rs`), the operations only the running hub answers, an account's tasks, runners and knowledge (`served.rs`), and its OpenAPI document (`openapi.rs`), over a small HTTP reader (`http.rs`); the hub's side of the link, a task per connection (`server.rs`); connected runners (`runners.rs`); runners' relay sockets and the model calls between them and from the hub, who may make them and how many at once (`calls.rs`); the tasks it keeps and leases, offered to the account's own runners first and then to runners that work for the hub, given back and blocked, with the notes recalled into each, `DbBoard`, and the `Service` that answers the link and lets a lender act on another account's task (`board.rs`), and a runner's worker run against them (`tests/queue.rs`); the tracker inbox (`inbox/`): the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`), an issue made a task and what the task reports (`work.rs`), the hub's inbox, one for each tracker (`relay.rs`) |
+| `ensemble-tasks` | the work of the helper teams, as a runner does it | tickets and tasks as the hub has them (`tasks.rs`); how they are leased and given back: the `Board` trait, a runner's `RemoteBoard`, over the link, for its account, and the tasks waiting for its agents in every project (`board.rs`); what a runner keeps of its runs (`runs.rs`); the worker that runs a repository's tasks within slots and budgets (`queue.rs`); one run of an agent and what it came to (`delegation.rs`) |
+| `ensemble-runner` | the runner, and its executable | `main` and the global options (`lib.rs`); where it keeps its settings and keys (`kept.rs`); the command line, parsed with clap (`cli.rs`), and what each group of commands does (`cmd/`: `runner`, `team`, `agent`, a team's `config`); the runner's workers, the repositories it clones for tasks, what it asks and gives back, its socket and reload (`daemon.rs`); `Worker`: the link that says the runner is connected, with its agents (`worker.rs`); `Relay`: its relay socket, serving others' calls to the backends it shares and carrying its agents' calls to others' (`relay.rs`); what `setup` and `doctor` find and check (`setup.rs`); the runner's teams, loaded, made, linked, pulled and approved (`teams.rs`), over git repositories pinned and trusted per commit (`remote.rs`) |
+| `ensemble-hub` | the hub, and its executable | `main` and the global options (`lib.rs`); the command line (`cli.rs`) and what its commands do (`cmd.rs`); MCP over HTTP for client agents (`mcp.rs`); the hub's operations, its accounts, tokens, join codes, sessions and settings (`accounts.rs`); its settings and its backends' keys in its database, sealed by `master.key` (`kept.rs`); accounts, and hashed tokens and join codes (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API, each route one of the operations (`api.rs`), the operations only the running hub answers, an account's tasks, runners and knowledge (`served.rs`), and its OpenAPI document (`openapi.rs`), over a small HTTP reader (`http.rs`); the hub's side of the link, a task per connection (`server.rs`); connected runners (`runners.rs`); runners' relay sockets and the model calls between them and from the hub, who may make them and how many at once (`calls.rs`); the tasks it keeps and leases, offered to the account's runners, given back and blocked, with the notes recalled into each, `DbBoard`, and the `Service` that answers the link (`board.rs`), and a runner's worker run against them (`tests/queue.rs`); the tracker inbox (`inbox/`): the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`), an issue made a task and what the task reports (`work.rs`), the hub's inbox, one for each tracker (`relay.rs`) |
 | `ensemble` (the root) | the two executables, and the tests of the whole | `src/bin/ensemble-hub.rs` and `src/bin/ensemble-runner.rs`, each its crate's `main`; the end-to-end suite, which runs both (`tests/end_to_end.rs`); the checks against the real agent CLIs (`tests/real_cli.rs`); the layering of the crates (`tests/workspace.rs`) |
 | `ensemble-ui-app` (`ui/app`, in the UI's own workspace) | the web UI's app, for WebAssembly | the pages and routes (`main.rs`), the REST API as the page calls it (`api.rs`), the form made from an operation (`form.rs`), the pages (`pages.rs`); `ui/build.sh` builds `ui/dist` |
 | `ensemble-ui` (`ui/server`, in the UI's own workspace) | the web UI's executable, apart from the hub | the app's files, embedded or from `--dist`, and the calls to `/api/` passed on to the hub as from its own origin, only from a page of the UI (`main.rs`) |
@@ -153,7 +149,7 @@ operation):
 | --- | --- | --- |
 | `config.yaml` | a helper team's folder in the runner's teams directory (`runner/teams/<name>/`), a folder linked there, or a pulled repository's clone | `limits`, `gates`, `tracker`, `agents` |
 | the hub's settings | typed rows of its core's database, `hub/core/database.db`, on the computer that runs the hub | the core: `owner`, its LLM `backends`, how people join and sign in, the `roles`; and its connectors' settings: the `distill` and `embed` models, `recall`, the `trackers` and the `source_filter` |
-| the runner's settings | typed rows of its core's database, `runner/core/database.db`, one per computer | `name`, `works_for`, `workspace`, `hub`, the LLM `backends` its teams run on, the `shares` and `max_shared_calls` |
+| the runner's settings | typed rows of its core's database, `runner/core/database.db`, one per computer | `name`, `workspace`, `hub`, the LLM `backends` its teams run on, the `shares` and `max_shared_calls` |
 
 No setting has a default: a new hub or runner starts with every one written
 (`HubSettings::starting`, `RunnerSettings::starting`), and a missing one is
@@ -377,42 +373,11 @@ task of it waiting for an answer:
   why, ends that runner's claim on it, and never lets it claim the task
   again; the other runners that may take it still may. A task given back is
   **blocked** when every runner connected now that may take it (the
-  account's own with its agent, and others' that lend it, below) gave it
-  back, as the hub works out from the runners connected whenever it lists
-  the task (`tasks`, `task` show `blocked` and `given_back`). So it is
+  account's own with its agent) gave it back, as the hub works out from
+  the runners connected whenever it lists the task (`tasks`, `task` show `blocked` and `given_back`). So it is
   offered again when a runner that may take it and has not given it back
   connects; assigning or answering it clears every give-back, for all
   runners to try again.
-
-**Other accounts' runners.** A runner that works for the hub (`works_for:
-hub`, connected by an account with `host`) also takes the tasks of other
-accounts, whose roles have `compute`, with the agents it **lends**: those of
-its teams on LLM backends (`AgentConfig::lendable`), which it works out and
-says in `runner` each time, never an agent on a CLI's own login. The hub
-offers a task to the account's own runners first: another's runner (a
-**lender**) may take it only while no runner of the account with its agent
-is connected, or every one gave it back. A busy one has not, so the task
-waits for it. A lender:
-
-- finds such tasks in `tasks_waiting`, after its own account's, each naming
-  its account, with its name on them, `<its account>/<its name>`;
-- works on such a project in `<workspace>/.for/<account>/<project>`,
-  cloned, asked about or given back as above: hidden, so the scan of its own
-  projects never takes it for one, and no project is named for it (the hub
-  refuses a project name that starts with a dot). Its worker runs only the
-  agents it lends;
-- names the task's account (`account`) and itself in every request about
-  it, and the hub lets it each time only while it is connected and works for
-  the hub, its token has `host`, the account's role has `compute`, and it
-  lends the task's agent. It sees only the tasks of the project it may take
-  and those they come after, and may take, run and give back a task, never
-  make, answer, assign or cancel one.
-
-The task stays its account's: its notes are those the account may see, its
-branch is pushed to its repository, and what it reports is shared as the
-account's. Whoever runs the lender can read the code it works on, the task
-and its notes, as on any computer: the roles say who may, and nobody is asked
-per task.
 
 What a run does as it goes (its activity lines) is in `runs/<id>/log.txt` in
 the repository's state directory on the runner that runs it. A task done is
@@ -472,18 +437,15 @@ folder of markdown issues is the one implementation so far.
 
 A runner with a hub server keeps a link (`Worker`, in `ensemble-runner`)
 that says, as soon as it connects and again when its teams are reloaded,
-what it is (`runner`): its name, whom it works for (`works_for`), every
-agent of its teams and the agents it lends other accounts. So the hub knows which runners are connected, with which agents:
-which may take an account's tasks, and whether a task given back is blocked,
-depend on them, and MCP's `agents` and `ensemble-runner peers` list them
-(`runners`): an account's own runners with every agent, then others' that
-work for the hub, when the account has `compute`, with what they lend. Model
-calls go on a socket of their own (see [Sharing LLM backends](#sharing-llm-backends)).
+what it is (`runner`): its name and every agent of its teams. So the hub
+knows which runners are connected, with which agents: which may take an
+account's tasks, and whether a task given back is blocked, depend on them,
+and MCP's `agents` and `ensemble-runner peers` list an account's runners
+(`runners`), each with every agent. Model calls go on a socket of their own (see [Sharing LLM backends](#sharing-llm-backends)).
 
 The hub keeps such runners as presence only: a runner is a connection that
-said `runner`, and nothing of it is kept once it is gone. A runner that
-works for its owner serves its models to its owner alone; one that works for
-the hub, to accounts with `compute` too.
+said `runner`, and nothing of it is kept once it is gone. A runner serves
+its models to the hub and its owner's other runners alone.
 
 ## The link
 
@@ -491,26 +453,26 @@ The runner opens WebSockets, at `/link` on the hub's port, says the version of t
 speaks as the `ensemble-protocol` header of the upgrade, and signs in with
 `Authorization: Bearer <token>`. The hub refuses a link of another version,
 or of none, before anything else, with 426 and words that name both versions
-and which of the two to update ("this hub speaks link protocol 5, the runner
-6: update ensemble-hub"), which the runner shows as they are; then a token
+and which of the two to update ("this hub speaks link protocol 6, the runner
+7: update ensemble-hub"), which the runner shows as they are; then a token
 that is not valid, with 401. A link without a token is signed in to nothing,
 and may only ask to be, for a token of its own. Frames are JSON text: requests
 `{id, method, params}`, replies `{id, result}` or `{id, error}`, and events
 `{event, data}` the hub sends unasked. A runner opens one link for the tasks of
-each repository it works in (another account's too), one for the tasks of
+each repository it works in, one for the tasks of
 projects it has no folder for, one that says it is connected, one per project whose task it asks about or gives back, a short one
 without a token to sign in, and a short one for `hello` when it signs in or
 says its status; and, when it shares backends or reaches others', a relay
 socket at `/relay` for model calls, whose frames `ensemble_link::relay`
-describes. This is version 6 of the protocol. It makes no HTTP request
+describes. This is version 7 of the protocol. It makes no HTTP request
 to the hub.
 
 | for | the runner asks | the hub sends |
 | --- | --- | --- |
 | a token, on a link without one | `login` (a name, a password and the client's name, `runner <name>`) or `join` (a join code and the client's name), each answered with a new access token of the client's own, named after it | |
 | who it is | `hello` (who am I, which permissions) | |
-| tasks | each with its `project`: `tasks`, `task`, `task_claim`, `task_renew`, `task_release`, `task_finish`, `task_give_back` (with why), and with `account` and `runner` for a lender on another account's task; and across projects, `tasks_waiting` (the tasks for these agents that this runner has not given back: the account's, then, for a lender, others' it may take, each with its account) | |
-| runners | `runner` (I am a runner: name, whom I work for, every agent, the agents I lend), `runners` (which work for me) | |
+| tasks | each with its `project`: `tasks`, `task`, `task_claim`, `task_renew`, `task_release`, `task_finish`, `task_give_back` (with why); and across projects, `tasks_waiting` (the account's tasks for these agents that this runner has not given back) | |
+| runners | `runner` (I am a runner: name, every agent), `runners` (mine) | |
 | model calls, on the relay socket | what it shares and how many calls at once, then calls to others' backends: `open`, the request's body in chunks, `end`, or `cancel` | the answers to its calls, and calls to the backends it shares, which it answers: `head`, the body in chunks, `done`, or `error` |
 
 `login` and `join` are the hub's operations `token.login` and `token.join`,
@@ -526,7 +488,7 @@ without the link spends it with `POST /api/v1/join`. The hub's MCP runs its tool
 ones, and `runners` for `agents`), so the link and MCP cannot differ. Every request is checked against the
 token's permissions (its role, narrowed by its scopes), read again from the
 hub's state, so a revoked token stops at once. The permissions are `share`,
-`recall`, `tasks`, `admin`, `compute` and `host`. The same port serves the
+`recall`, `tasks` and `admin`. The same port serves the
 REST API under `/api/v1/` (accounts, sessions, access tokens, admin) and
 `/mcp`; a WebSocket upgrade is the link at `/link` or a runner's relay socket
 at `/relay`, and refused anywhere else (after the version check, so an older
@@ -554,13 +516,7 @@ work, and is written to be read by the person or the model that will see it.
 - **Secrets** are never in a file Ensemble reads as config, and are passed to a
   CLI only as the provider key of the backend it runs on.
 - **Subscriptions stay with their owner.** Claude Code runs only through its
-  official CLI on its owner's login; a runner that works for the hub never
-  lends one, nor any agent on a CLI's own login.
-- **A lender is trusted with what it works on.** A runner that works for the
-  hub acts on another account's task only while the hub lets it, request by
-  request, and sees only the tasks it may take; but its owner can read the
-  code, the task and the notes it gets, and its agents run with its
-  computer's permissions.
+  official CLI on its owner's login, on its owner's runner.
 - **Shared text is data.** The distilling model has no tools; recalled notes
   are marked as reference data, in a recall and in a task.
 - **The hub keeps hashes.** Passwords as PBKDF2, tokens and join codes as
@@ -621,7 +577,7 @@ the config rules allow.
 | Level | What runs | Who it is for |
 |---|---|---|
 | 1. A hub and a runner of one's own | Both on the person's computer: tasks, helper teams, a knowledge vault fed by shares and task reports | A developer on their own |
-| 2. A shared hub and many runners | People, always-on work, a tracker shared by a team, runners that work for others, shared backends, sources | Teams and organizations |
+| 2. A shared hub and many runners | People, always-on work, a tracker shared by a team, shared backends, sources | Teams and organizations |
 
 A runner always needs a hub, and knowledge always belongs to one: one person
 on their own runs both on their computer. (Decided 2026-11-19.)
@@ -712,24 +668,15 @@ pure worker:
   cannot reach the repository, it gives the task back and the hub offers it
   to another runner; when none can, the task is **blocked**, and offered again
   when a runner that has not given it back connects, or when it is assigned
-  or answered again. (Built: "none can" is every runner that may take the task
-  connected at the time, the account's own with its agent and others' that
-  lend it; the answer to its question becomes the task's `repository`.)
+  or answered again. (Built: "none can" is every runner of the account with
+  the task's agent connected at the time; the answer to its question becomes
+  the task's `repository`.)
 - A task's report becomes a share of the task's account on the hub, and the
   distiller decides what of it becomes notes.
 
-The hub offers a task to the account's own runners with the agent first, then
-to runners that work for others. Such a runner works others' tasks only with
-agents on LLM backends, never on a CLI's login, and only on repositories its
-computer can reach. Its settings say so in one setting, `works_for: owner`
-or `works_for: hub` (also for the accounts whose role has `compute`; it needs
-`host`). The agents it lends follow from the rule, worked out from its teams,
-never listed. "Then" means: when no runner of the account with the agent is
-connected, or every one gave the task back; a busy one has not. It works on
-another account's project in `<workspace>/.for/<account>/<project>`, apart
-from its owner's. Its owner can see the code it works on. A run on another
-computer is a task too: the `node` adapter and its snapshots are gone.
-(Built with step 19.)
+The hub offers a task to the account's runners with the agent, and to no
+other account's. A run on another computer is a task too: the `node` adapter
+and its snapshots are gone. (Built with step 19.)
 
 ### Sharing LLM backends
 
@@ -758,9 +705,7 @@ $ ensemble-hub knowledge models gpu-box:qwen3.5-72b
   calls its own server.
 - Only LLM backends are offered, OpenAI-compatible ones, never an agent CLI,
   and a shared backend is asked only for its models, chats, completions and
-  embeddings. The hub may use any; a runner's owner's other runners may; when
-  it works for the hub (which needs `host`), the runners of every account
-  whose role has `compute` may too.
+  embeddings. The hub may use any; a runner's owner's other runners may.
 - When the serving runner is offline or busy, the `try` list's next entry is
   used. The runner says how many calls it takes at once
   (`max_shared_calls`); the hub keeps the next waiting for up to 10 seconds,
@@ -825,8 +770,7 @@ behind a VPN; nothing in Ensemble assumes either. (Decided 2026-11-10.)
 
 ### Rules that hold everywhere
 
-- An agent runs on a runner: its owner's, or one that works for others and
-  that its owner may use; never on the hub. Runners share only what they offer
+- An agent runs on a runner of its owner's; never on the hub. Runners share only what they offer
   through the hub (tasks they work on, backends they serve); none shares
   tools, files or subscriptions, and runners never reach each other.
 - An organization may run a central LLM server on its own GPUs. It is an
@@ -856,7 +800,7 @@ a home that exists anyway:
 | Giving the helper team work | The person's own agent makes tasks through the hub's MCP; later a web UI. |
 | Turning an issue into work | The inbox: a `<label>:<agent>` label names the agent; without one the task waits in the backlog until someone assigns it. |
 | Planning and splitting work | A helper agent the person puts in their team for it, which hands parts on with `HAND OFF:`. A team design choice, not a concept of the system. |
-| Being reachable while the person's own runner is off | A runner that works for others, which the person may use, takes the task; otherwise it waits. |
+| Being reachable while the person's own runner is off | The task waits for one of the person's runners. |
 
 So the system has three parts: the **hub** (people, knowledge, tasks, and
 which runner takes what), **runners** (workers), and each person's **helper
@@ -881,7 +825,7 @@ hub's chat API can share it.
 
 An agent loop of Ensemble's own is back, as the `builtin` adapter: harness-rs's
 `AgentLoop`, its file and shell tools, and its model clients, on the user's LLM
-backends, so a helper team (or a runner that works for others) needs no agent CLI installed. It
+backends, so a helper team needs no agent CLI installed. It
 is pinned to one exact version because the library is young. (Decided
 2026-11-16.)
 
@@ -1073,8 +1017,8 @@ There are no teams of people in the hub, only roles. Ensemble defines a fixed
 set of permissions (such as managing users, managing the hub's backends,
 sharing, recalling, receiving tasks), and each hub's config names its own roles
 as sets of them, so an organization decides what roles it has. (Decided
-2026-11-10.) Built so far: `share`, `recall`, `tasks`, `admin`, which manages
-users, `compute` and `host`, for runners and their backends.
+2026-11-10.) Built so far: `share`, `recall`, `tasks`, and `admin`, which
+manages users.
 
 People join a hub server by signing up through its REST API (`/api/v1/`, on
 the hub's own port, for a web UI and scripts) with a name and a password; the
@@ -1133,7 +1077,7 @@ let a computer join; add a team from a template; rebuild the knowledge.
 `ensemble-hub`'s `goals.rs`.) **Settings operations** reach every other
 setting, one each (`settings.owner`, `settings.sessions`,
 `settings.lockout` on the hub; `settings.name`,
-`settings.workspace`, `settings.works-for`, `settings.shared-calls` on the
+`settings.workspace`, `settings.shared-calls` on the
 runner), with `settings.show`, `settings.history` and `settings.import`: a
 change is loaded before it is kept, and kept in the audit log with who made
 it.
@@ -1323,8 +1267,7 @@ crate holds it today.
 19. The runner's workspace: a task's repository found or cloned, worked on a
     branch and pushed; a question when it is not found; a task given back,
     and blocked when no runner can reach its repository; the related notes in
-    every task; a task's report as a share; runners that work for others, and
-    how `runner.yaml` says so; the `node` adapter removed. (Done. A task
+    every task; a task's report as a share; the `node` adapter removed. (Done. A task
     names its `repository`, which `submit` takes with a `gate`; every 30
     seconds a runner asks the hub for its account's tasks waiting for its
     agents in every project (`tasks_waiting`), clones the
@@ -1332,23 +1275,14 @@ crate holds it today.
     prompt, asks on the task which repository to clone when none is named,
     and keeps the answer as the task's `repository`, and gives a task back
     with why when its computer cannot clone it (`task_give_back`); a task is
-    blocked while every connected runner that may take it, the account's own
-    and others', gave it back, and offered again when one that has not
+    blocked while every connected runner of the account with its agent gave
+    it back, and offered again when one that has not
     connects or it is assigned or answered again; the hub keeps the notes it
     recalls for every
     new task, which the agent reads as reference data; a task done is still
     shared; every connected runner registers with all its agents
     (`runner`/`runners`); the `node` adapter, its snapshots and the link's
-    runs are gone. A runner says `works_for: owner` or `works_for: hub`; one
-    that works for the hub needs `host`, and lends the agents of its teams on
-    `llm_backends`, worked out,
-    never on a CLI's login; it takes another account's task, of one whose
-    role has `compute`, only when no runner of that account with the agent is
-    connected or every one gave it back, finds it in `tasks_waiting` with its
-    account, works on it in `<workspace>/.for/<account>/<project>`, and names
-    the account and itself in every request, which the hub checks each time;
-    its report is the account's share; MCP's `agents` lists others' runners
-    with what they lend; the link's protocol 3.)
+    runs are gone; the link's protocol 3.)
 20. Sharing LLM backends: the `llm` block in `hub.yaml` and `runner.yaml`,
     offered backends listed in the hub's settings operations, calls relayed
     over a second WebSocket. (Done: measured first, a few milliseconds
@@ -1462,14 +1396,7 @@ adapters like the web UI.
 
 1. Export from workplace to home: who approves.
 2. Recording from a browser without sending audio to the hub.
-3. Runners that work for others: whether the runner's owner and the task's
-   account should consent to each task, beyond roles (built: the roles alone
-   decide, `host` and `compute`); whether the hub should offer a task to the
-   least busy runner, and to others' runners while the account's own are busy
-   (built: the first runner to claim takes it, and a busy runner of the
-   account's own keeps it from others'). (Telegram, open here before, feeds
-   the vault as a source: decided 2026-11-19.)
-4. Chat: whether people talk to a helper agent through the hub at all, and
+3. Chat: whether people talk to a helper agent through the hub at all, and
    how. Left for later on 2026-11-19.
-5. Several hubs for one person (a home hub and a workplace hub): a runner
+4. Several hubs for one person (a home hub and a workplace hub): a runner
    names one hub; whether it may name several.

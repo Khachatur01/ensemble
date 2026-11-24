@@ -304,7 +304,6 @@ mod tests {
             .resolve(&ensemble_core::state::RunnerDir::new(""), &BTreeMap::new())
             .unwrap();
         assert_eq!(runner.name, "desk-2");
-        assert_eq!(runner.works_for, ensemble_config::WorksFor::Owner);
         assert_eq!(runner.workspace, Path::new("/code"));
         assert!(runner.llm.direct.is_empty() && runner.llm.shares.is_empty());
         assert!(starting("a/b", "/code").is_err(), "a name is checked");

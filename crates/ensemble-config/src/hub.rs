@@ -145,12 +145,6 @@ pub enum Permission {
     Tasks,
     /// Manage users: approve sign-ups, give roles, revoke tokens.
     Admin,
-    /// Have your tasks worked on by other people's runners that work for the
-    /// hub, with the agents they lend, and use their models.
-    Compute,
-    /// Connect a runner that works for the hub: for others whose role has
-    /// `compute`.
-    Host,
 }
 
 impl Permission {
@@ -160,14 +154,11 @@ impl Permission {
             Permission::Recall => "recall",
             Permission::Tasks => "tasks",
             Permission::Admin => "admin",
-            Permission::Compute => "compute",
-            Permission::Host => "host",
         }
     }
 
     /// Every permission's name.
-    pub const NAMES: &'static [&'static str] =
-        &["share", "recall", "tasks", "admin", "compute", "host"];
+    pub const NAMES: &'static [&'static str] = &["share", "recall", "tasks", "admin"];
 }
 
 /// The issue tracker types that ship.
@@ -304,18 +295,11 @@ impl HubSettings {
                     Permission::Share,
                     Permission::Recall,
                     Permission::Tasks,
-                    Permission::Compute,
-                    Permission::Host,
                 ],
             ),
             (
                 "member",
-                vec![
-                    Permission::Share,
-                    Permission::Recall,
-                    Permission::Tasks,
-                    Permission::Compute,
-                ],
+                vec![Permission::Share, Permission::Recall, Permission::Tasks],
             ),
             ("reader", vec![Permission::Recall]),
         ];

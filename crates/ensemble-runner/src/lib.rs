@@ -1,7 +1,7 @@
 //! The runner, `ensemble-runner`: this computer's power for the people of a
 //! hub. It runs the tasks the hub keeps for its owner with the helper teams,
-//! in the git repositories of its workspace, and, when it works for the hub,
-//! others' tasks with its agents on model servers, and serves them its models.
+//! in the git repositories of its workspace, and serves the hub and its
+//! owner's other runners the models it shares.
 //!
 //! ```text
 //!   the hub (ensemble-hub)

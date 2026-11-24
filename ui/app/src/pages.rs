@@ -421,7 +421,6 @@ pub fn Runners() -> Element {
                 for runner in list {
                     section { class: "card", key: "{text(&runner, \"runner\")}",
                         h2 { "{text(&runner, \"runner\")}" }
-                        p { class: "muted", "works for its {text(&runner, \"works_for\")}" }
                         ul {
                             for agent in runner["agents"].as_array().cloned().unwrap_or_default() {
                                 li { key: "{text(&agent, \"name\")}",

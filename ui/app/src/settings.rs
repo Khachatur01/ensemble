@@ -443,13 +443,12 @@ fn Backends() -> Element {
                 if !list.is_empty() {
                     h3 { "Shared by the runners connected now" }
                     table {
-                        thead { tr { th { "Runner" } th { "Backend" } th { "Works for" } th { "Models" } } }
+                        thead { tr { th { "Runner" } th { "Backend" } th { "Models" } } }
                         tbody {
                             for o in list {
                                 tr { key: "{text(&o, \"runner\")}/{text(&o, \"backend\")}",
                                     td { "{text(&o, \"runner\")}" }
                                     td { "{text(&o, \"backend\")}" }
-                                    td { "{text(&o, \"works_for\")}" }
                                     td { "{lookup::strings(&o[\"models\"]).join(\", \")}" }
                                 }
                             }

@@ -4,9 +4,8 @@
 //! one goes to that socket, and its answer back to whoever made it, the hub
 //! renumbering each call between the two.
 //!
-//! Who may call a runner's backend: its owner's other runners, and the hub;
-//! when it works for the hub, also the runners of every account whose role
-//! has `compute`. A call waits for a free place among the runner's
+//! Who may call a runner's backend: its owner's other runners, and the hub. A
+//! call waits for a free place among the runner's
 //! `max_shared_calls` for up to [`BUSY_WAIT`], then is answered busy, and the
 //! caller tries the next model of its list. The hub never learns a backend's
 //! address or key: the runner calls its own.
@@ -23,15 +22,14 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 pub(crate) enum Caller {
     /// The hub, for its own work, such as distilling.
     Hub,
-    /// A runner of `name`, an account whose role has `compute` or not.
-    Account { name: String, compute: bool },
+    /// A runner of the account `name`.
+    Account { name: String },
 }
 
 /// A connected relay socket, and what its runner shares.
 struct Sharer {
     owner: String,
     name: String,
-    for_hub: bool,
     shares: Vec<String>,
     max_calls: u32,
     /// The models each shared backend serves, as the runner said.
@@ -51,7 +49,7 @@ impl Sharer {
     fn serves(&self, caller: &Caller) -> bool {
         match caller {
             Caller::Hub => true,
-            Caller::Account { name, compute } => *name == self.owner || (self.for_hub && *compute),
+            Caller::Account { name } => *name == self.owner,
         }
     }
 }
@@ -88,7 +86,6 @@ pub struct Calls {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Offered {
     pub(crate) runner: String,
-    pub(crate) for_hub: bool,
     pub(crate) backend: String,
     pub(crate) max_calls: u32,
     pub(crate) models: Vec<String>,
@@ -105,33 +102,17 @@ impl Calls {
 
     /// A relay socket of `owner`'s that offered `offer`: its number, its
     /// runner as the hub knows it, and what is to be sent on it; or why it
-    /// is refused. One that works for the hub needs `host`.
+    /// is refused.
     pub(crate) fn connect(
         &self,
         owner: &str,
         offer: &Offer,
-        may_host: bool,
     ) -> Result<(u64, String, UnboundedReceiver<Frame>), String> {
         let name = offer.name.trim().to_string();
         if !ensemble_config::runner::valid_name(&name) {
             return Err(format!(
                 "relay: '{name}' is not a runner name: letters, digits, '-', '_' or '.'"
             ));
-        }
-        let for_hub = match offer.works_for.as_str() {
-            "hub" => true,
-            "owner" => false,
-            other => {
-                return Err(format!(
-                    "relay: `works_for` must be owner or hub, not '{other}'"
-                ));
-            }
-        };
-        if for_hub && !may_host {
-            return Err(
-                "relay: a runner that works for the hub needs the `host` permission in your role; say `works_for: owner`, or ask an admin"
-                    .into(),
-            );
         }
         if let Some(bad) = offer
             .shares
@@ -145,7 +126,6 @@ impl Calls {
         let sharer = Sharer {
             owner: owner.to_string(),
             name,
-            for_hub,
             shares: offer.shares.clone(),
             max_calls,
             models: offer.models.clone(),
@@ -198,7 +178,6 @@ impl Calls {
             .flat_map(|s| {
                 s.shares.iter().map(|b| Offered {
                     runner: s.id(),
-                    for_hub: s.for_hub,
                     backend: b.clone(),
                     max_calls: s.max_calls,
                     models: s.models.get(b).cloned().unwrap_or_default(),
@@ -309,7 +288,7 @@ impl Calls {
             }
             Some((_, _, false, ..)) => {
                 return refuse(format!(
-                    "runner {} does not share its backends with you: it works for its owner",
+                    "runner {} does not share its backends with you: only with its owner's runners and the hub",
                     open.runner
                 ));
             }
@@ -381,10 +360,9 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    fn offer(name: &str, works_for: &str, shares: &[&str], max: u32) -> Offer {
+    fn offer(name: &str, shares: &[&str], max: u32) -> Offer {
         Offer {
             name: name.into(),
-            works_for: works_for.into(),
             shares: shares.iter().map(|s| s.to_string()).collect(),
             max_shared_calls: max,
             models: Default::default(),
@@ -411,29 +389,19 @@ mod tests {
     async fn a_call_reaches_the_runner_that_shares_the_backend_and_its_answer_comes_back() {
         let calls = Arc::new(Calls::default());
         let (gpu, id, mut served) = calls
-            .connect("ana", &offer("gpu-box", "owner", &["local"], 1), false)
+            .connect("ana", &offer("gpu-box", &["local"], 1))
             .unwrap();
         assert_eq!(id, "ana/gpu-box");
         assert!(
             calls
-                .connect("ana", &offer("gpu-box", "owner", &[], 1), false)
+                .connect("ana", &offer("gpu-box", &[], 1))
                 .unwrap_err()
                 .contains("connected already")
         );
-        assert!(
-            calls
-                .connect("bob", &offer("lab", "hub", &[], 1), false)
-                .unwrap_err()
-                .contains("`host`")
-        );
         // ana's laptop calls her gpu box.
-        let (laptop, _, mut laptop_frames) = calls
-            .connect("ana", &offer("laptop", "owner", &[], 1), false)
-            .unwrap();
-        let ana = Caller::Account {
-            name: "ana".into(),
-            compute: false,
-        };
+        let (laptop, _, mut laptop_frames) =
+            calls.connect("ana", &offer("laptop", &[], 1)).unwrap();
+        let ana = Caller::Account { name: "ana".into() };
         calls.frame(
             laptop,
             &ana,
@@ -489,14 +457,9 @@ mod tests {
         assert_eq!(next(&mut laptop_frames).await, Frame::Done { call: 5 });
         assert!(calls.lock().served.is_empty(), "its place is given back");
 
-        // bob may not call a runner that works for its owner, compute or not.
-        let bob = Caller::Account {
-            name: "bob".into(),
-            compute: true,
-        };
-        let (bobs, _, mut bobs_frames) = calls
-            .connect("bob", &offer("desk", "owner", &[], 1), false)
-            .unwrap();
+        // bob may not call a runner of ana's.
+        let bob = Caller::Account { name: "bob".into() };
+        let (bobs, _, mut bobs_frames) = calls.connect("bob", &offer("desk", &[], 1)).unwrap();
         calls.frame(
             bobs,
             &bob,
@@ -512,7 +475,10 @@ mod tests {
             panic!("refused")
         };
         assert_eq!(status, UNAVAILABLE);
-        assert!(message.contains("works for its owner"), "{message}");
+        assert!(
+            message.contains("only with its owner's runners"),
+            "{message}"
+        );
         // The hub may; a backend it does not share, or a runner not there, is
         // unavailable.
         let mut answer = calls.open_as_hub(open("ana/gpu-box", "big"), vec![]);
@@ -549,7 +515,7 @@ mod tests {
     async fn a_call_to_a_runner_with_no_free_place_waits_then_is_answered_busy() {
         let calls = Arc::new(Calls::default());
         let (_gpu, _, mut served) = calls
-            .connect("ana", &offer("gpu-box", "owner", &["local"], 1), false)
+            .connect("ana", &offer("gpu-box", &["local"], 1))
             .unwrap();
         let _first = calls.open_as_hub(open("ana/gpu-box", "local"), vec![]);
         assert!(matches!(next(&mut served).await, Frame::Open { .. }));

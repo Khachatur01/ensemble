@@ -2,18 +2,11 @@
 //! `ensemble-runner serve` keeps it whenever its `runner.yaml` names a hub.
 //!
 //! It keeps one connection to the hub and says what the runner is
-//! (`runner`): its name, whom it works for (`works_for`), every agent of its
-//! teams and the agents it lends other accounts, and says it again when its
-//! teams are reloaded. So the hub knows which runners are connected, with
+//! (`runner`): its name and every agent of its teams, and says it again when
+//! its teams are reloaded. So the hub knows which runners are connected, with
 //! which agents, and which may take an account's tasks.
-//!
-//! A runner that works for the hub works for other people, so the agents it
-//! lends are those of its teams that run on models of LLM backends
-//! ([`ensemble_config::AgentConfig::lendable`]), worked out from its teams
-//! each time it says what it is, never listed by hand: an agent CLI's own
-//! login is its owner's, and is never used for someone else's work.
 
-use ensemble_config::{Config, Runner, WorksFor};
+use ensemble_config::{Config, Runner};
 use ensemble_core::runtime;
 use ensemble_link::client::{Connection, Failure, Token};
 use ensemble_link::protocol::RUNNER;
@@ -25,20 +18,6 @@ use tokio::sync::Notify;
 
 /// Why a connection ended when the token was replaced.
 const REPLACED: &str = "signed in again with a new token";
-
-/// The agents `runner` lends other accounts, of its teams `config`: those on
-/// LLM backends when it works for the hub, and none when it works for its
-/// owner.
-pub fn lends(runner: &Runner, config: &Config) -> Vec<String> {
-    match runner.works_for {
-        WorksFor::Hub => config
-            .lendable_agents()
-            .into_iter()
-            .map(String::from)
-            .collect(),
-        WorksFor::Owner => Vec::new(),
-    }
-}
 
 /// A runner's link to its hub, ready to connect.
 pub struct Worker {
@@ -91,15 +70,13 @@ impl Worker {
             .collect();
         json!({
             "name": self.runner.name,
-            "works_for": self.runner.works_for.as_str(),
             "agents": agents,
-            "lends": lends(&self.runner, &team),
         })
     }
 
     /// Serve the hub until `stop` is set, connecting again when the link
-    /// breaks. A hub that refuses the runner (one that works for the hub
-    /// without `host`, a name taken) makes it return, saying why.
+    /// breaks. A hub that refuses the runner (a name taken) makes it return,
+    /// saying why.
     pub async fn work(&self, stop: &AtomicBool, say: &(dyn Fn(&str) + Sync)) -> Result<(), String> {
         let mut backoff = Duration::from_secs(1);
         let mut said_down = false;
@@ -148,10 +125,9 @@ impl Worker {
             .map_err(Failure::Broken)?;
         let me = link.call(RUNNER, self.hello()).await?;
         say(&format!(
-            "connected to {} as the runner {} (works for {})",
+            "connected to {} as the runner {}",
             self.url,
-            me["runner"].as_str().unwrap_or("?"),
-            self.runner.works_for.as_str()
+            me["runner"].as_str().unwrap_or("?")
         ));
         let result = loop {
             tokio::select! {
@@ -173,35 +149,5 @@ impl Worker {
         };
         link.close().await;
         result
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-
-    #[test]
-    fn a_runner_lends_its_agents_on_llm_backends_only_when_it_works_for_the_hub() {
-        let team =
-            ensemble_config::parse(ensemble_config::SAMPLE, Path::new("config.yaml")).unwrap();
-        let runner = |works_for: &str| {
-            let mut settings = ensemble_config::RunnerSettings::starting("box", "/code");
-            settings.hub = Some("ws://hub".into());
-            settings.works_for = serde_json::from_value(serde_json::json!(works_for)).unwrap();
-            settings
-                .resolve(
-                    &ensemble_core::state::RunnerDir::new(""),
-                    &std::collections::BTreeMap::new(),
-                )
-                .unwrap()
-        };
-        // Its agents on OpenCode with a provider, Codex and Claude Code use
-        // their CLI's own login: never lent.
-        assert_eq!(
-            lends(&runner("hub"), &team),
-            ["coder", "patcher", "summariser"]
-        );
-        assert!(lends(&runner("owner"), &team).is_empty());
     }
 }

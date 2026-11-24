@@ -1,12 +1,9 @@
 //! The settings of one runner ([`RunnerSettings`]), a worker that gives this
-//! computer's power to its owner and, when it works for the hub, to the people
-//! of a hub server, kept in typed tables of its database
+//! computer's power to its owner, kept in typed tables of its database
 //! (`ensemble_store::kept`) and changed only through its operations. A
 //! computer runs one runner.
 //!
-//! A runner says who it works for (`works_for`: its owner alone, or also the
-//! accounts of its hub whose role has `compute`, with the agents of its teams
-//! that run on `llm_backends`), where it works (its workspace, a folder of git
+//! A runner says where it works (its workspace, a folder of git
 //! repositories, each a project named for its folder, where it clones the
 //! repository of a task whose project it has no copy of), and the LLM
 //! backends its teams' agents run on: its own, those it offers
@@ -23,7 +20,6 @@ use serde::{Deserialize, Serialize};
 pub struct Runner {
     /// Its name, which a hub knows as `<owner>/<name>`.
     pub name: String,
-    pub works_for: WorksFor,
     /// The folder it works in: each git repository directly inside it is a
     /// project, named for its folder, whose tasks the runner runs; it clones
     /// a task's repository here for a project it has none of.
@@ -36,29 +32,6 @@ pub struct Runner {
     pub source: PathBuf,
 }
 
-/// Whom a runner works for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum WorksFor {
-    /// Its owner alone: the tasks of its owner's account.
-    Owner,
-    /// Its owner, and every account of its hub whose role has `compute`: their
-    /// tasks that no runner of their own takes, with the agents of its teams
-    /// on LLM backends alone (`AgentConfig::lendable`), and the backends it
-    /// shares.
-    /// Connecting it needs `host`.
-    Hub,
-}
-
-impl WorksFor {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            WorksFor::Owner => "owner",
-            WorksFor::Hub => "hub",
-        }
-    }
-}
-
 /// The runner's settings as they are kept, in typed tables of its database
 /// (`ensemble_store::kept`), and as `export` and `import` write them: every
 /// setting written, none with a default.
@@ -67,7 +40,6 @@ impl WorksFor {
 pub struct RunnerSettings {
     /// Its name, which a hub knows as `<owner>/<name>`.
     pub name: String,
-    pub works_for: WorksFor,
     /// The folder it works in: `~/` is the home directory, and a relative
     /// path is in the runner's folder.
     pub workspace: String,
@@ -82,12 +54,11 @@ pub struct RunnerSettings {
 }
 
 impl RunnerSettings {
-    /// The settings a new runner starts with: `name`, working for its owner
-    /// in `workspace`, with no hub and no backend.
+    /// The settings a new runner starts with: `name`, working in `workspace`,
+    /// with no hub and no backend.
     pub fn starting(name: &str, workspace: &str) -> Self {
         RunnerSettings {
             name: name.to_string(),
-            works_for: WorksFor::Owner,
             workspace: workspace.to_string(),
             hub: None,
             backends: BTreeMap::new(),
@@ -118,11 +89,6 @@ impl RunnerSettings {
             problems.push(format!(
                 "hub: '{h}' must start with ws:// or wss://, such as wss://hub.example.com"
             ));
-        }
-        if hub.is_none() && self.works_for == WorksFor::Hub {
-            problems.push(
-                "works_for: a runner works for the accounts of a hub, and it names no hub; say `owner`, or name the hub".into(),
-            );
         }
         let (direct, relayed) = crate::llm::backends(&self.backends, env, &mut problems);
         let mut shares: Vec<String> = Vec::new();
@@ -157,7 +123,6 @@ impl RunnerSettings {
         if problems.is_empty() {
             Ok(Runner {
                 name,
-                works_for: self.works_for,
                 workspace,
                 hub,
                 llm: RunnerLlm {

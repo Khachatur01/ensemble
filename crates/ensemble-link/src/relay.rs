@@ -43,8 +43,6 @@ pub const UNAVAILABLE: u16 = 503;
 pub struct Offer {
     /// Its name, which the hub knows it by as `<owner>/<name>`.
     pub name: String,
-    /// `owner` or `hub`, as runner.yaml says.
-    pub works_for: String,
     /// The backends of its `llm.direct` it shares.
     pub shares: Vec<String>,
     /// The most calls of others to them at once.

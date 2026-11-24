@@ -9,12 +9,10 @@
 //! A variable is looked for in the environment, then among the keys kept.
 
 use ensemble_config::kept::{Change, Keep};
-use ensemble_config::{Runner, RunnerSettings, WorksFor};
+use ensemble_config::{Runner, RunnerSettings};
 use ensemble_core::state::RunnerDir;
 use ensemble_link::tokens::normal;
-use ensemble_store::kept::{
-    self, audited, backend_rows, int, named, num, read_backends, some_text, txt,
-};
+use ensemble_store::kept::{self, audited, backend_rows, int, num, read_backends, some_text, txt};
 use ensemble_store::{optional, rows, text, transaction};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -31,7 +29,6 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS runner_settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     name TEXT NOT NULL,
-    works_for TEXT NOT NULL,
     workspace TEXT NOT NULL,
     hub TEXT,
     max_shared_calls INTEGER NOT NULL
@@ -107,7 +104,7 @@ impl Keep<RunnerSettings> for RunnerStore {
         core(&self.dir, async |c| {
             let found = rows(
                 c,
-                "SELECT name, works_for, workspace, hub, max_shared_calls FROM runner_settings WHERE id = 1",
+                "SELECT name, workspace, hub, max_shared_calls FROM runner_settings WHERE id = 1",
                 vec![],
             )
             .await?;
@@ -117,12 +114,11 @@ impl Keep<RunnerSettings> for RunnerStore {
             let (backends, shares) = read_backends(c).await?;
             Ok(Some(RunnerSettings {
                 name: some_text(&r[0], "name")?,
-                works_for: named::<WorksFor>(&r[1], "works_for")?,
-                workspace: some_text(&r[2], "workspace")?,
-                hub: text(&r[3]),
+                workspace: some_text(&r[1], "workspace")?,
+                hub: text(&r[2]),
                 backends,
                 shares,
-                max_shared_calls: num(&r[4], "max_shared_calls")?,
+                max_shared_calls: num(&r[3], "max_shared_calls")?,
             }))
         })
     }
@@ -131,10 +127,9 @@ impl Keep<RunnerSettings> for RunnerStore {
         let mut statements = vec![
             ("DELETE FROM runner_settings", vec![]),
             (
-                "INSERT INTO runner_settings (id, name, works_for, workspace, hub, max_shared_calls) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO runner_settings (id, name, workspace, hub, max_shared_calls) VALUES (1, ?1, ?2, ?3, ?4)",
                 vec![
                     txt(&s.name),
-                    txt(s.works_for.as_str()),
                     txt(&s.workspace),
                     optional(s.hub.as_deref()),
                     int(s.max_shared_calls),
@@ -231,7 +226,6 @@ mod tests {
         assert_eq!(store.read().unwrap(), None);
         let mut runner = RunnerSettings::starting("laptop", "~/ensemble");
         runner.hub = Some("ws://127.0.0.1:7700".into());
-        runner.works_for = WorksFor::Hub;
         runner.backends.insert(
             "local".into(),
             BackendSetting::OpenAiCompatible {

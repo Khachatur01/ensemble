@@ -81,7 +81,7 @@ impl Scratch {
     /// as its LLM backends, by name.
     fn runner_with(&self, backends: Value) -> PathBuf {
         let dir = self.runner_dir();
-        let mut runner = runner_doc("desk", "owner", backends);
+        let mut runner = runner_doc("desk", backends);
         runner["workspace"] = json!(self.workspace());
         // The hub it names, if it names one, it keeps.
         if let Some(before) = runner_settings(&dir) {
@@ -202,12 +202,10 @@ impl Drop for Scratch {
     }
 }
 
-/// A runner's settings: `name`, working for `works_for`, with `backends` by
-/// name, sharing none; its workspace and its hub are filled in where it runs.
-fn runner_doc(name: &str, works_for: &str, backends: Value) -> Value {
+/// A runner's settings: `name`, with `backends` by name, sharing none; its workspace and its hub are filled in where it runs.
+fn runner_doc(name: &str, backends: Value) -> Value {
     json!({
         "name": name,
-        "works_for": works_for,
         "workspace": null,
         "hub": null,
         "backends": backends,
@@ -1880,7 +1878,7 @@ fn runner_names_hub(scratch: &Scratch, url: &str) {
         .0
         .with_extension("xdg-state")
         .join("ensemble/runner");
-    let mut runner = runner_doc("desk", "owner", local_backend(NOWHERE));
+    let mut runner = runner_doc("desk", local_backend(NOWHERE));
     runner["workspace"] = json!(scratch.workspace());
     runner["hub"] = json!(url);
     write_runner(&config, runner);
@@ -2067,12 +2065,12 @@ fn a_hub_server_refuses_another_protocol_or_a_bad_token_and_stops_on_sigterm() {
     assert!(status.contains("426"), "no protocol named: {status}");
     let status = upgrade(
         "/link",
-        "Ensemble-Protocol: 6\r\nAuthorization: Bearer ens_wrong\r\n",
+        "Ensemble-Protocol: 7\r\nAuthorization: Bearer ens_wrong\r\n",
     );
     assert!(status.contains("401"), "{status}");
-    let status = upgrade("/", "Ensemble-Protocol: 6\r\n");
+    let status = upgrade("/", "Ensemble-Protocol: 7\r\n");
     assert!(status.contains("404"), "the link is at /link: {status}");
-    let status = upgrade("/link", "Ensemble-Protocol: 6\r\n");
+    let status = upgrade("/link", "Ensemble-Protocol: 7\r\n");
     assert!(
         status.contains("101"),
         "no token: signing in only: {status}"
@@ -2161,7 +2159,7 @@ fn a_runner_signs_in_to_a_hub_server_and_takes_a_new_token_as_it_runs() {
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stdout_of(&out).contains("as ana (member: share, recall, tasks, compute)"),
+        stdout_of(&out).contains("as ana (member: share, recall, tasks)"),
         "{}",
         stdout_of(&out)
     );
@@ -2560,7 +2558,7 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
     };
 
     // The gpu box shares its model server as `local`.
-    let mut gpu = runner_doc("gpu", "owner", json!({ "local": openai(&server, 10) }));
+    let mut gpu = runner_doc("gpu", json!({ "local": openai(&server, 10) }));
     gpu["hub"] = json!(url);
     gpu["shares"] = json!(["local"]);
     gpu["max_shared_calls"] = json!(2);
@@ -2570,8 +2568,7 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
     let out = ensemble_hub(&s, &["runner", "backends"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stdout_of(&out)
-            .contains("ana/gpu  local  (works for owner, 2 call(s) at once)  models: small"),
+        stdout_of(&out).contains("ana/gpu  local  (2 call(s) at once)  models: small"),
         "{}",
         stdout_of(&out)
     );
@@ -2579,7 +2576,6 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
     // ana's laptop has no model server: its agent runs on the gpu box's.
     let mut laptop = runner_doc(
         "laptop",
-        "owner",
         json!({ "gpu-local": { "type": "runner", "runner": "ana/gpu", "backend": "local" } }),
     );
     laptop["hub"] = json!(url);
@@ -2632,32 +2628,6 @@ fn a_backend_one_runner_shares_serves_another_runners_agent_and_the_hub_through_
 }
 
 #[test]
-fn only_a_host_connects_a_runner_that_works_for_the_hub() {
-    let s = Scratch::new("runner-host");
-    let (_hub, address, token) = hub_server(&s);
-    let _hub = serve_hub(&s, &address);
-    let url = format!("ws://{address}");
-    let out = runner_command(&s)
-        .args(["login", &url, "--token", &token])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    let mut runner = runner_doc("hub-box", "hub", json!({}));
-    runner["hub"] = json!(url);
-    // A member may not connect a runner that works for the hub.
-    let out = on_machine(&s, "hub-box", &runner)
-        .args(["serve"])
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    assert!(
-        stderr_of(&out).contains("`host` permission"),
-        "{}",
-        stderr_of(&out)
-    );
-}
-
-#[test]
 fn a_running_runner_reloads_its_teams() {
     let s = Scratch::new("reload");
     s.local_backend(NOWHERE);
@@ -2696,7 +2666,7 @@ fn a_running_runner_reloads_its_teams() {
 /// The runner of the computer `machine`, named for it, with the hub at
 /// `url`: started and waited for until it is ready.
 fn machine_runner(scratch: &Scratch, machine: &str, url: &str) -> Served {
-    let mut settings = runner_doc(machine, "owner", local_backend(NOWHERE));
+    let mut settings = runner_doc(machine, local_backend(NOWHERE));
     settings["hub"] = json!(url);
     let mut runner = on_machine(scratch, machine, &settings)
         .args(["serve"])
@@ -2875,7 +2845,7 @@ fn a_repository_added_after_the_runner_started_gets_a_worker_and_a_task_brings_i
     );
     let peers = stdout_of(&ensemble_runner(&s, &["peers"]));
     assert!(
-        peers.contains("ana/desk  (works for owner)\n  agents: team/coder, team/reviewer"),
+        peers.contains("ana/desk\n  agents: team/coder, team/reviewer"),
         "{peers}"
     );
 
@@ -3062,131 +3032,6 @@ fn a_task_whose_repository_its_only_runner_cannot_clone_is_given_back_and_blocke
     assert_eq!(outcome_of(&s, "shop", "0001-bar-it"), None);
 }
 
-/// bob's runner `gpu`, on its own computer, signed in to the scratch's hub
-/// at `url` as bob, an admin, whose role has `host`, and working for the hub
-/// with the helper team `team`: started and waited for until connected.
-fn bobs_runner(scratch: &Scratch, url: &str, team: &str) -> Served {
-    let out = hub_command(scratch)
-        .args(["user", "add", "bob", "--role", "admin"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    let bob = stdout_of(&out).trim().to_string();
-    let mut settings = runner_doc("gpu", "hub", local_backend(NOWHERE));
-    settings["hub"] = json!(url);
-    let out = on_machine(scratch, "gpu", &settings)
-        .args(["login", url, "--token", &bob])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    machine_team(scratch, "gpu", "team", team);
-    serve_runner(scratch, url, "gpu", &settings)
-}
-
-/// The workspace of the computer `machine`.
-fn machine_workspace(scratch: &Scratch, machine: &str) -> PathBuf {
-    scratch
-        .0
-        .with_extension("machines")
-        .join(machine)
-        .join("workspace")
-}
-
-#[test]
-fn another_accounts_runner_that_works_for_the_hub_does_a_task_no_runner_of_its_own_takes() {
-    let s = Scratch::new("works-for-hub");
-    let origin = bare_origin(&s, "shop");
-    let cli = s.opencode("bar it is", "echo bar > a.txt");
-    // coder runs on an LLM backend, so bob's runner lends it.
-    let team = config_yaml(&cli).replace("isolation: shared", "isolation: worktree");
-    let (hub, address, ana) = hub_server(&s);
-    let _hub = serve_hub(&s, &address);
-    let url = format!("ws://{address}");
-    let _gpu = bobs_runner(&s, &url, &team);
-    // ana has no runner of her own: bob's takes her task, with what it lends.
-    let agents = mcp_tool(&address, &ana, "agents", serde_json::json!({}));
-    assert!(
-        agents.contains("- team/coder on bob/gpu (another's runner"),
-        "{agents}"
-    );
-    let said = mcp_tool(
-        &address,
-        &ana,
-        "submit",
-        serde_json::json!({
-            "project": "shop", "title": "Bar it", "task": "write bar into a.txt",
-            "agent": "team/coder", "repository": origin.to_string_lossy(),
-        }),
-    );
-    assert!(said.contains("0001-bar-it"), "{said}");
-    assert!(
-        wait_for(60, || outcome_of(&s, "shop", "0001-bar-it").is_some()),
-        "bob's runner did not take ana's task: {:?}",
-        task_of(&s, "shop", "0001-bar-it")
-    );
-    let outcome = outcome_of(&s, "shop", "0001-bar-it").unwrap();
-    assert_eq!(
-        outcome.status,
-        ensemble_tasks::tasks::Status::Done,
-        "{}",
-        outcome.text
-    );
-    // Cloned into a folder of ana's in bob's workspace, apart from his own
-    // projects, and pushed to ana's repository on its branch.
-    let gpu = machine_workspace(&s, "gpu");
-    assert!(gpu.join(".for/ana/shop/.git").exists());
-    assert!(!gpu.join("shop").exists());
-    assert_eq!(
-        git_in(&origin, &["show", "ensemble/0001-bar-it:a.txt"]),
-        "bar"
-    );
-    // What it reported is ana's knowledge, not bob's.
-    let shares = ensemble_knowledge::Vault::new(hub.join("knowledge/vault")).shares();
-    assert!(
-        shares
-            .iter()
-            .any(|sh| sh.shared_by == "ana" && sh.title == "Bar it"),
-        "{shares:?}"
-    );
-    assert!(!shares.iter().any(|sh| sh.shared_by == "bob"));
-}
-
-#[test]
-fn a_runner_that_works_for_the_hub_never_lends_an_agent_on_its_clis_own_login() {
-    let s = Scratch::new("lends-no-login");
-    let cli = s.opencode("reviewed", "true");
-    // reviewer runs on a provider of OpenCode's own: its login, never lent.
-    let (_hub, address, ana) = hub_server(&s);
-    let _hub = serve_hub(&s, &address);
-    let url = format!("ws://{address}");
-    let _gpu = bobs_runner(&s, &url, &config_yaml(&cli));
-    let agents = mcp_tool(&address, &ana, "agents", serde_json::json!({}));
-    assert!(agents.contains("team/coder on bob/gpu"), "{agents}");
-    assert!(!agents.contains("team/reviewer"), "{agents}");
-    mcp_tool(
-        &address,
-        &ana,
-        "submit",
-        serde_json::json!({
-            "project": "shop", "title": "Review it", "task": "review a.txt",
-            "agent": "team/reviewer", "repository": bare_origin(&s, "shop").to_string_lossy(),
-        }),
-    );
-    // bob's runner looks every second; it never takes, clones or gives back
-    // what it does not lend.
-    std::thread::sleep(std::time::Duration::from_secs(5));
-    let task = task_of(&s, "shop", "0001-review-it");
-    assert_eq!(
-        (task.running_on, task.status, task.given_back.len()),
-        (None, None, 0)
-    );
-    assert!(!machine_workspace(&s, "gpu").join(".for").exists());
-    assert!(
-        !s.0.with_extension("bin").join("args").exists(),
-        "the reviewer never ran"
-    );
-}
-
 #[test]
 fn settings_are_changed_from_the_command_line_and_each_change_is_in_the_history() {
     let s = Scratch::new("config");
@@ -3194,20 +3039,9 @@ fn settings_are_changed_from_the_command_line_and_each_change_is_in_the_history(
     let get = |key: &str| read_runner(&runner)[key].clone();
     assert_eq!(get("name"), "desk");
 
-    // Working for the hub needs a hub.
-    let out = ensemble_runner(&s, &["settings", "works-for", "hub"]);
-    assert!(!out.status.success());
-    assert!(
-        stderr_of(&out).contains("it names no hub"),
-        "{}",
-        stderr_of(&out)
-    );
-    let mut named = read_runner(&runner);
-    named["hub"] = json!("ws://127.0.0.1:9");
-    write_runner(&runner, named);
-    let out = ensemble_runner(&s, &["settings", "works-for", "hub"]);
+    let out = ensemble_runner(&s, &["settings", "shared-calls", "3"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(get("works_for"), "hub");
+    assert_eq!(get("max_shared_calls"), 3);
     // One that would not load is refused, and nothing changes.
     let out = ensemble_runner(&s, &["settings", "name", "a b/c"]);
     assert!(!out.status.success());
@@ -3225,10 +3059,10 @@ fn settings_are_changed_from_the_command_line_and_each_change_is_in_the_history(
         "{shown}"
     );
     let json = stdout_of(&ensemble_runner(&s, &["settings", "show", "--json"]));
-    assert!(json.contains("\"works_for\": \"hub\""), "{json}");
+    assert!(json.contains("\"max_shared_calls\": 3"), "{json}");
     let history = stdout_of(&ensemble_runner(&s, &["settings", "history"]));
     assert!(
-        history.contains("local  settings.works-for")
+        history.contains("local  settings.shared-calls")
             && history.contains("local  settings.workspace"),
         "{history}"
     );

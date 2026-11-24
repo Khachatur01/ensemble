@@ -7,7 +7,7 @@ use crate::{kept, setup, teams};
 use ensemble_agents::router::Ensemble;
 use ensemble_backends::ops::{Backends, KeptBackends, Side, WithBackends};
 use ensemble_config::kept::{Change, Keep, Kept, WithKept};
-use ensemble_config::{self as config, Config, RunnerSettings, WorksFor};
+use ensemble_config::{self as config, Config, RunnerSettings};
 use ensemble_core::state::{self, RunnerDir};
 use ensemble_ops::cli::ask;
 use ensemble_ops::local;
@@ -99,9 +99,8 @@ fn init(force: bool, keep: bool) -> Result<ExitCode, String> {
 fn status() -> Result<ExitCode, String> {
     let runner = this_runner()?;
     println!(
-        "runner {} (works for {}): {}",
+        "runner {}: {}",
         runner.name,
-        runner.works_for.as_str(),
         if runner_running() {
             "running"
         } else {
@@ -516,11 +515,6 @@ struct Workspace {
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
-struct WorksForInput {
-    whom: String,
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
 struct SharedCalls {
     most: u64,
 }
@@ -539,13 +533,6 @@ const NAME: &[Field] = &[Field::text(
 const WORKSPACE: &[Field] = &[Field::text(
     "path",
     "The folder it works in, of git repositories; ~/ is your home.",
-)
-.required()
-.positional()];
-const WORKS_FOR: &[Field] = &[Field::new(
-    "whom",
-    ensemble_ops::Kind::Choice(&["owner", "hub"]),
-    "owner: you alone; hub: also everyone on the hub whose role has `compute`, with the agents of its teams on LLM backends.",
 )
 .required()
 .positional()];
@@ -686,27 +673,6 @@ pub fn operations() -> Registry<RunnerContext> {
                     s.workspace = path.clone();
                     Ok(())
                 })
-            },
-        ),
-        changing(
-            Spec {
-                name: "settings.works-for",
-                summary: "Say whom the runner works for: you alone, or also the hub's people with `compute`.",
-                access: local,
-                input: WORKS_FOR,
-            },
-            |c, input: WorksForInput, change| {
-                let whom: WorksFor = serde_json::from_value(serde_json::json!(input.whom))
-                    .map_err(|_| Error::invalid("owner or hub").on("whom"))?;
-                edit(
-                    c,
-                    change,
-                    format!("the runner works for its {}", whom.as_str()),
-                    |s| {
-                        s.works_for = whom;
-                        Ok(())
-                    },
-                )
             },
         ),
         changing(
@@ -933,8 +899,7 @@ fn runner_running() -> bool {
     })
 }
 
-/// `ensemble-runner peers`: the runners of your runner's hub that work for
-/// you now: yours, and others' that work for the hub with what they lend you.
+/// `ensemble-runner peers`: your runners connected to your runner's hub now.
 fn peers() -> Result<ExitCode, String> {
     let (url, token) = runner_hub("peers")?;
     let token = token.as_str();
@@ -971,9 +936,8 @@ fn peers() -> Result<ExitCode, String> {
             }
         };
         println!(
-            "{}  (works for {})\n  agents: {}\n  models: {}",
+            "{}\n  agents: {}\n  models: {}",
             n["runner"].as_str().unwrap_or("?"),
-            n["works_for"].as_str().unwrap_or("?"),
             names("agents", Some("name")),
             names("models", None)
         );

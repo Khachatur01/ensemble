@@ -5,13 +5,9 @@
 //! connected now that may take an account's tasks ([`Present`]), which say
 //! whether a task given back is blocked.
 //!
-//! A task is offered to the runners of its own account with its agent first.
-//! A runner of another account that works for the hub (a [`Lender`]) may
-//! take it only when none of those is connected, or every one gave it back,
-//! and only when the task's account has `compute` and the runner lends the
-//! task's agent. Being busy is not giving back: a task waits for its
-//! account's own runners while one with its agent is connected and has not
-//! given it back.
+//! A task is offered to the runners of its account with its agent. Being
+//! busy is not giving back: a task waits while a runner with its agent is
+//! connected and has not given it back.
 
 use async_trait::async_trait;
 use ensemble_core::runtime::blocking;
@@ -24,7 +20,6 @@ use ensemble_tasks::board::{Board, Cancelled, Claim, End, LEASE, Progress, Renew
 use ensemble_tasks::tasks::{Detail, GivenBack, Outcome, Status, Task, Ticket, utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
@@ -75,8 +70,8 @@ fn projects(dir: &Path, owner: &str) -> Result<Vec<Value>, String> {
 /// The hub's tasks, as the server passes the link's task methods to them, so
 /// the server knows nothing of how they are kept.
 pub trait TaskService: Sync {
-    /// One of the link's task methods (`TASK_METHODS`), asked by `asker`: on
-    /// its own account's tasks, or, as a lender, on another's it may take.
+    /// One of the link's task methods (`TASK_METHODS`), asked by `asker`, on
+    /// its account's tasks.
     fn handle(&self, asker: &Asker<'_>, method: &str, params: &Value) -> Result<Value, String>;
 }
 
@@ -84,38 +79,18 @@ pub trait TaskService: Sync {
 pub struct Asker<'a> {
     /// The signed-in account.
     pub user: &'a str,
-    /// The runner of the account the request names (`runner`), when it is
-    /// connected, works for the hub and the account's token has `host`: what
-    /// it may do on other accounts' tasks.
-    pub lender: Option<Lender>,
     /// The runners connected now that may take an account's tasks.
     pub runners: &'a (dyn Fn(&str) -> Vec<Present> + Sync),
-    /// Whether an account's role has `compute`: whether others' runners work
-    /// on its tasks.
-    pub compute: &'a (dyn Fn(&str) -> bool + Sync),
 }
 
 /// A runner connected now that may take an account's tasks, and the agents
 /// it takes them with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Present {
-    /// As its claims name it: its name for a runner of the account's own,
-    /// `<its account>/<its name>` for another's.
+    /// Its name, as its claims name it.
     pub name: String,
-    /// Every agent of a runner of the account's own; those another's lends.
+    /// Every agent of its teams.
     pub agents: Vec<String>,
-    /// Whether it is a runner of the account's own.
-    pub own: bool,
-}
-
-/// A runner of another account that works for the hub, acting on an
-/// account's tasks.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Lender {
-    /// Its name on others' tasks: `<its account>/<its name>`.
-    pub name: String,
-    /// The agents it lends: those of its teams on `llm_backends`.
-    pub lends: Vec<String>,
 }
 
 /// A task as the hub keeps it.
@@ -186,33 +161,6 @@ impl Record {
                 .all(|r| self.given_back.iter().any(|g| g.runner == r.name))
     }
 
-    /// Whether the account's own runners of `present` leave it to others: none
-    /// of them has its agent, or every one that has gave it back.
-    fn left_to_others(&self, present: &[Present]) -> bool {
-        present
-            .iter()
-            .filter(|r| r.own && r.agents.contains(&self.ticket.agent))
-            .all(|r| self.given_back.iter().any(|g| g.runner == r.name))
-    }
-
-    /// Whether `lender` may take it, as `present` are connected: not ended,
-    /// for an agent it lends, not given back by it; and its already (it runs
-    /// there or its work is there), or left to others and neither running on
-    /// nor pinned to another runner.
-    fn open_to(&self, lender: &Lender, present: &[Present], now: u64) -> bool {
-        let it = |n: &str| n == lender.name;
-        if self.result.is_some()
-            || !lender.lends.contains(&self.ticket.agent)
-            || self.given_back.iter().any(|g| it(&g.runner))
-        {
-            return false;
-        }
-        if self.holder(now).is_some_and(it) || self.pinned_to.as_deref().is_some_and(it) {
-            return true;
-        }
-        self.holder(now).is_none() && self.pinned_to.is_none() && self.left_to_others(present)
-    }
-
     /// The task as runners and clients see it; whether it is blocked as
     /// `present`, the account's connected runners, say.
     fn task(&self, now: u64, present: Option<&[Present]>) -> Task {
@@ -278,9 +226,6 @@ pub struct DbBoard {
     /// The runners connected now that may take the account's tasks, when
     /// known: whether a task given back is blocked depends on them.
     present: Option<Vec<Present>>,
-    /// Another account's runner that acts on these tasks, when it is not
-    /// the account itself: it sees and takes only those it may.
-    lender: Option<Lender>,
 }
 
 impl DbBoard {
@@ -290,7 +235,6 @@ impl DbBoard {
             owner: owner.to_string(),
             project: project.to_string(),
             present: None,
-            lender: None,
         }
     }
 
@@ -299,20 +243,6 @@ impl DbBoard {
     pub fn with_runners(mut self, runners: &[Present]) -> Self {
         self.present = Some(runners.to_vec());
         self
-    }
-
-    /// The same, as `lender`, a runner of another account, sees them: only
-    /// the tasks it may take ([`Record::open_to`]), and those they come after.
-    pub fn for_lender(mut self, lender: Lender) -> Self {
-        self.lender = Some(lender);
-        self
-    }
-
-    /// Whether the lender acting on these tasks, if any, may take `r`.
-    fn open(&self, r: &Record, now: u64) -> bool {
-        self.lender
-            .as_ref()
-            .is_none_or(|l| r.open_to(l, self.present.as_deref().unwrap_or(&[]), now))
     }
 
     fn keys(&self) -> Vec<Sql> {
@@ -384,38 +314,22 @@ impl DbBoard {
         Ok(out)
     }
 
-    /// Every task, oldest first; for a lender, those it may take and those
-    /// they come after.
+    /// Every task, oldest first.
     pub fn list(&self) -> Result<Vec<Task>, String> {
         let now = unix_now();
         let present = self.present.as_deref();
-        let records = self.records()?;
-        // What a lender may take, and what that comes after.
-        let shown: Option<HashSet<&str>> = self.lender.as_ref().map(|_| {
-            records
-                .iter()
-                .filter(|r| self.open(r, now))
-                .flat_map(|r| std::iter::once(&r.ticket.id).chain(&r.ticket.after))
-                .map(String::as_str)
-                .collect()
-        });
-        Ok(records
+        Ok(self
+            .records()?
             .iter()
-            .filter(|r| {
-                shown
-                    .as_ref()
-                    .is_none_or(|s| s.contains(r.ticket.id.as_str()))
-            })
             .map(|r| r.task(now, present))
             .collect())
     }
 
-    /// Task `id` with what it said; for a lender, only one it may take.
+    /// Task `id` with what it said.
     pub fn detail(&self, id: &str) -> Result<Option<Detail>, String> {
         let now = unix_now();
         Ok(self
             .record(id)?
-            .filter(|r| self.open(r, now))
             .map(|r| r.detail(now, self.present.as_deref())))
     }
 
@@ -488,7 +402,7 @@ impl DbBoard {
 
     /// Lease task `id` to `node` for `seconds`, if it may start: assigned,
     /// not ended, not waiting on an answer or another task, not running on
-    /// another runner, and not pinned to one; for a lender, one it may take.
+    /// another runner, and not pinned to one.
     /// A runner that claims a task it held before, such as after it started
     /// again, gets it back. Unless the run is `movable`, the task is pinned
     /// to `node`.
@@ -503,12 +417,6 @@ impl DbBoard {
             let refused = |why: &str| Ok(Claim::Refused(why.to_string()));
             if r.result.is_some() {
                 return refused("it has ended");
-            }
-            if !self.open(r, now) {
-                return refused(&format!(
-                    "it is not offered to {node}: it waits for a runner of {}'s own, or for an agent {node} does not lend",
-                    self.owner
-                ));
             }
             if r.ticket.agent.is_empty() {
                 return refused("it is in the backlog");
@@ -682,8 +590,7 @@ impl DbBoard {
     }
 
     /// `node` gives task `id` back, saying `why`, and does not take it again;
-    /// a claim of its own on it ends. A lender gives back only a task of an
-    /// agent it lends. Whether the task is blocked now: every runner
+    /// a claim of its own on it ends. Whether the task is blocked now: every runner
     /// connected that may take it gave it back, as far as the board knows who
     /// is connected.
     pub fn give_back(&self, id: &str, node: &str, why: &str) -> Result<bool, String> {
@@ -691,14 +598,6 @@ impl DbBoard {
         self.change(id, |r, _| {
             if r.result.is_some() {
                 return Err(format!("{id} has ended"));
-            }
-            if let Some(lender) = &self.lender
-                && !lender.lends.contains(&r.ticket.agent)
-            {
-                return Err(format!(
-                    "{id} is for {}, which {node} does not lend",
-                    r.ticket.agent
-                ));
             }
             if r.lease.as_ref().is_some_and(|l| l.node == node) {
                 r.lease = None;
@@ -888,59 +787,6 @@ pub fn waiting(
             continue;
         }
         out.push(Waiting {
-            account: owner.to_string(),
-            project,
-            task: r.task(now, Some(present)),
-        });
-    }
-    Ok(out)
-}
-
-/// Every task of other accounts than `user`'s, in every project, that
-/// `lender`, a runner of `user`'s, may take ([`Record::open_to`]): of the
-/// accounts whose role has `compute`, as `runners` of each are connected.
-/// Those that wait for an answer or another task are there too, as in
-/// [`waiting`].
-pub fn lent(
-    dir: &Path,
-    user: &str,
-    lender: &Lender,
-    runners: &(dyn Fn(&str) -> Vec<Present> + Sync),
-    compute: &(dyn Fn(&str) -> bool + Sync),
-) -> Result<Vec<Waiting>, String> {
-    let rows = with(dir, async |c| {
-        store::rows(
-            c,
-            "SELECT owner, project, data FROM tasks WHERE owner != ?1 ORDER BY owner, project, number",
-            vec![Sql::Text(user.to_string())],
-        )
-        .await
-    })?;
-    let now = unix_now();
-    // Each account's runners, once, and none for an account without `compute`.
-    let mut accounts: HashMap<String, Option<Vec<Present>>> = HashMap::new();
-    let mut out = Vec::new();
-    for row in &rows {
-        let (Some(owner), Some(project), Some(data)) = (
-            store::text(&row[0]),
-            store::text(&row[1]),
-            store::text(&row[2]),
-        ) else {
-            continue;
-        };
-        let present = accounts
-            .entry(owner.clone())
-            .or_insert_with(|| compute(&owner).then(|| runners(&owner)));
-        let Some(present) = present else {
-            continue;
-        };
-        let r: Record =
-            serde_json::from_str(&data).map_err(|e| format!("a task is unreadable: {e}"))?;
-        if !r.open_to(lender, present, now) {
-            continue;
-        }
-        out.push(Waiting {
-            account: owner,
             project,
             task: r.task(now, Some(present)),
         });
@@ -962,22 +808,8 @@ pub type OnDone = dyn Fn(&str, &str, &Detail) + Send + Sync;
 /// reference data, or none when nothing is related.
 pub type Recall = dyn Fn(&str, &str) -> Option<String> + Send + Sync;
 
-/// The methods a lender may ask on another account's tasks: reading those it
-/// may take, and running them. Making, answering, assigning and cancelling
-/// are the account's own.
-const LENDER_METHODS: [&str; 7] = [
-    TASKS,
-    TASK,
-    TASK_CLAIM,
-    TASK_RENEW,
-    TASK_RELEASE,
-    TASK_FINISH,
-    TASK_GIVE_BACK,
-];
-
 /// The hub's side of the link's task methods: each for the signed-in
-/// account's own tasks, or another account's for a lender, in the hub's
-/// database in `dir`.
+/// account's tasks, in the hub's database in `dir`.
 pub struct Service {
     dir: PathBuf,
     done: Option<Box<OnDone>>,
@@ -1053,51 +885,6 @@ pub fn learned(project: &str, task: &Detail) -> Option<(String, String)> {
     Some((t.title.clone(), text))
 }
 
-impl Service {
-    /// The board of `account`'s `project` that `asker`'s runner may act on
-    /// with `method`, as a lender: refused unless the runner is a lender, it
-    /// names itself as one, the method is one a lender may ask, and the
-    /// account's role has `compute`. Which of its tasks it may take, the
-    /// board says.
-    fn lent_board(
-        &self,
-        asker: &Asker<'_>,
-        account: &str,
-        project: &str,
-        method: &str,
-        params: &Value,
-    ) -> Result<DbBoard, String> {
-        let Some(lender) = &asker.lender else {
-            return Err(format!(
-                "{method}: only a runner of yours connected now that works for the hub, with the `host` permission, acts on {account}'s tasks; name it as `runner`"
-            ));
-        };
-        if !LENDER_METHODS.contains(&method) {
-            return Err(format!(
-                "{method}: only {account} does this to its tasks; a runner that works for the hub only takes and runs them"
-            ));
-        }
-        for key in ["runner", "node"] {
-            if let Some(named) = params.get(key).and_then(Value::as_str)
-                && named.trim() != lender.name
-            {
-                return Err(format!(
-                    "{method}: on {account}'s tasks the runner is {}, not '{named}'",
-                    lender.name
-                ));
-            }
-        }
-        if !(asker.compute)(account) {
-            return Err(format!(
-                "{method}: {account}'s role has no `compute`, so runners of other accounts do not work on its tasks"
-            ));
-        }
-        Ok(DbBoard::new(&self.dir, account, project)
-            .with_runners(&(asker.runners)(account))
-            .for_lender(lender.clone()))
-    }
-}
-
 impl TaskService for Service {
     fn handle(&self, asker: &Asker<'_>, method: &str, params: &Value) -> Result<Value, String> {
         let user = asker.user;
@@ -1134,11 +921,8 @@ impl TaskService for Service {
                 .map_err(|e| format!("{method}: `agents` is a list of agents: {e}"))?;
             let runner = text("runner")?;
             let own = (asker.runners)(user);
-            let mut tasks = waiting(&self.dir, user, runner, &agents, &own)?;
-            if let Some(lender) = &asker.lender {
-                tasks.extend(lent(&self.dir, user, lender, asker.runners, asker.compute)?);
-            }
-            return Ok(json!({ "runner": format!("{user}/{runner}"), "tasks": tasks }));
+            let tasks = waiting(&self.dir, user, runner, &agents, &own)?;
+            return Ok(json!({ "tasks": tasks }));
         }
         if method == TASK_PROJECTS {
             return Ok(json!({ "projects": projects(&self.dir, user)? }));
@@ -1147,22 +931,7 @@ impl TaskService for Service {
         if project.contains(['/', '\\']) || project.starts_with('.') {
             return Err(format!("{method}: '{project}' is not a project name"));
         }
-        // The task's account: the signed-in one's, or another a lender names.
-        let account = params
-            .get("account")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|a| !a.is_empty() && *a != user);
-        let (owner, board) = match account {
-            None => (
-                user,
-                DbBoard::new(&self.dir, user, project).with_runners(&(asker.runners)(user)),
-            ),
-            Some(account) => (
-                account,
-                self.lent_board(asker, account, project, method, params)?,
-            ),
-        };
+        let board = DbBoard::new(&self.dir, user, project).with_runners(&(asker.runners)(user));
         match method {
             TASKS => Ok(json!({ "tasks": board.list()? })),
             TASK => Ok(json!({ "task": board.detail(text("id")?)? })),
@@ -1197,16 +966,15 @@ impl TaskService for Service {
                 let over = matches!(end, End::Result { .. });
                 let id = text("id")?;
                 board.end(id, text("node")?, end, progress()?)?;
-                // Read as its account has it: ended, it is no lender's to see.
                 if over
                     && let Some(done) = &self.done
-                    && let Some(task) = DbBoard::new(&self.dir, owner, project).detail(id)?
+                    && let Some(task) = board.detail(id)?
                     && task
                         .outcome
                         .as_ref()
                         .is_some_and(|o| o.status == Status::Done)
                 {
-                    done(owner, project, &task);
+                    done(user, project, &task);
                 }
                 Ok(json!({ "finished": true }))
             }
@@ -1548,7 +1316,6 @@ mod tests {
         Present {
             name: name.into(),
             agents: agents.iter().map(|a| a.to_string()).collect(),
-            own: true,
         }
     }
 
@@ -1557,18 +1324,11 @@ mod tests {
         Vec::new()
     }
 
-    /// No account's role has `compute`.
-    fn without(_: &str) -> bool {
-        false
-    }
-
     /// `user` asking, with no runner connected.
     fn alone(user: &str) -> Asker<'_> {
         Asker {
             user,
-            lender: None,
             runners: &nobody,
-            compute: &without,
         }
     }
 
@@ -1791,205 +1551,6 @@ mod tests {
         assert_eq!(d.outcome.unwrap().reply(), "Cancelled while it ran.\n");
     }
 
-    /// root's runner gpu, which works for the hub and lends `web/coder`.
-    fn gpu() -> Lender {
-        Lender {
-            name: "root/gpu".into(),
-            lends: vec!["web/coder".into()],
-        }
-    }
-
-    /// gpu as one of the runners that may take ana's tasks.
-    fn lending() -> Present {
-        Present {
-            name: "root/gpu".into(),
-            agents: vec!["web/coder".into()],
-            own: false,
-        }
-    }
-
-    #[test]
-    fn another_accounts_runner_is_offered_a_task_only_when_no_runner_of_its_own_takes_it() {
-        let tmp = TempDir::new();
-        let connected = [present("desk", &["web/coder"]), lending()];
-        let own = board(&tmp).with_runners(&connected);
-        let lent = board(&tmp).with_runners(&connected).for_lender(gpu());
-        let id = own.add(&draft("A", "web/coder", "t")).unwrap();
-        let other = own.add(&draft("R", "web/reviewer", "t")).unwrap();
-        // The desk has the agent and has not given it back: it is the desk's.
-        assert!(lent.list().unwrap().is_empty());
-        assert_eq!(lent.detail(&id).unwrap(), None);
-        let refused = lent.take(&id, "root/gpu", 60, true).unwrap();
-        assert!(
-            matches!(&refused, Claim::Refused(why) if why.contains("waits for a runner of ana's own")),
-            "{refused:?}"
-        );
-        // Busy is not giving back: running on the desk, it stays the desk's.
-        own.take(&id, "desk", 60, true).unwrap();
-        assert!(lent.list().unwrap().is_empty());
-        // The desk gives it back: now gpu may take it, and is the last to try.
-        assert!(!own.give_back(&id, "desk", "no key").unwrap());
-        let listed: Vec<String> = lent.list().unwrap().iter().map(|t| t.id().into()).collect();
-        assert_eq!(
-            listed,
-            std::slice::from_ref(&id),
-            "never the reviewer's: not lent"
-        );
-        assert_eq!(lent.take(&id, "root/gpu", 60, true).unwrap(), Claim::Taken);
-        assert_eq!(
-            own.detail(&id).unwrap().unwrap().task.running_on.as_deref(),
-            Some("root/gpu")
-        );
-        assert_eq!(lent.keep(&id, "root/gpu", 60).unwrap(), Renewal::Kept);
-        assert!(lent.give_back(&id, "root/gpu", "cannot clone").unwrap());
-        assert!(
-            own.list().unwrap()[0].blocked,
-            "every one that may take it gave it back"
-        );
-        // An agent it does not lend: never offered, never given back by it.
-        assert!(matches!(
-            lent.take(&other, "root/gpu", 60, true).unwrap(),
-            Claim::Refused(_)
-        ));
-        let err = lent.give_back(&other, "root/gpu", "x").unwrap_err();
-        assert!(err.contains("does not lend"), "{err}");
-
-        // With no runner of ana's with the agent connected, it is offered at
-        // once, and so is what it comes after, to read.
-        let alone = [lending()];
-        let lent = board(&tmp).with_runners(&alone).for_lender(gpu());
-        let first = own.add(&draft("First", "web/reviewer", "t")).unwrap();
-        let then = own
-            .add(&Ticket {
-                after: vec![first.clone()],
-                ..draft("Then", "web/coder", "t")
-            })
-            .unwrap();
-        let listed: Vec<String> = lent.list().unwrap().iter().map(|t| t.id().into()).collect();
-        assert_eq!(listed, [first.clone(), then.clone()]);
-        assert_eq!(lent.detail(&first).unwrap(), None, "only what it may take");
-        assert_eq!(
-            lent.take(&then, "root/gpu", 60, true).unwrap(),
-            Claim::Refused(format!("it waits for {first}"))
-        );
-    }
-
-    /// A service asked by root's runner gpu, a lender, with `compute` for
-    /// ana alone, and no runner of ana's connected.
-    fn as_gpu(lender: Option<Lender>) -> Asker<'static> {
-        fn runners(account: &str) -> Vec<Present> {
-            if account == "ana" {
-                vec![lending()]
-            } else {
-                Vec::new()
-            }
-        }
-        fn compute(account: &str) -> bool {
-            account == "ana"
-        }
-        Asker {
-            user: "root",
-            lender,
-            runners: &runners,
-            compute: &compute,
-        }
-    }
-
-    #[test]
-    fn a_runner_acts_on_another_accounts_task_only_as_a_lender_the_hub_lets() {
-        let tmp = TempDir::new();
-        let shared: &'static Mutex<Vec<String>> = Box::leak(Box::default());
-        let service = Service::new(&tmp.0).on_done(|user, project, _| {
-            shared.lock().unwrap().push(format!("{user}/{project}"));
-        });
-        let id = board(&tmp).add(&draft("A", "web/coder", "t")).unwrap();
-        let rexs = DbBoard::new(&tmp.0, "rex", "shop")
-            .add(&draft("Rex's", "web/coder", "t"))
-            .unwrap();
-        let ask =
-            |asker: &Asker<'_>, method: &str, params: Value| service.handle(asker, method, &params);
-        let on = |params: Value| {
-            let mut p = json!({"account": "ana", "project": "shop", "id": id, "runner": "root/gpu", "node": "root/gpu"});
-            for (k, v) in params.as_object().unwrap() {
-                p[k] = v.clone();
-            }
-            p
-        };
-
-        // What it finds waiting: root's own, then ana's it may take; never
-        // rex's, whose role has no `compute`.
-        let found = ask(
-            &as_gpu(Some(gpu())),
-            TASKS_WAITING,
-            json!({"runner": "gpu", "agents": ["web/coder"]}),
-        )
-        .unwrap();
-        assert_eq!(found["runner"], "root/gpu");
-        let tasks = found["tasks"].as_array().unwrap();
-        assert_eq!(tasks.len(), 1, "{found}");
-        assert_eq!(
-            (
-                tasks[0]["account"].as_str(),
-                tasks[0]["task"]["ticket"]["id"].as_str()
-            ),
-            (Some("ana"), Some(id.as_str()))
-        );
-        // A runner that is no lender finds only its own account's.
-        let found = ask(
-            &as_gpu(None),
-            TASKS_WAITING,
-            json!({"runner": "gpu", "agents": ["web/coder"]}),
-        )
-        .unwrap();
-        assert_eq!(found["tasks"], json!([]));
-
-        // Each refused: no lender (not connected, works for its owner, or no
-        // `host`), a method only the account asks, another name, an account
-        // without `compute`.
-        let err = ask(&as_gpu(None), TASK_CLAIM, on(json!({}))).unwrap_err();
-        assert!(
-            err.contains("works for the hub, with the `host` permission"),
-            "{err}"
-        );
-        for method in [TASK_CREATE, TASK_ANSWER, TASK_ASSIGN, TASK_CANCEL] {
-            let err = ask(&as_gpu(Some(gpu())), method, on(json!({}))).unwrap_err();
-            assert!(err.contains("only ana does this"), "{method}: {err}");
-        }
-        for (key, name) in [("node", "gpu"), ("runner", "root/lab")] {
-            let err = ask(&as_gpu(Some(gpu())), TASK_CLAIM, on(json!({ key: name }))).unwrap_err();
-            assert!(err.contains("the runner is root/gpu"), "{key}: {err}");
-        }
-        let err = ask(
-            &as_gpu(Some(gpu())),
-            TASK_CLAIM,
-            on(json!({"account": "rex", "id": rexs})),
-        )
-        .unwrap_err();
-        assert!(err.contains("rex's role has no `compute`"), "{err}");
-        // An agent it does not lend.
-        let lab = Lender {
-            lends: vec!["web/reviewer".into()],
-            ..gpu()
-        };
-        let claim = ask(&as_gpu(Some(lab)), TASK_CLAIM, on(json!({}))).unwrap();
-        assert_eq!(
-            claim["claim"]["refused"]
-                .as_str()
-                .map(|w| w.contains("does not lend")),
-            Some(true)
-        );
-
-        // As a lender: it runs ana's task, and what it reports is ana's.
-        let claim = ask(&as_gpu(Some(gpu())), TASK_CLAIM, on(json!({}))).unwrap();
-        assert_eq!(claim["claim"], "taken");
-        let listed = ask(&as_gpu(Some(gpu())), TASKS, on(json!({}))).unwrap();
-        assert_eq!(listed["tasks"][0]["running_on"], "root/gpu");
-        let end = serde_json::to_value(result("done")).unwrap();
-        ask(&as_gpu(Some(gpu())), TASK_FINISH, on(json!({ "end": end }))).unwrap();
-        assert_eq!(*shared.lock().unwrap(), ["ana/shop"]);
-        assert_eq!(board(&tmp).list().unwrap()[0].status, Some(Status::Done));
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn a_runner_reaches_its_tasks_through_the_hub() {
         let tmp = TempDir::new();
@@ -2092,81 +1653,5 @@ mod tests {
             ..kept.detail(&id).unwrap().unwrap()
         };
         assert_eq!(learned("shop", &failed), None);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_runner_takes_another_accounts_task_only_while_it_is_connected_and_works_for_the_hub()
-    {
-        use ensemble_link::client::Connection;
-        use ensemble_link::protocol::RUNNER;
-        use ensemble_tasks::board::RemoteBoard;
-        let tmp = TempDir::new();
-        let hub =
-            crate::server::testing::start_with_tasks(Box::leak(Box::new(Service::new(&tmp.0))));
-        let id = board(&tmp).add(&draft("A", "web/coder", "t")).unwrap();
-        let gpu = RemoteBoard::new(&hub.url, &hub.root, "shop").of_account("ana", "root/gpu");
-        let as_gpu = |works_for: &str| {
-            json!({"name": "gpu", "works_for": works_for,
-                   "agents": [{"name": "web/coder", "about": ""}], "lends": ["web/coder"]})
-        };
-        // Not connected.
-        let err = gpu.claim(&id, "root/gpu", LEASE, true).await.unwrap_err();
-        assert!(
-            err.contains("connected now that works for the hub"),
-            "{err}"
-        );
-        // Connected, working for its owner alone.
-        let mut link = Connection::open(&hub.url, &hub.root).await.unwrap();
-        link.call(RUNNER, as_gpu("owner")).await.unwrap();
-        let err = gpu.claim(&id, "root/gpu", LEASE, true).await.unwrap_err();
-        assert!(
-            err.contains("connected now that works for the hub"),
-            "{err}"
-        );
-        // Working for the hub, but asked with a token of root's without
-        // `host`.
-        link.call(RUNNER, as_gpu("hub")).await.unwrap();
-        let scoped = {
-            let mut users = crate::users::Users::load(&hub.tmp.0.join("state/core")).unwrap();
-            let (_, token, _) = users
-                .create_token(
-                    "root",
-                    "tasks-only",
-                    None,
-                    Some(vec![ensemble_config::Permission::Tasks]),
-                    &hub.server.roles(),
-                )
-                .unwrap();
-            users.save().unwrap();
-            token
-        };
-        let err = RemoteBoard::new(&hub.url, &scoped, "shop")
-            .of_account("ana", "root/gpu")
-            .claim(&id, "root/gpu", LEASE, true)
-            .await
-            .unwrap_err();
-        assert!(err.contains("`host`"), "{err}");
-        // ana has no runner with the agent, and `compute`: gpu takes it.
-        assert_eq!(
-            gpu.claim(&id, "root/gpu", LEASE, true).await.unwrap(),
-            Claim::Taken
-        );
-        assert_eq!(
-            gpu.scan().await.unwrap()[0].running_on.as_deref(),
-            Some("root/gpu")
-        );
-        // Gone, it acts on ana's tasks no more.
-        link.close().await;
-        drop(link);
-        let gone = async {
-            while hub.server.routes.lender("root", "gpu").is_some() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        };
-        tokio::time::timeout(Duration::from_secs(10), gone)
-            .await
-            .expect("a runner that went away is no lender");
-        let err = gpu.renew(&id, "root/gpu", LEASE).await.unwrap_err();
-        assert!(err.contains("connected now"), "{err}");
     }
 }

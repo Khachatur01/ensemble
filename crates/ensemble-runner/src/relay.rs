@@ -64,7 +64,6 @@ impl Relay {
             token,
             offer: Offer {
                 name: runner.name.clone(),
-                works_for: runner.works_for.as_str().to_string(),
                 shares: runner.llm.shares.clone(),
                 max_shared_calls: runner.llm.max_shared_calls,
                 models: BTreeMap::new(),
@@ -78,8 +77,7 @@ impl Relay {
     }
 
     /// Keep the socket until `stop` is set, connecting again when it breaks.
-    /// A hub that refuses it (one that works for the hub without `host`, a
-    /// name taken) makes it return, saying why.
+    /// A hub that refuses it (a name taken) makes it return, saying why.
     pub async fn work(
         self: &Arc<Self>,
         stop: &AtomicBool,

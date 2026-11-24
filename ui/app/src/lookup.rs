@@ -21,11 +21,6 @@ pub const PERMISSIONS: &[(&str, &str)] = &[
     ("recall", "read the vault's notes"),
     ("tasks", "have tasks worked on by their helper team"),
     ("admin", "manage users and the hub's settings"),
-    (
-        "compute",
-        "have tasks worked on by runners that work for the hub",
-    ),
-    ("host", "connect a runner that works for the hub"),
 ];
 
 /// The hub's roles, by name, with what each may do (`role.list`).

@@ -750,7 +750,7 @@ const MAKE_TOKEN: &[Field] = &[
     Field::new(
         "scopes",
         FieldKind::Choices(ensemble_config::Permission::NAMES),
-        "What it may do, within your role: share, recall, tasks, admin, compute, host.",
+        "What it may do, within your role: share, recall, tasks, admin.",
     ),
 ];
 const TOKEN_ID: &[Field] = &[Field::text("id", "The token's id.").required()];
@@ -906,7 +906,7 @@ fn own_operations() -> Vec<Operation<HubContext>> {
                     Some(list) => Some(
                         serde_json::from_value::<Vec<Permission>>(json!(list)).map_err(|_| {
                             Error::invalid(
-                                "`scopes` must be a list of share, recall, tasks, admin, compute or host",
+                                "`scopes` must be a list of share, recall, tasks or admin",
                             )
                             .on("scopes")
                         })?,
@@ -1057,10 +1057,9 @@ fn runner_backends() -> Operation<HubContext> {
                         .filter_map(Value::as_str)
                         .collect();
                     format!(
-                        "{}  {}  (works for {}, {} call(s) at once)  models: {}",
+                        "{}  {}  ({} call(s) at once)  models: {}",
                         b["runner"].as_str().unwrap_or(""),
                         b["backend"].as_str().unwrap_or(""),
-                        b["works_for"].as_str().unwrap_or(""),
                         b["max_calls"],
                         if models.is_empty() {
                             "-".to_string()
