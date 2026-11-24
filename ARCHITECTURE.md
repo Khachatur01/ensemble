@@ -16,7 +16,10 @@ connectors" (decided 2026-11-19) is built: the hub's settings are the core
 (accounts, the port, the LLM backends) and the connectors, every one always
 on. "Settings in the database" (decided 2026-11-20) is built: the hub keeps
 its settings, and its backends' keys sealed by a master key, in its database,
-as a GitLab instance does, and a NixOS module only runs it.
+as a GitLab instance does, and a NixOS module only runs it. "Models and
+harnesses" (decided 2026-11-25) is being built: nobody makes a team, a runner
+offers its ANN pool and its harnesses, and a picker chooses what works on
+each task; part one still describes the teams until it is.
 
 `README.md` is the user's guide: every setting, command and tool. This document
 is the map behind it.
@@ -576,7 +579,7 @@ the config rules allow.
 
 | Level | What runs | Who it is for |
 |---|---|---|
-| 1. A hub and a runner of one's own | Both on the person's computer: tasks, helper teams, a knowledge vault fed by shares and task reports | A developer on their own |
+| 1. A hub and a runner of one's own | Both on the person's computer: tasks, the models and harnesses it has, a knowledge vault fed by shares and task reports | A developer on their own |
 | 2. A shared hub and many runners | People, always-on work, a tracker shared by a team, shared backends, sources | Teams and organizations |
 
 A runner always needs a hub, and knowledge always belongs to one: one person
@@ -645,17 +648,18 @@ the agent decides when to follow them, but every MCP client has it. (Built:
 the `mcp` connector, always on, `/mcp` on the hub's port, one `POST` per
 message and no event stream, in `ensemble-hub`'s `mcp.rs`.)
 
-No client connects to a runner, and there is no delegation: the helper teams
-work only on tasks, which a client makes on the hub.
+No client connects to a runner, and there is no delegation: runners work
+only on tasks, which a client makes on the hub.
 
 ### Runners
 
 A **runner** (`ensemble-runner`, its settings in
 `runner/core/database.db`) is a machine's capacity to do agent
-work: its helper teams, their agent CLIs and logins, and its models. It is a
-pure worker:
+work: its harnesses, with their logins, and its ANN pool. It is a pure
+worker:
 
-- It offers no tools to clients and its helper agents have no knowledge tools.
+- It offers no tools to clients and the harnesses it runs have no knowledge
+  tools.
   The hub puts the notes related to a task, as the task's account may see
   them, into the task.
 - It needs a hub; one person on their own runs both on their computer.
@@ -674,8 +678,8 @@ pure worker:
 - A task's report becomes a share of the task's account on the hub, and the
   distiller decides what of it becomes notes.
 
-The hub offers a task to the account's runners with the agent, and to no
-other account's. A run on another computer is a task too: the `node` adapter
+The hub offers a task to the account's runners, and to no other account's.
+A run on another computer is a task too: the `node` adapter
 and its snapshots are gone. (Built with step 19.)
 
 ### Sharing LLM backends
@@ -756,7 +760,7 @@ issues of today, Jira and others later.
 
 ### Where the hub runs
 
-The hub is a service, not a computational resource: it has no helper team
+The hub is a service, not a computational resource: it has no harnesses
 and runs no agents. (Decided 2026-11-17.) It is always `ensemble-hub`, with
 its files in `hub/` of `--config-dir`; one person runs it on their own
 computer, a team on a server, and a developer who wants it from elsewhere
@@ -797,37 +801,87 @@ a home that exists anyway:
 |---|---|
 | Knowing the person: decisions, setup, preferences | The vault. Recall serves the person's agent, and the hub puts related notes into every task. |
 | Identity, tokens, being accountable | The person's hub account. Issues are assigned to the person. |
-| Giving the helper team work | The person's own agent makes tasks through the hub's MCP; later a web UI. |
-| Turning an issue into work | The inbox: a `<label>:<agent>` label names the agent; without one the task waits in the backlog until someone assigns it. |
-| Planning and splitting work | A helper agent the person puts in their team for it, which hands parts on with `HAND OFF:`. A team design choice, not a concept of the system. |
+| Giving the runners work | The person's own agent makes tasks through the hub's MCP; later a web UI. |
+| Turning an issue into work | The inbox makes the issue a task of the person it is assigned to. |
+| Planning and splitting work | The person's own agent, in conversation, which makes the tasks. |
 | Being reachable while the person's own runner is off | The task waits for one of the person's runners. |
 
 So the system has three parts: the **hub** (people, knowledge, tasks, and
-which runner takes what), **runners** (workers), and each person's **helper
-team**, defined on their runner. The person's agent is the interface to all
+which runner takes what), **runners** (workers), and the **models and
+harnesses** each runner offers. The person's agent is the interface to all
 three, not one of them.
 
-## Helper team
+## Models and harnesses
 
-The user decides how their helper team is structured. Each agent has a CLI, a
-prompt, tools and gates tuned for its profession. What changes from run to run
-is the model behind an agent: each agent lists an explicit fallback order of
-backends (the user's own model, the central LLM server, a hub API key), and a
-resolver binds the agent to the first one that is reachable, compatible with
-the CLI and within budget. Nothing in that order is defaulted. An agent says
-what happens when nothing fits: fail, or wait in the queue. Every run records
-the model that actually ran.
+Nobody makes a team (decided 2026-11-24): a person who is not technical
+would not write one, and one who is should not have to. A runner offers what
+its computer has, in two lists, and a task names no agent: Ensemble picks
+what works on it. The names say what a thing is: an ANN (artificial neural
+network), an LLM, an embedding model, a decision model, a harness. Ensemble
+never says "AI".
 
-The light adapter that sends one chat request straight to a backend, with no CLI
-and no tools, is called `direct`. The chat
-client it uses belongs to the backends module, so the knowledge pipeline and the
-hub's chat API can share it.
+**The ANN pool** (`ann_pool`) holds the neural networks a runner may call, in
+two layers:
 
-An agent loop of Ensemble's own is back, as the `builtin` adapter: harness-rs's
-`AgentLoop`, its file and shell tools, and its model clients, on the user's LLM
-backends, so a helper team needs no agent CLI installed. It
-is pinned to one exact version because the library is young. (Decided
-2026-11-16.)
+- A **source** is where models come from: a model server (an
+  OpenAI-compatible one, Ollama, llama.cpp's server), a vendor's API with its
+  key, a decision model's service or file, or the models another runner of
+  the same account shares through the hub. A person adds it, or setup finds
+  it. It holds what all its models share: the address, the key, how long a
+  call may take and how many calls it takes at once.
+- A **model** is what a source serves, found by asking the source: its list
+  of models, what Ollama says each can do, and one test call where the source
+  says nothing. A model is of one type:
+  - an **LLM**: messages in, text out, with tool calls when it can make them;
+  - an **embedding model**: text in, a vector out;
+  - a **decision model**: a state and typed questions in, typed answers with
+    their probabilities out, such as Jev (a hosted service) or Laya (open
+    weights).
+
+  Each model has a profile (an LLM its tier, small, medium or strong, its
+  context window and whether it calls tools; an embedding model its
+  dimensions), limits of its own, and a switch that shares it through the hub.
+  A model a source newly lists is off until a person turns it on. Its tier
+  comes from a catalog of known models Ensemble ships, or is medium for one
+  the catalog does not know, and the person who turns it on may change it.
+
+**Harnesses** are the programs that drive an LLM to work in a repository:
+Claude Code, Codex, OpenCode, and `builtin`, which is always there. A harness
+is not an ANN, so it is a list of its own. Setup finds the CLIs and whether
+each is logged in. OpenCode and `builtin` drive any LLM of the pool; Claude
+Code and Codex drive their own vendor's models, which belong to the harness
+and are not in the pool. Each harness has a time limit for one run and a most
+number of steps. A harness is never shared: a task runs on its account's
+runners, and a person who wants it worked on elsewhere reassigns it to another
+person.
+
+**A run** works in the task's own git worktree, on the branch `ensemble/<id>`,
+where the harness may edit files and run commands. Ensemble never merges it.
+
+**The picker** chooses the harness and the LLM a task runs on. It is a trait,
+so a decision model can take the rules' place. Until then it follows rules:
+among the pairs it may use now (turned on, with a free place, within their
+limits), the strongest tier first, and the least busy among equals. When the
+task's gate fails, the next try goes one tier up. Every run records what was
+picked.
+
+**Gates** are the task's: the command its work must pass, how long it may run
+and how many tries it gets. Only the task's account sets one, through MCP, the
+REST API or the web UI. The tracker inbox never does, as anyone who may write
+in the tracker writes its issues. A task reassigned to another person runs its
+gate only once that person confirms it, since someone else wrote the command.
+
+The hub has an ANN pool too, for its own work: the distiller, the embedding
+model and the source filter, on its own sources and on the models runners
+share with it. A model alone is called, with no harness, only there: until
+tasks say what they need (an open question), every task goes to a harness.
+
+The agent loop of Ensemble's own is the `builtin` harness: harness-rs's
+`AgentLoop`, its file and shell tools, and its model clients, on the pool's
+LLMs, so a runner needs no agent CLI installed. It is pinned to one exact
+version because the library is young. (Decided 2026-11-16.) The chat client
+that sends one request straight to an LLM belongs to the backends module, so
+the knowledge pipeline and the hub's chat API share it.
 
 Ensemble is async, on tokio: agent runs (CLI processes included), the task
 queue, the MCP server, the runner, the link on both ends, and the knowledge a
@@ -839,10 +893,9 @@ Short HTTP requests use ureq; what streams for long (a runner's model calls)
 uses reqwest. The trade-off of running a session's calls in one task is in
 part one, under "How it runs at once".
 
-An organization may later limit helper teams through policy, not structure:
-which backends its data may be sent to, gates its repositories require, budgets
-per user, forbidden tools and permission modes. For now there are no such
-limits. (Decided 2026-11-10.)
+An organization may later limit runs through policy: which models its data
+may be sent to, and budgets per person. For now there are no such limits.
+(Decided 2026-11-10.)
 
 ## Tasks
 
@@ -852,15 +905,17 @@ Two kinds of work (decided 2026-11-17):
   rotating cameras", in a tracker (Jira, GitLab, markdown files), assigned to
   the person, who stays accountable. Ensemble is never the source of truth
   for issues.
-- A **task** is an agent's: one agent, one goal, one check, such as "the
-  camera calibration module in `calib/`; `cargo test` passes". Tasks are kept
-  on the hub, per account and project, so that a task outlives the runner
-  that works on it: runners **lease** them (see "A task" in part one), and
-  when a runner stops or dies another runner with the agent takes the task
-  up. The helper teams work only on tasks; there is no delegation outside
-  them. (Decided 2026-11-19.)
+- A **task** is for a harness: one goal, one check, such as "the camera
+  calibration module in `calib/`; `cargo test` passes". Tasks are kept on the
+  hub, per account and project, so that a task outlives the runner that works
+  on it: runners **lease** them (see "A task" in part one), and when a runner
+  stops or dies another runner of the account takes the task up. Runners work
+  only on tasks; there is no delegation outside them. (Decided 2026-11-19.) A
+  task names no agent: the picker chooses what works on it (see "Models and
+  harnesses"). It is reassigned only to another person, whose runners then
+  take it. (Decided 2026-11-25.)
 
-The helper team never calls a tracker itself. Each tracker implements one
+A harness never calls a tracker itself. Each tracker implements one
 trait, `IssueTracker`: the issues assigned to this user that carry the
 signal, and statuses and comments written back. The hub's inbox makes such an
 issue a task of the account it is assigned to and reports the task back on
@@ -875,19 +930,19 @@ An issue carries an explicit signal that agents may take it: a label, such as
 (Decided 2026-11-10.) The flow:
 
 1. The inbox sees an issue assigned to me with the signal and makes it a task
-   for the helper agent its label names, or puts it in my backlog.
-2. The agent gets it with the vault's notes about it, which the hub puts into
-   the task.
+   of mine, or puts it in my backlog.
+2. A runner of mine takes it, with the vault's notes about it, which the hub
+   puts into the task, and the picker chooses what works on it.
 3. If it is unclear, the agent asks; the question goes to a tracker comment and
    my answer comes back the same way.
-4. It works, checks gates, and may hand parts on to other agents of my team.
+4. It works, checks the task's gate, and may make further tasks.
 5. The result is reported in the tracker; I remain the assignee.
 6. What the agent reported goes to the knowledge pipeline, as a share of the
    account the task is for.
 
 Planning is a conversation, not an object (decided 2026-11-18). The person
 talks the work through with their own agent, with an issue of theirs or
-without one, and the agent then makes tasks for the helper team, or none, as
+without one, and the agent then makes tasks for the runners, or none, as
 the work needs. Ensemble keeps no plan and offers no planning tool: a task's
 `after` is all the order it needs.
 
@@ -1383,10 +1438,16 @@ crate holds it today.
     can before asking the hub, and ask before they remove, revoke or
     cancel anything. Not yet: sign-up, browsing the vault's notes, the
     review queue.)
-31. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
+31. Models and harnesses in place of teams, as "Models and harnesses"
+    describes. (Done: runners that work for the hub removed, so a runner
+    takes its own account's tasks alone; link protocol 7. Not yet: the ANN
+    pool of the runner and the hub, its sources and models, in place of the
+    backends; the harnesses; gates as a task's; teams, their `config.yaml`
+    and agents' names on tasks removed, with the picker choosing a harness
+    and an LLM; reassigning a task to another person.)
+32. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
     and Teams, Telegram); a runner's operations from the hub, for its own
-    account; the remaining goal operations (people, computers, teams from
-    templates); chat.
+    account; the remaining goal operations (people, computers); chat.
 
 What remains besides is the "Not yet" of steps 4 and 5, and the modules
 marked not built above. Other interfaces, such as a desktop app, are
@@ -1400,3 +1461,12 @@ adapters like the web UI.
    how. Left for later on 2026-11-19.
 4. Several hubs for one person (a home hub and a workplace hub): a runner
    names one hub; whether it may name several.
+5. How a task says what it needs (whether it changes code or only asks for
+   an answer, how hard it is) and what decides it: the person's agent as it
+   makes the task, an LLM, or a decision model. Until it is decided, every
+   task goes to a harness and the picker follows its rules. Left for later on
+   2026-11-24.
+6. Skills, folders of instructions a harness loads when the work calls for
+   them, as the expertise a team's prompts once gave: where they live, and
+   whether the vault's how-to notes become some. Left for later on
+   2026-11-25.
