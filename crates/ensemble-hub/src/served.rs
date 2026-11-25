@@ -9,14 +9,15 @@
 //! | `task.projects` | `task_projects` | `tasks` |
 //! | `task.list`, `task.show`, `task.create` | `tasks`, `task`, `task_create` | `tasks` |
 //! | `task.answer`, `task.gate`, `task.cancel` | `task_answer`, `task_gate`, `task_cancel` | `tasks` |
+//! | `task.reassign`, `task.confirm-gate` | `task_reassign`, `task_confirm_gate` | `tasks` |
 //! | `runner.list` | `runners` | `tasks` |
 //! | `knowledge.share` | `share` | `share` |
 //! | `knowledge.find` | `recall` | `recall` |
 
 use crate::accounts::HubContext;
 use ensemble_link::protocol::{
-    RECALL, RUNNERS, SHARE, TASK, TASK_ANSWER, TASK_CANCEL, TASK_CREATE, TASK_GATE, TASK_PROJECTS,
-    TASKS,
+    RECALL, RUNNERS, SHARE, TASK, TASK_ANSWER, TASK_CANCEL, TASK_CONFIRM_GATE, TASK_CREATE,
+    TASK_GATE, TASK_PROJECTS, TASK_REASSIGN, TASKS,
 };
 use ensemble_ops::{Access, Caller, Error, Field, Kind, Operation, Spec, operation};
 use serde::Deserialize;
@@ -55,6 +56,15 @@ const GATE_ATTEMPTS: Field = Field::new(
     "How many runs it gets to pass the gate, at least 1.",
 );
 const SET_GATE: &[Field] = &[PROJECT, ID, GATE_COMMAND, GATE_TIMEOUT, GATE_ATTEMPTS];
+const REASSIGN: &[Field] = &[
+    PROJECT,
+    ID,
+    Field::text(
+        "to",
+        "The account to give it to: its runners take it, once it confirms the task's gate.",
+    )
+    .required(),
+];
 const CREATE: &[Field] = &[
     PROJECT,
     Field::text("title", "What it is, in one line.").required(),
@@ -132,6 +142,13 @@ struct Create {
     gate: Option<String>,
     gate_timeout_seconds: Option<u64>,
     gate_attempts: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct Reassign {
+    project: String,
+    id: String,
+    to: String,
 }
 
 #[derive(Deserialize)]
@@ -293,6 +310,36 @@ pub(crate) fn operations() -> Vec<Operation<HubContext>> {
                     caller,
                     TASK_GATE,
                     json!({ "project": input.project, "id": input.id, "gate": gate }),
+                )
+            },
+        ),
+        operation(
+            Spec {
+                name: "task.confirm-gate",
+                summary: "Confirm the gate of a task someone gave you, so your runners take it.",
+                access: SIGNED,
+                input: ON_TASK,
+            },
+            |c: &HubContext, caller: &Caller, input: OnTask| {
+                c.ask(
+                    caller,
+                    TASK_CONFIRM_GATE,
+                    json!({ "project": input.project, "id": input.id }),
+                )
+            },
+        ),
+        operation(
+            Spec {
+                name: "task.reassign",
+                summary: "Give one of your tasks that is not running to another person, whose runners then take it.",
+                access: SIGNED,
+                input: REASSIGN,
+            },
+            |c: &HubContext, caller: &Caller, input: Reassign| {
+                c.ask(
+                    caller,
+                    TASK_REASSIGN,
+                    json!({ "project": input.project, "id": input.id, "to": input.to }),
                 )
             },
         ),

@@ -436,9 +436,10 @@ actually run is what `GET /api/v1/ops` lists for it.
 An account's own work is operations too, which only the running hub answers,
 each as the runners' link and MCP do, the permission it needs checked:
 `task.projects`, `task.list`, `task.show`, `task.create`, `task.answer`,
-`task.gate` and `task.cancel` (`tasks`), `runner.list`, the runners that
-work for you with what each runs tasks on (`tasks`), `knowledge.share` (`share`) and
-`knowledge.find` (`recall`).
+`task.gate`, `task.confirm-gate`, `task.reassign` and `task.cancel`
+(`tasks`), `runner.list`, the runners that work for you with what each runs
+tasks on (`tasks`), `knowledge.share` (`share`) and `knowledge.find`
+(`recall`).
 
 Errors are `{"error": "..."}` with 400, 401, 403, 404, 405, 409 or 429.
 
@@ -458,7 +459,8 @@ Open its address in a browser and sign in with your name and password on the
 hub. It shows what your account may do:
 
 - **Tasks**, by project: each task with its state and the question it asks,
-  made, answered, given a gate and cancelled.
+  made, answered, given a gate, given to someone else, its gate confirmed
+  when someone gave it to you, and cancelled.
 - **Runners**: those connected now that work for you, and what each runs
   tasks on.
 - **Knowledge**: recall the notes about a topic, and share what is worth
@@ -546,6 +548,8 @@ The tools are what the token may do:
 | `task` | one task: its ticket, state, questions and result |
 | `answer` | answer the question a task stopped to ask, so that it goes on |
 | `gate` | give a task that is not running the check its work must pass, `{command, timeout_seconds, attempts}`, or, without one, take it away |
+| `confirm_gate` | confirm the gate of a task someone gave you (`gate_unconfirmed`), once you have read its command, so your runners take it |
+| `reassign` | give a task that is not running to another person (`to`, their account's name): it becomes a task of theirs, with a new id |
 | `cancel` | cancel a task; a runner working on it stops |
 
 The task tools need the `tasks` permission, and each names the
@@ -1132,6 +1136,19 @@ one: when you make it (`submit`, `task.create`, the web UI's form) or with
 `gate` (`task.gate`, the task's page). A task made from a tracker's issue has
 none, since anyone who may write in the tracker writes its issues; give it one
 yourself. Your tasks run only on your own runners.
+
+**Giving a task to someone.** A task runs on its account's runners. To have
+someone else's take it, give it to them with `reassign` (`task.reassign`, or
+"Give it to someone" on the task's page), naming their account, which must
+have `tasks`. It becomes a task of theirs in the same project, with an id
+among their tasks; the notes the hub put into it are recalled again as they
+may see them, so none of yours goes with it; and the task keeps who gave it to
+whom (`moves`). Not while it runs or after it has ended, nor when it waits for
+another task or another waits for it. A gate goes with it, but it is your
+command running on their computers, so the task waits (`gate_unconfirmed`,
+"confirm its gate" in the web UI) until they confirm it (`confirm_gate`,
+`task.confirm-gate`) or change it; a task without a gate is theirs to run at
+once.
 
 A result starts with `status` (`done`, `failed` or `cancelled`), the
 `harness` and `model` of its last run, `started` and `ended`, then the reply.

@@ -14,7 +14,7 @@ use serde_json::Value;
 /// The version of what is said here. The runner sends it as the
 /// [`VERSION_HEADER`] of every link it opens, and a hub refuses one of
 /// another version, or of none, before anything else.
-pub const VERSION: u32 = 11;
+pub const VERSION: u32 = 12;
 /// The path of a runner's link on the hub's port.
 pub const PATH: &str = "/link";
 /// The header of the upgrade that carries the runner's [`VERSION`].
@@ -79,8 +79,16 @@ pub const TASK_FINISH: &str = "task_finish";
 pub const TASK_ANSWER: &str = "task_answer";
 /// Give a task the gate its work must pass, or none: `{project, id, gate}`,
 /// the gate `{command, timeout_seconds, attempts}` or null; not one that
-/// runs or has ended.
+/// runs or has ended. It confirms the gate of a task given to the account.
 pub const TASK_GATE: &str = "task_gate";
+/// Confirm the gate of a task another account gave this one, so its runners
+/// take it: `{project, id}`.
+pub const TASK_CONFIRM_GATE: &str = "task_confirm_gate";
+/// Give a task to another account, whose runners then take it: `{project,
+/// id, to}`, answered with `{id}`, its id among the tasks of `to`. Not one
+/// that runs or has ended, nor one that waits for another or that another
+/// waits for.
+pub const TASK_REASSIGN: &str = "task_reassign";
 /// Cancel a task: `{project, id}`, answered with `{cancel}`: `before` it
 /// started, `running` (its runner stops it) or `ended` already.
 pub const TASK_CANCEL: &str = "task_cancel";
@@ -97,7 +105,7 @@ pub const TASK_GIVE_BACK: &str = "task_give_back";
 /// [{project, tasks}]}`, each with how many tasks it has.
 pub const TASK_PROJECTS: &str = "task_projects";
 /// Every task method, for the server to pass on.
-pub const TASK_METHODS: [&str; 13] = [
+pub const TASK_METHODS: [&str; 15] = [
     TASKS,
     TASK,
     TASK_CREATE,
@@ -107,6 +115,8 @@ pub const TASK_METHODS: [&str; 13] = [
     TASK_FINISH,
     TASK_ANSWER,
     TASK_GATE,
+    TASK_CONFIRM_GATE,
+    TASK_REASSIGN,
     TASK_CANCEL,
     TASKS_WAITING,
     TASK_GIVE_BACK,

@@ -12,12 +12,13 @@
 use async_trait::async_trait;
 use ensemble_core::runtime::blocking;
 use ensemble_link::protocol::{
-    TASK, TASK_ANSWER, TASK_CANCEL, TASK_CLAIM, TASK_CREATE, TASK_FINISH, TASK_GATE,
-    TASK_GIVE_BACK, TASK_PROJECTS, TASK_RELEASE, TASK_RENEW, TASKS, TASKS_WAITING,
+    TASK, TASK_ANSWER, TASK_CANCEL, TASK_CLAIM, TASK_CONFIRM_GATE, TASK_CREATE, TASK_FINISH,
+    TASK_GATE, TASK_GIVE_BACK, TASK_PROJECTS, TASK_REASSIGN, TASK_RELEASE, TASK_RENEW, TASKS,
+    TASKS_WAITING,
 };
 use ensemble_store::{self as store, Value as Sql};
 use ensemble_tasks::board::{Board, Cancelled, Claim, End, LEASE, Progress, Renewal, Waiting};
-use ensemble_tasks::tasks::{Detail, Gate, GivenBack, Outcome, Status, Task, Ticket, utc};
+use ensemble_tasks::tasks::{Detail, Gate, GivenBack, Moved, Outcome, Status, Task, Ticket, utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -81,6 +82,9 @@ pub struct Asker<'a> {
     pub user: &'a str,
     /// The runners connected now that may take an account's tasks.
     pub runners: &'a (dyn Fn(&str) -> Vec<Present> + Sync),
+    /// Whether a task may be given to an account: an active one whose role
+    /// has `tasks`, or why not.
+    pub accounts: &'a (dyn Fn(&str) -> Result<(), String> + Sync),
 }
 
 /// A runner connected now that may take an account's tasks: one that runs
@@ -110,6 +114,9 @@ struct Record {
     result: Option<Outcome>,
     /// The runners that gave it back, and why.
     given_back: Vec<GivenBack>,
+    /// Given to its account with a gate it has not confirmed.
+    gate_unconfirmed: bool,
+    moves: Vec<Moved>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -176,6 +183,8 @@ impl Record {
             pinned_to: self.pinned_to.clone(),
             given_back: self.given_back.clone(),
             blocked: self.blocked(present),
+            gate_unconfirmed: self.gate_unconfirmed,
+            moves: self.moves.clone(),
         }
     }
 
@@ -341,25 +350,7 @@ impl DbBoard {
                 "`after` names '{missing}', which is not a task. Tasks are named by the id `submit` returned."
             ));
         }
-        let number = records
-            .iter()
-            .filter_map(|r| {
-                let digits: String = r
-                    .ticket
-                    .id
-                    .chars()
-                    .take_while(char::is_ascii_digit)
-                    .collect();
-                digits.parse::<i64>().ok()
-            })
-            .max()
-            .map_or(1, |n| n + 1);
-        let slug = slug(&ticket.title);
-        let id = if slug.is_empty() {
-            format!("{number:04}")
-        } else {
-            format!("{number:04}-{slug}")
-        };
+        let (number, id) = next_id(&records, &ticket.title);
         let record = Record {
             ticket: Ticket {
                 id: id.clone(),
@@ -377,6 +368,8 @@ impl DbBoard {
             cancel: false,
             result: None,
             given_back: Vec::new(),
+            gate_unconfirmed: false,
+            moves: Vec::new(),
         };
         let data = serde_json::to_string(&record).map_err(|e| e.to_string())?;
         let mut params = self.keys();
@@ -390,6 +383,93 @@ impl DbBoard {
             .await
         })?;
         Ok(id)
+    }
+
+    /// Give task `id` to the account `to`, in a project of the same name,
+    /// with the notes `notes` recalls for it as `to` may see them: its id
+    /// there. Not one that runs or has ended, whose work is in a runner's
+    /// folder, or that waits for another task or another waits for. Its
+    /// gate, someone else's command to `to`, waits for `to` to confirm it.
+    pub fn reassign(
+        &self,
+        id: &str,
+        to: &str,
+        notes: impl FnOnce(&Ticket) -> Option<String>,
+    ) -> Result<String, String> {
+        if to == self.owner {
+            return Err(format!("{id} is {to}'s already."));
+        }
+        let _held = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
+        let records = self.records()?;
+        let mut record = records
+            .iter()
+            .find(|r| r.ticket.id == id)
+            .cloned()
+            .ok_or_else(|| format!("no task '{id}'"))?;
+        if record.result.is_some() {
+            return Err(format!("{id} has ended."));
+        }
+        if let Some(holder) = record.holder(unix_now()) {
+            return Err(format!("{id} runs on {holder}; give it once it stops."));
+        }
+        if let Some(pinned) = &record.pinned_to {
+            return Err(format!(
+                "{id}'s work is in {pinned}'s folder; only {pinned} may go on with it."
+            ));
+        }
+        let done = |dep: &str| {
+            records.iter().any(|r| {
+                r.ticket.id == dep && r.result.as_ref().is_some_and(|o| o.status == Status::Done)
+            })
+        };
+        if let Some(dep) = record.ticket.after.iter().find(|a| !done(a)) {
+            return Err(format!("{id} waits for {dep}, which stays here."));
+        }
+        if let Some(next) = records
+            .iter()
+            .find(|r| r.result.is_none() && r.ticket.after.iter().any(|a| a == id))
+        {
+            return Err(format!("{} waits for {id}.", next.ticket.id));
+        }
+        let theirs = DbBoard::new(&self.dir, to, &self.project);
+        let (number, new_id) = next_id(&theirs.records()?, &record.ticket.title);
+        record.ticket.id = new_id.clone();
+        record.ticket.after.clear();
+        record.ticket.notes = notes(&record.ticket);
+        record.lease = None;
+        record.interrupted_on = None;
+        record.given_back.clear();
+        record.gate_unconfirmed = record.ticket.gate.is_some();
+        record.moves.push(Moved {
+            at: utc(SystemTime::now()),
+            from: self.owner.clone(),
+            to: to.to_string(),
+            was: id.to_string(),
+        });
+        let data = serde_json::to_string(&record).map_err(|e| e.to_string())?;
+        let mut gone = self.keys();
+        gone.push(Sql::Text(id.to_string()));
+        let mut added = theirs.keys();
+        added.extend([
+            Sql::Text(new_id.clone()),
+            Sql::Integer(number),
+            Sql::Text(data),
+        ]);
+        with(&self.dir, async |c| {
+            store::execute(
+                c,
+                "DELETE FROM tasks WHERE owner = ?1 AND project = ?2 AND id = ?3",
+                gone,
+            )
+            .await?;
+            store::execute(
+                c,
+                "INSERT INTO tasks (owner, project, id, number, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+                added,
+            )
+            .await
+        })?;
+        Ok(new_id)
     }
 
     /// Lease task `id` to `node` for `seconds`, if it may start: not ended, not waiting on an answer or another task, not running on
@@ -411,6 +491,9 @@ impl DbBoard {
             }
             if r.open_question().is_some() {
                 return refused("it waits for an answer");
+            }
+            if r.gate_unconfirmed {
+                return refused("it waits for its gate to be confirmed");
             }
             if let Some(dep) = r.ticket.after.iter().find(|a| !done.contains(a)) {
                 return refused(&format!("it waits for {dep}"));
@@ -603,6 +686,19 @@ impl DbBoard {
                 return Err(format!("{id} is running; change its gate when it stops."));
             }
             r.ticket.gate = gate;
+            r.gate_unconfirmed = false;
+            Ok(())
+        })
+    }
+
+    /// Confirm the gate of task `id`, given to the account by another, so its
+    /// runners take it.
+    pub fn confirm_gate(&self, id: &str) -> Result<(), String> {
+        self.change(id, |r, _| {
+            if !r.gate_unconfirmed {
+                return Err(format!("{id} has no gate waiting to be confirmed."));
+            }
+            r.gate_unconfirmed = false;
             Ok(())
         })
     }
@@ -673,6 +769,31 @@ fn yaml_str(s: &str) -> String {
     serde_json::to_string(s).expect("a string serializes")
 }
 
+/// The next task's number among `records` and its id: the number, then a
+/// slug of `title`.
+fn next_id(records: &[Record], title: &str) -> (i64, String) {
+    let number = records
+        .iter()
+        .filter_map(|r| {
+            let digits: String = r
+                .ticket
+                .id
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse::<i64>().ok()
+        })
+        .max()
+        .map_or(1, |n| n + 1);
+    let slug = slug(title);
+    let id = if slug.is_empty() {
+        format!("{number:04}")
+    } else {
+        format!("{number:04}-{slug}")
+    };
+    (number, id)
+}
+
 /// Lowercase words of the title, joined by dashes, at most 40 characters.
 fn slug(title: &str) -> String {
     let mut out = String::new();
@@ -736,9 +857,10 @@ impl Board for DbBoard {
 
 /// Every task of `owner`'s, in every project, that waits for a runner and
 /// that `runner`, a runner of `owner`'s, may take or ask about: not
-/// ended, not given back by it, and neither running on nor pinned to another
-/// runner. Those that wait for an answer or another task are there too: the
-/// runner looks for the projects it has no copy of.
+/// ended, not waiting for its gate to be confirmed, not given back by it,
+/// and neither running on nor pinned to another runner. Those that wait for
+/// an answer or another task are there too: the runner looks for the
+/// projects it has no copy of.
 pub fn waiting(
     dir: &Path,
     owner: &str,
@@ -763,6 +885,7 @@ pub fn waiting(
             serde_json::from_str(&data).map_err(|e| format!("a task is unreadable: {e}"))?;
         let mine = |n: &str| n == runner;
         if r.result.is_some()
+            || r.gate_unconfirmed
             || r.given_back.iter().any(|g| mine(&g.runner))
             || r.holder(now).is_some_and(|h| !mine(h))
             || r.pinned_to.as_deref().is_some_and(|p| !mine(p))
@@ -979,6 +1102,23 @@ impl TaskService for Service {
                 })?;
                 board.set_gate(text("id")?, gate)?;
                 Ok(json!({ "gate": true }))
+            }
+            TASK_CONFIRM_GATE => {
+                board.confirm_gate(text("id")?)?;
+                Ok(json!({ "confirmed": true }))
+            }
+            TASK_REASSIGN => {
+                let to = text("to")?;
+                (asker.accounts)(to)?;
+                // What the hub recalled for it was what its account may see:
+                // it is recalled again as `to`, so nothing moves to `to` that
+                // `to` may not see.
+                let notes = |ticket: &Ticket| {
+                    self.notes
+                        .as_ref()
+                        .and_then(|recall| recall(to, &recall_query(ticket)))
+                };
+                Ok(json!({ "id": board.reassign(text("id")?, to, notes)? }))
             }
             TASK_CANCEL => Ok(json!({ "cancel": board.stop(text("id")?)? })),
             TASK_GIVE_BACK => {
@@ -1312,6 +1452,15 @@ mod tests {
         Asker {
             user,
             runners: &nobody,
+            accounts: &anyone,
+        }
+    }
+
+    /// Every account but `rex` may have tasks.
+    fn anyone(account: &str) -> Result<(), String> {
+        match account {
+            "rex" => Err("rex's role has no `tasks`".into()),
+            _ => Ok(()),
         }
     }
 
@@ -1444,6 +1593,138 @@ mod tests {
             found[1].task.ticket.repository.as_deref(),
             Some("/srv/shop.git")
         );
+    }
+
+    #[test]
+    fn a_task_given_to_another_account_moves_with_its_notes_recalled_again_and_its_gate_confirmed()
+    {
+        let tmp = TempDir::new();
+        let service = Service::new(&tmp.0)
+            .with_notes(|user, query| Some(format!("notes for {user} about {query}")));
+        let ask =
+            |user: &str, method: &str, params: Value| service.handle(&alone(user), method, &params);
+        let gate = Gate {
+            command: "cargo test".into(),
+            timeout_seconds: 600,
+            attempts: 2,
+        };
+        // Bo already has a task in the project: the one Ana gives is numbered after it.
+        ask(
+            "bo",
+            TASK_CREATE,
+            json!({"project": "shop", "ticket": draft("Bo's", "t")}),
+        )
+        .unwrap();
+        let first = ask(
+            "ana",
+            TASK_CREATE,
+            json!({"project": "shop", "ticket": draft("First", "t")}),
+        )
+        .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let ticket = Ticket {
+            gate: Some(gate.clone()),
+            after: vec![first.clone()],
+            ..draft("Deploy", "Ship the cart.")
+        };
+        let id = ask(
+            "ana",
+            TASK_CREATE,
+            json!({"project": "shop", "ticket": ticket}),
+        )
+        .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let give = |id: &str, to: &str| {
+            ask(
+                "ana",
+                TASK_REASSIGN,
+                json!({"project": "shop", "id": id, "to": to}),
+            )
+        };
+        // It waits for a task that stays with Ana, and that one is waited for.
+        assert!(
+            give(&id, "bo")
+                .unwrap_err()
+                .contains(&format!("waits for {first}"))
+        );
+        assert!(
+            give(&first, "bo")
+                .unwrap_err()
+                .contains(&format!("{id} waits for"))
+        );
+        assert!(give(&id, "rex").unwrap_err().contains("no `tasks`"));
+        assert!(give(&id, "ana").unwrap_err().contains("already"));
+        let ana = board(&tmp);
+        ana.take(&first, "desk", 60, true).unwrap();
+        ana.end(&first, "desk", result("done"), None).unwrap();
+
+        let moved = give(&id, "bo").unwrap()["id"].as_str().unwrap().to_string();
+        assert_eq!(moved, "0002-deploy");
+        assert!(ana.detail(&id).unwrap().is_none(), "it is Ana's no more");
+        let bos = DbBoard::new(&tmp.0, "bo", "shop");
+        let task = bos.detail(&moved).unwrap().unwrap().task;
+        assert_eq!(
+            task.ticket.notes.as_deref(),
+            Some("notes for bo about Deploy\nShip the cart.")
+        );
+        assert!(task.ticket.after.is_empty());
+        assert_eq!(task.ticket.gate, Some(gate));
+        assert!(task.gate_unconfirmed);
+        assert_eq!(
+            (
+                task.moves[0].from.as_str(),
+                task.moves[0].to.as_str(),
+                task.moves[0].was.as_str()
+            ),
+            ("ana", "bo", id.as_str())
+        );
+        // Bo's runners do not take it, nor see it waiting, until Bo confirms its gate.
+        assert!(
+            waiting(&tmp.0, "bo", "desk", &[])
+                .unwrap()
+                .iter()
+                .all(|w| w.task.id() != moved)
+        );
+        assert!(
+            matches!(bos.take(&moved, "desk", 60, true).unwrap(), Claim::Refused(why) if why.contains("confirmed"))
+        );
+        ask(
+            "bo",
+            TASK_CONFIRM_GATE,
+            json!({"project": "shop", "id": moved}),
+        )
+        .unwrap();
+        let err = ask(
+            "bo",
+            TASK_CONFIRM_GATE,
+            json!({"project": "shop", "id": moved}),
+        )
+        .unwrap_err();
+        assert!(err.contains("no gate waiting"), "{err}");
+        assert_eq!(bos.take(&moved, "desk", 60, true).unwrap(), Claim::Taken);
+        // Running, it is not given on.
+        let err = ask(
+            "bo",
+            TASK_REASSIGN,
+            json!({"project": "shop", "id": moved, "to": "ana"}),
+        )
+        .unwrap_err();
+        assert!(err.contains("runs on desk"), "{err}");
+    }
+
+    #[test]
+    fn a_task_without_a_gate_given_to_another_account_is_taken_at_once() {
+        let tmp = TempDir::new();
+        let ana = board(&tmp);
+        let id = ana.add(&draft("Fix", "t")).unwrap();
+        let moved = ana.reassign(&id, "bo", |_| None).unwrap();
+        let bos = DbBoard::new(&tmp.0, "bo", "shop");
+        assert!(!bos.detail(&moved).unwrap().unwrap().task.gate_unconfirmed);
+        assert_eq!(bos.take(&moved, "desk", 60, true).unwrap(), Claim::Taken);
     }
 
     #[test]

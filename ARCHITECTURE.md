@@ -290,14 +290,21 @@ a client agent's `submit` over the hub's MCP, the REST API or the web UI, or
 from the hub's inbox; either way the hub recalls the notes related to it (its
 title and text as the query, `Memory::recall_as` for its account) and keeps
 them on the ticket as its `notes`, which its maker cannot set. The ticket may
-name the project's `repository`, a git URL or path to clone it from. The hub
-never runs one; a runner leases it. The worker of each repository of a
+name the project's `repository`, a git URL or path to clone it from. Its
+account may give it to another person's (`task.reassign`) while it neither
+runs nor has ended, nor waits for another task or is waited for: it becomes
+a task of that account in the same project, numbered among its tasks, its
+notes recalled again as that account may see them, and who gave it to whom
+kept with it (`moves`). Its gate, if it has one, waits for the new account
+to confirm it (`gate_unconfirmed`), and no runner takes it until then. The
+hub never runs one; a runner leases it. The worker of each repository of a
 runner's workspace, every two seconds and whenever a run ends, asks the hub for
 its project's tasks (`RemoteBoard`, over one link that opens again when it
 breaks), and:
 
-1. skips tasks that ended, waiting for an answer, with `after` tasks not yet
-   `done`, running on another runner, or given back by this one;
+1. skips tasks that ended, waiting for an answer or for their gate to be
+   confirmed, with `after` tasks not yet `done`, running on another runner,
+   or given back by this one;
 2. takes a pair of the runner's means for each, oldest first, while one is
    free; with none free, the task waits, which its activity log says once;
 3. **claims** the task for a minute (`task_claim`); another runner that was
@@ -447,14 +454,14 @@ projects it has no folder for, one that says it is connected, one per project wh
 without a token to sign in, and a short one for `hello` when it signs in or
 says its status; and, when it shares models or reaches other runners', a
 relay socket at `/relay` for model calls, whose frames `ensemble_link::relay`
-describes. This is version 11 of the protocol. It makes no HTTP request
+describes. This is version 12 of the protocol. It makes no HTTP request
 to the hub.
 
 | for | the runner asks | the hub sends |
 | --- | --- | --- |
 | a token, on a link without one | `login` (a name, a password and the client's name, `runner <name>`) or `join` (a join code and the client's name), each answered with a new access token of the client's own, named after it | |
 | who it is | `hello` (who am I, which permissions) | |
-| tasks | each with its `project`: `tasks`, `task`, `task_claim`, `task_renew`, `task_release`, `task_finish`, `task_give_back` (with why), and `task_gate` (a task's gate, or none, while it neither runs nor has ended); and across projects, `tasks_waiting` (the account's tasks that this runner has not given back) | |
+| tasks | each with its `project`: `tasks`, `task`, `task_claim`, `task_renew`, `task_release`, `task_finish`, `task_give_back` (with why), `task_gate` (a task's gate, or none, while it neither runs nor has ended), `task_confirm_gate` (the gate of a task given to the account) and `task_reassign` (to another account, as a task of its own there); and across projects, `tasks_waiting` (the account's tasks that this runner has not given back) | |
 | runners | `runner` (I am a runner: name, the harnesses that may run with the models each drives), `runners` (mine, each with what it runs on and the models it shares) | |
 | model calls, on the relay socket | the models it shares, by provider, and how many calls each provider takes at once, then calls to other runners' models: `open` (the runner and the provider), the request's body in chunks, `end`, or `cancel` | the answers to its calls, and calls to the models it shares, which it answers: `head`, the body in chunks, `done`, or `error` |
 
@@ -467,8 +474,8 @@ or the account for itself with a session, `me.join-code`
 (`POST /api/v1/me/join-codes`). A code is shown once, kept as a hash with the
 tokens, signs in as no one, and is good once within 24 hours; a client
 without the link spends it with `POST /api/v1/join`. The hub's MCP runs its tools as the same requests (`share`, `recall`, and
-`task_create`, `task_answer`, `task_gate`, `task_cancel` with the reading
-ones, and `runners`), so the link and MCP cannot differ. Every request is checked against the
+`task_create`, `task_answer`, `task_gate`, `task_confirm_gate`,
+`task_reassign`, `task_cancel` with the reading ones, and `runners`), so the link and MCP cannot differ. Every request is checked against the
 token's permissions (its role, narrowed by its scopes), read again from the
 hub's state, so a revoked token stops at once. The permissions are `share`,
 `recall`, `tasks` and `admin`. The same port serves the
@@ -497,7 +504,10 @@ work, and is written to be read by the person or the model that will see it.
   shell could; only the task's account gives it one (MCP's
   `submit` and `gate`, `task.create` and `task.gate`), never the tracker
   inbox, whose issues anyone who may write in the tracker writes, and a
-  task runs only on its account's runners. A task's `repository` is cloned with `--`
+  task runs only on its account's runners. A task given to another account
+  keeps its gate, someone else's command to that account, so no runner of
+  that account takes it until the account confirms the gate
+  (`task.confirm-gate`) or changes it. A task's `repository` is cloned with `--`
   before it, so it cannot be an option of git's, and with no prompt for a
   password.
 - **Secrets** are never in a file Ensemble reads as config, and are passed to a
@@ -1458,8 +1468,13 @@ crate holds it today.
     harness's `max_concurrent` and builtin's `max_tokens`; the runner saying
     what it runs tasks on, MCP's `runners`, a result and the record of runs
     naming the harness and the model, `ensemble-runner stats`; link protocol
-    11. Not yet: decision models in the pool; reassigning a task to another
-    person, whose runners run its gate only once that person confirms it.)
+    11; a task given to another person with `task.reassign` (MCP's
+    `reassign`, the task's page) while it neither runs nor has ended, nor
+    waits for another task or is waited for: it becomes a task of theirs
+    in the same project, its notes recalled again as they may see them, who
+    gave it to whom kept with it, and its gate confirmed by them
+    (`task.confirm-gate`) before their runners take it; link protocol 12.
+    Not yet: decision models in the pool.)
 32. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
     and Teams, Telegram); a runner's operations from the hub, for its own
     account; the remaining goal operations (people, computers); chat.

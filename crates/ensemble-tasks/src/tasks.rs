@@ -239,12 +239,27 @@ pub struct Task {
     /// The runner whose folder its work is in, which alone may go on with it.
     pub pinned_to: Option<String>,
     /// The runners that gave it back, and why, such as that they cannot reach
-    /// its repository. None of them takes it again until it is assigned or
-    /// answered again.
+    /// its repository. None of them takes it again until it is answered
+    /// again.
     pub given_back: Vec<GivenBack>,
     /// Every connected runner of its account that runs tasks gave it back: it
     /// waits for one that has not, or to be answered again.
     pub blocked: bool,
+    /// It was given to its account with a gate someone else wrote: no runner
+    /// takes it until its account confirms the gate, or changes it.
+    pub gate_unconfirmed: bool,
+    /// Who it was given by and to, oldest first.
+    pub moves: Vec<Moved>,
+}
+
+/// A task given by one account to another.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Moved {
+    pub at: String,
+    pub from: String,
+    pub to: String,
+    /// Its id among the tasks of `from`.
+    pub was: String,
 }
 
 /// A runner that gave a task back, and why.
@@ -358,6 +373,8 @@ mod tests {
             pinned_to: None,
             given_back: Vec::new(),
             blocked: false,
+            gate_unconfirmed: false,
+            moves: Vec::new(),
         }
     }
 

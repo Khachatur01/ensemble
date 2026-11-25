@@ -19,7 +19,8 @@ use ensemble_config::Permission;
 use ensemble_core::runtime::blocking;
 use ensemble_knowledge::Visibility;
 use ensemble_link::protocol::{
-    RECALL, RUNNERS, Request, SHARE, TASK, TASK_ANSWER, TASK_CANCEL, TASK_CREATE, TASK_GATE, TASKS,
+    RECALL, RUNNERS, Request, SHARE, TASK, TASK_ANSWER, TASK_CANCEL, TASK_CONFIRM_GATE,
+    TASK_CREATE, TASK_GATE, TASK_REASSIGN, TASKS,
 };
 use serde_json::{Map, Value, json};
 use tokio::net::TcpStream;
@@ -40,6 +41,8 @@ const LIST: &str = "tasks";
 const SHOW: &str = "task";
 const ANSWER: &str = "answer";
 const GATE: &str = "gate";
+const CONFIRM_GATE: &str = "confirm_gate";
+const REASSIGN: &str = "reassign";
 const CANCEL: &str = "cancel";
 
 impl Server<'_> {
@@ -197,7 +200,10 @@ impl Server<'_> {
                  `runners` lists the runners connected now and what each runs on. Follow a task \
                  with `tasks` and `task`; when it asks a question, ask the user and `answer` it. \
                  A task is `blocked` when every runner gave it back, saying why in `given_back`: \
-                 tell the user, and `answer` or make it again once that is fixed.",
+                 tell the user, and `answer` or make it again once that is fixed. `reassign` \
+                 gives a task to another person; a task given to the user with a gate waits \
+                 (`gate_unconfirmed`) until the user has read the gate's command and you \
+                 `confirm_gate` it.",
             );
         }
         out
@@ -316,6 +322,24 @@ impl Server<'_> {
                     json!({ "project": field("project"), "id": field("id"), "gate": gate }),
                 )?;
                 Ok(what)
+            }
+            CONFIRM_GATE => {
+                tasks()?;
+                ask(TASK_CONFIRM_GATE, pass(&["project", "id"]))?;
+                Ok(format!(
+                    "Confirmed the gate of task {}; your runners take it.",
+                    field("id")
+                ))
+            }
+            REASSIGN => {
+                tasks()?;
+                let moved = ask(TASK_REASSIGN, pass(&["project", "id", "to"]))?;
+                Ok(format!(
+                    "Gave task {} to {}, as their task {}.",
+                    field("id"),
+                    field("to"),
+                    moved["id"].as_str().unwrap_or("?")
+                ))
             }
             CANCEL => {
                 tasks()?;
@@ -547,6 +571,21 @@ fn task_tools() -> Vec<Value> {
             &["project", "id"],
         ),
         tool(
+            CONFIRM_GATE,
+            "Confirm the gate of a task someone gave the user (`gate_unconfirmed`), once the \
+             user has read its command: the user's runners run that command, so only then do \
+             they take the task.",
+            json!({ "project": project, "id": id }),
+            &["project", "id"],
+        ),
+        tool(
+            REASSIGN,
+            "Give a task that is not running to another person, by their account's name: \
+             their runners take it, and it gets a new id among their tasks.",
+            json!({ "project": project, "id": id, "to": { "type": "string", "description": "The account to give it to." } }),
+            &["project", "id", "to"],
+        ),
+        tool(
             CANCEL,
             "Cancel a task; a runner working on it stops.",
             json!({ "project": project, "id": id }),
@@ -761,6 +800,7 @@ mod tests {
                 "tasks" => json!({"tasks": [{"id": "t-1", "title": "Fix the cart"}]}),
                 "task" => json!({"task": null}),
                 "task_cancel" => json!({"cancel": "before"}),
+                "task_reassign" => json!({"id": "0004-fix-the-cart"}),
                 _ => json!({}),
             })
         }
@@ -773,7 +813,17 @@ mod tests {
         assert_eq!(
             tool_names(&hub, &hub.ana),
             [
-                "share", "recall", "runners", "submit", "tasks", "task", "answer", "gate", "cancel"
+                "share",
+                "recall",
+                "runners",
+                "submit",
+                "tasks",
+                "task",
+                "answer",
+                "gate",
+                "confirm_gate",
+                "reassign",
+                "cancel"
             ]
         );
         assert_eq!(
@@ -901,6 +951,30 @@ mod tests {
             .map(|(_, _, params)| &params["gate"])
             .collect();
         assert_eq!(gated, [&gate, &Value::Null]);
+        let (text, _) = tool(
+            &hub,
+            &hub.ana,
+            "reassign",
+            json!({"project": "shop", "id": "t-1", "to": "bo"}),
+        );
+        assert_eq!(
+            text,
+            "Gave task t-1 to bo, as their task 0004-fix-the-cart."
+        );
+        let (text, _) = tool(
+            &hub,
+            &hub.ana,
+            "confirm_gate",
+            json!({"project": "shop", "id": "t-1"}),
+        );
+        assert_eq!(
+            text,
+            "Confirmed the gate of task t-1; your runners take it."
+        );
+        let asked = tasks.asked.lock().unwrap().clone();
+        assert!(asked.iter().any(|(user, method, params)| user == "ana"
+            && method == "task_reassign"
+            && params == &json!({"project": "shop", "id": "t-1", "to": "bo"})));
         let (text, _) = tool(&hub, &hub.ana, "runners", json!({}));
         assert!(text.starts_with("No runner that works for you"), "{text}");
     }

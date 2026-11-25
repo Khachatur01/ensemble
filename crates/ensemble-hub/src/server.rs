@@ -569,7 +569,8 @@ impl Server<'_> {
     }
 
     /// Pass a task method to `tasks`, asked by the account `user`, with who
-    /// is connected now: the runners that may take its tasks.
+    /// is connected now: the runners that may take its tasks; and who may be
+    /// given a task, as the accounts are now.
     fn ask_tasks(
         &self,
         tasks: &dyn TaskService,
@@ -578,9 +579,28 @@ impl Server<'_> {
         params: &Value,
     ) -> Result<Value, String> {
         let runners = |account: &str| self.routes.present(account);
+        let accounts = |account: &str| -> Result<(), String> {
+            let users = self.users()?;
+            let user = users
+                .get(account)
+                .filter(|u| u.status == crate::users::Status::Active)
+                .ok_or_else(|| format!("no active account '{account}'"))?;
+            if self
+                .roles()
+                .get(&user.role)
+                .is_some_and(|p| p.contains(&Permission::Tasks))
+            {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{account}'s role has no `tasks`: it may not have tasks"
+                ))
+            }
+        };
         let asker = Asker {
             user,
             runners: &runners,
+            accounts: &accounts,
         };
         tasks.handle(&asker, method, params)
     }

@@ -249,6 +249,9 @@ fn status(task: &Value) -> String {
     if task["blocked"] == true {
         return "blocked".into();
     }
+    if task["gate_unconfirmed"] == true {
+        return "confirm its gate".into();
+    }
     if !task["question"].is_null() {
         return "asks".into();
     }
@@ -325,6 +328,8 @@ pub fn TaskPage(project: String, id: String) -> Element {
         ("project".to_string(), json!(project)),
         ("id".to_string(), json!(id)),
     ];
+    let nav = navigator();
+    let gone = project.clone();
     rsx! {
         p { class: "crumbs",
             Link { to: Route::Projects {}, "Tasks" }
@@ -342,11 +347,35 @@ pub fn TaskPage(project: String, id: String) -> Element {
                 Some(command) => format!("Its work must pass `{command}`."),
                 None => "None: its work is done when the run says so.".into(),
             };
+            let unconfirmed = shown["gate_unconfirmed"] == true;
+            let moves: Vec<String> = shown["moves"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|m| format!("{} gave it to {} on {}, as {}.", text(m, "from"), text(m, "to"), text(m, "at"), text(m, "was")))
+                .collect();
             rsx! {
                 h1 { "{text(ticket, \"title\")}" }
                 p { class: "muted",
                     span { class: "state {status(shown)}", "{status(shown)}" }
                     " {id}"
+                }
+                for moved in moves {
+                    p { class: "muted", "{moved}" }
+                }
+                if unconfirmed {
+                    section { class: "panel notice",
+                        p {
+                            strong { "Someone else wrote its gate. " }
+                            "Your runners run `{text(&ticket[\"gate\"], \"command\")}` on your computers once you confirm it; change or clear it below instead if you would rather."
+                        }
+                        OpForm {
+                            op: "task.confirm-gate",
+                            fixed: on_task.clone(),
+                            submit: "Confirm the gate",
+                            on_done: move |_| task.restart(),
+                        }
+                    }
                 }
                 if !question.is_empty() {
                     section { class: "panel notice",
@@ -377,6 +406,18 @@ pub fn TaskPage(project: String, id: String) -> Element {
                                 ],
                                 submit: "Save the gate",
                                 on_done: move |_| task.restart(),
+                            }
+                        }
+                        section { class: "panel",
+                            h2 { "Give it to someone" }
+                            p { class: "muted", "Their runners take it, once they confirm its gate. Not while it runs." }
+                            OpForm {
+                                op: "task.reassign",
+                                fixed: on_task.clone(),
+                                labels: vec![label("to", "their account's name")],
+                                submit: "Give the task",
+                                confirm: "Give {id} away? It becomes theirs, and leaves your tasks.",
+                                on_done: move |_| { nav.push(Route::ProjectTasks { project: gone.clone() }); },
                             }
                         }
                         section { class: "panel",

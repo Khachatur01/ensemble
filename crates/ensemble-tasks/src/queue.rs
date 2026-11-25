@@ -169,11 +169,12 @@ impl<'e> Queue<'e> {
     }
 
     /// Whether `task` may start here: not ended, not asking, not waiting for
-    /// another task, not running on another runner, and not given back by
-    /// this one.
+    /// its gate to be confirmed or another task, not running on another
+    /// runner, and not given back by this one.
     fn may_start(&self, task: &Task, all: &[Task]) -> bool {
         task.status.is_none()
             && task.question.is_none()
+            && !task.gate_unconfirmed
             && task.running_on.as_ref().is_none_or(|n| *n == self.runner)
             && !task.given_back.iter().any(|g| g.runner == self.runner)
             && waiting_for(&task.ticket, all).is_empty()

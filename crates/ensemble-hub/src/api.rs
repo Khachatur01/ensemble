@@ -532,6 +532,35 @@ mod tests {
         );
         let (_, out) = op(&hub.root, "task.projects", json!({}));
         assert_eq!(out["projects"], json!([]), "each account's own");
+        // Given to another person, with a gate they confirm.
+        let (_, made) = op(
+            &hub.ana,
+            "task.create",
+            json!({
+                "project": "shop", "title": "Ship", "task": "Ship it.", "gate": "make check",
+                "gate_timeout_seconds": 60, "gate_attempts": 1,
+            }),
+        );
+        let given = json!({"project": "shop", "id": made["id"], "to": "rex"});
+        let (status, out) = op(&hub.ana, "task.reassign", given);
+        assert_eq!(status, 400, "rex's role has no tasks: {out}");
+        let given = json!({"project": "shop", "id": made["id"], "to": "root"});
+        let (status, out) = op(&hub.ana, "task.reassign", given);
+        assert_eq!(status, 200, "{out}");
+        let theirs = out["id"].as_str().unwrap().to_string();
+        let (_, out) = op(&hub.root, "task.list", json!({"project": "shop"}));
+        assert_eq!(out["tasks"][0]["gate_unconfirmed"], true, "{out}");
+        assert_eq!(out["tasks"][0]["moves"][0]["from"], "ana", "{out}");
+        let (status, out) = op(
+            &hub.root,
+            "task.confirm-gate",
+            json!({"project": "shop", "id": theirs}),
+        );
+        assert_eq!(status, 200, "{out}");
+        let (_, out) = op(&hub.root, "task.list", json!({"project": "shop"}));
+        assert_eq!(out["tasks"][0]["gate_unconfirmed"], false, "{out}");
+        let (_, out) = op(&hub.root, "task.projects", json!({}));
+        assert_eq!(out["projects"], json!([{"project": "shop", "tasks": 1}]));
         let (status, _) = op(&hub.rex, "task.projects", json!({}));
         assert_eq!(status, 403, "no `tasks`");
 
