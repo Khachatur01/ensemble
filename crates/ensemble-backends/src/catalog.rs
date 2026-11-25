@@ -3,7 +3,7 @@
 //! has. A model it does not know is medium, and the person who turns it on
 //! may say otherwise.
 
-use ensemble_config::Tier;
+use ensemble_config::{HarnessKind, Tier};
 
 /// Families known by a word of their id, the first that matches winning, so
 /// `mini` and `nano` come before the families they belong to.
@@ -25,6 +25,21 @@ const FAMILIES: &[(&str, Tier)] = &[
     ("kimi-k2", Tier::Strong),
     ("glm-4.5", Tier::Strong),
 ];
+
+/// The models of a harness that drives its own vendor's LLMs, with how
+/// strong each is: Claude Code's by its aliases, and Codex's. Those models
+/// belong to the harness, not the ANN pool; OpenCode and `builtin` have none
+/// of their own.
+pub fn harness_models(kind: HarnessKind) -> Vec<(&'static str, Tier)> {
+    let ids: &[&str] = match kind {
+        HarnessKind::ClaudeCode => &["haiku", "sonnet", "opus"],
+        HarnessKind::Codex => &["gpt-5-codex", "gpt-5", "gpt-5-mini"],
+        HarnessKind::OpenCode | HarnessKind::Builtin => &[],
+    };
+    ids.iter()
+        .map(|id| (*id, family(id).expect("the catalog knows its own models")))
+        .collect()
+}
 
 /// The tier of the model `id`: by its family, else by the size its id says,
 /// such as `qwen3.5:9b`; none when the id says neither.
@@ -121,6 +136,26 @@ mod tests {
         assert_eq!(tier("Qwen3-Embedding-0.6B"), Some(Tier::Small));
         assert_eq!(tier("my-model"), None);
         assert_eq!(tier("bomb"), None, "a b inside a word is no size");
+    }
+
+    #[test]
+    fn only_claude_code_and_codex_have_models_of_their_own() {
+        let tiers = |kind| {
+            harness_models(kind)
+                .into_iter()
+                .map(|(_, t)| t)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            tiers(HarnessKind::ClaudeCode),
+            [Tier::Medium, Tier::Strong, Tier::Strong]
+        );
+        assert_eq!(
+            tiers(HarnessKind::Codex),
+            [Tier::Strong, Tier::Strong, Tier::Medium]
+        );
+        assert!(harness_models(HarnessKind::OpenCode).is_empty());
+        assert!(harness_models(HarnessKind::Builtin).is_empty());
     }
 
     #[test]

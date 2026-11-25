@@ -288,6 +288,15 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
         ),
         Err(e) => eprintln!("ensemble: the providers were not asked: {e}"),
     });
+    // And where its harnesses' CLIs are now.
+    std::thread::spawn(|| {
+        let looked = RunnerContext::new()
+            .and_then(|c| super::harness::refresh_at_start(&c).map_err(|e| e.to_string()));
+        match looked {
+            Ok(said) => eprintln!("ensemble: the harnesses: {said}"),
+            Err(e) => eprintln!("ensemble: the harnesses were not looked for: {e}"),
+        }
+    });
     // What `ensemble-runner …` asks of it while it runs.
     let operations = operations();
     let daemon = daemon::Daemon::new(
@@ -344,9 +353,9 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
 /// What the runner's operations are given: its settings, kept in its
 /// database.
 pub struct RunnerContext {
-    settings: Kept<RunnerSettings>,
+    pub(super) settings: Kept<RunnerSettings>,
     /// Its folder.
-    dir: RunnerDir,
+    pub(super) dir: RunnerDir,
     /// In the running runner: read its hub's token again, and say what it did.
     relink: Option<Box<Relink>>,
 }
@@ -560,7 +569,7 @@ const IMPORT: &[Field] = &[Field::text(
 
 /// An operation that changes the runner's settings: `run` given the change it
 /// makes, for the audit log.
-fn changing<I>(
+pub(super) fn changing<I>(
     spec: Spec,
     run: impl Fn(&RunnerContext, I, Change) -> Result<serde_json::Value, Error> + Send + Sync + 'static,
 ) -> ensemble_ops::Operation<RunnerContext>
@@ -575,7 +584,7 @@ where
 
 /// Make `edit` to the runner's settings and keep them with `change`, once
 /// they load; say `said`, and what the running runner did with them.
-fn edit(
+pub(super) fn edit(
     c: &RunnerContext,
     change: Change,
     said: String,
@@ -688,6 +697,7 @@ pub fn operations() -> Registry<RunnerContext> {
         Side::Runner,
         Access::Local,
     ));
+    all.extend(super::harness::operations());
     all.push(changing(
         Spec {
             name: "login",
@@ -992,6 +1002,17 @@ fn setup(
         println!(
             "Made the runner '{name}', working in {workspace}, kept in {}.",
             dir.database().display()
+        );
+        let found: Vec<&str> = settings
+            .harnesses
+            .each()
+            .into_iter()
+            .filter(|h| !h.missing)
+            .map(|h| h.kind.as_str())
+            .collect();
+        println!(
+            "Its harnesses: {}; each is off until you turn it on with `ensemble-runner harness on <harness>`.",
+            found.join(", ")
         );
     }
     println!();

@@ -8,10 +8,12 @@
 //! repository of a task whose project it has no copy of), and its ANN pool:
 //! the providers its teams' agents run on, its own and other runners it
 //! reaches through the hub, the models they serve, and which of its own it
-//! shares through the hub. Its teams are the folders of its teams directory
-//! (`teams`).
+//! shares through the hub. Its harnesses are the programs that drive an LLM
+//! to work in a repository, each off until a person turns it on (`harness`).
+//! Its teams are the folders of its teams directory (`teams`).
 
 use super::ann::AnnPoolSetting;
+use super::harness::HarnessesSetting;
 use super::*;
 use ensemble_core::state::RunnerDir;
 use serde::{Deserialize, Serialize};
@@ -30,6 +32,8 @@ pub struct Runner {
     pub hub: Option<String>,
     /// Its ANN pool: the providers its agents run on, and the models it shares.
     pub llm: AnnPool,
+    /// Its harnesses: the programs that drive an LLM to work in a repository.
+    pub harnesses: HarnessesSetting,
     pub source: PathBuf,
 }
 
@@ -48,17 +52,21 @@ pub struct RunnerSettings {
     pub hub: Option<String>,
     /// The providers its teams' agents run on and the models they serve.
     pub ann_pool: AnnPoolSetting,
+    /// The programs that drive an LLM to work in a repository, one of each
+    /// kind.
+    pub harnesses: HarnessesSetting,
 }
 
 impl RunnerSettings {
     /// The settings a new runner starts with: `name`, working in `workspace`,
-    /// with no hub and no provider.
+    /// with no hub, no provider and every harness off.
     pub fn starting(name: &str, workspace: &str) -> Self {
         RunnerSettings {
             name: name.to_string(),
             workspace: workspace.to_string(),
             hub: None,
             ann_pool: AnnPoolSetting::default(),
+            harnesses: HarnessesSetting::starting(),
         }
     }
 
@@ -86,6 +94,7 @@ impl RunnerSettings {
             ));
         }
         let llm = crate::ann::pool(&self.ann_pool, true, env, &mut problems);
+        self.harnesses.problems(&mut problems);
         if hub.is_none() && llm.models.iter().any(|m| m.shared) {
             problems.push(
                 "ann_pool: a runner shares its models through a hub, and it names no hub".into(),
@@ -103,6 +112,7 @@ impl RunnerSettings {
                 workspace,
                 hub,
                 llm,
+                harnesses: self.harnesses.clone(),
                 source: source.to_path_buf(),
             })
         } else {

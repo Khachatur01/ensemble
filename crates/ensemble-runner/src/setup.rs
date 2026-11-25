@@ -3,7 +3,9 @@
 //! what they need as arguments, so tests can run them without a terminal or a
 //! network.
 
-use ensemble_config::{Adapter, Budget, CLAUDE_CODE_AGENT, Config, OPENCODE_AGENT};
+use ensemble_config::{
+    Adapter, Budget, CLAUDE_CODE_AGENT, Config, HarnessKind, HarnessesSetting, OPENCODE_AGENT,
+};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -35,6 +37,74 @@ pub fn on_path(program: &str) -> bool {
         let file = dir.join(program);
         file.is_file() && is_executable(&file)
     })
+}
+
+/// Is `command` a program this computer can run: a path to an executable
+/// file, or a name on `PATH`? Nothing is run.
+pub fn found(command: &str) -> bool {
+    let command = command.trim();
+    if command.contains(std::path::MAIN_SEPARATOR) {
+        let file = Path::new(command);
+        file.is_file() && is_executable(file)
+    } else {
+        !command.is_empty() && on_path(command)
+    }
+}
+
+/// Whether the CLI of `kind` is logged in, as far as a file of its own or a
+/// key in the environment says without running it: Claude Code's
+/// credentials or `ANTHROPIC_API_KEY`, Codex's `auth.json` or
+/// `OPENAI_API_KEY`. None where nothing says: OpenCode and `builtin` run on
+/// the ANN pool, and Claude Code on macOS keeps its login in the keychain.
+pub fn logged_in(kind: HarnessKind) -> Option<bool> {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|v| !v.is_empty());
+    let dir = |variable: &str, default: &str| {
+        std::env::var_os(variable)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| home().map(|h| h.join(default)))
+    };
+    match kind {
+        HarnessKind::ClaudeCode => {
+            let file = dir("CLAUDE_CONFIG_DIR", ".claude").map(|d| d.join(".credentials.json"));
+            if set("ANTHROPIC_API_KEY") || file.is_some_and(|f| f.is_file()) {
+                Some(true)
+            } else if cfg!(target_os = "macos") {
+                None
+            } else {
+                Some(false)
+            }
+        }
+        HarnessKind::Codex => {
+            let file = dir("CODEX_HOME", ".codex").map(|d| d.join("auth.json"));
+            Some(set("OPENAI_API_KEY") || file.is_some_and(|f| f.is_file()))
+        }
+        HarnessKind::OpenCode | HarnessKind::Builtin => None,
+    }
+}
+
+/// Mark each CLI harness of `harnesses` found or missing, as its command is
+/// now; say which changed.
+pub fn look_for(harnesses: &mut HarnessesSetting) -> Vec<String> {
+    let mut said = Vec::new();
+    for kind in HarnessKind::ALL {
+        if let Some(h) = harnesses.cli_mut(kind) {
+            let missing = !found(&h.command);
+            if missing != h.missing {
+                said.push(format!(
+                    "{} {}",
+                    kind.as_str(),
+                    if missing {
+                        "is missing now"
+                    } else {
+                        "is found"
+                    }
+                ));
+                h.missing = missing;
+            }
+        }
+    }
+    said
 }
 
 #[cfg(unix)]
@@ -74,9 +144,11 @@ pub fn detect(probe: bool) -> Detected {
 pub const WORKSPACE: &str = "~/ensemble";
 
 /// The settings of a new runner: `name`, working for its owner in
-/// `workspace`, offering nothing, once they load.
+/// `workspace`, offering nothing, with the harnesses it finds, each off,
+/// once they load.
 pub fn starting(name: &str, workspace: &str) -> Result<ensemble_config::RunnerSettings, String> {
-    let settings = ensemble_config::RunnerSettings::starting(name.trim(), workspace.trim());
+    let mut settings = ensemble_config::RunnerSettings::starting(name.trim(), workspace.trim());
+    look_for(&mut settings.harnesses);
     settings
         .resolve(
             &ensemble_core::state::RunnerDir::new(""),

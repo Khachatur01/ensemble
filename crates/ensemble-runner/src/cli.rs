@@ -53,6 +53,10 @@ pub fn command<R>(runner: &Registry<R>) -> clap::Command {
             "model",
             "The models of the runner's ANN pool: which are on, what each is, and which it shares.",
         ),
+        (
+            "harness",
+            "The runner's harnesses, the programs that drive an LLM to work in a repository: which are found, which are on, and how long a run may take.",
+        ),
     ];
     mount(Cli::command(), runner, &groups)
 }

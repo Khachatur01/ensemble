@@ -621,6 +621,7 @@ impl std::error::Error for ConfigError {}
 pub mod ann;
 pub mod edit;
 mod env;
+mod harness;
 pub mod hub;
 pub mod kept;
 mod raw;
@@ -634,6 +635,7 @@ pub use ann::{
     AnnPool, AnnPoolSetting, ModelKind, PoolModel, ProviderSetting, RelayAt, Tier, split_name,
 };
 pub use env::*;
+pub use harness::{BuiltinHarness, CliHarness, Harness, HarnessKind, HarnessesSetting};
 pub use hub::{
     AccountRules, Accounts, Connectors, Embed, EmbedSetting, Hub, HubSettings, IssueTracker,
     Knowledge, ModelSetting, ModelsSetting, Permission, Recall, Registration, RegistrationSetting,

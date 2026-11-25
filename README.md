@@ -826,6 +826,8 @@ $ ensemble-runner model list                                  # its models, each
 $ ensemble-runner model on local:qwen3.5:9b --tier medium     # how strong it is, if Ensemble does not know
 $ ensemble-runner model share local:qwen3.5:9b               # offered to the hub and your other runners
 $ ensemble-runner provider add team-gpu --type runner --runner kim/workstation
+$ ensemble-runner harness list                                # Claude Code, Codex, OpenCode, builtin: found, on or off
+$ ensemble-runner harness on claude-code                      # tasks may run on it
 $ ensemble-runner login wss://hub.example.com --user kim     # once: it names this hub
 $ git clone git@github.com:acme/shop.git ~/ensemble/shop      # a project of its workspace, or let a task name it
 $ ensemble-runner serve                                       # until Ctrl-C or SIGTERM
@@ -837,6 +839,26 @@ $ ensemble-runner peers                                       # your runners con
 project's tasks run on a runner with a repository of its name in its
 workspace: one you cloned there, or one it cloned for a task that names its
 `repository` (see [Tasks](#tasks)).
+
+A runner has one **harness** of each kind, the programs that drive an LLM to
+work in a repository: Claude Code, Codex and OpenCode, CLIs it looks for on
+PATH when it is made, when it starts and on `harness refresh`, and `builtin`,
+Ensemble's own loop, which needs nothing installed. Each is off until you
+turn it on, and one that is missing is turned on once it is found. Claude Code
+and Codex drive their own vendor's models (`harness list` names them, with
+how strong each is, and says whether the CLI is logged in where a file of its
+own or a key says so); OpenCode drives the LLMs of the runner's
+OpenAI-compatible providers, and `builtin` those that make tool calls. Each
+says how long one run may take and how many steps it may make:
+
+```console
+$ ensemble-runner harness set codex --command ~/bin/codex --max-seconds 1800 --max-steps 50
+$ ensemble-runner harness off codex
+```
+
+A harness is never shared: a task runs on its own account's runners. For now
+a task still runs on the agent of a helper team it names; the harnesses are
+what this computer offers to run tasks on once teams are gone.
 
 ### Running the runner
 
@@ -938,7 +960,7 @@ repository:
 
 | where | |
 | --- | --- |
-| `core/` | its `database.db`, with its settings, its ANN pool, its providers' keys and its hub tokens, sealed by `master.key` beside it |
+| `core/` | its `database.db`, with its settings, its ANN pool and harnesses, its providers' keys and its hub tokens, sealed by `master.key` beside it |
 | `teams/` | its helper teams, a folder each |
 | `workdirs/<folder>-<hash>/runs/` | what tasks did as they ran on this computer, for one repository of the workspace |
 | `.../worktrees/` | a git worktree per task of an agent with `isolation: worktree` |
@@ -1696,6 +1718,7 @@ $ ensemble-hub source filter central:qwen3.5-72b --prompt "Salaries; clients' na
 $ ensemble-hub source try "Bob: deploys go out on Tuesdays now"
 $ ensemble-runner provider add local --type openai-compatible-api --url http://127.0.0.1:11434/v1 --max-concurrent 1
 $ ensemble-runner model share local:qwen3.5:9b      # model unshare
+$ ensemble-runner harness on claude-code            # harness off | set | refresh
 ```
 
 - **A provider is asked first.** `provider add` asks it which models it serves
@@ -2019,6 +2042,7 @@ $ ensemble-runner settings name|workspace <value>
 $ ensemble-runner settings import <json>   # settings `settings show --json` printed, whole
 $ ensemble-runner provider list|add|test|key|refresh|remove   # the providers of its ANN pool, and their keys
 $ ensemble-runner model list|on|off|set|share|unshare   # their models: which are on, what each is, which it shares
+$ ensemble-runner harness list|on|off|set|refresh   # its harnesses: which are found, which are on, a run's limits
 
 # Its helper teams
 $ ensemble-runner team list                 # each team, where it comes from, its agents

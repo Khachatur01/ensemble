@@ -1606,6 +1606,43 @@ fn a_new_runner_works_in_its_workspace_and_loads() {
 }
 
 #[test]
+fn a_new_runner_has_one_harness_of_each_kind_each_off_and_its_runs_limited() {
+    let r = runner_with(|_| {}).unwrap();
+    let each = r.harnesses.each();
+    assert_eq!(
+        each.iter().map(|h| h.kind).collect::<Vec<_>>(),
+        HarnessKind::ALL
+    );
+    assert!(each.iter().all(|h| !h.on), "every harness is off");
+    assert_eq!(
+        each.iter()
+            .map(|h| h.command.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("claude"), Some("codex"), Some("opencode"), None],
+        "builtin runs no program"
+    );
+    let said = runner_with(|r| {
+        r.harnesses.codex.max_seconds = 0;
+        r.harnesses.builtin.max_steps = 0;
+        r.harnesses.opencode.command = " ".into();
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(
+        said.contains("harnesses.codex: `max_seconds` must be greater than 0"),
+        "{said}"
+    );
+    assert!(
+        said.contains("harnesses.builtin: `max_steps` must be greater than 0"),
+        "{said}"
+    );
+    assert!(
+        said.contains("harnesses.opencode: `command` is empty"),
+        "{said}"
+    );
+}
+
+#[test]
 fn a_runner_shares_models_of_its_openai_compatible_servers_and_reaches_others_through_its_hub() {
     let claude = ProviderSetting::Anthropic {
         base_url: "https://api.anthropic.com".into(),
