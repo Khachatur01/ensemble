@@ -35,7 +35,7 @@ const MODEL: Field = Field::text(
 .positional();
 const COMMAND: Field = Field::text(
     "command",
-    "The CLI, by its name on PATH or its path: claude, codex or opencode when left out; builtin runs none.",
+    "The CLI, by its name on PATH or its path, such as claude, codex or opencode: needed for each of them; builtin runs none.",
 );
 const MAX_SECONDS: Field = Field::new("max_seconds", Kind::Number, "Seconds one run may take.");
 const MAX_STEPS: Field = Field::new("max_steps", Kind::Number, "The most steps of one run.");
@@ -368,7 +368,12 @@ fn add(
             format!("{name} is added: it drives LLMs of the ANN pool's OpenAI-compatible providers")
         }
     };
-    let command = command.unwrap_or_else(|| kind.program().unwrap_or_default().to_string());
+    let command = command.ok_or_else(|| {
+        Error::invalid(format!(
+            "`command` is required: the {name} CLI, by its name on PATH or its path"
+        ))
+        .on("command")
+    })?;
     if !setup::found(&command) {
         return Err(Error::new(
             Code::NotFound,
@@ -376,7 +381,7 @@ fn add(
         )
         .on("command")
         .hint(format!(
-            "install it, or name it with `harness add {name} --command <path>`"
+            "install it, or name its path with `harness add {name} --command <path>`"
         )));
     }
     let harness = CliHarness {

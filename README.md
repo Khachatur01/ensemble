@@ -179,7 +179,7 @@ and what is next. Add a harness (with a model of its vendor's for
 pool), give the runner a repository and the hub, and run it:
 
 ```console
-$ ensemble-runner harness add claude-code --max-seconds 1800 --max-steps 50 --max-concurrent 1
+$ ensemble-runner harness add claude-code --command claude --max-seconds 1800 --max-steps 50 --max-concurrent 1
 $ ensemble-runner harness add-model claude-code sonnet       # or: provider add …, model add …, harness add opencode …
 $ git clone git@github.com:acme/shop.git ~/ensemble/shop      # a project: a repository in the workspace
 $ ensemble-runner login ws://127.0.0.1:7700 --user ana        # your account on the hub, or: join <url> <code>
@@ -822,7 +822,7 @@ $ ensemble-runner model list                                  # the models added
 $ ensemble-runner model share local:qwen3.5:9b               # offered to the hub and your other runners
 $ ensemble-runner provider add team-gpu --type runner --runner kim/workstation
 $ ensemble-runner harness list                                # those added, found or missing, and CLIs installed not added
-$ ensemble-runner harness add claude-code --max-seconds 1800 --max-steps 50 --max-concurrent 1
+$ ensemble-runner harness add claude-code --command claude --max-seconds 1800 --max-steps 50 --max-concurrent 1
 $ ensemble-runner harness add-model claude-code sonnet        # a model of its vendor's it drives
 $ ensemble-runner login wss://hub.example.com --user kim     # once: it names this hub
 $ git clone git@github.com:acme/shop.git ~/ensemble/shop      # a project of its workspace, or let a task name it
@@ -838,9 +838,10 @@ workspace: one you cloned there, or one it cloned for a task that names its
 
 A runner has the **harnesses** you add, at most one of each kind, the
 programs that drive an LLM to work in a repository: Claude Code, Codex and
-OpenCode, CLIs it must find to add (on PATH, or by `--command`) and looks for
-again when it starts and on `harness refresh`, and `builtin`, Ensemble's own
-loop, which needs nothing installed. Each says how long one run may take, how
+OpenCode, CLIs each added with its `--command` (a name on PATH or a path),
+which the runner must find to add it and looks for again when it starts and
+on `harness refresh`, and `builtin`, Ensemble's own loop, which needs nothing
+installed. Each says how long one run may take, how
 many steps it may make and how many run at once, and `builtin` the most
 tokens of answer per model call. Claude Code and Codex drive only the models
 of their own vendor's you add to them, each with how strong it is (Ensemble's

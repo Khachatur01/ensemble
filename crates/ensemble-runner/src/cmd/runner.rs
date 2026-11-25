@@ -982,7 +982,7 @@ fn setup(name: Option<String>, workspace: Option<String>, yes: bool) -> Result<E
             .map(|k| k.as_str())
             .collect();
         println!(
-            "It has no harness yet{}: add one with `ensemble-runner harness add <harness> --max-seconds <s> --max-steps <n> --max-concurrent <n>`, and nothing runs until you do.",
+            "It has no harness yet{}: add one with `ensemble-runner harness add <harness> --command <cli> --max-seconds <s> --max-steps <n> --max-concurrent <n>` (builtin takes no command and `--max-tokens <n>`), and nothing runs until you do.",
             if installed.is_empty() {
                 String::new()
             } else {

@@ -2312,12 +2312,28 @@ fn a_runners_harnesses_are_added_given_models_and_changed_from_the_command_line(
     );
     assert_eq!(harness("claude_code"), Value::Null);
 
-    // Found, it is added; one not found, or with no limits, is refused.
+    // Named and found, it is added; one with no command, not found, or with
+    // no limits, is refused.
     let out = run(&[&["harness", "add", "claude-code"][..], &limits].concat());
+    assert!(!out.status.success(), "its command is needed");
+    assert!(
+        stderr_of(&out).contains("`command` is required"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = run(&[
+        &["harness", "add", "claude-code", "--command", "claude"][..],
+        &limits,
+    ]
+    .concat());
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(harness("claude_code")["command"], "claude");
     assert_eq!(harness("claude_code")["models"], json!([]));
-    let out = run(&[&["harness", "add", "codex"][..], &limits].concat());
+    let out = run(&[
+        &["harness", "add", "codex", "--command", "codex"][..],
+        &limits,
+    ]
+    .concat());
     assert!(!out.status.success());
     assert!(
         stderr_of(&out).contains("`codex` is not found"),
