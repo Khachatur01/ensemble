@@ -72,6 +72,9 @@ pub struct HarnessModel {
     /// Its id, as the CLI takes it: `sonnet`, `gpt-5-codex`.
     pub id: String,
     pub tier: Tier,
+    /// What a person wrote it is good and bad at: what the hub chooses a
+    /// model for a task by, beside its tier. None when nobody wrote it.
+    pub abilities: Option<String>,
 }
 
 /// A harness that is a CLI the runner starts.

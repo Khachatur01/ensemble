@@ -1315,12 +1315,12 @@ fn a_hub_server_refuses_another_protocol_or_a_bad_token_and_stops_on_sigterm() {
     assert!(status.contains("426"), "no protocol named: {status}");
     let status = upgrade(
         "/link",
-        "Ensemble-Protocol: 12\r\nAuthorization: Bearer ens_wrong\r\n",
+        "Ensemble-Protocol: 13\r\nAuthorization: Bearer ens_wrong\r\n",
     );
     assert!(status.contains("401"), "{status}");
-    let status = upgrade("/", "Ensemble-Protocol: 12\r\n");
+    let status = upgrade("/", "Ensemble-Protocol: 13\r\n");
     assert!(status.contains("404"), "the link is at /link: {status}");
-    let status = upgrade("/link", "Ensemble-Protocol: 12\r\n");
+    let status = upgrade("/link", "Ensemble-Protocol: 13\r\n");
     assert!(
         status.contains("101"),
         "no token: signing in only: {status}"
@@ -2370,11 +2370,41 @@ fn a_runners_harnesses_are_added_given_models_and_changed_from_the_command_line(
         "mine",
         "--tier",
         "small",
+        "--abilities",
+        "quick, for small fixes",
     ]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(
         harness("claude_code")["models"],
-        json!([{ "id": "mine", "tier": "small" }, { "id": "sonnet", "tier": "strong" }])
+        json!([
+            { "id": "mine", "tier": "small", "abilities": "quick, for small fixes" },
+            { "id": "sonnet", "tier": "strong", "abilities": null },
+        ])
+    );
+    // What a model is good and bad at changes, and so does its tier.
+    let out = run(&[
+        "harness",
+        "set-model",
+        "claude-code",
+        "sonnet",
+        "--abilities",
+        "strong at Rust",
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let list = stdout_of(&run(&["harness", "list"]));
+    assert!(list.contains("sonnet (strong): strong at Rust"), "{list}");
+    let out = run(&[
+        "harness",
+        "set-model",
+        "claude-code",
+        "mine",
+        "--abilities",
+        "",
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(
+        harness("claude_code")["models"][0]["abilities"],
+        Value::Null
     );
     let out = run(&["harness", "remove-model", "claude-code", "mine"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2398,6 +2428,7 @@ fn a_runners_harnesses_are_added_given_models_and_changed_from_the_command_line(
     for op in [
         "harness.add",
         "harness.add-model",
+        "harness.set-model",
         "harness.remove-model",
         "harness.set",
         "harness.remove",
@@ -2580,6 +2611,30 @@ fn an_admin_adds_providers_and_their_keys_without_naming_a_variable_and_adds_mod
         stdout_of(&out).contains("local:small is in the pool: llm, small"),
         "{}",
         stdout_of(&out)
+    );
+    // What an LLM is good and bad at, in a person's words, for the hub to
+    // choose it by.
+    let out = hub_with_stdin(
+        &s,
+        &[
+            "model",
+            "set",
+            "local:small",
+            "--abilities",
+            "quick, weak at UI",
+        ],
+        "",
+    );
+    assert!(
+        stdout_of(&out).contains("local:small is llm, small: quick, weak at UI"),
+        "{}{}",
+        stdout_of(&out),
+        stderr_of(&out)
+    );
+    let models = stdout_of(&hub_with_stdin(&s, &["model", "list", "local"], ""));
+    assert!(
+        models.contains("local:small  llm, small: quick, weak at UI"),
+        "{models}"
     );
 
     let out = hub_with_stdin(&s, &["provider", "key", "local"], "sk-local\n");

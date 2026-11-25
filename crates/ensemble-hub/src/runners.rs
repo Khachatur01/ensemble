@@ -25,8 +25,15 @@ use tokio::sync::mpsc::{
 struct Runner {
     owner: String,
     name: String,
-    /// Its harnesses that may run, each `{harness, models: [{model, tier}]}`.
+    /// Its harnesses that may run, each `{harness, max_concurrent, models:
+    /// [{model, provider, tier, context_window, tools, abilities}]}`: what the
+    /// hub may choose a worker of for a task.
     harnesses: Vec<Value>,
+    /// The most calls at once to each provider of its pool.
+    providers: Value,
+    /// How busy it is, as it last said: `{harnesses, providers}`, the runs on
+    /// each.
+    busy: Value,
 }
 
 impl Runner {
@@ -79,28 +86,15 @@ impl Routes {
         }
         let harnesses: Vec<Value> = params["harnesses"]
             .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|h| {
-                        let models: Vec<Value> = h["models"]
-                            .as_array()?
-                            .iter()
-                            .filter_map(|m| {
-                                Some(json!({
-                                    "model": m["model"].as_str()?,
-                                    "tier": m["tier"].as_str()?,
-                                }))
-                            })
-                            .collect();
-                        Some(json!({ "harness": h["harness"].as_str()?, "models": models }))
-                    })
-                    .collect()
-            })
+            .map(|a| a.iter().filter_map(harness).collect())
             .unwrap_or_default();
+        let providers = counts(&params["providers"]);
         let runner = Runner {
             owner: owner.to_string(),
             name,
             harnesses,
+            providers,
+            busy: json!({ "harnesses": {}, "providers": {} }),
         };
         let mut inner = self.lock();
         let id = runner.id();
@@ -117,6 +111,20 @@ impl Routes {
         Ok(json!({ "runner": id }))
     }
 
+    /// How busy the runner on `conn` is now, as it says.
+    pub(crate) fn busy(&self, conn: u64, params: &Value) -> Result<Value, String> {
+        let mut inner = self.lock();
+        let runner = inner
+            .runners
+            .get_mut(&conn)
+            .ok_or("runner_busy: this connection has not said it is a runner")?;
+        runner.busy = json!({
+            "harnesses": counts(&params["harnesses"]),
+            "providers": counts(&params["providers"]),
+        });
+        Ok(json!({}))
+    }
+
     /// `user`'s runners, each with what it runs tasks on.
     pub(crate) fn listed(&self, user: &str) -> Value {
         let inner = self.lock();
@@ -128,6 +136,8 @@ impl Routes {
                 json!({
                     "runner": r.id(),
                     "harnesses": r.harnesses,
+                    "providers": r.providers,
+                    "busy": r.busy,
                 })
             })
             .collect();
@@ -152,6 +162,41 @@ impl Routes {
     }
 }
 
+/// A harness as a runner said it, with only what the hub reads of it; none
+/// when it is not one.
+fn harness(h: &Value) -> Option<Value> {
+    let models: Vec<Value> = h["models"]
+        .as_array()?
+        .iter()
+        .filter_map(|m| {
+            Some(json!({
+                "model": m["model"].as_str()?,
+                "provider": m["provider"].as_str(),
+                "tier": m["tier"].as_str()?,
+                "context_window": m["context_window"].as_u64(),
+                "tools": m["tools"].as_bool(),
+                "abilities": m["abilities"].as_str(),
+            }))
+        })
+        .collect();
+    Some(json!({
+        "harness": h["harness"].as_str()?,
+        "max_concurrent": h["max_concurrent"].as_u64(),
+        "models": models,
+    }))
+}
+
+/// A map of names to counts as a runner said it, without what is not one.
+fn counts(said: &Value) -> Value {
+    let counted: serde_json::Map<String, Value> = said
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(k, v)| Some((k.clone(), json!(v.as_u64()?))))
+        .collect();
+    Value::Object(counted)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::server::testing::start;
@@ -163,17 +208,26 @@ mod tests {
     /// What a runner on Claude Code and OpenCode says it runs on.
     fn harnesses() -> Value {
         json!([
-            {"harness": "claude-code", "models": [{"model": "sonnet", "tier": "strong"}]},
-            {"harness": "opencode", "models": [{"model": "local:qwen3.5:9b", "tier": "medium"}]},
+            {"harness": "claude-code", "max_concurrent": 1, "models": [
+                {"model": "sonnet", "provider": null, "tier": "strong", "context_window": null,
+                 "tools": true, "abilities": "strong at Rust"},
+            ]},
+            {"harness": "opencode", "max_concurrent": 2, "models": [
+                {"model": "local:qwen3.5:9b", "provider": "local", "tier": "medium",
+                 "context_window": 32768, "tools": true, "abilities": null},
+            ]},
         ])
     }
 
     /// A runner on Claude Code and OpenCode.
     async fn runner(url: &str, token: &str, name: &str) -> Connection {
         let mut link = Connection::open(url, token).await.unwrap();
-        link.call(RUNNER, json!({"name": name, "harnesses": harnesses()}))
-            .await
-            .unwrap();
+        link.call(
+            RUNNER,
+            json!({"name": name, "harnesses": harnesses(), "providers": {"local": 1}}),
+        )
+        .await
+        .unwrap();
         link
     }
 
@@ -212,6 +266,24 @@ mod tests {
         let listed = root.call(RUNNERS, json!({})).await.unwrap();
         assert_eq!(listed["runners"][0]["runner"], "root/gpu-box");
         assert_eq!(listed["runners"][0]["harnesses"], harnesses());
+        assert_eq!(listed["runners"][0]["providers"], json!({"local": 1}));
+        assert_eq!(
+            listed["runners"][0]["busy"],
+            json!({"harnesses": {}, "providers": {}})
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_runner_says_how_busy_it_is_and_its_owner_sees_it() {
+        let hub = start();
+        let mut laptop = runner(&hub.url, &hub.ana, "laptop").await;
+        let busy = json!({"harnesses": {"opencode": 1}, "providers": {"local": 1}});
+        laptop.call(RUNNER_BUSY, busy.clone()).await.unwrap();
+        let mut ana = open(&hub.url, &hub.ana).await;
+        let listed = ana.call(RUNNERS, json!({})).await.unwrap();
+        assert_eq!(listed["runners"][0]["busy"], busy);
+        let said = refused(&mut ana, RUNNER_BUSY, busy).await;
+        assert!(said.contains("not said it is a runner"), "{said}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

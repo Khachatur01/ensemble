@@ -427,8 +427,14 @@ folder of markdown issues is the one implementation so far.
 ## Connected runners
 
 A runner with a hub server keeps a link (`Worker`, in `ensemble-runner`)
-that says, as soon as it connects, what it is (`runner`): its name and its
-harnesses that may run, each with the models it drives. So the hub knows
+that says, as soon as it connects, what it is (`runner`): its name, its
+harnesses that may run, each with how many runs it takes at once and the
+models it drives, what each is (its tier, context window, whether it makes
+tool calls) and what a person wrote it is good and bad at, and how many
+calls each provider of its pool takes at once; then how busy it is
+(`runner_busy`): the runs going on on each harness and holding a call of
+each provider, again whenever that changes. The hub keeps both while the
+runner is connected: what it chooses a worker for a task from. So the hub knows
 which runners are connected and which run tasks: which may take an account's
 tasks, and whether a task given back is blocked, depend on them, and MCP's
 `runners` and `ensemble-runner peers` list an account's runners
@@ -455,7 +461,7 @@ projects it has no folder for, one that says it is connected, one per project wh
 without a token to sign in, and a short one for `hello` when it signs in or
 says its status; and, when it shares models or reaches other runners', a
 relay socket at `/relay` for model calls, whose frames `ensemble_link::relay`
-describes. This is version 12 of the protocol. It makes no HTTP request
+describes. This is version 13 of the protocol. It makes no HTTP request
 to the hub.
 
 | for | the runner asks | the hub sends |
@@ -463,7 +469,7 @@ to the hub.
 | a token, on a link without one | `login` (a name, a password and the client's name, `runner <name>`) or `join` (a join code and the client's name), each answered with a new access token of the client's own, named after it | |
 | who it is | `hello` (who am I, which permissions) | |
 | tasks | each with its `project`: `tasks`, `task`, `task_claim`, `task_renew`, `task_release`, `task_finish`, `task_give_back` (with why), `task_gate` (a task's gate, or none, while it neither runs nor has ended), `task_confirm_gate` (the gate of a task given to the account) and `task_reassign` (to another account, as a task of its own there); and across projects, `tasks_waiting` (the account's tasks that this runner has not given back) | |
-| runners | `runner` (I am a runner: name, the harnesses that may run with the models each drives), `runners` (mine, each with what it runs on and the models it shares) | |
+| runners | `runner` (I am a runner: name, the harnesses that may run, each with how many runs it takes and the models it drives, what each is and its abilities, and my providers' limits), `runner_busy` (the runs going on on each harness and provider, whenever that changes), `runners` (mine, each with what it runs on, how busy it is and the models it shares) | |
 | model calls, on the relay socket | the models it shares, by provider, and how many calls each provider takes at once, then calls to other runners' models: `open` (the runner and the provider), the request's body in chunks, `end`, or `cancel` | the answers to its calls, and calls to the models it shares, which it answers: `head`, the body in chunks, `done`, or `error` |
 
 `login` and `join` are the hub's operations `token.login` and `token.join`,
@@ -1495,9 +1501,11 @@ crate holds it today.
     no rules: with no decision model answering, no task is handed out.
     (Done: a task's definition of done, required, and an issue's `##
     Definition of done` section; `decision-api` providers of the hub's pool,
-    their models decision models, a client for `/v1/systemone`. Not yet: an
-    abilities description on each model, and the runners telling the hub
-    their workers and how busy each is; `task_picker` in the hub's settings,
+    their models decision models, a client for `/v1/systemone`; an
+    abilities description a person writes on each LLM of a pool and each
+    model of Claude Code's and Codex's; the runners telling the hub their
+    workers, what each model is and its abilities, and how busy each harness
+    and provider is, link protocol 13. Not yet: `task_picker` in the hub's settings,
     its decision models to try, its questions, what each answer does and
     how sure it must be; the hub choosing, a task waiting for a person to
     choose when it is not sure, and the rules on the runner gone; a task

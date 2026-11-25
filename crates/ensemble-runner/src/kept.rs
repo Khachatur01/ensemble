@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS harness_models (
     harness TEXT NOT NULL,
     id TEXT NOT NULL,
     tier TEXT NOT NULL,
+    abilities TEXT,
     PRIMARY KEY (harness, id)
 );
 CREATE TABLE IF NOT EXISTS hub_tokens (
@@ -176,8 +177,13 @@ fn harness_rows(harnesses: &HarnessesSetting) -> Vec<(&'static str, Vec<ensemble
         ));
         for m in &h.models {
             out.push((
-                "INSERT INTO harness_models (harness, id, tier) VALUES (?1, ?2, ?3)",
-                vec![txt(h.kind.as_str()), txt(&m.id), txt(m.tier.as_str())],
+                "INSERT INTO harness_models (harness, id, tier, abilities) VALUES (?1, ?2, ?3, ?4)",
+                vec![
+                    txt(h.kind.as_str()),
+                    txt(&m.id),
+                    txt(m.tier.as_str()),
+                    optional(m.abilities.as_deref()),
+                ],
             ));
         }
     }
@@ -190,7 +196,7 @@ async fn read_harnesses(c: &ensemble_store::Connection) -> Result<HarnessesSetti
     let mut models: BTreeMap<HarnessKind, Vec<HarnessModel>> = BTreeMap::new();
     for r in rows(
         c,
-        "SELECT harness, id, tier FROM harness_models ORDER BY harness, id",
+        "SELECT harness, id, tier, abilities FROM harness_models ORDER BY harness, id",
         vec![],
     )
     .await?
@@ -200,10 +206,11 @@ async fn read_harnesses(c: &ensemble_store::Connection) -> Result<HarnessesSetti
             .ok_or_else(|| format!("harness_models: the harness '{name}' is unknown"))?;
         let id = some_text(&r[1], &format!("harness_models.{name}.id"))?;
         let tier = named(&r[2], &format!("harness_models.{name}:{id}.tier"))?;
-        models
-            .entry(kind)
-            .or_default()
-            .push(HarnessModel { id, tier });
+        models.entry(kind).or_default().push(HarnessModel {
+            id,
+            tier,
+            abilities: text(&r[3]),
+        });
     }
     let mut harnesses = HarnessesSetting::default();
     for r in rows(
@@ -366,6 +373,7 @@ mod tests {
             models: vec![HarnessModel {
                 id: "sonnet".into(),
                 tier: ensemble_config::Tier::Strong,
+                abilities: None,
             }],
         });
         runner.harnesses.builtin = Some(BuiltinHarness {

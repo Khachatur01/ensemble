@@ -66,6 +66,10 @@ const SET: &[Field] = &[
     MAX_CONCURRENT,
     MAX_TOKENS,
 ];
+const ABILITIES: Field = Field::text(
+    "abilities",
+    "What it is good and bad at, in your words, such as \"strong at Rust, slow\": what the hub chooses a model for a task by. Empty takes it away.",
+);
 const ADD_MODEL: &[Field] = &[
     OWN,
     MODEL,
@@ -74,6 +78,17 @@ const ADD_MODEL: &[Field] = &[
         Kind::Choice(Tier::NAMES),
         "How strong it is, for choosing one that is enough; Ensemble's catalog says when left out.",
     ),
+    ABILITIES,
+];
+const SET_MODEL: &[Field] = &[
+    OWN,
+    MODEL,
+    Field::new(
+        "tier",
+        Kind::Choice(Tier::NAMES),
+        "How strong it is, for choosing one that is enough.",
+    ),
+    ABILITIES,
 ];
 const ONE_MODEL: &[Field] = &[OWN, MODEL];
 
@@ -97,6 +112,7 @@ struct AddModel {
     harness: String,
     model: String,
     tier: Option<String>,
+    abilities: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -159,6 +175,14 @@ pub fn operations() -> Vec<Operation<RunnerContext>> {
         ),
         changing(
             spec(
+                "harness.set-model",
+                "Change how strong a model of Claude Code's or Codex's is, or what it is good and bad at.",
+                SET_MODEL,
+            ),
+            |c, input: AddModel, change| set_model(c, input, change),
+        ),
+        changing(
+            spec(
                 "harness.remove-model",
                 "Take a model out of Claude Code or Codex.",
                 ONE_MODEL,
@@ -206,7 +230,7 @@ fn drives(h: &Harness) -> String {
             "its own models: {}",
             h.models
                 .iter()
-                .map(|m| format!("{} ({})", m.id, m.tier.as_str()))
+                .map(model_said)
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -220,7 +244,7 @@ fn listed(h: &Harness) -> Value {
     let models: Vec<Value> = h
         .models
         .iter()
-        .map(|m| json!({ "id": m.id, "tier": m.tier.as_str() }))
+        .map(|m| json!({ "id": m.id, "tier": m.tier.as_str(), "abilities": m.abilities }))
         .collect();
     let suggested: Vec<Value> = ensemble_backends::catalog::harness_models(h.kind)
         .iter()
@@ -481,16 +505,7 @@ fn add_model(
     if id.is_empty() {
         return Err(Error::invalid("the model is empty").on("model"));
     }
-    let given = input
-        .tier
-        .as_deref()
-        .map(|t| {
-            Tier::parse(t).ok_or_else(|| {
-                Error::invalid(format!("'{t}' is not a tier: {}", Tier::NAMES.join(", ")))
-                    .on("tier")
-            })
-        })
-        .transpose()?;
+    let given = tier_given(input.tier.as_deref())?;
     let name = kind.as_str();
     if added(c, kind)?.models.iter().any(|m| m.id == id) {
         return Ok(json!({ "said": format!("{name} drives {id} already") }));
@@ -505,16 +520,85 @@ fn add_model(
         .or_else(|| ensemble_backends::catalog::tier(&id))
         .unwrap_or(Tier::Medium);
     let said = format!("{name} drives {id} ({})", tier.as_str());
+    let abilities = written(input.abilities.as_deref());
     edit(c, change, said, |s| {
         if let Some(h) = s.harnesses.cli_mut(kind) {
             h.models.push(HarnessModel {
                 id: id.clone(),
                 tier,
+                abilities: abilities.clone(),
             });
             h.models.sort_by(|a, b| a.id.cmp(&b.id));
         }
         Ok(())
     })
+}
+
+/// The tier given, if one is.
+fn tier_given(given: Option<&str>) -> Result<Option<Tier>, Error> {
+    given
+        .map(|t| {
+            Tier::parse(t).ok_or_else(|| {
+                Error::invalid(format!("'{t}' is not a tier: {}", Tier::NAMES.join(", ")))
+                    .on("tier")
+            })
+        })
+        .transpose()
+}
+
+/// Abilities as a person wrote them: none when they wrote nothing.
+fn written(given: Option<&str>) -> Option<String> {
+    given
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .map(String::from)
+}
+
+fn set_model(
+    c: &RunnerContext,
+    input: AddModel,
+    change: ensemble_config::kept::Change,
+) -> Result<Value, Error> {
+    let kind = own(c, &input.harness)?;
+    let id = input.model.trim().to_string();
+    let name = kind.as_str();
+    let Some(was) = added(c, kind)?.models.into_iter().find(|m| m.id == id) else {
+        return Err(Error::not_found(format!("{name} drives no model {id}")).on("model"));
+    };
+    let now = HarnessModel {
+        id: id.clone(),
+        tier: tier_given(input.tier.as_deref())?.unwrap_or(was.tier),
+        abilities: match input.abilities.as_deref() {
+            Some(given) => written(Some(given)),
+            None => was.abilities.clone(),
+        },
+    };
+    if now == was {
+        return Ok(json!({ "said": format!("{name}'s {id} is as it was") }));
+    }
+    edit(
+        c,
+        change,
+        format!("{name} drives {}", model_said(&now)),
+        |s| {
+            if let Some(m) = s
+                .harnesses
+                .cli_mut(kind)
+                .and_then(|h| h.models.iter_mut().find(|m| m.id == id))
+            {
+                *m = now.clone();
+            }
+            Ok(())
+        },
+    )
+}
+
+/// A model of a harness's own: `sonnet (strong): strong at Rust`.
+fn model_said(m: &HarnessModel) -> String {
+    match &m.abilities {
+        Some(a) => format!("{} ({}): {a}", m.id, m.tier.as_str()),
+        None => format!("{} ({})", m.id, m.tier.as_str()),
+    }
 }
 
 fn remove_model(

@@ -294,6 +294,7 @@ fn a_model_of_the_pool_is_of_one_of_its_providers_once() {
         kind: llm(),
         missing: false,
         shared: false,
+        abilities: None,
     });
     hub.ann_pool.models.push(PoolModel {
         shared: true,
@@ -432,6 +433,7 @@ fn settings_are_written_as_json_and_an_unknown_one_is_refused() {
             "kind": { "type": "llm", "tier": "medium", "context_window": null, "tools": null },
             "missing": false,
             "shared": false,
+            "abilities": null,
         })
     );
     assert_eq!(json["distill"]["try"][0]["model"], "small");
@@ -499,6 +501,7 @@ fn a_new_runner_has_no_harness_and_one_added_is_checked() {
             models: vec![HarnessModel {
                 id: "sonnet".into(),
                 tier: Tier::Strong,
+                abilities: None,
             }],
             ..cli("claude", 1800, 1)
         });
@@ -539,6 +542,7 @@ fn a_new_runner_has_no_harness_and_one_added_is_checked() {
             models: vec![HarnessModel {
                 id: "x".into(),
                 tier: Tier::Small,
+                abilities: None,
             }],
             ..cli(" ", 1800, 1)
         });

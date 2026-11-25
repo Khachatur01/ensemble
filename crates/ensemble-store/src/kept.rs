@@ -149,7 +149,7 @@ pub fn pool_rows(pool: &AnnPoolSetting) -> Vec<(&'static str, Vec<Value>)> {
             ModelKind::Decision => (Value::Null, Value::Null, Value::Null, Value::Null),
         };
         out.push((
-            "INSERT INTO ann_models (provider, id, kind, tier, context_window, tools, dimensions, missing, shared) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO ann_models (provider, id, kind, tier, context_window, tools, dimensions, missing, shared, abilities) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             vec![
                 txt(&m.provider),
                 txt(&m.id),
@@ -160,6 +160,7 @@ pub fn pool_rows(pool: &AnnPoolSetting) -> Vec<(&'static str, Vec<Value>)> {
                 dimensions,
                 flag(m.missing),
                 flag(m.shared),
+                optional(m.abilities.as_deref()),
             ],
         ));
     }
@@ -215,7 +216,7 @@ pub async fn read_pool(c: &turso::Connection) -> Result<AnnPoolSetting, String> 
     }
     for r in rows(
         c,
-        "SELECT provider, id, kind, tier, context_window, tools, dimensions, missing, shared FROM ann_models ORDER BY provider, id",
+        "SELECT provider, id, kind, tier, context_window, tools, dimensions, missing, shared, abilities FROM ann_models ORDER BY provider, id",
         vec![],
     )
     .await?
@@ -248,6 +249,7 @@ pub async fn read_pool(c: &turso::Connection) -> Result<AnnPoolSetting, String> 
             kind,
             missing: flag(&r[7], "missing")?,
             shared: flag(&r[8], "shared")?,
+            abilities: text(&r[9]),
         });
     }
     Ok(pool)

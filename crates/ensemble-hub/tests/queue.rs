@@ -83,6 +83,7 @@ fn means(command: Option<String>, max_concurrent: u32) -> Arc<Means> {
         },
         missing: false,
         shared: false,
+        abilities: None,
     }];
     let backends = pool.direct.clone();
     Arc::new(Means::new(harnesses, pool, backends))

@@ -207,6 +207,10 @@ pub struct PoolModel {
     /// Offered through the hub, to the hub and its owner's other runners: a
     /// runner's alone.
     pub shared: bool,
+    /// What a person wrote an LLM is good and bad at, such as "strong at Rust,
+    /// slow": what the hub chooses a model for a task by, beside its tier. None
+    /// when nobody wrote it.
+    pub abilities: Option<String>,
 }
 
 impl PoolModel {
@@ -265,6 +269,7 @@ impl AnnPoolSetting {
                 kind,
                 missing: false,
                 shared: false,
+                abilities: None,
             }),
         }
         self.models

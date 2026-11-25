@@ -33,6 +33,10 @@ pub struct Pair {
     pub model: String,
     pub tier: Tier,
     pub context_window: Option<u32>,
+    /// Whether its model makes tool calls; None: nobody said.
+    pub tools: Option<bool>,
+    /// What a person wrote its model is good and bad at.
+    pub abilities: Option<String>,
 }
 
 impl Pair {
@@ -85,11 +89,14 @@ pub fn above(tier: Tier) -> Tier {
     }
 }
 
-/// Runs and calls going on now.
-#[derive(Default)]
-struct Busy {
-    harnesses: BTreeMap<HarnessKind, u32>,
-    providers: BTreeMap<String, u32>,
+/// Runs and calls going on now: what a runner tells the hub, whenever it
+/// changes, of how busy it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Busy {
+    /// Runs on each harness.
+    pub harnesses: BTreeMap<HarnessKind, u32>,
+    /// Runs holding a call of each provider of the pool.
+    pub providers: BTreeMap<String, u32>,
 }
 
 /// What a runner has to run tasks on: its harnesses that may run, its ANN
@@ -102,6 +109,8 @@ pub struct Means {
     backends: BTreeMap<String, LlmBackend>,
     picker: Box<dyn Picker>,
     busy: Mutex<Busy>,
+    /// What is busy, each time it changes.
+    told: tokio::sync::watch::Sender<Busy>,
 }
 
 impl Means {
@@ -118,6 +127,7 @@ impl Means {
             backends,
             picker: Box::new(Rules),
             busy: Mutex::new(Busy::default()),
+            told: tokio::sync::watch::Sender::new(Busy::default()),
         }
     }
 
@@ -129,6 +139,21 @@ impl Means {
 
     fn lock(&self) -> MutexGuard<'_, Busy> {
         self.busy.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// What is busy now, and again each time it changes.
+    pub fn busy(&self) -> tokio::sync::watch::Receiver<Busy> {
+        self.told.subscribe()
+    }
+
+    /// Its harnesses that may run.
+    pub fn harnesses(&self) -> &[Harness] {
+        &self.harnesses
+    }
+
+    /// The most calls at once to each provider of its pool it calls itself.
+    pub fn provider_limits(&self) -> &BTreeMap<String, u32> {
+        &self.pool.max_concurrent
     }
 
     fn harness(&self, kind: HarnessKind) -> Option<&Harness> {
@@ -154,6 +179,8 @@ impl Means {
                         model: m.id.clone(),
                         tier: m.tier,
                         context_window: None,
+                        tools: Some(true),
+                        abilities: m.abilities.clone(),
                     })
                     .collect(),
                 HarnessKind::OpenCode | HarnessKind::Builtin => self
@@ -179,6 +206,8 @@ impl Means {
                                 model: m.id.clone(),
                                 tier,
                                 context_window: Some(window),
+                                tools,
+                                abilities: m.abilities.clone(),
                             })
                         }
                         _ => None,
@@ -196,17 +225,13 @@ impl Means {
         !self.pairs().is_empty()
     }
 
-    /// What each harness can drive, as the runner tells the hub.
-    pub fn offers(&self) -> Vec<(HarnessKind, Vec<(String, Tier)>)> {
-        let mut out: Vec<(HarnessKind, Vec<(String, Tier)>)> = Vec::new();
+    /// Each harness with the pairs it is in, as the runner tells the hub.
+    pub fn offers(&self) -> Vec<(HarnessKind, Vec<Pair>)> {
+        let mut out: Vec<(HarnessKind, Vec<Pair>)> = Vec::new();
         for pair in self.pairs() {
-            let model = match &pair.provider {
-                Some(p) => format!("{p}:{}", pair.model),
-                None => pair.model.clone(),
-            };
             match out.last_mut() {
-                Some((kind, models)) if *kind == pair.harness => models.push((model, pair.tier)),
-                _ => out.push((pair.harness, vec![(model, pair.tier)])),
+                Some((kind, pairs)) if *kind == pair.harness => pairs.push(pair),
+                _ => out.push((pair.harness, vec![pair])),
             }
         }
         out
@@ -243,6 +268,7 @@ impl Means {
         if let Some(p) = &pair.provider {
             *busy.providers.entry(p.clone()).or_default() += 1;
         }
+        self.told.send_replace(busy.clone());
         drop(busy);
         let spec = self.spec(&pair);
         Some(Taken {
@@ -326,6 +352,7 @@ impl Drop for Taken {
         {
             *n = n.saturating_sub(1);
         }
+        self.means.told.send_replace(busy.clone());
     }
 }
 
@@ -348,10 +375,12 @@ mod tests {
                     HarnessModel {
                         id: "haiku".into(),
                         tier: Tier::Medium,
+                        abilities: None,
                     },
                     HarnessModel {
                         id: "sonnet".into(),
                         tier: Tier::Strong,
+                        abilities: None,
                     },
                 ],
                 _ => Vec::new(),
@@ -376,6 +405,7 @@ mod tests {
             },
             missing: false,
             shared: false,
+            abilities: None,
         }
     }
 
@@ -448,8 +478,15 @@ mod tests {
             harness(HarnessKind::OpenCode, 2),
             harness(HarnessKind::Builtin, 1),
         ]);
+        let told = m.busy();
         let first = m.take(None).unwrap();
         assert_eq!(first.spec.name, "opencode on local:big");
+        assert_eq!(
+            told.borrow().harnesses[&HarnessKind::OpenCode],
+            1,
+            "what is busy is told"
+        );
+        assert_eq!(told.borrow().providers["local"], 1);
         // The local server takes one call at a time: its strong model is
         // busy, so the strongest free one is Anthropic's, on builtin.
         let second = m.take(None).unwrap();
@@ -457,6 +494,8 @@ mod tests {
         // builtin runs one at a time, and the local server is busy.
         assert!(m.take(None).is_none());
         drop(first);
+        assert_eq!(told.borrow().harnesses[&HarnessKind::OpenCode], 0);
+        assert_eq!(told.borrow().providers["local"], 0);
         assert_eq!(m.take(None).unwrap().spec.name, "opencode on local:big");
     }
 
@@ -501,6 +540,8 @@ mod tests {
             model: "m".into(),
             tier: Tier::Medium,
             context_window: Some(1),
+            tools: None,
+            abilities: None,
         };
         let b = Pair {
             harness: HarnessKind::Builtin,

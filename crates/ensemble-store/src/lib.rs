@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS ann_models (
     dimensions INTEGER,
     missing INTEGER NOT NULL,
     shared INTEGER NOT NULL,
+    abilities TEXT,
     PRIMARY KEY (provider, id)
 );
 CREATE TABLE IF NOT EXISTS settings_audit (

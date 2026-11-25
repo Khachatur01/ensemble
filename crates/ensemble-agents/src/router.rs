@@ -243,6 +243,7 @@ mod tests {
             models: vec![HarnessModel {
                 id: "sonnet".into(),
                 tier: Tier::Strong,
+                abilities: None,
             }],
         };
         let means = Arc::new(Means::new(

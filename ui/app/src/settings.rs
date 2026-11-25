@@ -614,8 +614,9 @@ fn ProviderCard(provider: Value, models: Vec<Value>, on_changed: EventHandler<()
                     label("tier", "how strong it is, for an LLM"),
                     label("context_window", "tokens of context its server runs it with"),
                     label("tools", "makes tool calls"),
+                    label("abilities", "what it is good and bad at, for an LLM"),
                 ],
-                more: vec!["tier".to_string(), "context_window".to_string(), "tools".to_string()],
+                more: vec!["tier".to_string(), "context_window".to_string(), "tools".to_string(), "abilities".to_string()],
                 submit: "Add the model",
                 clear: true,
                 on_done: move |_| {
@@ -696,6 +697,9 @@ fn ModelRow(model: Value, on_changed: EventHandler<()>) -> Element {
         "decision" => "decision model".to_string(),
         _ => format!("embedding model, {} dimensions", text(&model, "dimensions")),
     };
+    if let Some(abilities) = model["abilities"].as_str() {
+        what.push_str(&format!(": {abilities}"));
+    }
     if model["missing"] == true {
         what.push_str("; its provider no longer lists it");
     }
@@ -708,12 +712,16 @@ fn ModelRow(model: Value, on_changed: EventHandler<()>) -> Element {
                         OpForm {
                             op: "model.set",
                             fixed: named.clone(),
-                            values: vec![value("tier", text(&model, "tier"))],
+                            values: vec![
+                                value("tier", text(&model, "tier")),
+                                value("abilities", text(&model, "abilities")),
+                            ],
                             picks: vec![Pick::named("tier", TIERS)],
                             labels: vec![
                                 label("tier", "how strong it is"),
                                 label("context_window", "tokens of context its server runs it with"),
                                 label("tools", "makes tool calls"),
+                                label("abilities", "what it is good and bad at (empty: nothing said)"),
                             ],
                             more: vec!["context_window".to_string(), "tools".to_string()],
                             submit: "Save",

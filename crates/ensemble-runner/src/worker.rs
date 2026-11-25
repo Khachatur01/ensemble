@@ -6,12 +6,13 @@
 //! it can drive. So the hub knows which runners are connected, and which may
 //! take an account's tasks.
 
-use ensemble_agents::picker::Means;
-use ensemble_config::Runner;
+use ensemble_agents::picker::{Busy, Means, Pair};
+use ensemble_config::{HarnessKind, Runner};
 use ensemble_core::runtime;
 use ensemble_link::client::{Connection, Failure, Token};
-use ensemble_link::protocol::RUNNER;
+use ensemble_link::protocol::{RUNNER, RUNNER_BUSY};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -40,25 +41,31 @@ impl Worker {
         }
     }
 
-    /// What this runner says it is when it connects.
+    /// What this runner says it is when it connects: each harness that may
+    /// run with the models it can drive, and its providers' limits.
     fn hello(&self) -> Value {
+        let limits: BTreeMap<HarnessKind, u32> = self
+            .means
+            .harnesses()
+            .iter()
+            .map(|h| (h.kind, h.max_concurrent))
+            .collect();
         let harnesses: Vec<Value> = self
             .means
             .offers()
             .into_iter()
-            .map(|(harness, models)| {
+            .map(|(harness, pairs)| {
                 json!({
                     "harness": harness.as_str(),
-                    "models": models
-                        .into_iter()
-                        .map(|(model, tier)| json!({"model": model, "tier": tier.as_str()}))
-                        .collect::<Vec<_>>(),
+                    "max_concurrent": limits.get(&harness),
+                    "models": pairs.iter().map(model).collect::<Vec<_>>(),
                 })
             })
             .collect();
         json!({
             "name": self.runner.name,
             "harnesses": harnesses,
+            "providers": self.means.provider_limits(),
         })
     }
 
@@ -112,6 +119,8 @@ impl Worker {
             .await
             .map_err(Failure::Broken)?;
         let me = link.call(RUNNER, self.hello()).await?;
+        let mut busy = self.means.busy();
+        busy.mark_changed();
         say(&format!(
             "connected to {} as the runner {}",
             self.url,
@@ -121,6 +130,12 @@ impl Worker {
             tokio::select! {
                 () = runtime::until_set(stop) => break Ok(()),
                 Ok(()) = replaced.changed() => break Err(Failure::Broken(REPLACED.into())),
+                Ok(()) = busy.changed() => {
+                    let now = told(&busy.borrow_and_update());
+                    if let Err(e) = link.send(RUNNER_BUSY, now).await {
+                        break Err(Failure::Broken(e));
+                    }
+                }
                 // The hub tells this link nothing unasked; it notices it went.
                 event = link.next_event() => {
                     if let Err(e) = event {
@@ -132,4 +147,30 @@ impl Worker {
         link.close().await;
         result
     }
+}
+
+/// A model a harness can drive, as the runner tells the hub.
+fn model(pair: &Pair) -> Value {
+    let model = match &pair.provider {
+        Some(p) => format!("{p}:{}", pair.model),
+        None => pair.model.clone(),
+    };
+    json!({
+        "model": model,
+        "provider": pair.provider,
+        "tier": pair.tier.as_str(),
+        "context_window": pair.context_window,
+        "tools": pair.tools,
+        "abilities": pair.abilities,
+    })
+}
+
+/// How busy the runner is, as it tells the hub.
+fn told(busy: &Busy) -> Value {
+    let harnesses: BTreeMap<&str, u32> = busy
+        .harnesses
+        .iter()
+        .map(|(h, n)| (h.as_str(), *n))
+        .collect();
+    json!({ "harnesses": harnesses, "providers": busy.providers })
 }

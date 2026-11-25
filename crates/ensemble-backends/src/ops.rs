@@ -123,6 +123,10 @@ const TIER: Field = Field::new(
     Kind::Choice(Tier::NAMES),
     "How strong the LLM is, for choosing one that is enough.",
 );
+const ABILITIES: Field = Field::text(
+    "abilities",
+    "What the LLM is good and bad at, in your words, such as \"strong at Rust, weak at UI, slow\": what the hub chooses a model for a task by. Empty takes it away.",
+);
 const ADD: &[Field] = &[
     NAME,
     Field::new("type", Kind::Choice(TYPES), "What it is: an OpenAI-compatible server, Anthropic's API, a decision model's API (TypeSafe's Jev, or Laya's laya-serve; a hub's alone), or another runner of yours, whose shared models are reached through the hub.").required(),
@@ -161,6 +165,7 @@ const ADD_MODEL: &[Field] = &[
         Kind::Choice(YES_NO),
         "Whether it makes tool calls, when the provider does not say.",
     ),
+    ABILITIES,
 ];
 const ONE_MODEL: &[Field] = &[MODEL];
 const SET: &[Field] = &[
@@ -176,6 +181,7 @@ const SET: &[Field] = &[
         Kind::Choice(YES_NO),
         "Whether it makes tool calls.",
     ),
+    ABILITIES,
 ];
 
 #[derive(Deserialize, Serialize)]
@@ -223,6 +229,7 @@ struct AddModel {
     tier: Option<String>,
     context_window: Option<u32>,
     tools: Option<String>,
+    abilities: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -236,6 +243,7 @@ struct Set {
     tier: Option<String>,
     context_window: Option<u32>,
     tools: Option<String>,
+    abilities: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -967,15 +975,11 @@ fn list_models<C: WithPool>(c: &C, side: Side, provider: Option<&str>) -> Result
         if m.shared {
             state.push("shared through the hub");
         }
+        let what = format!("{}{}", m.kind.describe(), described(m.abilities.as_deref()));
         said.push(if state.is_empty() {
-            format!("{}  {}", m.name(), m.kind.describe())
+            format!("{}  {what}", m.name())
         } else {
-            format!(
-                "{}  {}  ({})",
-                m.name(),
-                m.kind.describe(),
-                state.join(", ")
-            )
+            format!("{}  {what}  ({})", m.name(), state.join(", "))
         });
         let mut row = json!({
             "name": m.name(),
@@ -984,6 +988,7 @@ fn list_models<C: WithPool>(c: &C, side: Side, provider: Option<&str>) -> Result
             "type": m.kind.type_id(),
             "missing": m.missing,
             "shared": m.shared,
+            "abilities": m.abilities,
         });
         match m.kind {
             ModelKind::Llm {
@@ -1107,6 +1112,7 @@ fn add_model<C: WithPool>(c: &C, input: AddModel, change: Change) -> Result<Valu
                 (tier.is_some(), "tier"),
                 (input.context_window.is_some(), "context_window"),
                 (tools.is_some(), "tools"),
+                (input.abilities.is_some(), "abilities"),
             ] {
                 if given {
                     return Err(Error::invalid(format!(
@@ -1118,8 +1124,12 @@ fn add_model<C: WithPool>(c: &C, input: AddModel, change: Change) -> Result<Valu
             }
         }
     }
+    let abilities = written(input.abilities.as_deref());
     let note = c.change_pool(change, &mut |p| {
         p.add(provider, id, kind);
+        if let Some(m) = p.model_mut(provider, id) {
+            m.abilities = abilities.clone();
+        }
         Ok(())
     })?;
     Ok(json!({
@@ -1192,19 +1202,37 @@ fn set<C: WithPool>(c: &C, input: Set, change: Change) -> Result<Value, Error> {
         context_window: input.context_window.or(context_window),
         tools: tools_now,
     };
-    if kind == model.kind {
+    let abilities = match input.abilities.as_deref() {
+        Some(given) => written(Some(given)),
+        None => model.abilities.clone(),
+    };
+    if kind == model.kind && abilities == model.abilities {
         return Ok(json!({ "said": format!("{} is as it was", model.name()) }));
     }
     let note = c.change_pool(change, &mut |p| {
         if let Some(m) = p.model_mut(&model.provider, &model.id) {
             m.kind = kind;
+            m.abilities = abilities.clone();
         }
         Ok(())
     })?;
     Ok(json!({
-        "said": format!("{} is {}", model.name(), kind.describe()),
+        "said": format!("{} is {}{}", model.name(), kind.describe(), described(abilities.as_deref())),
         "note": note,
     }))
+}
+
+/// Abilities as a person wrote them: none when they wrote nothing.
+pub(crate) fn written(given: Option<&str>) -> Option<String> {
+    given
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .map(String::from)
+}
+
+/// A model's abilities, as a list says them after what it is.
+fn described(abilities: Option<&str>) -> String {
+    abilities.map_or(String::new(), |a| format!(": {a}"))
 }
 
 fn share<C: WithPool>(c: &C, given: &str, on: bool, change: Change) -> Result<Value, Error> {

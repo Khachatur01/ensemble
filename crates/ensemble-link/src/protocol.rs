@@ -14,7 +14,7 @@ use serde_json::Value;
 /// The version of what is said here. The runner sends it as the
 /// [`VERSION_HEADER`] of every link it opens, and a hub refuses one of
 /// another version, or of none, before anything else.
-pub const VERSION: u32 = 12;
+pub const VERSION: u32 = 13;
 /// The path of a runner's link on the hub's port.
 pub const PATH: &str = "/link";
 /// The header of the upgrade that carries the runner's [`VERSION`].
@@ -124,13 +124,24 @@ pub const TASK_METHODS: [&str; 15] = [
 ];
 
 /// This connection is a runner, said once it connects: `{name, harnesses:
-/// [{harness, models: [{model, tier}]}]}`, each of its harnesses that may run
-/// with the models it can drive; none when it runs no task. Answered with
-/// `{runner}`, its `<owner>/<name>`.
+/// [{harness, max_concurrent, models: [{model, provider, tier, context_window,
+/// tools, abilities}]}], providers: {<name>: max_concurrent}}`, each of its
+/// harnesses that may run, with how many runs it takes at once and the models
+/// it can drive: a model of the ANN pool as `<provider>:<id>`, with its
+/// `provider`, one of the harness's own by its id alone; and the most calls
+/// at once to each provider of its pool. None when it runs no task. Answered
+/// with `{runner}`, its `<owner>/<name>`.
 pub const RUNNER: &str = "runner";
+/// How busy a runner is now, said after [`RUNNER`] and again whenever it
+/// changes: `{harnesses: {<harness>: runs}, providers: {<provider>: runs}}`,
+/// the runs going on on each harness and holding a call of each provider.
+/// Answered with `{}`.
+pub const RUNNER_BUSY: &str = "runner_busy";
 /// The account's runners connected now: `{}`, answered with `{runners:
-/// [{runner, harnesses, models}]}`, each with what it runs on, as [`RUNNER`]
-/// says, and the models it shares, `[{provider, id, kind}]`, as its relay socket offered them.
+/// [{runner, harnesses, providers, busy, models}]}`, each with what it runs on,
+/// as [`RUNNER`] says, how busy it is, as [`RUNNER_BUSY`] says, and the
+/// models it shares, `[{provider, id, kind}]`, as its relay socket offered
+/// them.
 pub const RUNNERS: &str = "runners";
 
 /// The most a WebSocket message may be: a model call's request, and some

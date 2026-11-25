@@ -206,6 +206,26 @@ fn gate_labels() -> Vec<(String, String)> {
     ]
 }
 
+/// How many runs go on on a runner's `harness`, of how many it takes:
+/// ` (1 of 2 running)`.
+fn runs(runner: &Value, harness: &Value) -> String {
+    let name = text(harness, "harness");
+    let going = runner["busy"]["harnesses"][&name].as_u64().unwrap_or(0);
+    match harness["max_concurrent"].as_u64() {
+        Some(most) => format!(" ({going} of {most} running)"),
+        None => String::new(),
+    }
+}
+
+/// A model a harness drives: `local:qwen3.5:9b (medium): strong at Rust`.
+fn worker(model: &Value) -> String {
+    let said = format!("{} ({})", text(model, "model"), text(model, "tier"));
+    match model["abilities"].as_str() {
+        Some(abilities) => format!("{said}: {abilities}"),
+        None => said,
+    }
+}
+
 #[component]
 pub fn Projects() -> Element {
     let mut projects = use_op("task.projects");
@@ -470,8 +490,9 @@ pub fn Runners() -> Element {
                             for harness in runner["harnesses"].as_array().cloned().unwrap_or_default() {
                                 li { key: "{text(&harness, \"harness\")}",
                                     strong { "{text(&harness, \"harness\")}" }
+                                    {runs(&runner, &harness)}
                                     " on "
-                                    {harness["models"].as_array().cloned().unwrap_or_default().iter().map(|m| format!("{} ({})", text(m, "model"), text(m, "tier"))).collect::<Vec<_>>().join(", ")}
+                                    {harness["models"].as_array().cloned().unwrap_or_default().iter().map(worker).collect::<Vec<_>>().join(", ")}
                                 }
                             }
                         }

@@ -23,8 +23,8 @@ use ensemble_config::Permission;
 use ensemble_core::runtime::{self, blocking};
 use ensemble_knowledge::Memory;
 use ensemble_link::protocol::{
-    Event, HELLO, JOIN, LOGIN, PATH as LINK, RECALL, RUNNER, RUNNERS, Reply, Request, SHARE,
-    TASK_METHODS, VERSION, VERSION_HEADER,
+    Event, HELLO, JOIN, LOGIN, PATH as LINK, RECALL, RUNNER, RUNNER_BUSY, RUNNERS, Reply, Request,
+    SHARE, TASK_METHODS, VERSION, VERSION_HEADER,
 };
 use ensemble_ops::Caller;
 use futures_util::SinkExt;
@@ -538,6 +538,7 @@ impl<'a> Server<'a> {
                 })
             }
             RUNNER => self.routes.register(conn, user, &req.params),
+            RUNNER_BUSY => self.routes.busy(conn, &req.params),
             RUNNERS => Ok(self.with_shared(self.routes.listed(user))),
             other => Err(format!("no method `{other}`")),
         };

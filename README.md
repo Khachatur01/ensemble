@@ -827,12 +827,14 @@ $ ensemble-runner settings workspace ~/ensemble               # its git reposito
 $ ensemble-runner provider add local --type openai-compatible-api --url http://127.0.0.1:11434/v1 --max-concurrent 1
 $ ensemble-runner provider models local                       # what it serves; none of it is in the pool yet
 $ ensemble-runner model add local:qwen3.5:9b --tier medium    # how strong it is, if Ensemble does not know
+$ ensemble-runner model set local:qwen3.5:9b --abilities "quick; weak at UI work"   # what it is good and bad at
 $ ensemble-runner model list                                  # the models added
 $ ensemble-runner model share local:qwen3.5:9b               # offered to the hub and your other runners
 $ ensemble-runner provider add team-gpu --type runner --runner kim/workstation
 $ ensemble-runner harness list                                # those added, found or missing, and CLIs installed not added
 $ ensemble-runner harness add claude-code --command claude --max-seconds 1800 --max-steps 50 --max-concurrent 1
 $ ensemble-runner harness add-model claude-code sonnet        # a model of its vendor's it drives
+$ ensemble-runner harness set-model claude-code sonnet --abilities "strong at Rust"
 $ ensemble-runner login wss://hub.example.com --user kim     # once: it names this hub
 $ git clone git@github.com:acme/shop.git ~/ensemble/shop      # a project of its workspace, or let a task name it
 $ ensemble-runner serve                                       # until Ctrl-C or SIGTERM
@@ -857,7 +859,13 @@ of their own vendor's you add to them, each with how strong it is (Ensemble's
 catalog says, when you do not; `harness list` suggests the ones it knows and
 says whether the CLI is logged in where a file of its own or a key says so);
 OpenCode drives the LLMs of the runner's pool on OpenAI-compatible providers,
-and `builtin` those that make tool calls:
+and `builtin` those that make tool calls. Each LLM of the pool and each model
+of Claude Code's or Codex's may say, in your words, what it is good and bad
+at (`--abilities`, on `model add|set` and `harness add-model|set-model`;
+empty takes it away): with how strong it is, it is what the hub chooses a
+model for a task by. The runner tells the hub what each harness can drive,
+with all of that, and how many runs go on on each harness and provider,
+whenever that changes; the web UI's Runners page shows both:
 
 ```console
 $ ensemble-runner harness add codex --command ~/bin/codex --max-seconds 1800 --max-steps 50 --max-concurrent 1
@@ -1573,8 +1581,8 @@ $ ensemble-runner settings show|history [--json]   # its settings, and who chang
 $ ensemble-runner settings name|workspace <value>
 $ ensemble-runner settings import <json>   # settings `settings show --json` printed, whole
 $ ensemble-runner provider list|add|test|key|refresh|remove   # the providers of its ANN pool, and their keys
-$ ensemble-runner model list|on|off|set|share|unshare   # their models: which are on, what each is, which it shares
-$ ensemble-runner harness list|on|off|set|refresh   # its harnesses: which are found, which are on, a run's limits
+$ ensemble-runner model list|add|remove|set|share|unshare   # their models: what each is, its abilities, which it shares
+$ ensemble-runner harness list|add|remove|set|refresh|add-model|set-model|remove-model   # its harnesses: which are found, a run's limits, Claude Code's and Codex's models
 
 
 # A hub this computer runs
@@ -1598,7 +1606,7 @@ $ ensemble-hub settings show|history [--json]    # its settings, and who changed
 $ ensemble-hub settings owner|sessions|lockout …
 $ ensemble-hub settings import <json>     # settings `settings show --json` printed, whole
 $ ensemble-hub provider list|add|test|key|refresh|remove   # the providers of its ANN pool, and their keys
-$ ensemble-hub model list|on|off|set      # their models: which are on, and what each is
+$ ensemble-hub model list|add|remove|set      # their models: what each is, and its abilities
 $ ensemble-hub runner models              # the models the connected runners share
 
 $ ensemble-runner completions zsh|bash|fish|elvish|powershell   # a completion script for your shell
