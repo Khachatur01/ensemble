@@ -472,6 +472,7 @@ mod tests {
             tier,
             context_window: Some(32768),
             tools: Some(false),
+            max_answer_tokens: None,
         };
         pool.add("local", "small", llm(Tier::Small));
         pool.add("local", "nomic", ModelKind::Embedding { dimensions: 768 });

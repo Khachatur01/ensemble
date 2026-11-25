@@ -132,24 +132,36 @@ pub fn pool_rows(pool: &AnnPoolSetting) -> Vec<(&'static str, Vec<Value>)> {
     }
     for m in &pool.models {
         let flag = |on: bool| int(i64::from(on));
-        let (tier, context_window, tools, dimensions) = match m.kind {
+        let (tier, context_window, tools, max_answer_tokens, dimensions) = match m.kind {
             ModelKind::Llm {
                 tier,
                 context_window,
                 tools,
+                max_answer_tokens,
             } => (
                 txt(tier.as_str()),
                 context_window.map_or(Value::Null, int),
                 tools.map_or(Value::Null, flag),
+                max_answer_tokens.map_or(Value::Null, int),
                 Value::Null,
             ),
-            ModelKind::Embedding { dimensions } => {
-                (Value::Null, Value::Null, Value::Null, int(dimensions))
-            }
-            ModelKind::Decision => (Value::Null, Value::Null, Value::Null, Value::Null),
+            ModelKind::Embedding { dimensions } => (
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                int(dimensions),
+            ),
+            ModelKind::Decision => (
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ),
         };
         out.push((
-            "INSERT INTO ann_models (provider, id, kind, tier, context_window, tools, dimensions, missing, shared, abilities) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO ann_models (provider, id, kind, tier, context_window, tools, max_answer_tokens, dimensions, missing, shared, abilities) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             vec![
                 txt(&m.provider),
                 txt(&m.id),
@@ -157,6 +169,7 @@ pub fn pool_rows(pool: &AnnPoolSetting) -> Vec<(&'static str, Vec<Value>)> {
                 tier,
                 context_window,
                 tools,
+                max_answer_tokens,
                 dimensions,
                 flag(m.missing),
                 flag(m.shared),
@@ -216,7 +229,7 @@ pub async fn read_pool(c: &turso::Connection) -> Result<AnnPoolSetting, String> 
     }
     for r in rows(
         c,
-        "SELECT provider, id, kind, tier, context_window, tools, dimensions, missing, shared, abilities FROM ann_models ORDER BY provider, id",
+        "SELECT provider, id, kind, tier, context_window, tools, dimensions, missing, shared, abilities, max_answer_tokens FROM ann_models ORDER BY provider, id",
         vec![],
     )
     .await?
@@ -235,6 +248,10 @@ pub async fn read_pool(c: &turso::Connection) -> Result<AnnPoolSetting, String> 
                 tools: match &r[5] {
                     Value::Null => None,
                     v => Some(flag(v, "tools")?),
+                },
+                max_answer_tokens: match &r[10] {
+                    Value::Null => None,
+                    v => Some(num(v, &format!("{at}.max_answer_tokens"))?),
                 },
             },
             "embedding" => ModelKind::Embedding {

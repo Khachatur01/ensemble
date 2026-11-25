@@ -150,6 +150,11 @@ pub enum ModelKind {
         context_window: Option<u32>,
         /// Whether it makes tool calls; None: its provider did not say.
         tools: Option<bool>,
+        /// The most tokens of answer asked of it when it answers a task alone,
+        /// as a person set it: required of a runner's LLM, which may answer
+        /// alone, and taken by no LLM of the hub's pool, whose uses keep their
+        /// own. None: nobody set it, as for a model a provider lists.
+        max_answer_tokens: Option<u32>,
     },
     /// Text in, a vector out.
     Embedding { dimensions: u32 },
@@ -175,6 +180,7 @@ impl ModelKind {
                 tier,
                 context_window,
                 tools,
+                max_answer_tokens,
             } => {
                 let mut said = format!("llm, {}", tier.as_str());
                 if let Some(n) = context_window {
@@ -184,6 +190,9 @@ impl ModelKind {
                     Some(true) => said.push_str(", tools"),
                     Some(false) => said.push_str(", no tools"),
                     None => {}
+                }
+                if let Some(n) = max_answer_tokens {
+                    said.push_str(&format!(", answers in {n} tokens at most"));
                 }
                 said
             }
@@ -438,11 +447,33 @@ pub(crate) fn pool(
             problems.push(format!("{at}: `dimensions` must be greater than 0"));
         }
         if let ModelKind::Llm {
-            context_window: Some(0),
+            context_window,
+            max_answer_tokens,
             ..
         } = m.kind
         {
-            problems.push(format!("{at}: `context_window` must be greater than 0"));
+            if context_window == Some(0) {
+                problems.push(format!("{at}: `context_window` must be greater than 0"));
+            }
+            match (may_share, max_answer_tokens) {
+                (false, Some(_)) => problems.push(format!(
+                    "{at}: the hub's pool takes no `max_answer_tokens`: no model of it answers a task alone"
+                )),
+                (true, None) => problems.push(format!(
+                    "{at}: `max_answer_tokens` is required: the most tokens of answer when it answers a task alone"
+                )),
+                (true, Some(0)) => {
+                    problems.push(format!("{at}: `max_answer_tokens` must be greater than 0"))
+                }
+                (true, Some(n)) => {
+                    if let Some(window) = context_window.filter(|w| *w > 0 && n >= *w) {
+                        problems.push(format!(
+                            "{at}: `max_answer_tokens` ({n}) must be less than its context window of {window} tokens"
+                        ));
+                    }
+                }
+                (false, None) => {}
+            }
         }
         if m.shared {
             if !may_share {

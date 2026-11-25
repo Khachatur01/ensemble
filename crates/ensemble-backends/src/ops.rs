@@ -152,35 +152,48 @@ const KEY_FIELDS: &[Field] = &[
 ];
 const LIST_MODELS: &[Field] =
     &[Field::text("provider", "The models of this provider alone.").positional()];
-const ADD_MODEL: &[Field] = &[
+const ADD_MODEL_CONTEXT: Field = Field::new(
+    "context_window",
+    Kind::Number,
+    "Tokens of context its server runs it with, when the provider does not say.",
+);
+const ADD_MODEL_TOOLS: Field = Field::new(
+    "tools",
+    Kind::Choice(YES_NO),
+    "Whether it makes tool calls, when the provider does not say.",
+);
+const MAX_ANSWER_TOKENS: Field = Field::new(
+    "max_answer_tokens",
+    Kind::Number,
+    "The most tokens of answer asked of the LLM when it answers a task alone, less than its context window: required of an LLM of a runner's pool.",
+);
+const ADD_MODEL: &[Field] = &[MODEL, TIER, ADD_MODEL_CONTEXT, ADD_MODEL_TOOLS, ABILITIES];
+const RUNNER_ADD_MODEL: &[Field] = &[
     MODEL,
     TIER,
-    Field::new(
-        "context_window",
-        Kind::Number,
-        "Tokens of context its server runs it with, when the provider does not say.",
-    ),
-    Field::new(
-        "tools",
-        Kind::Choice(YES_NO),
-        "Whether it makes tool calls, when the provider does not say.",
-    ),
+    ADD_MODEL_CONTEXT,
+    ADD_MODEL_TOOLS,
+    MAX_ANSWER_TOKENS,
     ABILITIES,
 ];
 const ONE_MODEL: &[Field] = &[MODEL];
-const SET: &[Field] = &[
+const SET_CONTEXT: Field = Field::new(
+    "context_window",
+    Kind::Number,
+    "Tokens of context its server runs it with.",
+);
+const SET_TOOLS: Field = Field::new(
+    "tools",
+    Kind::Choice(YES_NO),
+    "Whether it makes tool calls.",
+);
+const SET: &[Field] = &[MODEL, TIER, SET_CONTEXT, SET_TOOLS, ABILITIES];
+const RUNNER_SET: &[Field] = &[
     MODEL,
     TIER,
-    Field::new(
-        "context_window",
-        Kind::Number,
-        "Tokens of context its server runs it with.",
-    ),
-    Field::new(
-        "tools",
-        Kind::Choice(YES_NO),
-        "Whether it makes tool calls.",
-    ),
+    SET_CONTEXT,
+    SET_TOOLS,
+    MAX_ANSWER_TOKENS,
     ABILITIES,
 ];
 
@@ -229,6 +242,7 @@ struct AddModel {
     tier: Option<String>,
     context_window: Option<u32>,
     tools: Option<String>,
+    max_answer_tokens: Option<u32>,
     abilities: Option<String>,
 }
 
@@ -243,6 +257,7 @@ struct Set {
     tier: Option<String>,
     context_window: Option<u32>,
     tools: Option<String>,
+    max_answer_tokens: Option<u32>,
     abilities: Option<String>,
 }
 
@@ -343,9 +358,12 @@ pub fn operations<C: WithPool + 'static>(side: Side, access: Access) -> Vec<Oper
             spec(
                 "model.add",
                 "Add a model a provider serves to the pool, as the provider says it is: an LLM or an embedding model. One whose provider does not say is asked once.",
-                ADD_MODEL,
+                match side {
+                    Side::Hub => ADD_MODEL,
+                    Side::Runner => RUNNER_ADD_MODEL,
+                },
             ),
-            |c: &C, input: AddModel, change| add_model(c, input, change),
+            move |c: &C, input: AddModel, change| add_model(c, side, input, change),
         ),
         changing(
             spec(
@@ -358,10 +376,13 @@ pub fn operations<C: WithPool + 'static>(side: Side, access: Access) -> Vec<Oper
         changing(
             spec(
                 "model.set",
-                "Say how strong an LLM is, how much context its server runs it with, or whether it makes tool calls.",
-                SET,
+                "Say how strong an LLM is, how much context its server runs it with, whether it makes tool calls, or, on a runner, the most tokens of answer when it answers a task alone.",
+                match side {
+                    Side::Hub => SET,
+                    Side::Runner => RUNNER_SET,
+                },
             ),
-            |c: &C, input: Set, change| set(c, input, change),
+            move |c: &C, input: Set, change| set(c, side, input, change),
         ),
     ];
     if side == Side::Runner {
@@ -995,10 +1016,12 @@ fn list_models<C: WithPool>(c: &C, side: Side, provider: Option<&str>) -> Result
                 tier,
                 context_window,
                 tools,
+                max_answer_tokens,
             } => {
                 row["tier"] = json!(tier.as_str());
                 row["context_window"] = json!(context_window);
                 row["tools"] = json!(tools);
+                row["max_answer_tokens"] = json!(max_answer_tokens);
             }
             ModelKind::Embedding { dimensions } => row["dimensions"] = json!(dimensions),
             ModelKind::Decision => {}
@@ -1056,7 +1079,12 @@ fn yes_no(given: Option<&str>, field: &'static str) -> Result<Option<bool>, Erro
     }
 }
 
-fn add_model<C: WithPool>(c: &C, input: AddModel, change: Change) -> Result<Value, Error> {
+fn add_model<C: WithPool>(
+    c: &C,
+    side: Side,
+    input: AddModel,
+    change: Change,
+) -> Result<Value, Error> {
     let (provider, id) = split_name(&input.model).ok_or_else(|| {
         Error::invalid(format!(
             "'{}' must be <provider>:<model>, such as local:qwen3.5:9b",
@@ -1096,6 +1124,7 @@ fn add_model<C: WithPool>(c: &C, input: AddModel, change: Change) -> Result<Valu
             tier: t,
             context_window,
             tools: makes_calls,
+            max_answer_tokens,
         } => {
             if let Some(given) = tier {
                 *t = given;
@@ -1106,12 +1135,20 @@ fn add_model<C: WithPool>(c: &C, input: AddModel, change: Change) -> Result<Valu
             if tools.is_some() {
                 *makes_calls = tools;
             }
+            *max_answer_tokens = answer_cap(side, input.max_answer_tokens, *context_window)?;
+            if side == Side::Runner && max_answer_tokens.is_none() {
+                return Err(Error::invalid(
+                    "`max_answer_tokens` is required: the most tokens of answer when it answers a task alone",
+                )
+                .on("max_answer_tokens"));
+            }
         }
         other => {
             for (given, field) in [
                 (tier.is_some(), "tier"),
                 (input.context_window.is_some(), "context_window"),
                 (tools.is_some(), "tools"),
+                (input.max_answer_tokens.is_some(), "max_answer_tokens"),
                 (input.abilities.is_some(), "abilities"),
             ] {
                 if given {
@@ -1136,6 +1173,35 @@ fn add_model<C: WithPool>(c: &C, input: AddModel, change: Change) -> Result<Valu
         "said": format!("{name} is in the pool: {}", kind.describe()),
         "note": note,
     }))
+}
+
+/// The most tokens of answer `given` for an LLM whose context window is
+/// `window`, on `side`: none on a hub, whose pool answers no task alone;
+/// more than 0 and less than the window on a runner.
+fn answer_cap(side: Side, given: Option<u32>, window: Option<u32>) -> Result<Option<u32>, Error> {
+    let Some(n) = given else {
+        return Ok(None);
+    };
+    if side == Side::Hub {
+        return Err(Error::invalid(
+            "the hub's pool takes no `max_answer_tokens`: no model of it answers a task alone",
+        )
+        .on("max_answer_tokens"));
+    }
+    if n == 0 {
+        return Err(
+            Error::invalid("`max_answer_tokens` must be greater than 0").on("max_answer_tokens")
+        );
+    }
+    if let Some(w) = window
+        && n >= w
+    {
+        return Err(Error::invalid(format!(
+            "`max_answer_tokens` ({n}) must be less than the context window of {w} tokens"
+        ))
+        .on("max_answer_tokens"));
+    }
+    Ok(Some(n))
 }
 
 /// What the model `id` of `provider`, which did not say, is: an embedding
@@ -1177,13 +1243,14 @@ fn remove_model<C: WithPool>(c: &C, given: &str, change: Change) -> Result<Value
     Ok(json!({ "said": format!("{} is out of the pool", model.name()), "note": note }))
 }
 
-fn set<C: WithPool>(c: &C, input: Set, change: Change) -> Result<Value, Error> {
+fn set<C: WithPool>(c: &C, side: Side, input: Set, change: Change) -> Result<Value, Error> {
     let kept = c.kept_pool()?;
     let model = model_of(&kept, &input.model)?.clone();
     let ModelKind::Llm {
         tier,
         context_window,
         tools,
+        max_answer_tokens,
     } = model.kind
     else {
         return Err(Error::invalid(format!(
@@ -1197,11 +1264,25 @@ fn set<C: WithPool>(c: &C, input: Set, change: Change) -> Result<Value, Error> {
         return Err(Error::invalid("`context_window` must be greater than 0").on("context_window"));
     }
     let tools_now = yes_no(input.tools.as_deref(), "tools")?.or(tools);
+    let window = input.context_window.or(context_window);
     let kind = ModelKind::Llm {
         tier: tier_of(input.tier.as_deref())?.unwrap_or(tier),
-        context_window: input.context_window.or(context_window),
+        context_window: window,
         tools: tools_now,
+        max_answer_tokens: answer_cap(side, input.max_answer_tokens, window)?.or(max_answer_tokens),
     };
+    if let (Some(n), Some(w)) = (input.max_answer_tokens.or(max_answer_tokens), window)
+        && n >= w
+    {
+        return Err(Error::invalid(format!(
+            "`max_answer_tokens` ({n}) must be less than the context window of {w} tokens"
+        ))
+        .on(if input.max_answer_tokens.is_some() {
+            "max_answer_tokens"
+        } else {
+            "context_window"
+        }));
+    }
     let abilities = match input.abilities.as_deref() {
         Some(given) => written(Some(given)),
         None => model.abilities.clone(),
@@ -1407,6 +1488,7 @@ mod tests {
             tier: Tier::Small,
             context_window: None,
             tools: None,
+            max_answer_tokens: None,
         };
         pool.add("local", "b", small);
         mark(&mut pool, "local", &[found("a"), found("b")]);

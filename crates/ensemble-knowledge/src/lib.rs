@@ -661,6 +661,7 @@ mod tests {
                 tier: ensemble_config::Tier::Small,
                 context_window: None,
                 tools: None,
+                max_answer_tokens: None,
             },
         );
         s.distill = ensemble_config::ModelsSetting {

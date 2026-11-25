@@ -712,6 +712,7 @@ pub mod testing {
                 tier: ensemble_config::Tier::Small,
                 context_window: None,
                 tools: None,
+                max_answer_tokens: None,
             },
         );
         s.registration = ensemble_config::RegistrationSetting::Approval { max_pending: 2 };

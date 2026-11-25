@@ -211,14 +211,17 @@ fn harnesses() -> Value {
     json!({ "claude_code": null, "codex": null, "opencode": null, "builtin": null })
 }
 
-/// An ANN pool of `providers`, by name, with the models `added`, each an LLM
-/// as `<provider>:<id>`, sharing none.
+/// A runner's ANN pool of `providers`, by name, with the models `added`, each
+/// an LLM as `<provider>:<id>` answering in 4096 tokens at most when alone,
+/// sharing none.
 fn pool(providers: Value, added: &[&str]) -> Value {
     let mut models: Vec<Value> = added
         .iter()
         .map(|name| {
             let (provider, id) = name.split_once(':').unwrap();
-            model_added(provider, id)
+            let mut model = model_added(provider, id);
+            model["kind"]["max_answer_tokens"] = json!(4096);
+            model
         })
         .collect();
     models.sort_by_key(|m| (m["provider"].to_string(), m["id"].to_string()));
@@ -1839,7 +1842,7 @@ fn a_model_one_runner_shares_serves_another_runners_harness_and_the_hub_through_
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out)
-            .contains("ana/gpu  local:small  llm, medium, 32768 tokens  (2 call(s) at once)"),
+            .contains("ana/gpu  local:small  llm, medium, 32768 tokens, answers in 4096 tokens at most  (2 call(s) at once)"),
         "{}",
         stdout_of(&out)
     );
@@ -2976,10 +2979,40 @@ fn a_runners_owner_adds_providers_and_shares_their_models() {
         "{}",
         stderr_of(&out)
     );
+    // A runner's LLM may answer a task alone: how much it answers is the
+    // person's to say.
     let out = run(&["model", "add", "gpu:big"]);
     assert!(
-        stdout_of(&out).contains("gpu:big is in the pool: llm, medium"),
+        stderr_of(&out).contains("`max_answer_tokens` is required"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = run(&["model", "add", "gpu:big", "--max-answer-tokens", "2048"]);
+    assert!(
+        stdout_of(&out)
+            .contains("gpu:big is in the pool: llm, medium, answers in 2048 tokens at most"),
         "it does not embed: {}{}",
+        stdout_of(&out),
+        stderr_of(&out)
+    );
+    let out = run(&[
+        "model",
+        "set",
+        "gpu:big",
+        "--context-window",
+        "4096",
+        "--max-answer-tokens",
+        "4096",
+    ]);
+    assert!(
+        stderr_of(&out).contains("must be less than the context window of 4096 tokens"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = run(&["model", "set", "gpu:big", "--max-answer-tokens", "1024"]);
+    assert!(
+        stdout_of(&out).contains("answers in 1024 tokens at most"),
+        "{}{}",
         stdout_of(&out),
         stderr_of(&out)
     );

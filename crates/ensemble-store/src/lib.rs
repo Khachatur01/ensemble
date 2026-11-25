@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS ann_models (
     tier TEXT,
     context_window INTEGER,
     tools INTEGER,
+    max_answer_tokens INTEGER,
     dimensions INTEGER,
     missing INTEGER NOT NULL,
     shared INTEGER NOT NULL,

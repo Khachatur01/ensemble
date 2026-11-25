@@ -153,7 +153,7 @@ through an operation:
 | settings | where | holds |
 | --- | --- | --- |
 | the hub's settings | typed rows of its core's database, `hub/core/database.db`, on the computer that runs the hub | the core: `owner`, its `ann_pool` (its providers and their models), how people join and sign in, the `roles`; and its connectors' settings: the `distill` and `embed` models, `recall`, the `trackers` and the `source_filter` |
-| the runner's settings | typed rows of its core's database, `runner/core/database.db`, one per computer | `name`, `workspace`, `hub`, and its `ann_pool`: the providers its harnesses run on, each with the most calls it takes at once, and the models of them a person added, each shared or not; and its `harnesses`, those a person added, at most one of each kind (`claude-code`, `codex`, `opencode`, `builtin`), each found or missing, with its command, how long and how many steps a run may take and how many run at once, `builtin`'s most tokens of answer per call, and the models of their own vendor's added to `claude-code` and `codex` (`harness_models`) |
+| the runner's settings | typed rows of its core's database, `runner/core/database.db`, one per computer | `name`, `workspace`, `hub`, and its `ann_pool`: the providers its harnesses run on, each with the most calls it takes at once, and the models of them a person added, each shared or not, each LLM with the most tokens it answers in alone (`max_answer_tokens`); and its `harnesses`, those a person added, at most one of each kind (`claude-code`, `codex`, `opencode`, `builtin`), each found or missing, with its command, how long and how many steps a run may take and how many run at once, `builtin`'s most tokens of answer per call, and the models of their own vendor's added to `claude-code` and `codex` (`harness_models`) |
 
 No setting has a default: a new hub or runner starts with every one written
 (`HubSettings::starting`, `RunnerSettings::starting`), and a missing one is
@@ -953,8 +953,10 @@ recalled for it, what it asked and was answered and its earlier runs, with no
 tools, no clone and no worktree; so a runner answers it for a project it has
 no folder for (`answers/<project>` in its folder). Its answer is the task's
 result, and one that ends asking waits for the answer as any run. It holds a
-call of its provider and asks for at most 8192 tokens, less when the
-model's context window leaves less.
+call of its provider and asks for at most the model's `max_answer_tokens`, a
+person's setting required of every LLM of a runner's pool (`model add|set
+--max-answer-tokens`, less than its context window; the hub's pool takes
+none), less when the context window leaves less after the task.
 
 The agent loop of Ensemble's own is the `builtin` harness: harness-rs's
 `AgentLoop`, its file and shell tools, and its model clients, on the pool's

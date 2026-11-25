@@ -357,6 +357,7 @@ mod tests {
                 tier: ensemble_config::Tier::Small,
                 context_window: Some(8192),
                 tools: Some(true),
+                max_answer_tokens: Some(2048),
             },
         );
         runner

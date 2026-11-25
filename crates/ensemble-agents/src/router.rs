@@ -16,22 +16,18 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// The most tokens of a model's answer when it answers a task alone. A
-/// model whose context window is known gets less when the task leaves less
-/// room.
-pub const ANSWER_MAX_TOKENS: u32 = 8192;
-
 /// The most tokens of answer to ask for of a model whose context window is
-/// `window`, the request being `task`: [`ANSWER_MAX_TOKENS`], or what the
-/// window leaves, the request taken as a token per three bytes, which is
-/// more than it is. None when it leaves too little to answer in.
-fn answer_budget(window: Option<u32>, task: &str) -> Option<u32> {
+/// `window`, the request being `task`: `cap`, the most a person set for it,
+/// or what the window leaves when that is less, the request taken as a token
+/// per three bytes, which is more than it is. None when it leaves too little
+/// to answer in.
+fn answer_budget(cap: u32, window: Option<u32>, task: &str) -> Option<u32> {
     let Some(window) = window else {
-        return Some(ANSWER_MAX_TOKENS);
+        return Some(cap);
     };
     let asked = task.len() / 3 + 64;
     let left = (window as usize).saturating_sub(asked);
-    (left >= 256).then(|| ANSWER_MAX_TOKENS.min(left as u32))
+    (left >= 256).then(|| cap.min(left as u32))
 }
 
 /// What a run produced, with enough provenance to audit it.
@@ -194,8 +190,8 @@ impl Ensemble {
                     alone.name()
                 ),
             })?;
-        let max_tokens =
-            answer_budget(alone.context_window, task).ok_or_else(|| Error::Unsupported {
+        let max_tokens = answer_budget(alone.max_answer_tokens, alone.context_window, task)
+            .ok_or_else(|| Error::Unsupported {
                 backend: alone.provider.clone(),
                 detail: format!(
                     "the task is too long for {}'s context window of {} tokens",
@@ -436,6 +432,7 @@ mod tests {
                 tier: Tier::Small,
                 context_window: Some(32768),
                 tools: Some(true),
+                max_answer_tokens: Some(1500),
             },
             missing: false,
             shared: false,
@@ -456,7 +453,7 @@ mod tests {
         let asked: serde_json::Value =
             serde_json::from_str(&server.requests.lock().unwrap()[0]).unwrap();
         assert_eq!(asked["model"], "small");
-        assert_eq!(asked["max_tokens"], ANSWER_MAX_TOKENS);
+        assert_eq!(asked["max_tokens"], 1500, "the most a person set");
         assert!(asked.get("tools").is_none(), "{asked}");
         assert_eq!(
             asked["messages"],
@@ -473,11 +470,11 @@ mod tests {
 
     #[test]
     fn an_answer_takes_what_the_context_window_leaves() {
-        assert_eq!(answer_budget(None, "hi"), Some(ANSWER_MAX_TOKENS));
-        assert_eq!(answer_budget(Some(200_000), "hi"), Some(ANSWER_MAX_TOKENS));
-        let left = answer_budget(Some(4096), "hi").unwrap();
+        assert_eq!(answer_budget(8000, None, "hi"), Some(8000));
+        assert_eq!(answer_budget(8000, Some(200_000), "hi"), Some(8000));
+        let left = answer_budget(8000, Some(4096), "hi").unwrap();
         assert!(left < 4096 && left > 3000, "{left}");
-        assert_eq!(answer_budget(Some(1024), &"x".repeat(3000)), None);
+        assert_eq!(answer_budget(8000, Some(1024), &"x".repeat(3000)), None);
     }
 
     #[test]

@@ -70,6 +70,8 @@ pub struct Alone {
     pub tier: Tier,
     pub context_window: Option<u32>,
     pub tools: Option<bool>,
+    /// The most tokens of answer asked of it, as a person set it.
+    pub max_answer_tokens: u32,
     pub abilities: Option<String>,
 }
 
@@ -181,6 +183,7 @@ impl Means {
                             tier,
                             context_window: Some(window),
                             tools,
+                            ..
                         } => {
                             let fits = match h.kind {
                                 HarnessKind::OpenCode => {
@@ -209,7 +212,8 @@ impl Means {
     }
 
     /// Every LLM of the pool that may answer a task alone: each whose
-    /// provider a run reaches, by provider, then id.
+    /// provider a run reaches and whose most tokens of answer a person set, by
+    /// provider, then id.
     pub fn alone(&self) -> Vec<Alone> {
         let mut out: Vec<Alone> = self
             .pool
@@ -221,12 +225,14 @@ impl Means {
                     tier,
                     context_window,
                     tools,
+                    max_answer_tokens: Some(max_answer_tokens),
                 } => Some(Alone {
                     provider: m.provider.clone(),
                     model: m.id.clone(),
                     tier,
                     context_window,
                     tools,
+                    max_answer_tokens,
                     abilities: m.abilities.clone(),
                 }),
                 _ => None,
@@ -470,6 +476,7 @@ mod tests {
                 tier,
                 context_window: window,
                 tools,
+                max_answer_tokens: Some(2048),
             },
             missing: false,
             shared: false,

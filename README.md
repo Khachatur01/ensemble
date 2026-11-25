@@ -828,7 +828,7 @@ $ ensemble-runner settings name gpu-box                       # a hub knows it a
 $ ensemble-runner settings workspace ~/ensemble               # its git repositories; ~/ is your home
 $ ensemble-runner provider add local --type openai-compatible-api --url http://127.0.0.1:11434/v1 --max-concurrent 1
 $ ensemble-runner provider models local                       # what it serves; none of it is in the pool yet
-$ ensemble-runner model add local:qwen3.5:9b --tier medium    # how strong it is, if Ensemble does not know
+$ ensemble-runner model add local:qwen3.5:9b --tier medium --max-answer-tokens 4096   # how strong, if Ensemble does not know; most tokens it answers alone
 $ ensemble-runner model set local:qwen3.5:9b --abilities "quick; weak at UI work"   # what it is good and bad at
 $ ensemble-runner model list                                  # the models added
 $ ensemble-runner model share local:qwen3.5:9b               # offered to the hub and your other runners
@@ -865,9 +865,12 @@ and `builtin` those that make tool calls. Each LLM of the pool and each model
 of Claude Code's or Codex's may say, in your words, what it is good and bad
 at (`--abilities`, on `model add|set` and `harness add-model|set-model`;
 empty takes it away): with how strong it is, it is what the hub chooses a
-model for a task by. The runner tells the hub what each harness can drive,
-with all of that, and how many runs go on on each harness and provider,
-whenever that changes; the web UI's Runners page shows both:
+model for a task by. Each LLM of the runner's pool also says the most
+tokens it answers in when it answers a task alone (`--max-answer-tokens`,
+required on `model add`, changed with `model set`); the hub's pool takes
+none. The runner tells the hub what each harness can drive, with all of that,
+and how many runs go on on each harness and provider, whenever that
+changes; the web UI's Runners page shows both:
 
 ```console
 $ ensemble-runner harness add codex --command ~/bin/codex --max-seconds 1800 --max-steps 50 --max-concurrent 1
@@ -1003,8 +1006,10 @@ runs; no tools, no clone and no worktree, so a runner answers it for a project
 it has no folder for. The answer is the task's result, kept on the hub as any
 run's and posted to its issue for a task from a tracker, and its front matter
 says `harness: alone`; an answer that ends with `NEEDS INPUT:` waits for yours.
-It holds one call of its provider, and asks for at most 8192 tokens of answer,
-less when the model's context window leaves less. A model answers alone only
+It holds one call of its provider, and asks for at most the tokens of answer
+you set for the model, `--max-answer-tokens` on `model add|set`, required of
+every LLM of a runner's pool and less than its context window; less when the
+window leaves less after the task. A model answers alone only
 when an answer of the task picker's questions says so (`model_alone`), and then
 only a model alone works on the task; never one with a gate, which runs in a
 worktree.
@@ -1768,11 +1773,11 @@ scripts stand in for the CLIs.
   kept, but nothing learns from it yet.
 - **A model alone answers in one reply.** It runs no tool and reads no file,
   so it answers from what the task says and the notes recalled for it; its
-  answer is at most 8192 tokens. It answers a task only when a question of
-  the task picker says the task only needs an answer, and never a task with
-  a gate: one the decision model says only needs an answer but has a gate
-  waits for you to choose a harness, or to take the gate away. The hub's own
-  pool answers no task.
+  answer is at most the model's `max_answer_tokens`, which you set. It
+  answers a task only when a question of the task picker says the task only
+  needs an answer, and never a task with a gate: one the decision model says
+  only needs an answer but has a gate waits for you to choose a harness, or
+  to take the gate away. The hub's own pool answers no task.
 - **Only the end of a run can ask.** A run stops with a question
   (`NEEDS INPUT:`) at the end of a run, never halfway through one: the CLIs'
   headless modes do not wait for an answer. The task waits for the answer,

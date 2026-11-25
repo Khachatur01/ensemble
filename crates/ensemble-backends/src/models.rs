@@ -83,6 +83,7 @@ pub fn discover(backend: &LlmBackend) -> Result<Vec<Found>, Error> {
                     tier: catalog::tier(&id).unwrap_or(Tier::Medium),
                     context_window: None,
                     tools: Some(true),
+                    max_answer_tokens: None,
                 }),
                 (BackendSettings::Decision { .. }, _) => Some(ModelKind::Decision),
                 (_, Some(origin)) => ollama_kind(origin, &id),
@@ -90,6 +91,7 @@ pub fn discover(backend: &LlmBackend) -> Result<Vec<Found>, Error> {
                     tier,
                     context_window: None,
                     tools: None,
+                    max_answer_tokens: None,
                 }),
             };
             Found { id, kind }
@@ -103,6 +105,7 @@ pub fn llm(id: &str) -> ModelKind {
         tier: catalog::tier(id).unwrap_or(Tier::Medium),
         context_window: None,
         tools: None,
+        max_answer_tokens: None,
     }
 }
 
@@ -177,6 +180,7 @@ fn ollama_says(id: &str, shown: &serde_json::Value) -> Option<ModelKind> {
             .unwrap_or(Tier::Medium),
         context_window: info(".context_length").filter(|n| *n > 0),
         tools: Some(can("tools")),
+        max_answer_tokens: None,
     })
 }
 
@@ -246,6 +250,7 @@ mod tests {
                 tier: Tier::Strong,
                 context_window: Some(32768),
                 tools: Some(true),
+                max_answer_tokens: None,
             })
         );
         let embedding = serde_json::json!({

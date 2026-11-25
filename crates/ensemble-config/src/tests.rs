@@ -153,6 +153,18 @@ fn llm() -> ModelKind {
         tier: Tier::Medium,
         context_window: None,
         tools: None,
+        max_answer_tokens: None,
+    }
+}
+
+/// An LLM of a runner's pool, as a test adds it: answering alone in 2048
+/// tokens at most.
+fn runner_llm() -> ModelKind {
+    ModelKind::Llm {
+        tier: Tier::Medium,
+        context_window: None,
+        tools: None,
+        max_answer_tokens: Some(2048),
     }
 }
 
@@ -430,7 +442,7 @@ fn settings_are_written_as_json_and_an_unknown_one_is_refused() {
         serde_json::json!({
             "provider": "local",
             "id": "small",
-            "kind": { "type": "llm", "tier": "medium", "context_window": null, "tools": null },
+            "kind": { "type": "llm", "tier": "medium", "context_window": null, "tools": null, "max_answer_tokens": null },
             "missing": false,
             "shared": false,
             "abilities": null,
@@ -576,6 +588,54 @@ fn a_new_runner_has_no_harness_and_one_added_is_checked() {
 }
 
 #[test]
+fn a_runners_llm_answers_alone_in_as_many_tokens_as_a_person_said_and_a_hubs_in_none() {
+    let said = runner_with(|r| {
+        r.ann_pool.providers.insert("local".into(), server(1));
+        r.ann_pool.add("local", "unsaid", llm());
+        r.ann_pool.add(
+            "local",
+            "zero",
+            ModelKind::Llm {
+                tier: Tier::Small,
+                context_window: None,
+                tools: None,
+                max_answer_tokens: Some(0),
+            },
+        );
+        r.ann_pool.add(
+            "local",
+            "wide",
+            ModelKind::Llm {
+                tier: Tier::Small,
+                context_window: Some(4096),
+                tools: None,
+                max_answer_tokens: Some(4096),
+            },
+        );
+        r.ann_pool.add("local", "said", runner_llm());
+    })
+    .unwrap_err()
+    .to_string();
+    for wanted in [
+        "ann_pool.models.local:unsaid: `max_answer_tokens` is required",
+        "ann_pool.models.local:zero: `max_answer_tokens` must be greater than 0",
+        "ann_pool.models.local:wide: `max_answer_tokens` (4096) must be less than its context window of 4096 tokens",
+    ] {
+        assert!(said.contains(wanted), "{wanted}: {said}");
+    }
+    assert!(!said.contains("local:said"), "{said}");
+
+    let mut hub = hub_settings();
+    hub.ann_pool.add("local", "alone", runner_llm());
+    assert!(
+        hub_problems(&hub)
+            .contains("ann_pool.models.local:alone: the hub's pool takes no `max_answer_tokens`"),
+        "{}",
+        hub_problems(&hub)
+    );
+}
+
+#[test]
 fn a_runner_shares_models_of_its_openai_compatible_servers_and_reaches_others_through_its_hub() {
     let claude = ProviderSetting::Anthropic {
         base_url: "https://api.anthropic.com".into(),
@@ -590,9 +650,9 @@ fn a_runner_shares_models_of_its_openai_compatible_servers_and_reaches_others_th
         r.ann_pool.providers.insert("local".into(), server(1));
         r.ann_pool.providers.insert("claude".into(), claude.clone());
         r.ann_pool.providers.insert("gpu".into(), gpu.clone());
-        r.ann_pool.add("local", "small", llm());
-        r.ann_pool.add("local", "other", llm());
-        r.ann_pool.add("claude", "haiku", llm());
+        r.ann_pool.add("local", "small", runner_llm());
+        r.ann_pool.add("local", "other", runner_llm());
+        r.ann_pool.add("claude", "haiku", runner_llm());
         r.ann_pool.model_mut("local", "small").unwrap().shared = true;
     };
     let r = runner_with(|r| {
