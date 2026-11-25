@@ -61,7 +61,8 @@ install no CLI, `builtin` is a loop in Ensemble itself. Four harnesses ship:
   ([harness-rs](https://github.com/liliang-cn/harness-rs)) on an LLM of your
   ANN pool: it reads, edits and runs commands, and needs nothing installed.
 
-Each is off until you turn it on.
+A runner has only the harnesses you add, and the models you add: nothing
+installed on the computer is used until you add it.
 
 ## How it works
 
@@ -150,7 +151,7 @@ $ ensemble-ui --hub http://127.0.0.1:7700           # serves the UI on 127.0.0.1
 A new hub listens on this computer alone (`127.0.0.1:7700`; `serve
 --http-host` and `--http-port` say otherwise), closed to sign-ups, with no model
 yet: give it one when you want shares distilled into notes
-(`ensemble-hub provider add`, `ensemble-hub model on`, `ensemble-hub knowledge models`; see
+(`ensemble-hub provider add`, `ensemble-hub model add`, `ensemble-hub knowledge models`; see
 [Changing settings](#changing-settings)).
 
 The token's answer gives the line that adds the hub to your agent
@@ -171,13 +172,15 @@ local model server. When this computer has no runner yet, it
 asks what to call it (this computer's name, unless you say otherwise) and
 which folder it works in (`~/ensemble`, unless you say otherwise), and makes
 it: its settings are kept in its database,
-`~/.local/state/ensemble/runner/core/database.db`, with each harness it
-found, off. Then it says what the runner runs tasks on, and what is next.
-Turn a harness on (and, for `opencode` or `builtin`, a model of the pool),
-give the runner a repository and the hub, and run it:
+`~/.local/state/ensemble/runner/core/database.db`, with no harness and no
+model. Then it says which CLIs are installed, what the runner runs tasks on,
+and what is next. Add a harness (with a model of its vendor's for
+`claude-code` or `codex`, or, for `opencode` or `builtin`, a model of the
+pool), give the runner a repository and the hub, and run it:
 
 ```console
-$ ensemble-runner harness on claude-code                     # or: provider add …, model on …, harness on opencode
+$ ensemble-runner harness add claude-code --max-seconds 1800 --max-steps 50 --max-concurrent 1
+$ ensemble-runner harness add-model claude-code sonnet       # or: provider add …, model add …, harness add opencode …
 $ git clone git@github.com:acme/shop.git ~/ensemble/shop      # a project: a repository in the workspace
 $ ensemble-runner login ws://127.0.0.1:7700 --user ana        # your account on the hub, or: join <url> <code>
 $ ensemble-runner serve
@@ -248,7 +251,7 @@ $ ensemble-hub serve                      # makes its settings and vault the fir
 $ ensemble-hub setup                      # its first admin, whose token it prints once
 $ ensemble-hub user password root         # typed without echo
 $ ensemble-hub provider add central --type openai-compatible-api --url http://127.0.0.1:8000/v1 --max-concurrent 4
-$ ensemble-hub model on central:qwen3.5-72b             # a model is off until it is turned on
+$ ensemble-hub model add central:qwen3.5-72b            # nothing it serves is in the pool until it is added
 $ ensemble-hub knowledge models central:qwen3.5-72b   # the models that turn shares into notes
 $ ensemble-hub check                      # says which model would distill shares now
 ```
@@ -338,11 +341,12 @@ from the command line, where the running hub listens.
 knowledge, in two layers: **providers**, its own servers and APIs, with the
 keys it keeps, and runners that share models through it (`type: runner`, see
 [Sharing models](#sharing-models)); and the **models** each serves, an LLM
-or an embedding model, found by asking the provider. A model a provider newly
-lists is off until someone turns it on, and only a model that is on, and of
-the kind its use needs, may be named, as `<provider>:<model>`. `ensemble-hub
-provider add` adds a provider and keeps its key for you, and `ensemble-hub
-model on` turns a model on (see [Changing settings](#changing-settings)).
+or an embedding model, that someone added, as the provider says it is.
+Nothing a provider serves is in the pool until someone adds it, and only a
+model in the pool, of the kind its use needs, may be named, as
+`<provider>:<model>`. `ensemble-hub provider add` adds a provider and keeps
+its key for you, and `ensemble-hub model add` adds a model it serves (see
+[Changing settings](#changing-settings)).
 
 **Permissions.** The permissions are `share` (keep knowledge in the vault),
 `recall` (read its notes), `tasks` (make and follow tasks, have your runners
@@ -471,8 +475,8 @@ hub. It shows what your account may do:
   what an admin does to an account; and **Settings**, a section each, filled
   in with each setting as it is now: the hub and its logins and sign-ups;
   the roles, a box for each permission; the models: each provider tested,
-  asked again, given a key or taken out, and each of its models turned on or
-  off and said how strong it is; the models of the knowledge vault and the source
+  given a model it serves, asked again, given a key or taken out, and each
+  model added said how strong it is or taken out; the models of the knowledge vault and the source
   filter; the trackers; who changed what; and a page for each operation of
   the settings no section shows yet.
 
@@ -812,12 +816,14 @@ each:
 $ ensemble-runner settings name gpu-box                       # a hub knows it as <you>/gpu-box
 $ ensemble-runner settings workspace ~/ensemble               # its git repositories; ~/ is your home
 $ ensemble-runner provider add local --type openai-compatible-api --url http://127.0.0.1:11434/v1 --max-concurrent 1
-$ ensemble-runner model list                                  # its models, each off until turned on
-$ ensemble-runner model on local:qwen3.5:9b --tier medium     # how strong it is, if Ensemble does not know
+$ ensemble-runner provider models local                       # what it serves; none of it is in the pool yet
+$ ensemble-runner model add local:qwen3.5:9b --tier medium    # how strong it is, if Ensemble does not know
+$ ensemble-runner model list                                  # the models added
 $ ensemble-runner model share local:qwen3.5:9b               # offered to the hub and your other runners
 $ ensemble-runner provider add team-gpu --type runner --runner kim/workstation
-$ ensemble-runner harness list                                # Claude Code, Codex, OpenCode, builtin: found, on or off
-$ ensemble-runner harness on claude-code                      # tasks may run on it
+$ ensemble-runner harness list                                # those added, found or missing, and CLIs installed not added
+$ ensemble-runner harness add claude-code --max-seconds 1800 --max-steps 50 --max-concurrent 1
+$ ensemble-runner harness add-model claude-code sonnet        # a model of its vendor's it drives
 $ ensemble-runner login wss://hub.example.com --user kim     # once: it names this hub
 $ git clone git@github.com:acme/shop.git ~/ensemble/shop      # a project of its workspace, or let a task name it
 $ ensemble-runner serve                                       # until Ctrl-C or SIGTERM
@@ -830,20 +836,24 @@ project's tasks run on a runner with a repository of its name in its
 workspace: one you cloned there, or one it cloned for a task that names its
 `repository` (see [Tasks](#tasks)).
 
-A runner has one **harness** of each kind, the programs that drive an LLM to
-work in a repository: Claude Code, Codex and OpenCode, CLIs it looks for on
-PATH when it is made, when it starts and on `harness refresh`, and `builtin`,
-Ensemble's own loop, which needs nothing installed. Each is off until you
-turn it on, and one that is missing is turned on once it is found. Claude Code
-and Codex drive their own vendor's models (`harness list` names them, with
-how strong each is, and says whether the CLI is logged in where a file of its
-own or a key says so); OpenCode drives the LLMs of the runner's
-OpenAI-compatible providers, and `builtin` those that make tool calls. Each
-says how long one run may take and how many steps it may make:
+A runner has the **harnesses** you add, at most one of each kind, the
+programs that drive an LLM to work in a repository: Claude Code, Codex and
+OpenCode, CLIs it must find to add (on PATH, or by `--command`) and looks for
+again when it starts and on `harness refresh`, and `builtin`, Ensemble's own
+loop, which needs nothing installed. Each says how long one run may take, how
+many steps it may make and how many run at once, and `builtin` the most
+tokens of answer per model call. Claude Code and Codex drive only the models
+of their own vendor's you add to them, each with how strong it is (Ensemble's
+catalog says, when you do not; `harness list` suggests the ones it knows and
+says whether the CLI is logged in where a file of its own or a key says so);
+OpenCode drives the LLMs of the runner's pool on OpenAI-compatible providers,
+and `builtin` those that make tool calls:
 
 ```console
-$ ensemble-runner harness set codex --command ~/bin/codex --max-seconds 1800 --max-steps 50
-$ ensemble-runner harness off codex
+$ ensemble-runner harness add codex --command ~/bin/codex --max-seconds 1800 --max-steps 50 --max-concurrent 1
+$ ensemble-runner harness add-model codex gpt-5-codex
+$ ensemble-runner harness set codex --max-seconds 900
+$ ensemble-runner harness remove codex
 ```
 
 A harness is never shared: a task runs on its own account's runners. Each
@@ -902,7 +912,7 @@ A hub may run on a small machine and need a strong model, and so may a
 runner. A runner may share some models of its own servers through the hub
 (`ensemble-runner model share`), and the hub and your other runners use them:
 each adds the runner as a provider of `type: runner`, naming it
-`<owner>/<name>`, and turns on the models it wants. A model of it is named as
+`<owner>/<name>`, and adds the models it wants. A model of it is named as
 the runner names it, after the provider's name: `gpu:local:qwen3.5:72b`.
 
 ```console
@@ -910,7 +920,7 @@ $ ensemble-runner model share local:qwen3.5:72b            # on ana's gpu box
 $ ensemble-hub runner models                               # what the connected runners share
 ana/gpu-box  local:qwen3.5:72b  llm, strong  (1 call(s) at once)
 $ ensemble-hub provider add gpu --type runner --runner ana/gpu-box
-$ ensemble-hub model on gpu:local:qwen3.5:72b
+$ ensemble-hub model add gpu:local:qwen3.5:72b
 ```
 
 - **Who may use it.** The hub, and its owner's other runners.
@@ -1206,12 +1216,12 @@ No setting is a file.
 ```console
 $ ensemble-hub provider add central --type openai-compatible-api --url http://127.0.0.1:11434/v1 --max-concurrent 2
 The provider's API key (empty for none): ••••••       # asked when it wants one, without echo
-added provider central, which serves central:qwen3.5:9b, central:embeddinggemma; they are off until you turn them on, as `model on central:qwen3.5:9b`
+added provider central, which serves central:qwen3.5:9b, central:embeddinggemma; add the ones to use, as `model add central:qwen3.5:9b`
 $ ensemble-hub provider key central                   # a new key, or empty to take it out
-$ ensemble-hub provider list | test [name] | refresh [name] | remove <name>
-$ ensemble-hub model list [provider]                  # each model: what it is, on or off, missing
-$ ensemble-hub model on central:qwen3.5:9b --tier medium   # model off | set
-$ ensemble-hub model on central:embeddinggemma
+$ ensemble-hub provider list | test [name] | models <name> | refresh [name] | remove <name>
+$ ensemble-hub model add central:qwen3.5:9b --tier medium   # model remove | set
+$ ensemble-hub model add central:embeddinggemma
+$ ensemble-hub model list [provider]                  # each model added: what it is, missing
 $ ensemble-hub knowledge models central:qwen3.5:9b claude:claude-haiku-4-5
 $ ensemble-hub knowledge embedding central:embeddinggemma   # or --off
 $ ensemble-hub knowledge recall --max-notes 8 --max-chars 6000
@@ -1222,7 +1232,7 @@ $ ensemble-hub source filter central:qwen3.5-72b --prompt "Salaries; clients' na
 $ ensemble-hub source try "Bob: deploys go out on Tuesdays now"
 $ ensemble-runner provider add local --type openai-compatible-api --url http://127.0.0.1:11434/v1 --max-concurrent 1
 $ ensemble-runner model share local:qwen3.5:9b      # model unshare
-$ ensemble-runner harness on claude-code            # harness off | set | refresh
+$ ensemble-runner harness add builtin --max-seconds 1800 --max-steps 50 --max-concurrent 1 --max-tokens 4000   # harness remove | set | refresh | add-model | remove-model
 ```
 
 - **A provider is asked first.** `provider add` asks it which models it serves
@@ -1230,14 +1240,16 @@ $ ensemble-runner harness on claude-code            # harness off | set | refres
   `--no-check` adds it anyway. One that answers that it wants a key has the
   key asked for. `--type runner` names another runner of yours, whose shared
   models the hub or the runner reaches through the hub (`--runner
-  <owner>/<name>`), only while it runs. Its providers are asked again on
-  `provider refresh` and whenever the hub or the runner starts.
-- **A model is off until it is turned on.** What each model is, an LLM or an
-  embedding model, is what Ollama says of it, what Ensemble knows of its
-  family, or, when nothing says, asked once as it is turned on. An LLM's tier,
-  small, medium or strong, comes from a catalog of known families and sizes,
-  else from Ollama's, else medium; `model on --tier` or `model set` says it.
-  A model a provider no longer lists is marked missing, never forgotten.
+  <owner>/<name>`), only while it runs.
+- **Nothing is in the pool until it is added.** `provider models` lists what
+  a provider serves now, and keeps none of it; `model add` adds one, once the
+  provider lists it. What it is, an LLM or an embedding model, is what Ollama
+  says of it, what Ensemble knows of its family, or, when nothing says, asked
+  once as it is added. An LLM's tier, small, medium or strong, comes from a
+  catalog of known families and sizes, else from Ollama's, else medium;
+  `model add --tier` or `model set` says it. The providers are asked again on
+  `provider refresh` and whenever the hub or the runner starts, only to mark
+  a model added that one no longer lists missing, never forgotten.
 - **Keys are kept for you.** A key you give is kept under a variable Ensemble
   names after the provider (`ENSEMBLE_PROVIDER_CENTRAL_KEY`), and the provider
   names that variable; `provider remove` takes it out too. The hub and the
@@ -1245,13 +1257,13 @@ $ ensemble-runner harness on claude-code            # harness off | set | refres
   [Secrets](#secrets)). A key you keep elsewhere already, such as one a
   secrets manager puts in the environment (`environmentFile` in Nix), is
   named instead with `--key-env NAME`.
-- **Models are checked too.** `knowledge models` takes only LLMs of the pool
-  that are on, and asks each provider whether it serves its model now;
-  `knowledge embedding` takes only an embedding model that is on, and asks it
-  to embed once.
+- **Models are checked too.** `knowledge models` takes only LLMs of the pool,
+  and asks each provider whether it serves its model now; `knowledge
+  embedding` takes only an embedding model of the pool, and asks it to embed
+  once.
 - **What something uses stays.** A provider or a model the distiller, the
-  embedding model or the source filter uses is not removed nor turned off,
-  nor a role an account has.
+  embedding model or the source filter uses is not removed, nor a role an
+  account has.
 
 ### Every other setting
 
@@ -1312,7 +1324,7 @@ with `--config-dir`) and is managed with the same commands. The Nix modules
 only run the hub and the runner: their settings are kept in their databases,
 and made and changed with `ensemble-hub` and `ensemble-runner`.
 
-Besides Ensemble, install the CLIs of the harnesses you turn on: `claude` for
+Besides Ensemble, install the CLIs of the harnesses you add: `claude` for
 `claude-code`, `opencode` for `opencode`, `codex` for `codex`. `builtin` needs
 none. git is needed for the workspace, the repositories a runner clones and
 worktrees. Then run `ensemble-runner setup`
@@ -1345,7 +1357,7 @@ The module has three parts, each enabled on its own: a runner, a hub and the
 hub's web UI. The runner and the hub each run as the person it is
 for, from their `~/.local/state/ensemble/`, so they manage it with `ensemble-hub` and
 `ensemble-runner` as on any platform: `ensemble-hub user add`, `ensemble-runner
-harness on`, `ensemble-runner settings …` and the rest, as themselves, with no
+harness add`, `ensemble-runner settings …` and the rest, as themselves, with no
 `sudo`.
 
 Neither has settings in Nix, as one runs a GitLab instance: the settings of
@@ -1374,7 +1386,7 @@ its REST API or a web UI). Back up their folders.
 The first time it starts, `ensemble-runner serve` makes a runner named for
 this computer, working for her in `~/ensemble`, offering nothing.
 Then, as `ana`: `ensemble-runner login <url> --user ana`, `ensemble-runner
-provider add …`, `ensemble-runner model on …`, `ensemble-runner harness on …`
+provider add …`, `ensemble-runner model add …`, `ensemble-runner harness add …`
 and `ensemble-runner settings …`; the running runner uses each at once. `ensemble-runner` is put on the system's `PATH`, for managing it;
 `services.ensemble.runner.package` is the package it comes from.
 
@@ -1402,7 +1414,7 @@ the keys of its providers are kept in its `database.db`, and changed with
 where it listens is. The first time it starts, `ensemble-hub serve` makes the
 settings a new hub starts with, every one of them, named for `user`, and its
 vault. Then, as `user`: `ensemble-hub setup`, which adds the first admin, and
-`ensemble-hub provider add …`, `ensemble-hub model on …`,
+`ensemble-hub provider add …`, `ensemble-hub model add …`,
 `ensemble-hub knowledge models …` and the rest. To reach it from other
 computers, give the module `listenAddress = "0.0.0.0";` and
 `openFirewall = true;`. Back up the hub's folder: without `core/master.key`,
@@ -1641,7 +1653,7 @@ scripts stand in for the CLIs.
 | `crates/ensemble-link/` | the token file 0600, the link opened again when it breaks, a hub of another protocol version named with what to update |
 | `crates/ensemble-core/` | the state directories and their hashes, the worker lock, run records |
 | `crates/ensemble-tasks/` | tickets, questions in a reply, run logs |
-| `crates/ensemble-hub/tests/queue.rs` | the worker of a repository: tasks run in worktrees within a harness's `max_concurrent`, closing the worker interrupting running tasks, cancel, `after`, gates, `repo`, questions and answers, a runner with no harness on waiting |
+| `crates/ensemble-hub/tests/queue.rs` | the worker of a repository: tasks run in worktrees within a harness's `max_concurrent`, closing the worker interrupting running tasks, cancel, `after`, gates, `repo`, questions and answers, a runner with no harness waiting |
 | `tests/workspace.rs` | the crates depend on each other in one direction only, and the runner on none of the hub's |
 | `tests/end_to_end.rs` | the real executables, `ensemble-hub` and `ensemble-runner`: their commands; setup and doctor against a stub server; every run in `stats`; the runner working on the tasks of a repository in its workspace, a task made through the hub's MCP; a task resumed when the runner starts again; a task stopped on one computer and carried on by another from its pushed branch; an issue from the tracker worked on a member's runner; a repository added to the workspace while the runner runs, a runner listed with what it runs tasks on, and a task's notes in its prompt; a task's repository cloned and its branch pushed there; a runner asking where a project is and cloning the answer; a task whose repository cannot be cloned given back and blocked; a runner's models through the hub, run by another runner's `builtin`; signing in and joining with a code, a hub refusing another protocol or a bad token, settings and harnesses changed from the command line |
 | `crates/ensemble-agents/tests/fixtures/` | saved event streams per CLI version, replayed through each adapter's parser (see its README) |

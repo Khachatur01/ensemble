@@ -704,7 +704,7 @@ pub mod testing {
                 max_concurrent: 1,
             },
         );
-        s.ann_pool.turn_on(
+        s.ann_pool.add(
             "local",
             "small",
             ensemble_config::ModelKind::Llm {

@@ -1,6 +1,6 @@
 //! What Ensemble knows of models before it asks them anything: how strong
 //! an LLM of a well-known family is, by its id, or by how many parameters it
-//! has. A model it does not know is medium, and the person who turns it on
+//! has. A model it does not know is medium, and the person who adds it
 //! may say otherwise.
 
 use ensemble_config::{HarnessKind, Tier};
@@ -26,8 +26,9 @@ const FAMILIES: &[(&str, Tier)] = &[
     ("glm-4.5", Tier::Strong),
 ];
 
-/// The models of a harness that drives its own vendor's LLMs, with how
-/// strong each is: Claude Code's by its aliases, and Codex's. Those models
+/// The models Ensemble knows of a harness that drives its own vendor's LLMs,
+/// with how strong each is: Claude Code's by its aliases, and Codex's. They
+/// are only suggested: a harness drives those a person added to it, which
 /// belong to the harness, not the ANN pool; OpenCode and `builtin` have none
 /// of their own.
 pub fn harness_models(kind: HarnessKind) -> Vec<(&'static str, Tier)> {

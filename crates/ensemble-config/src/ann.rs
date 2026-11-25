@@ -2,8 +2,9 @@
 //! call, in two layers. A **provider** is where models come from: a server it
 //! calls itself, or another runner, whose shared models it reaches through
 //! the hub (`type: runner`). A **model** is what a provider serves, an LLM or
-//! an embedding model, found by asking the provider; it is off until a person
-//! turns it on, and a runner may share it through the hub.
+//! an embedding model, that a person added, as the provider said it is:
+//! nothing a provider serves is in the pool until a person adds it, and a
+//! runner may share what is through the hub.
 //!
 //! A provider's name is unique in the pool, so whatever names a model (the
 //! hub's distiller and embedding model) names it as
@@ -126,8 +127,6 @@ impl Tier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModelKind {
-    /// Its provider did not say; turning it on asks it.
-    Unknown,
     /// Messages in, text out.
     Llm {
         tier: Tier,
@@ -144,7 +143,6 @@ impl ModelKind {
     /// Its type, as it is written: `unknown`, `llm` or `embedding`.
     pub fn type_id(&self) -> &'static str {
         match self {
-            ModelKind::Unknown => "unknown",
             ModelKind::Llm { .. } => "llm",
             ModelKind::Embedding { .. } => "embedding",
         }
@@ -153,7 +151,6 @@ impl ModelKind {
     /// It, in a few words: `llm, strong, 32768 tokens, tools`.
     pub fn describe(&self) -> String {
         match self {
-            ModelKind::Unknown => "not known yet".into(),
             ModelKind::Llm {
                 tier,
                 context_window,
@@ -184,10 +181,7 @@ pub struct PoolModel {
     /// Its id there, as the provider lists it.
     pub id: String,
     pub kind: ModelKind,
-    /// Whether it may be used: a model a provider newly lists is off until a
-    /// person turns it on.
-    pub on: bool,
-    /// The provider listed it before, and does not now.
+    /// The provider served it when it was added, and does not list it now.
     pub missing: bool,
     /// Offered through the hub, to the hub and its owner's other runners: a
     /// runner's alone.
@@ -202,12 +196,12 @@ impl PoolModel {
 
     /// Whether it may be used as an LLM.
     pub fn usable_llm(&self) -> bool {
-        self.on && matches!(self.kind, ModelKind::Llm { .. })
+        matches!(self.kind, ModelKind::Llm { .. })
     }
 
     /// Whether it may be used as an embedding model.
     pub fn usable_embedding(&self) -> bool {
-        self.on && matches!(self.kind, ModelKind::Embedding { .. })
+        matches!(self.kind, ModelKind::Embedding { .. })
     }
 }
 
@@ -234,19 +228,15 @@ impl AnnPoolSetting {
             .find(|m| m.provider == provider && m.id == id)
     }
 
-    /// Keep the model `id` of `provider` as `kind`, turned on, among the
-    /// models in the order of their providers and ids.
-    pub fn turn_on(&mut self, provider: &str, id: &str, kind: ModelKind) {
+    /// Add the model `id` of `provider` as `kind`, or keep it as `kind` when
+    /// it is there, among the models in the order of their providers and ids.
+    pub fn add(&mut self, provider: &str, id: &str, kind: ModelKind) {
         match self.model_mut(provider, id) {
-            Some(m) => {
-                m.kind = kind;
-                m.on = true;
-            }
+            Some(m) => m.kind = kind,
             None => self.models.push(PoolModel {
                 provider: provider.to_string(),
                 id: id.to_string(),
                 kind,
-                on: true,
                 missing: false,
                 shared: false,
             }),
@@ -407,11 +397,6 @@ pub(crate) fn pool(
             problems.push(format!("{at}: is listed twice"));
         }
         seen.push((&m.provider, &m.id));
-        if m.on && m.kind == ModelKind::Unknown {
-            problems.push(format!(
-                "{at}: is on, and what it is is not known: an LLM or an embedding model"
-            ));
-        }
         if let ModelKind::Embedding { dimensions: 0 } = m.kind {
             problems.push(format!("{at}: `dimensions` must be greater than 0"));
         }
@@ -425,8 +410,6 @@ pub(crate) fn pool(
         if m.shared {
             if !may_share {
                 problems.push(format!("{at}: a hub shares no model"));
-            } else if !m.on {
-                problems.push(format!("{at}: is shared, and off"));
             } else if !matches!(provider, ProviderSetting::OpenAiCompatible { .. }) {
                 problems.push(format!(
                     "{at}: is shared, and only a model of an {OPENAI_COMPATIBLE_API} provider of the runner's own may be"
@@ -461,7 +444,7 @@ impl AnnPoolSetting {
 }
 
 /// Check that the model `id` of `provider`, named at `at`, is one of `pool`'s,
-/// on, and of `use_`.
+/// and of `use_`.
 pub(crate) fn check_model(
     at: &str,
     provider: &str,
@@ -489,7 +472,7 @@ pub(crate) fn check_model(
         .find(|m| m.provider == provider && m.id == id)
     else {
         problems.push(format!(
-            "{at}: {name} is not a model of the ANN pool; `provider refresh {provider}` asks the provider again"
+            "{at}: {name} is not a model of the ANN pool; `model add {name}` adds it"
         ));
         return;
     };
@@ -497,11 +480,7 @@ pub(crate) fn check_model(
         Use::Llm => model.usable_llm(),
         Use::Embedding => model.usable_embedding(),
     };
-    if !model.on {
-        problems.push(format!(
-            "{at}: {name} is off; `model on {name}` turns it on"
-        ));
-    } else if !fits {
+    if !fits {
         let wanted = match use_ {
             Use::Llm => "an LLM",
             Use::Embedding => "an embedding model",

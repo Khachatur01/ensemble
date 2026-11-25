@@ -1002,14 +1002,10 @@ fn model_of<'g>(
             "there is no model '{provider}:{model}' in the hub's ANN pool"
         ))
         .on(field)
-        .hint("`model list` lists them; `provider add` adds a provider and `provider refresh` asks the providers again"));
+        .hint(
+            "`model list` lists them; `model add <provider>:<model>` adds one a provider serves",
+        ));
     };
-    if !found.on {
-        return Err(Error::invalid(format!(
-            "{provider}:{model} is off; turn it on first with `model on {provider}:{model}`"
-        ))
-        .on(field));
-    }
     let fits = match use_ {
         Use::Llm => found.usable_llm(),
         Use::Embedding => found.usable_embedding(),

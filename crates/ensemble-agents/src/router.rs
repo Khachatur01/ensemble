@@ -226,7 +226,7 @@ impl Ensemble {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ensemble_config::{AnnPool, Harness, HarnessKind, Tier};
+    use ensemble_config::{AnnPool, Harness, HarnessKind, HarnessModel, Tier};
     use ensemble_core::workspace::testing::TempDir;
 
     /// A runner whose one harness is Claude Code, run as `program`, on
@@ -234,19 +234,21 @@ mod tests {
     fn ensemble(program: &str, records: &Path) -> (Ensemble, Arc<Means>) {
         let claude = Harness {
             kind: HarnessKind::ClaudeCode,
-            on: true,
             missing: false,
             command: Some(program.into()),
             max_seconds: 60,
             max_steps: 5,
             max_concurrent: 1,
             max_tokens: None,
+            models: vec![HarnessModel {
+                id: "sonnet".into(),
+                tier: Tier::Strong,
+            }],
         };
         let means = Arc::new(Means::new(
             vec![claude],
             AnnPool::default(),
             Default::default(),
-            |_| vec![("sonnet".into(), Tier::Strong)],
         ));
         let e = Ensemble::new(means.clone(), None).with_records(records.to_path_buf());
         (e, means)

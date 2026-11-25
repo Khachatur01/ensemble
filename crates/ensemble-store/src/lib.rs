@@ -48,7 +48,6 @@ CREATE TABLE IF NOT EXISTS ann_models (
     context_window INTEGER,
     tools INTEGER,
     dimensions INTEGER,
-    turned_on INTEGER NOT NULL,
     missing INTEGER NOT NULL,
     shared INTEGER NOT NULL,
     PRIMARY KEY (provider, id)

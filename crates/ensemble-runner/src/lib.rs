@@ -39,7 +39,7 @@ mod worker;
 use clap::FromArgMatches;
 use cmd::runner::RunnerContext;
 use ensemble_agents::picker::Means;
-use ensemble_config::{self as config, RelayAt, Tier};
+use ensemble_config::{self as config, RelayAt};
 use ensemble_core::state;
 use ensemble_ops::cli::matched;
 use ensemble_ops::{Error, Registry};
@@ -92,27 +92,17 @@ fn dispatch(
     cmd::runner::run(cli.command)
 }
 
-/// What `runner` has to run tasks on: its harnesses that are on, found and
-/// not known to be logged out, and its ANN pool, its providers reached
-/// through the hub at `relay` when it serves them there.
+/// What `runner` has to run tasks on: the harnesses a person added that are
+/// found and not known to be logged out, and its ANN pool, its providers
+/// reached through the hub at `relay` when it serves them there.
 fn means(runner: &config::Runner, relay: Option<&RelayAt>) -> Means {
     let harnesses = runner
         .harnesses
         .each()
         .into_iter()
-        .filter(|h| h.on && !h.missing && setup::logged_in(h.kind) != Some(false))
+        .filter(|h| !h.missing && setup::logged_in(h.kind) != Some(false))
         .collect();
-    Means::new(
-        harnesses,
-        runner.llm.clone(),
-        runner.llm.backends(relay),
-        |kind| {
-            ensemble_backends::catalog::harness_models(kind)
-                .into_iter()
-                .map(|(id, tier): (&str, Tier)| (id.to_string(), tier))
-                .collect()
-        },
-    )
+    Means::new(harnesses, runner.llm.clone(), runner.llm.backends(relay))
 }
 
 /// This computer's runner, from its settings, with the keys they name from

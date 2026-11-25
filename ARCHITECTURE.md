@@ -46,10 +46,11 @@ executables, `ensemble-hub` and `ensemble-runner`, in these roles:
 - **The runner**: a computational resource and a pure worker. It runs the
   tasks the hub keeps for its owner, like a person handed work: in a worktree
   of the project's git repository in its workspace, cloned there when it has
-  none. It keeps an ANN pool, the providers of models and the models they
-  serve, off until a person turns them on, and may share some of its models
-  through the hub; and its harnesses (Claude Code, Codex, OpenCode, Ensemble's
-  own loop), off until a person turns them on. It takes its owner's tasks alone. It serves no client. It is its own process too, `ensemble-runner
+  none. It keeps an ANN pool, the providers of models and the models of
+  them a person added, and may share some of those models through the hub;
+  and the harnesses a person added (Claude Code, Codex, OpenCode, Ensemble's
+  own loop). Nothing installed on its computer is used until a person adds
+  it. It takes its owner's tasks alone. It serves no client. It is its own process too, `ensemble-runner
   serve`, one per computer, and its executable holds nothing of the hub's.
 - **The picker**: for each task, a harness and an LLM of what the runner
   has, the pair a run is started on (an agent CLI headless, or Ensemble's own
@@ -149,7 +150,7 @@ through an operation:
 | settings | where | holds |
 | --- | --- | --- |
 | the hub's settings | typed rows of its core's database, `hub/core/database.db`, on the computer that runs the hub | the core: `owner`, its `ann_pool` (its providers and their models), how people join and sign in, the `roles`; and its connectors' settings: the `distill` and `embed` models, `recall`, the `trackers` and the `source_filter` |
-| the runner's settings | typed rows of its core's database, `runner/core/database.db`, one per computer | `name`, `workspace`, `hub`, and its `ann_pool`: the providers its harnesses run on, each with the most calls it takes at once, and their models, each on or off, and shared or not; and its `harnesses`, one of each kind (`claude-code`, `codex`, `opencode`, `builtin`), each on or off, found or missing, with its command, how long and how many steps a run may take and how many run at once, and `builtin`'s most tokens of answer per call |
+| the runner's settings | typed rows of its core's database, `runner/core/database.db`, one per computer | `name`, `workspace`, `hub`, and its `ann_pool`: the providers its harnesses run on, each with the most calls it takes at once, and the models of them a person added, each shared or not; and its `harnesses`, those a person added, at most one of each kind (`claude-code`, `codex`, `opencode`, `builtin`), each found or missing, with its command, how long and how many steps a run may take and how many run at once, `builtin`'s most tokens of answer per call, and the models of their own vendor's added to `claude-code` and `codex` (`harness_models`) |
 
 No setting has a default: a new hub or runner starts with every one written
 (`HubSettings::starting`, `RunnerSettings::starting`), and a missing one is
@@ -525,8 +526,8 @@ work, and is written to be read by the person or the model that will see it.
 ## Names
 
 - **Harness**: a program that drives an LLM to work in a repository: Claude
-  Code, Codex, OpenCode, or Ensemble's own loop. A runner has one of each, off
-  until a person turns it on. Not an ANN. (Decided 2026-11-24.)
+  Code, Codex, OpenCode, or Ensemble's own loop. A runner has those a person
+  added, at most one of each. Not an ANN. (Decided 2026-11-24.)
 - **ANN pool**: the artificial neural networks a hub or a runner may call:
   providers, and the models they serve (LLMs, embedding models, decision
   models). Ensemble never says "AI". (Decided 2026-11-24.)
@@ -681,13 +682,13 @@ to them, so the hub and the owner's other runners use them. Runners never
 reach each other.
 
 The runner's owner shares a model; the hub's admin adds that runner as a
-provider of `type: runner`, turns the model on, and names it where it is used
+provider of `type: runner`, adds the model, and names it where it is used
 (the distiller, the embedding model, the source filter), as any model:
 
 ```console
 $ ensemble-runner model share local:qwen3.5:72b                # on ana's workstation
 $ ensemble-hub provider add gpu-box --type runner --runner ana/workstation
-$ ensemble-hub model on gpu-box:local:qwen3.5:72b
+$ ensemble-hub model add gpu-box:local:qwen3.5:72b
 $ ensemble-hub knowledge models gpu-box:local:qwen3.5:72b
 ```
 
@@ -827,9 +828,12 @@ two layers:
   the same account shares through the hub. A person adds it, or setup finds
   it. It holds what all its models share: the address, the key, how long a
   call may take and how many calls it takes at once.
-- A **model** is what a provider serves, found by asking the provider: its
-  list of models, what Ollama says each can do, and one test call where the
-  provider says nothing. A model is of one type:
+- A **model** is what a provider serves that a person added to the pool:
+  nothing a provider serves is in the pool, nor seen by anyone, the runner
+  itself included, until a person adds it (decided 2026-11-25). What it is
+  is found by asking the provider as it is added: its list of models, what
+  Ollama says each can do, and one test call where the provider says
+  nothing. A model is of one type:
   - an **LLM**: messages in, text out, with tool calls when it can make them;
   - an **embedding model**: text in, a vector out;
   - a **decision model**: a state and typed questions in, typed answers with
@@ -839,17 +843,20 @@ two layers:
   Each model has a profile (an LLM its tier, small, medium or strong, its
   context window and whether it calls tools; an embedding model its
   dimensions), limits of its own, and a switch that shares it through the hub.
-  A model a provider newly lists is off until a person turns it on. Its tier
-  comes from a catalog of known models Ensemble ships, or is medium for one
-  the catalog does not know, and the person who turns it on may change it.
+  Its tier comes from a catalog of known models Ensemble ships, or is medium
+  for one the catalog does not know, and the person who adds it may change
+  it. A model its provider no longer lists is marked missing, never
+  forgotten.
 
 **Harnesses** are the programs that drive an LLM to work in a repository:
-Claude Code, Codex, OpenCode, and `builtin`, which is always there. A harness
-is not an ANN, so it is a list of its own. Setup finds the CLIs and whether
-each is logged in. OpenCode and `builtin` drive any LLM of the pool; Claude
-Code and Codex drive their own vendor's models, which belong to the harness
-and are not in the pool. Each harness has a time limit for one run and a most
-number of steps. A harness is never shared: a task runs on its account's
+Claude Code, Codex, OpenCode, and `builtin`, which needs nothing installed. A
+harness is not an ANN, so it is a list of its own, and a runner has only
+those a person added. Setup says which CLIs are installed, and a CLI must be
+found to be added. OpenCode and `builtin` drive the LLMs of the pool; Claude
+Code and Codex drive the models of their own vendor's a person added to them,
+which belong to the harness and are not in the pool, of a tier the catalog
+suggests. Each harness has a time limit for one run, a most number of steps
+and a most number of runs at once. A harness is never shared: a task runs on its account's
 runners, and a person who wants it worked on elsewhere reassigns it to another
 person.
 
@@ -858,7 +865,7 @@ where the harness may edit files and run commands. Ensemble never merges it.
 
 **The picker** chooses the harness and the LLM a task runs on. It is a trait,
 so a decision model can take the rules' place. Until then it follows rules:
-among the pairs it may use now (turned on, with a free place, within their
+among the pairs it may use now (added, found, with a free place, within their
 limits), the strongest tier first, and the least busy among equals. When the
 task's gate fails, the next try goes one tier up. Every run records what was
 picked.
@@ -1441,19 +1448,22 @@ crate holds it today.
     describes. (Done: runners that work for the hub removed, so a runner
     takes its own account's tasks alone; the ANN pool of the runner and
     the hub in place of the backends: providers, each with the most calls it
-    takes at once, and their models, found by asking the provider when it is
-    added, on `provider.refresh` and as the process starts, off until turned
-    on, of a tier from a catalog of known families and sizes, or Ollama's,
-    else medium, each named `<provider>:<id>` and checked to be on and of the
-    kind its use needs; a runner sharing models, not whole providers, the
+    takes at once, and the models of them a person added, nothing else of
+    them seen by anyone, each asked what it is as it is added
+    (`provider.models` lists what a provider serves, keeping nothing), of a
+    tier from a catalog of known families and sizes, or Ollama's, else
+    medium, marked missing on `provider.refresh` and as the process starts
+    when its provider no longer lists it, each named `<provider>:<id>` and
+    checked to be in the pool and of the kind its use needs; a runner sharing models, not whole providers, the
     hub queueing calls for each provider; `provider.*`, `model.*` and
     `runner.models`, and the web UI's Models section; the pool's sources
     called providers, as a source is knowledge from outside; link protocol
-    9; the runner's harnesses, one of each kind, looked for on PATH when the
-    runner is made, as it starts and on `harness.refresh`, off until turned
-    on, each with its command and a run's most seconds and steps, Claude
-    Code's and Codex's own models named from the catalog, and
-    `harness.list|on|off|set|refresh`; a gate as a task's own, its command,
+    9; the runner's harnesses, those a person added, a CLI found when it is
+    added and looked for again as the runner starts and on
+    `harness.refresh`, each with its command and a run's most seconds,
+    steps and runs at once, Claude Code's and Codex's own models those a
+    person added, of a tier the catalog suggests, and
+    `harness.list|add|remove|set|add-model|remove-model|refresh`; a gate as a task's own, its command,
     time limit and attempts, given only by the task's account when it makes
     the task (MCP's `submit`, `task.create`, the web UI) or with `task.gate`
     (MCP's `gate`, `task_gate` on the link) while the task neither runs nor

@@ -198,7 +198,7 @@ pub use ann::{
 };
 pub use env::*;
 pub use harness::{
-    BuiltinHarness, CliHarness, Harness, HarnessChange, HarnessKind, HarnessesSetting,
+    BuiltinHarness, CliHarness, Harness, HarnessChange, HarnessKind, HarnessModel, HarnessesSetting,
 };
 pub use hub::{
     AccountRules, Accounts, Connectors, Embed, EmbedSetting, Hub, HubSettings, IssueTracker,

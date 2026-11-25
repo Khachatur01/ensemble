@@ -1,10 +1,10 @@
 //! What works on a task: a harness and an LLM, picked from what the runner
-//! has (`Means`). Its harnesses that are on, found and not known to be
-//! logged out, each with the LLMs it can drive, are the **pairs**: Claude
-//! Code and Codex with their own vendor's models, OpenCode with the pool's
-//! LLMs that are on, of an OpenAI-compatible provider and of a known context
-//! window, and `builtin` with the pool's LLMs that are on, of a known context
-//! window and not known to make no tool calls.
+//! has (`Means`). Its harnesses a person added that are found and not known
+//! to be logged out, each with the LLMs it can drive, are the **pairs**:
+//! Claude Code and Codex with the models of their own vendor's a person added
+//! to them, OpenCode with the pool's LLMs of an OpenAI-compatible provider and
+//! of a known context window, and `builtin` with the pool's LLMs of a known
+//! context window and not known to make no tool calls.
 //!
 //! A pair is usable now while its harness has a free run and its model's
 //! provider a free call. The [`Picker`] chooses among them; the one Ensemble
@@ -95,32 +95,27 @@ struct Busy {
 /// What a runner has to run tasks on: its harnesses that may run, its ANN
 /// pool, and what is busy now, for every repository it works in.
 pub struct Means {
-    /// Its harnesses on, found and not known to be logged out.
+    /// Its harnesses found and not known to be logged out.
     harnesses: Vec<Harness>,
     pool: AnnPool,
     /// The pool's providers, by name, as a run reaches them.
     backends: BTreeMap<String, LlmBackend>,
-    /// The models of the harnesses that drive their own vendor's.
-    own_models: Box<dyn Fn(HarnessKind) -> Vec<(String, Tier)> + Send + Sync>,
     picker: Box<dyn Picker>,
     busy: Mutex<Busy>,
 }
 
 impl Means {
     /// `harnesses`, those that may run, on `pool`, whose providers a run
-    /// reaches as `backends` says; the harnesses' own models as `own_models`
-    /// lists them; picked by the [`Rules`].
+    /// reaches as `backends` says; picked by the [`Rules`].
     pub fn new(
         harnesses: Vec<Harness>,
         pool: AnnPool,
         backends: BTreeMap<String, LlmBackend>,
-        own_models: impl Fn(HarnessKind) -> Vec<(String, Tier)> + Send + Sync + 'static,
     ) -> Self {
         Means {
             harnesses,
             pool,
             backends,
-            own_models: Box::new(own_models),
             picker: Box::new(Rules),
             busy: Mutex::new(Busy::default()),
         }
@@ -150,13 +145,14 @@ impl Means {
         let mut out = Vec::new();
         for h in &self.harnesses {
             let mut pairs: Vec<Pair> = match h.kind {
-                HarnessKind::ClaudeCode | HarnessKind::Codex => (self.own_models)(h.kind)
-                    .into_iter()
-                    .map(|(model, tier)| Pair {
+                HarnessKind::ClaudeCode | HarnessKind::Codex => h
+                    .models
+                    .iter()
+                    .map(|m| Pair {
                         harness: h.kind,
                         provider: None,
-                        model,
-                        tier,
+                        model: m.id.clone(),
+                        tier: m.tier,
                         context_window: None,
                     })
                     .collect(),
@@ -164,7 +160,7 @@ impl Means {
                     .pool
                     .models
                     .iter()
-                    .filter(|m| m.on && self.backends.contains_key(&m.provider))
+                    .filter(|m| self.backends.contains_key(&m.provider))
                     .filter_map(|m| match m.kind {
                         ModelKind::Llm {
                             tier,
@@ -336,18 +332,30 @@ impl Drop for Taken {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ensemble_config::PoolModel;
+    use ensemble_config::{HarnessModel, PoolModel};
 
     fn harness(kind: HarnessKind, max_concurrent: u32) -> Harness {
         Harness {
             kind,
-            on: true,
             missing: false,
             command: kind.program().map(String::from),
             max_seconds: 60,
             max_steps: 9,
             max_concurrent,
             max_tokens: (kind == HarnessKind::Builtin).then_some(300),
+            models: match kind {
+                HarnessKind::ClaudeCode => vec![
+                    HarnessModel {
+                        id: "haiku".into(),
+                        tier: Tier::Medium,
+                    },
+                    HarnessModel {
+                        id: "sonnet".into(),
+                        tier: Tier::Strong,
+                    },
+                ],
+                _ => Vec::new(),
+            },
         }
     }
 
@@ -366,7 +374,6 @@ mod tests {
                 context_window: window,
                 tools,
             },
-            on: true,
             missing: false,
             shared: false,
         }
@@ -398,19 +405,9 @@ mod tests {
                 Some(200_000),
                 Some(true),
             ),
-            PoolModel {
-                on: false,
-                ..llm("local", "off", Tier::Strong, Some(1), Some(true))
-            },
         ];
         let backends = pool.direct.clone();
-        Arc::new(Means::new(harnesses, pool, backends, |kind| match kind {
-            HarnessKind::ClaudeCode => vec![
-                ("haiku".into(), Tier::Medium),
-                ("sonnet".into(), Tier::Strong),
-            ],
-            _ => Vec::new(),
-        }))
+        Arc::new(Means::new(harnesses, pool, backends))
     }
 
     fn names(pairs: &[Pair]) -> Vec<String> {

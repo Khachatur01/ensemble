@@ -42,9 +42,10 @@ const SHOWN: &[&str] = &[
     "provider.test",
     "provider.key",
     "provider.refresh",
+    "provider.models",
     "model.list",
-    "model.on",
-    "model.off",
+    "model.add",
+    "model.remove",
     "model.set",
     "runner.models",
     "runner.list",
@@ -443,7 +444,7 @@ fn Models() -> Element {
     let api_types = ["openai-compatible-api", "anthropic-api"];
     rsx! {
         p { class: "muted",
-            "The hub's ANN pool: the providers of models it calls, and the models each serves. A model a provider newly lists is off until you turn it on. Keys are kept sealed, never in the settings."
+            "The hub's ANN pool: the providers of models it calls, and the models of each you added. Nothing a provider serves is in the pool until you add it. Keys are kept sealed, never in the settings."
         }
         {loaded(&providers.read(), |out| {
             let list = out["providers"].as_array().cloned().unwrap_or_default();
@@ -527,11 +528,26 @@ fn Models() -> Element {
     }
 }
 
-/// A provider: what it is, where, its key, and its models; tested, asked again
-/// which models it serves, given a key, or taken out.
+/// A provider: what it is, where, its key, and the models of it added; tested,
+/// given a model it serves, asked again which models it serves, given a key,
+/// or taken out.
 #[component]
 fn ProviderCard(provider: Value, models: Vec<Value>, on_changed: EventHandler<()>) -> Element {
     let name = text(&provider, "name");
+    let mut served = {
+        let name = name.clone();
+        use_resource(move || api::op("provider.models", json!({ "name": name.clone() })))
+    };
+    let addable: Vec<String> = match &*served.read() {
+        Some(Ok(out)) => out["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|m| m["added"] != true)
+            .map(|m| text(m, "name"))
+            .collect(),
+        _ => Vec::new(),
+    };
     let mut tested = use_signal(|| None::<Result<Value, Failure>>);
     let mut keying = use_signal(|| false);
     let kind = text(&provider, "type");
@@ -575,7 +591,7 @@ fn ProviderCard(provider: Value, models: Vec<Value>, on_changed: EventHandler<()
                 }
             }
             if models.is_empty() {
-                p { class: "muted", "It serves no model the hub knows of yet." }
+                p { class: "muted", "None of its models is in the pool yet: add one below." }
             } else {
                 table {
                     thead { tr { th { "Model" } th { "What it is" } th { "" } } }
@@ -585,6 +601,23 @@ fn ProviderCard(provider: Value, models: Vec<Value>, on_changed: EventHandler<()
                         }
                     }
                 }
+            }
+            OpForm {
+                op: "model.add",
+                picks: vec![Pick::suggest("model", addable), Pick::named("tier", TIERS)],
+                labels: vec![
+                    label("model", "model, as <provider>:<model>"),
+                    label("tier", "how strong it is, for an LLM"),
+                    label("context_window", "tokens of context its server runs it with"),
+                    label("tools", "makes tool calls"),
+                ],
+                more: vec!["tier".to_string(), "context_window".to_string(), "tools".to_string()],
+                submit: "Add the model",
+                clear: true,
+                on_done: move |_| {
+                    served.restart();
+                    on_changed.call(());
+                },
             }
             div { class: "actions",
                 button { class: "small plain", onclick: test, "Test" }
@@ -619,7 +652,7 @@ fn ProviderCard(provider: Value, models: Vec<Value>, on_changed: EventHandler<()
             OpForm {
                 op: "provider.refresh",
                 fixed: named.clone(),
-                submit: "Ask it again which models it serves",
+                submit: "Ask it again which of its models it still serves",
                 saved: true,
                 on_done: move |_| on_changed.call(()),
             }
@@ -628,7 +661,7 @@ fn ProviderCard(provider: Value, models: Vec<Value>, on_changed: EventHandler<()
                 fixed: named.clone(),
                 submit: "Remove",
                 danger: true,
-                confirm: "Remove {name}, with its models and the key kept for it? Refused while something uses one of its models.",
+                confirm: "Remove {name}, with the models of it added and the key kept for it? Refused while something uses one of its models.",
                 quiet: true,
                 on_done: move |_| on_changed.call(()),
             }
@@ -636,13 +669,12 @@ fn ProviderCard(provider: Value, models: Vec<Value>, on_changed: EventHandler<()
     }
 }
 
-/// A model of a provider: what it is, whether it is on; turned on, off, or
-/// said how strong it is.
+/// A model of a provider in the pool: what it is; said how strong it is, or
+/// taken out.
 #[component]
 fn ModelRow(model: Value, on_changed: EventHandler<()>) -> Element {
     let name = text(&model, "name");
     let named = vec![("model".to_string(), json!(name))];
-    let on = model["on"] == true;
     let llm = text(&model, "type") == "llm";
     let mut what = match text(&model, "type").as_str() {
         "llm" => {
@@ -657,8 +689,7 @@ fn ModelRow(model: Value, on_changed: EventHandler<()>) -> Element {
             }
             said
         }
-        "embedding" => format!("embedding model, {} dimensions", text(&model, "dimensions")),
-        _ => "not known yet: asked when it is turned on".to_string(),
+        _ => format!("embedding model, {} dimensions", text(&model, "dimensions")),
     };
     if model["missing"] == true {
         what.push_str("; its provider no longer lists it");
@@ -668,15 +699,7 @@ fn ModelRow(model: Value, on_changed: EventHandler<()>) -> Element {
             td { "{name}" }
             td { "{what}" }
             td {
-                if on {
-                    OpForm {
-                        op: "model.off",
-                        fixed: named.clone(),
-                        submit: "Turn off",
-                        quiet: true,
-                        on_done: move |_| on_changed.call(()),
-                    }
-                    if llm {
+                if llm {
                         OpForm {
                             op: "model.set",
                             fixed: named.clone(),
@@ -692,18 +715,15 @@ fn ModelRow(model: Value, on_changed: EventHandler<()>) -> Element {
                             saved: true,
                             on_done: move |_| on_changed.call(()),
                         }
-                    }
-                } else {
-                    OpForm {
-                        op: "model.on",
-                        fixed: named.clone(),
-                        values: if llm { vec![value("tier", text(&model, "tier"))] } else { vec![] },
-                        picks: vec![Pick::named("tier", TIERS)],
-                        labels: vec![label("tier", "how strong it is, for an LLM")],
-                        more: vec!["tier".to_string()],
-                        submit: "Turn on",
-                        on_done: move |_| on_changed.call(()),
-                    }
+                }
+                OpForm {
+                    op: "model.remove",
+                    fixed: named.clone(),
+                    submit: "Remove",
+                    danger: true,
+                    confirm: "Take {name} out of the pool? Refused while something uses it.",
+                    quiet: true,
+                    on_done: move |_| on_changed.call(()),
                 }
             }
         }

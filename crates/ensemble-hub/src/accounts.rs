@@ -352,8 +352,7 @@ impl WithPool for HubContext {
                     .flatten()
                     .map(move |m| Found {
                         id: format!("{provider}:{}", m["id"].as_str().unwrap_or_default()),
-                        kind: serde_json::from_value(m["kind"].clone())
-                            .unwrap_or(ModelKind::Unknown),
+                        kind: serde_json::from_value(m["kind"].clone()).ok(),
                     })
             })
             .collect())

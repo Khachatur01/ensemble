@@ -147,7 +147,7 @@ fn trailing_slashes_are_normalised_away() {
 // The hub's settings
 // ---------------------------------------------------------------------------
 
-/// An LLM of the pool, as a test turns it on.
+/// An LLM of the pool, as a test adds it.
 fn llm() -> ModelKind {
     ModelKind::Llm {
         tier: Tier::Medium,
@@ -171,7 +171,7 @@ fn server(port: u16) -> ProviderSetting {
 fn hub_settings() -> HubSettings {
     let mut hub = HubSettings::starting("Ana");
     hub.ann_pool.providers.insert("local".into(), server(1));
-    hub.ann_pool.turn_on("local", "small", llm());
+    hub.ann_pool.add("local", "small", llm());
     hub.distill.candidates = vec![ModelSetting {
         provider: "local".into(),
         model: "small".into(),
@@ -234,7 +234,7 @@ fn a_hub_names_every_problem_of_its_settings() {
 fn a_hub_uses_only_a_model_of_its_pool_that_is_on_and_of_the_kind_it_needs() {
     let mut hub = hub_settings();
     hub.ann_pool
-        .turn_on("local", "nomic", ModelKind::Embedding { dimensions: 8 });
+        .add("local", "nomic", ModelKind::Embedding { dimensions: 8 });
     hub.embed = Some(EmbedSetting {
         provider: "local".into(),
         model: "nomic".into(),
@@ -261,14 +261,6 @@ fn a_hub_uses_only_a_model_of_its_pool_that_is_on_and_of_the_kind_it_needs() {
         provider: "local".into(),
         model: "nomic".into(),
     });
-    hub.ann_pool.models.push(PoolModel {
-        provider: "local".into(),
-        id: "new".into(),
-        kind: ModelKind::Unknown,
-        on: false,
-        missing: false,
-        shared: false,
-    });
     hub.distill.candidates.push(ModelSetting {
         provider: "local".into(),
         model: "new".into(),
@@ -278,14 +270,14 @@ fn a_hub_uses_only_a_model_of_its_pool_that_is_on_and_of_the_kind_it_needs() {
         "embed: local:small is not an embedding model: it is llm, medium",
         "must be from 0 to 1",
         "distill.try[1]: local:nomic is not an LLM: it is embedding, 8 dimensions",
-        "distill.try[2]: local:new is off; `model on local:new` turns it on",
+        "distill.try[2]: local:new is not a model of the ANN pool; `model add local:new` adds it",
     ] {
         assert!(said.contains(wanted), "{wanted}: {said}");
     }
 }
 
 #[test]
-fn a_model_of_the_pool_is_known_on_and_of_one_of_its_sources_once() {
+fn a_model_of_the_pool_is_of_one_of_its_providers_once() {
     let mut hub = hub_settings();
     hub.ann_pool.providers.insert(
         "busy".into(),
@@ -296,16 +288,13 @@ fn a_model_of_the_pool_is_known_on_and_of_one_of_its_sources_once() {
             max_concurrent: 0,
         },
     );
-    let unknown = |provider: &str, id: &str, on| PoolModel {
-        provider: provider.into(),
-        id: id.into(),
-        kind: ModelKind::Unknown,
-        on,
+    hub.ann_pool.models.push(PoolModel {
+        provider: "gone".into(),
+        id: "x".into(),
+        kind: llm(),
         missing: false,
         shared: false,
-    };
-    hub.ann_pool.models.push(unknown("local", "odd", true));
-    hub.ann_pool.models.push(unknown("gone", "x", false));
+    });
     hub.ann_pool.models.push(PoolModel {
         shared: true,
         ..hub.ann_pool.models[0].clone()
@@ -313,7 +302,6 @@ fn a_model_of_the_pool_is_known_on_and_of_one_of_its_sources_once() {
     let said = hub_problems(&hub);
     for wanted in [
         "ann_pool.providers.busy: `max_concurrent` must be greater than 0",
-        "ann_pool.models.local:odd: is on, and what it is is not known",
         "ann_pool.models.gone:x: there is no provider 'gone'",
         "ann_pool.models.local:small: is listed twice",
         "ann_pool.models.local:small: a hub shares no model",
@@ -393,7 +381,7 @@ fn a_hub_reaches_the_models_a_runner_shares_as_that_runner_names_them() {
             runner: "ana/gpu-box".into(),
         },
     );
-    hub.ann_pool.turn_on("gpu", "local:big", llm());
+    hub.ann_pool.add("gpu", "local:big", llm());
     hub.distill.candidates.push(ModelSetting {
         provider: "gpu".into(),
         model: "local:big".into(),
@@ -442,7 +430,6 @@ fn settings_are_written_as_json_and_an_unknown_one_is_refused() {
             "provider": "local",
             "id": "small",
             "kind": { "type": "llm", "tier": "medium", "context_window": null, "tools": null },
-            "on": true,
             "missing": false,
             "shared": false,
         })
@@ -496,32 +483,65 @@ fn a_new_runner_works_in_its_workspace_and_loads() {
 }
 
 #[test]
-fn a_new_runner_has_one_harness_of_each_kind_each_off_and_its_runs_limited() {
+fn a_new_runner_has_no_harness_and_one_added_is_checked() {
     let r = runner_with(|_| {}).unwrap();
-    let each = r.harnesses.each();
+    assert!(r.harnesses.each().is_empty(), "only what a person adds");
+    let cli = |command: &str, max_seconds, max_concurrent| CliHarness {
+        missing: false,
+        command: command.into(),
+        max_seconds,
+        max_steps: 50,
+        max_concurrent,
+        models: Vec::new(),
+    };
+    let r = runner_with(|r| {
+        r.harnesses.claude_code = Some(CliHarness {
+            models: vec![HarnessModel {
+                id: "sonnet".into(),
+                tier: Tier::Strong,
+            }],
+            ..cli("claude", 1800, 1)
+        });
+        r.harnesses.builtin = Some(BuiltinHarness {
+            max_seconds: 1800,
+            max_steps: 50,
+            max_concurrent: 1,
+            max_tokens: 4000,
+        });
+    })
+    .unwrap();
     assert_eq!(
-        each.iter().map(|h| h.kind).collect::<Vec<_>>(),
-        HarnessKind::ALL
-    );
-    assert!(each.iter().all(|h| !h.on), "every harness is off");
-    assert_eq!(
-        each.iter()
-            .map(|h| h.command.as_deref())
+        r.harnesses
+            .each()
+            .iter()
+            .map(|h| (h.kind, h.command.as_deref()))
             .collect::<Vec<_>>(),
-        [Some("claude"), Some("codex"), Some("opencode"), None],
+        [
+            (HarnessKind::ClaudeCode, Some("claude")),
+            (HarnessKind::Builtin, None)
+        ],
         "builtin runs no program"
     );
-    assert!(
-        each.iter().all(|h| h.max_concurrent == 1),
-        "one run at a time"
+    assert_eq!(
+        r.harnesses.get(HarnessKind::Builtin).unwrap().max_tokens,
+        Some(4000)
     );
-    assert_eq!(r.harnesses.get(HarnessKind::Builtin).max_tokens, Some(4000));
     let said = runner_with(|r| {
-        r.harnesses.codex.max_seconds = 0;
-        r.harnesses.builtin.max_steps = 0;
-        r.harnesses.builtin.max_tokens = 0;
-        r.harnesses.claude_code.max_concurrent = 0;
-        r.harnesses.opencode.command = " ".into();
+        r.harnesses.codex = Some(cli("codex", 0, 1));
+        r.harnesses.builtin = Some(BuiltinHarness {
+            max_seconds: 1800,
+            max_steps: 0,
+            max_concurrent: 1,
+            max_tokens: 0,
+        });
+        r.harnesses.claude_code = Some(cli("claude", 1800, 0));
+        r.harnesses.opencode = Some(CliHarness {
+            models: vec![HarnessModel {
+                id: "x".into(),
+                tier: Tier::Small,
+            }],
+            ..cli(" ", 1800, 1)
+        });
     })
     .unwrap_err()
     .to_string();
@@ -543,6 +563,12 @@ fn a_new_runner_has_one_harness_of_each_kind_each_off_and_its_runs_limited() {
         said.contains("harnesses.opencode: `command` is empty"),
         "{said}"
     );
+    assert!(
+        said.contains(
+            "harnesses.opencode: drives the LLMs of the ANN pool, and has no models of its own"
+        ),
+        "{said}"
+    );
 }
 
 #[test]
@@ -560,9 +586,9 @@ fn a_runner_shares_models_of_its_openai_compatible_servers_and_reaches_others_th
         r.ann_pool.providers.insert("local".into(), server(1));
         r.ann_pool.providers.insert("claude".into(), claude.clone());
         r.ann_pool.providers.insert("gpu".into(), gpu.clone());
-        r.ann_pool.turn_on("local", "small", llm());
-        r.ann_pool.turn_on("local", "other", llm());
-        r.ann_pool.turn_on("claude", "haiku", llm());
+        r.ann_pool.add("local", "small", llm());
+        r.ann_pool.add("local", "other", llm());
+        r.ann_pool.add("claude", "haiku", llm());
         r.ann_pool.model_mut("local", "small").unwrap().shared = true;
     };
     let r = runner_with(|r| {
@@ -591,14 +617,11 @@ fn a_runner_shares_models_of_its_openai_compatible_servers_and_reaches_others_th
     let said = runner_with(|r| {
         pool(r);
         r.ann_pool.model_mut("claude", "haiku").unwrap().shared = true;
-        r.ann_pool.model_mut("local", "other").unwrap().on = false;
-        r.ann_pool.model_mut("local", "other").unwrap().shared = true;
     })
     .unwrap_err()
     .to_string();
     for wanted in [
         "ann_pool.models.claude:haiku: is shared, and only a model of an openai-compatible-api provider of the runner's own may be",
-        "ann_pool.models.local:other: is shared, and off",
         "ann_pool: a runner shares its models through a hub, and it names no hub",
         "ann_pool: a provider that is another runner is reached through a hub",
     ] {

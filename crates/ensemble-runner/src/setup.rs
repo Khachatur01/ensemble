@@ -82,8 +82,8 @@ pub fn logged_in(kind: HarnessKind) -> Option<bool> {
     }
 }
 
-/// Mark each CLI harness of `harnesses` found or missing, as its command is
-/// now; say which changed.
+/// Mark each CLI harness a person added to `harnesses` found or missing, as
+/// its command is now; say which changed.
 pub fn look_for(harnesses: &mut HarnessesSetting) -> Vec<String> {
     let mut said = Vec::new();
     for kind in HarnessKind::ALL {
@@ -142,12 +142,22 @@ pub fn detect(probe: bool) -> Detected {
 /// The workspace `setup` offers: a folder in the home directory.
 pub const WORKSPACE: &str = "~/ensemble";
 
+/// The CLIs of harnesses installed on this computer that no harness of
+/// `harnesses` is yet: what a person may add.
+pub fn not_added(harnesses: &HarnessesSetting) -> Vec<HarnessKind> {
+    HarnessKind::ALL
+        .into_iter()
+        .filter(|kind| {
+            kind.program().is_some_and(on_path) && !harnesses.each().iter().any(|h| h.kind == *kind)
+        })
+        .collect()
+}
+
 /// The settings of a new runner: `name`, working for its owner in
-/// `workspace`, offering nothing, with the harnesses it finds, each off,
-/// once they load.
+/// `workspace`, offering nothing, with no harness and an empty pool, once
+/// they load.
 pub fn starting(name: &str, workspace: &str) -> Result<ensemble_config::RunnerSettings, String> {
-    let mut settings = ensemble_config::RunnerSettings::starting(name.trim(), workspace.trim());
-    look_for(&mut settings.harnesses);
+    let settings = ensemble_config::RunnerSettings::starting(name.trim(), workspace.trim());
     settings
         .resolve(
             &ensemble_core::state::RunnerDir::new(""),
@@ -205,44 +215,45 @@ impl Finding {
 /// to run a task on, and whether its `workspace` holds a project.
 pub fn structure(runner: &ensemble_config::Runner, means: &Means) -> Vec<Finding> {
     let mut out = Vec::new();
-    let on: Vec<_> = runner
-        .harnesses
-        .each()
-        .into_iter()
-        .filter(|h| h.on)
-        .collect();
-    for h in &on {
+    let added = runner.harnesses.each();
+    for h in &added {
         let name = h.kind.as_str();
         if h.command.as_deref().is_some_and(|c| !found(c)) {
             out.push(Finding::bad(
                 format!(
-                    "{name} is on, and `{}` is not found",
+                    "{name}: `{}` is not found",
                     h.command.as_deref().unwrap_or_default()
                 ),
                 format!(
-                    "install it, or name it with `ensemble-runner harness set {name} --command <path>`, or `ensemble-runner harness off {name}`"
+                    "install it, or name it with `ensemble-runner harness set {name} --command <path>`, or `ensemble-runner harness remove {name}`"
                 ),
             ));
         } else if logged_in(h.kind) == Some(false) {
             out.push(Finding::bad(
-                format!("{name} is on, and its CLI is not logged in"),
+                format!("{name}: its CLI is not logged in"),
                 format!(
-                    "log in with `{}`, or `ensemble-runner harness off {name}`",
+                    "log in with `{}`, or `ensemble-runner harness remove {name}`",
                     h.command.as_deref().unwrap_or_default()
                 ),
             ));
         }
+        if h.kind.has_own_models() && h.models.is_empty() {
+            out.push(Finding::bad(
+                format!("{name} drives no model: none of its vendor's is added to it"),
+                format!("add one with `ensemble-runner harness add-model {name} <model>`"),
+            ));
+        }
     }
     let pairs = means.pairs();
-    if pairs.is_empty() && on.is_empty() {
+    if pairs.is_empty() && added.is_empty() {
         out.push(Finding::note(
-            "the runner runs no task yet: every harness is off",
-            "turn one on with `ensemble-runner harness on <harness>`, and, for opencode or builtin, a model of the pool with `ensemble-runner model on <provider>:<model>`",
+            "the runner runs no task yet: it has no harness",
+            "add one with `ensemble-runner harness add <harness>`, and, for opencode or builtin, a model of the pool with `ensemble-runner model add <provider>:<model>`",
         ));
     } else if pairs.is_empty() {
         out.push(Finding::bad(
-            "the runner runs no task: no harness is on with a model it can drive",
-            "turn a harness on with `ensemble-runner harness on <harness>`, and, for opencode or builtin, a model of the pool with `ensemble-runner model on <provider>:<model>`",
+            "the runner runs no task: no harness has a model it can drive",
+            "add a model of the pool with `ensemble-runner model add <provider>:<model>` for opencode or builtin, or one of its vendor's with `ensemble-runner harness add-model <harness> <model>` for claude-code or codex",
         ));
     } else {
         out.push(Finding::ok(format!(
@@ -274,11 +285,11 @@ pub fn structure(runner: &ensemble_config::Runner, means: &Means) -> Vec<Finding
     out
 }
 
-/// Whether each provider of the pool with a model on answers and serves
+/// Whether each provider of the pool with a model added answers and serves
 /// those models, as findings.
 pub fn providers(pool: &ensemble_config::AnnPool) -> Vec<Finding> {
     let mut wanted: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
-    for m in pool.models.iter().filter(|m| m.on) {
+    for m in &pool.models {
         wanted.entry(&m.provider).or_default().push(&m.id);
     }
     let mut out = Vec::new();
@@ -298,7 +309,7 @@ pub fn providers(pool: &ensemble_config::AnnPool) -> Vec<Finding> {
                     out.push(Finding::bad(
                         format!("{name} does not serve {}", gone.join(", ")),
                         format!(
-                            "`ensemble-runner provider refresh {name}`, then turn on a model it serves"
+                            "`ensemble-runner provider models {name}` lists what it serves; `ensemble-runner model remove` takes out what it no longer does"
                         ),
                     ));
                 }
@@ -342,23 +353,29 @@ mod tests {
     #[test]
     fn a_runner_with_nothing_to_run_a_task_on_is_told_how_to_fix_it() {
         let mut settings = ensemble_config::RunnerSettings::starting("desk", "/nowhere");
-        settings.harnesses.codex.on = true;
-        settings.harnesses.codex.command = "/nonexistent/codex".into();
+        settings.harnesses.codex = Some(ensemble_config::CliHarness {
+            missing: true,
+            command: "/nonexistent/codex".into(),
+            max_seconds: 60,
+            max_steps: 5,
+            max_concurrent: 1,
+            models: Vec::new(),
+        });
         let runner = settings
             .resolve(&ensemble_core::state::RunnerDir::new(""), &BTreeMap::new())
             .unwrap();
-        let means = Means::new(Vec::new(), runner.llm.clone(), Default::default(), |_| {
-            Vec::new()
-        });
+        let means = Means::new(Vec::new(), runner.llm.clone(), Default::default());
         let found = structure(&runner, &means);
         let said: Vec<&str> = found.iter().map(|f| f.what.as_str()).collect();
         assert!(
-            said[0].starts_with("codex is on, and `/nonexistent/codex` is not found"),
+            said[0].starts_with("codex: `/nonexistent/codex` is not found"),
             "{said:?}"
         );
         assert!(
-            said.contains(&"the runner runs no task: no harness is on with a model it can drive")
+            said.contains(&"codex drives no model: none of its vendor's is added to it"),
+            "{said:?}"
         );
+        assert!(said.contains(&"the runner runs no task: no harness has a model it can drive"));
         assert!(
             found
                 .iter()

@@ -403,18 +403,11 @@ mod tests {
             context_window: Some(32768),
             tools: Some(false),
         };
-        pool.turn_on("local", "small", llm(Tier::Small));
-        pool.turn_on("local", "nomic", ModelKind::Embedding { dimensions: 768 });
-        pool.turn_on("gpu", "local:big", llm(Tier::Strong));
-        pool.turn_on("claude", "haiku", llm(Tier::Medium));
-        pool.models.push(ensemble_config::PoolModel {
-            provider: "local".into(),
-            id: "unasked".into(),
-            kind: ModelKind::Unknown,
-            on: false,
-            missing: true,
-            shared: false,
-        });
+        pool.add("local", "small", llm(Tier::Small));
+        pool.add("local", "nomic", ModelKind::Embedding { dimensions: 768 });
+        pool.add("gpu", "local:big", llm(Tier::Strong));
+        pool.add("claude", "haiku", llm(Tier::Medium));
+        pool.model_mut("local", "nomic").unwrap().missing = true;
         // Kept in the order of their providers and ids.
         pool.models
             .sort_by(|a, b| (&a.provider, &a.id).cmp(&(&b.provider, &b.id)));

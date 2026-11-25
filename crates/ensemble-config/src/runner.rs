@@ -9,7 +9,7 @@
 //! the providers its harnesses run on, its own and other runners it
 //! reaches through the hub, the models they serve, and which of its own it
 //! shares through the hub. Its harnesses are the programs that drive an LLM
-//! to work in a repository, each off until a person turns it on (`harness`).
+//! to work in a repository, those a person added (`harness`).
 //! A task runs on a harness and an LLM the picker chooses of them.
 
 use super::ann::AnnPoolSetting;
@@ -60,14 +60,14 @@ pub struct RunnerSettings {
 
 impl RunnerSettings {
     /// The settings a new runner starts with: `name`, working in `workspace`,
-    /// with no hub, no provider and every harness off.
+    /// with no hub, no provider and no harness.
     pub fn starting(name: &str, workspace: &str) -> Self {
         RunnerSettings {
             name: name.to_string(),
             workspace: workspace.to_string(),
             hub: None,
             ann_pool: AnnPoolSetting::default(),
-            harnesses: HarnessesSetting::starting(),
+            harnesses: HarnessesSetting::default(),
         }
     }
 

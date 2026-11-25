@@ -85,21 +85,21 @@ impl Scratch {
         dir
     }
 
-    /// The runner with its OpenCode harness on, run as `command`, two runs at
-    /// once; its other harnesses and its pool as they were.
+    /// The runner with its OpenCode harness added, run as `command`, two
+    /// runs at once; its other harnesses and its pool as they were.
     fn on_opencode(&self, command: &str) -> PathBuf {
         let dir = self.runner();
         let mut runner = read_runner(&dir);
         runner["harnesses"]["opencode"] = json!({
-            "on": true, "missing": false, "command": command,
-            "max_seconds": 1800, "max_steps": 30, "max_concurrent": 2,
+            "missing": false, "command": command,
+            "max_seconds": 1800, "max_steps": 30, "max_concurrent": 2, "models": [],
         });
         write_runner(&dir, runner);
         dir
     }
 
-    /// The runner `desk` with `openai-local` at `url`, its LLMs on, its
-    /// harnesses as they were.
+    /// The runner `desk` with `openai-local` at `url` and two of its LLMs
+    /// added, its harnesses as they were.
     fn local_provider(&self, url: &str) -> PathBuf {
         self.runner_with(local_provider(url))
     }
@@ -206,52 +206,43 @@ fn runner_doc(name: &str, pool: Value) -> Value {
     })
 }
 
-/// A runner's harnesses as a new one starts with them: each off, and each
-/// CLI missing until it is looked for.
+/// A runner's harnesses as a new one starts with them: none.
 fn harnesses() -> Value {
-    let cli = |command: &str| json!({ "on": false, "missing": true, "command": command, "max_seconds": 1800, "max_steps": 50, "max_concurrent": 1 });
-    json!({
-        "claude_code": cli("claude"),
-        "codex": cli("codex"),
-        "opencode": cli("opencode"),
-        "builtin": { "on": false, "max_seconds": 1800, "max_steps": 50, "max_concurrent": 1, "max_tokens": 4000 },
-    })
+    json!({ "claude_code": null, "codex": null, "opencode": null, "builtin": null })
 }
 
-/// An ANN pool of `providers`, by name, with `on` turned on, each an LLM as
-/// `<provider>:<id>`, sharing none.
-fn pool(providers: Value, on: &[&str]) -> Value {
-    let mut models: Vec<Value> = on
+/// An ANN pool of `providers`, by name, with the models `added`, each an LLM
+/// as `<provider>:<id>`, sharing none.
+fn pool(providers: Value, added: &[&str]) -> Value {
+    let mut models: Vec<Value> = added
         .iter()
         .map(|name| {
             let (provider, id) = name.split_once(':').unwrap();
-            model_on(provider, id)
+            model_added(provider, id)
         })
         .collect();
     models.sort_by_key(|m| (m["provider"].to_string(), m["id"].to_string()));
     json!({ "providers": providers, "models": models })
 }
 
-/// The model `id` of `provider`, a medium LLM that is on, of a known context
+/// The model `id` of `provider`, a medium LLM added, of a known context
 /// window.
-fn model_on(provider: &str, id: &str) -> Value {
+fn model_added(provider: &str, id: &str) -> Value {
     json!({
         "provider": provider,
         "id": id,
         "kind": { "type": "llm", "tier": "medium", "context_window": 32768, "tools": null },
-        "on": true,
         "missing": false,
         "shared": false,
     })
 }
 
-/// The model `id` of `provider`, an embedding model that is on.
-fn embedding_on(provider: &str, id: &str) -> Value {
+/// The model `id` of `provider`, an embedding model added.
+fn embedding_added(provider: &str, id: &str) -> Value {
     json!({
         "provider": provider,
         "id": id,
         "kind": { "type": "embedding", "dimensions": 768 },
-        "on": true,
         "missing": false,
         "shared": false,
     })
@@ -288,7 +279,7 @@ fn write_runner(dir: &Path, settings: Value) {
         .unwrap();
 }
 
-/// A pool of `openai-local` at `url`, with two of its models turned on.
+/// A pool of `openai-local` at `url`, with two of its models added.
 fn local_provider(url: &str) -> Value {
     pool(
         json!({ "openai-local": {
@@ -486,8 +477,8 @@ fn setup_writes_the_runner_and_says_what_it_runs_tasks_on() {
     );
     assert!(
         said.contains("holds no git repository")
-            && said.contains("every harness is off")
-            && said.contains("ensemble-runner harness on")
+            && said.contains("it has no harness")
+            && said.contains("ensemble-runner harness add")
             && said.contains("Done.")
             && said.contains("ensemble-runner serve"),
         "{said}"
@@ -544,7 +535,7 @@ fn doctor_says_what_is_wrong_and_how_to_fix_it() {
     assert!(!out.status.success());
     let text = stdout_of(&out);
     assert!(
-        text.contains("problem: opencode is on, and `/nonexistent/opencode` is not found"),
+        text.contains("problem: opencode: `/nonexistent/opencode` is not found"),
         "{text}"
     );
     assert!(text.contains("fix: install it"), "{text}");
@@ -879,9 +870,9 @@ fn hub_init_writes_a_hub_and_its_vault_and_check_says_which_model_distills() {
     settings["ann_pool"] = json!({
         "providers": { "down": openai(NOWHERE, 5), "up": openai(&url, 5) },
         "models": [
-            model_on("down", "small"),
-            embedding_on("up", "nomic-embed-text"),
-            model_on("up", "small"),
+            model_added("down", "small"),
+            embedding_added("up", "nomic-embed-text"),
+            model_added("up", "small"),
         ],
     });
     settings["distill"]["try"] = json!([
@@ -1112,8 +1103,8 @@ fn hub_server_of(scratch: &Scratch) -> PathBuf {
             "max_concurrent": 4,
         } },
         "models": [
-            embedding_on("central", "nomic-embed-text"),
-            model_on("central", "qwen3.5-72b"),
+            embedding_added("central", "nomic-embed-text"),
+            model_added("central", "qwen3.5-72b"),
         ],
     });
     s["distill"]["try"] = central.clone();
@@ -1791,7 +1782,7 @@ fn a_model_one_runner_shares_serves_another_runners_harness_and_the_hub_through_
     settings["ann_pool"]["models"]
         .as_array_mut()
         .unwrap()
-        .insert(0, model_on("gpu", "local:small"));
+        .insert(0, model_added("gpu", "local:small"));
     let gpu = json!([{ "provider": "gpu", "model": "local:small" }]);
     settings["distill"]["try"] = gpu.clone();
     settings["source_filter"]["models"]["try"] = gpu;
@@ -1836,7 +1827,9 @@ fn a_model_one_runner_shares_serves_another_runners_harness_and_the_hub_through_
         ),
     );
     laptop["hub"] = json!(url);
-    laptop["harnesses"]["builtin"]["on"] = json!(true);
+    laptop["harnesses"]["builtin"] = json!({
+        "max_seconds": 1800, "max_steps": 50, "max_concurrent": 1, "max_tokens": 4000,
+    });
     login("laptop", &laptop);
     let _laptop = serve_runner(&s, &url, "laptop", &laptop);
     let said = mcp_tool(
@@ -1885,8 +1878,8 @@ fn machine_runner(scratch: &Scratch, machine: &str, url: &str, cli: &str) -> Ser
     let mut settings = runner_doc(machine, local_provider(NOWHERE));
     settings["hub"] = json!(url);
     settings["harnesses"]["opencode"] = json!({
-        "on": true, "missing": false, "command": cli,
-        "max_seconds": 1800, "max_steps": 30, "max_concurrent": 1,
+        "missing": false, "command": cli,
+        "max_seconds": 1800, "max_steps": 30, "max_concurrent": 1, "models": [],
     });
     let mut runner = on_machine(scratch, machine, &settings)
         .args(["serve"])
@@ -2283,7 +2276,7 @@ fn settings_are_changed_from_the_command_line_and_each_change_is_in_the_history(
 }
 
 #[test]
-fn a_runners_harnesses_are_found_turned_on_and_changed_from_the_command_line() {
+fn a_runners_harnesses_are_added_given_models_and_changed_from_the_command_line() {
     use std::os::unix::fs::PermissionsExt;
     let s = Scratch::new("harnesses");
     let runner = s.runner();
@@ -2302,68 +2295,95 @@ fn a_runners_harnesses_are_found_turned_on_and_changed_from_the_command_line() {
             .unwrap()
     };
     let harness = |kind: &str| read_runner(&runner)["harnesses"][kind].clone();
+    let limits = [
+        "--max-seconds",
+        "1800",
+        "--max-steps",
+        "50",
+        "--max-concurrent",
+        "1",
+    ];
 
-    let out = run(&["harness", "refresh"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(
-        stdout_of(&out).contains("claude-code is found"),
-        "{}",
-        stdout_of(&out)
-    );
-    assert_eq!(harness("claude_code")["missing"], false);
-    assert_eq!(harness("codex")["missing"], true);
+    // Nothing is a harness until it is added; what is installed is said.
     let list = stdout_of(&run(&["harness", "list"]));
     assert!(
-        list.contains("claude-code  off")
-            && list.contains("claude, not logged in")
-            && list.contains("its own models: haiku (medium), sonnet (strong), opus (strong)"),
+        list.contains("no harness yet") && list.contains("installed, not added: claude-code"),
         "{list}"
     );
-    assert!(list.contains("codex        missing"), "{list}");
+    assert_eq!(harness("claude_code"), Value::Null);
 
-    // Found, it is turned on; missing, it is refused until it is found.
-    let out = run(&["harness", "on", "claude-code"]);
+    // Found, it is added; one not found, or with no limits, is refused.
+    let out = run(&[&["harness", "add", "claude-code"][..], &limits].concat());
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(harness("claude_code")["on"], true);
-    let out = run(&["harness", "on", "codex"]);
+    assert_eq!(harness("claude_code")["command"], "claude");
+    assert_eq!(harness("claude_code")["models"], json!([]));
+    let out = run(&[&["harness", "add", "codex"][..], &limits].concat());
     assert!(!out.status.success());
     assert!(
-        stderr_of(&out).contains("codex is missing"),
+        stderr_of(&out).contains("`codex` is not found"),
         "{}",
         stderr_of(&out)
     );
-    assert_eq!(harness("codex")["on"], false);
-    let out = run(&["harness", "on", "builtin"]);
+    assert_eq!(harness("codex"), Value::Null);
+    let out = run(&["harness", "add", "builtin", "--max-seconds", "600"]);
+    assert!(!out.status.success(), "its limits are needed");
+    let out = run(&[
+        &["harness", "add", "builtin"][..],
+        &limits,
+        &["--max-tokens", "4000"],
+    ]
+    .concat());
     assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(harness("builtin")["max_tokens"], 4000);
+
+    // Claude Code drives only the models of its vendor's added to it.
+    let list = stdout_of(&run(&["harness", "list"]));
+    assert!(
+        list.contains("claude-code  found")
+            && list.contains("claude, not logged in")
+            && list.contains("no model yet"),
+        "{list}"
+    );
+    let out = run(&["harness", "add-model", "claude-code", "sonnet"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let out = run(&[
+        "harness",
+        "add-model",
+        "claude-code",
+        "mine",
+        "--tier",
+        "small",
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(
+        harness("claude_code")["models"],
+        json!([{ "id": "mine", "tier": "small" }, { "id": "sonnet", "tier": "strong" }])
+    );
+    let out = run(&["harness", "remove-model", "claude-code", "mine"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let out = run(&["harness", "add-model", "builtin", "x"]);
+    assert!(!out.status.success(), "builtin drives the pool's LLMs");
 
     // A run's limits change; builtin runs no command, and nothing is not a
     // change.
-    let out = run(&[
-        "harness",
-        "set",
-        "codex",
-        "--command",
-        bin.to_str().unwrap(),
-        "--max-seconds",
-        "600",
-    ]);
+    let out = run(&["harness", "set", "claude-code", "--max-seconds", "600"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(harness("codex")["missing"], false);
-    assert_eq!(harness("codex")["max_seconds"], 600);
+    assert_eq!(harness("claude_code")["max_seconds"], 600);
     let out = run(&["harness", "set", "builtin", "--command", "x"]);
     assert!(!out.status.success());
-    let out = run(&["harness", "set", "opencode", "--max-steps", "0"]);
+    let out = run(&["harness", "set", "builtin", "--max-steps", "0"]);
     assert!(!out.status.success());
-    let out = run(&["harness", "off", "claude-code"]);
+    let out = run(&["harness", "remove", "claude-code"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(harness("claude_code")["on"], false);
+    assert_eq!(harness("claude_code"), Value::Null);
 
     let history = stdout_of(&run(&["settings", "history"]));
     for op in [
-        "harness.refresh",
-        "harness.on",
+        "harness.add",
+        "harness.add-model",
+        "harness.remove-model",
         "harness.set",
-        "harness.off",
+        "harness.remove",
     ] {
         assert!(history.contains(op), "{op}: {history}");
     }
@@ -2473,7 +2493,7 @@ fn hub_with_stdin(scratch: &Scratch, args: &[&str], stdin: &str) -> std::process
 }
 
 #[test]
-fn an_admin_adds_sources_and_their_keys_without_naming_a_variable_and_turns_models_on() {
+fn an_admin_adds_providers_and_their_keys_without_naming_a_variable_and_adds_models() {
     let s = Scratch::new("hub-providers");
     let hub = hub_server_of(&s);
     let yaml = || read_hub(&hub);
@@ -2504,7 +2524,7 @@ fn an_admin_adds_sources_and_their_keys_without_naming_a_variable_and_turns_mode
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stdout_of(&out).contains(
-            "added provider local, which serves local:small; they are off until you turn them on"
+            "added provider local, which serves local:small; add the ones to use, as `model add local:small`"
         ),
         "{}",
         stdout_of(&out)
@@ -2518,16 +2538,29 @@ fn an_admin_adds_sources_and_their_keys_without_naming_a_variable_and_turns_mode
 
     // A key, given as a secret, is kept sealed in the database under a name
     // of Ensemble's, by a master key only the hub's user may read.
-    // Its model is off until it is turned on, and what it is is asked then.
+    // None of its models is in the pool until it is added; what it is is
+    // asked then, and one it does not serve is refused.
     let models = stdout_of(&hub_with_stdin(&s, &["model", "list", "local"], ""));
     assert!(
-        models.contains("local:small  not known yet  (off)"),
+        models.contains("no model of local is in the pool"),
         "{models}"
     );
-    let out = hub_with_stdin(&s, &["model", "on", "local:small", "--tier", "small"], "");
+    let served = stdout_of(&hub_with_stdin(&s, &["provider", "models", "local"], ""));
+    assert!(
+        served.contains("local:small  what it is is not said"),
+        "{served}"
+    );
+    let out = hub_with_stdin(&s, &["model", "add", "local:nope"], "");
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("local does not serve nope"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = hub_with_stdin(&s, &["model", "add", "local:small", "--tier", "small"], "");
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stdout_of(&out).contains("local:small is on: llm, small"),
+        stdout_of(&out).contains("local:small is in the pool: llm, small"),
         "{}",
         stdout_of(&out)
     );
@@ -2557,7 +2590,7 @@ fn an_admin_adds_sources_and_their_keys_without_naming_a_variable_and_turns_mode
     let list = stdout_of(&hub_with_stdin(&s, &["provider", "list"], ""));
     assert!(
         list.contains("local  openai-compatible-api at")
-            && list.contains("key kept, 1 call(s) at once, 1 model(s), 1 on"),
+            && list.contains("key kept, 1 call(s) at once, 1 model(s) added"),
         "{list}"
     );
 
@@ -2672,12 +2705,12 @@ fn a_runners_owner_adds_providers_and_shares_their_models() {
     };
     let yaml = || read_runner(&runner_yaml);
 
-    // Nothing but the picker uses a runner's models: one is turned off as
+    // Nothing but the picker uses a runner's models: one is taken out as
     // asked.
-    let out = run(&["model", "off", "openai-local:small"]);
+    let out = run(&["model", "remove", "openai-local:small"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
 
-    // A model is shared through a hub, which it names, once it is on.
+    // A model is shared through a hub, which it names, once it is added.
     let mut named = read_runner(&runner_yaml);
     named["hub"] = json!("ws://127.0.0.1:1");
     write_runner(&runner_yaml, named);
@@ -2696,13 +2729,13 @@ fn a_runners_owner_adds_providers_and_shares_their_models() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let out = run(&["model", "share", "gpu:big"]);
     assert!(
-        stderr_of(&out).contains("gpu:big is off; turn it on first"),
+        stderr_of(&out).contains("there is no model 'gpu:big'"),
         "{}",
         stderr_of(&out)
     );
-    let out = run(&["model", "on", "gpu:big"]);
+    let out = run(&["model", "add", "gpu:big"]);
     assert!(
-        stdout_of(&out).contains("gpu:big is on: llm, medium"),
+        stdout_of(&out).contains("gpu:big is in the pool: llm, medium"),
         "it does not embed: {}{}",
         stdout_of(&out),
         stderr_of(&out)
@@ -2783,18 +2816,18 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
         ]);
     }
 
-    // Models are asked for by what they are, and checked: one that is off
+    // Models are asked for by what they are, and checked: one not added
     // is not used.
     let out = run(&["knowledge", "models", "local:gpt-5-mini"]);
     assert!(
-        stderr_of(&out).contains("local:gpt-5-mini is off; turn it on first"),
+        stderr_of(&out).contains("there is no model 'local:gpt-5-mini' in the hub's ANN pool"),
         "{}",
         stderr_of(&out)
     );
-    ok(&["model", "on", "local:gpt-5-mini"]);
-    let said = ok(&["model", "on", "vec:small"]);
+    ok(&["model", "add", "local:gpt-5-mini"]);
+    let said = ok(&["model", "add", "vec:small"]);
     assert!(
-        said.contains("vec:small is on: embedding, 2 dimensions"),
+        said.contains("vec:small is in the pool: embedding, 2 dimensions"),
         "{said}"
     );
     let said = ok(&[

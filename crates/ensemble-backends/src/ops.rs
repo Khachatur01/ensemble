@@ -1,8 +1,9 @@
 //! The operations on the ANN pool a hub or a runner keeps in its settings,
 //! for every interface to reach: its providers, `provider.list`, `provider.add`,
 //! `provider.remove`, `provider.test`, `provider.key` and `provider.refresh`, and
-//! the models they serve, `model.list`, `model.on`, `model.off` and
-//! `model.set`, and, for a runner, `model.share` and `model.unshare`.
+//! the models a person added of them, `model.list`, `model.add`,
+//! `model.remove` and `model.set`, and, for a runner, `model.share` and
+//! `model.unshare`; and what a provider serves now, `provider.models`.
 //!
 //! A person gives what a provider is and its key, never the name of a
 //! variable: the key is kept under a variable Ensemble names after the
@@ -12,12 +13,14 @@
 //! elsewhere already, such as a secrets manager that sets a variable, names
 //! that variable instead (`key_env`).
 //!
-//! A provider is asked which models it serves when it is added, on
-//! `provider.refresh`, and when the process starts ([`refresh_all`]), so a
-//! wrong address or key is said at once, and an answer that wants a key has
-//! an interface ask for it. A model it lists newly is kept off until a person
-//! turns it on; one it no longer lists is marked missing, never forgotten, so
-//! what was said of it comes back with it.
+//! Nothing a provider serves is in the pool until a person adds it: a model
+//! is added by its name, once its provider lists it, as what the provider
+//! says it is, which the person may correct. A provider is asked which
+//! models it serves when it is added, so a wrong address or key is said at
+//! once and an answer that wants a key has an interface ask for it; on
+//! `provider.refresh`, and when the process starts ([`refresh_all`]), it is
+//! asked again only to mark a model added that it no longer lists missing,
+//! never forgotten, and one it lists again no longer missing.
 
 use crate::models::{Found, discover, llm};
 use ensemble_config::ann::{RUNNER_PROVIDER, split_name, valid_runner_id};
@@ -140,7 +143,20 @@ const KEY_FIELDS: &[Field] = &[
 ];
 const LIST_MODELS: &[Field] =
     &[Field::text("provider", "The models of this provider alone.").positional()];
-const ON: &[Field] = &[MODEL, TIER];
+const ADD_MODEL: &[Field] = &[
+    MODEL,
+    TIER,
+    Field::new(
+        "context_window",
+        Kind::Number,
+        "Tokens of context its server runs it with, when the provider does not say.",
+    ),
+    Field::new(
+        "tools",
+        Kind::Choice(YES_NO),
+        "Whether it makes tool calls, when the provider does not say.",
+    ),
+];
 const ONE_MODEL: &[Field] = &[MODEL];
 const SET: &[Field] = &[
     MODEL,
@@ -197,9 +213,11 @@ struct ListModels {
 }
 
 #[derive(Deserialize, Serialize)]
-struct On {
+struct AddModel {
     model: String,
     tier: Option<String>,
+    context_window: Option<u32>,
+    tools: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -253,7 +271,7 @@ pub fn operations<C: WithPool + 'static>(side: Side, access: Access) -> Vec<Oper
         changing(
             spec(
                 "provider.add",
-                "Add a provider of models, once it answers: its key is kept for you, never written in the settings. Its models are off until you turn them on.",
+                "Add a provider of models, once it answers: its key is kept for you, never written in the settings. None of its models is in the pool until you add it.",
                 ADD,
             ),
             |c: &C, input: Add, change| add(c, input, change),
@@ -274,6 +292,14 @@ pub fn operations<C: WithPool + 'static>(side: Side, access: Access) -> Vec<Oper
             ),
             |c: &C, _: &Caller, input: SomeSource| test(c, input.name.as_deref()),
         ),
+        operation(
+            spec(
+                "provider.models",
+                "List what a provider serves now, and what each is as far as it says; nothing of it is kept, and a model is in the pool only once you add it.",
+                NAMED,
+            ),
+            |c: &C, _: &Caller, input: Named| served(c, &input.name),
+        ),
         changing(
             spec(
                 "provider.key",
@@ -285,7 +311,7 @@ pub fn operations<C: WithPool + 'static>(side: Side, access: Access) -> Vec<Oper
         changing(
             spec(
                 "provider.refresh",
-                "Ask the providers again which models they serve: a new one is kept off, one no longer served is marked missing.",
+                "Ask the providers again which models they serve: a model added that one no longer serves is marked missing. Nothing is added.",
                 SOME_SOURCE,
             ),
             |c: &C, input: SomeSource, change| refresh(c, input.name.as_deref(), change),
@@ -293,7 +319,7 @@ pub fn operations<C: WithPool + 'static>(side: Side, access: Access) -> Vec<Oper
         operation(
             spec(
                 "model.list",
-                "List the models of the ANN pool: what each is, and whether it is on.",
+                "List the models of the ANN pool, those you added: what each is, and whether its provider still serves it.",
                 LIST_MODELS,
             ),
             move |c: &C, _: &Caller, input: ListModels| {
@@ -302,19 +328,19 @@ pub fn operations<C: WithPool + 'static>(side: Side, access: Access) -> Vec<Oper
         ),
         changing(
             spec(
-                "model.on",
-                "Turn a model on, so it may be used; one whose provider did not say what it is is asked once.",
-                ON,
+                "model.add",
+                "Add a model a provider serves to the pool, as the provider says it is: an LLM or an embedding model. One whose provider does not say is asked once.",
+                ADD_MODEL,
             ),
-            |c: &C, input: On, change| turn_on(c, input, change),
+            |c: &C, input: AddModel, change| add_model(c, input, change),
         ),
         changing(
             spec(
-                "model.off",
-                "Turn a model off; refused while something uses it.",
+                "model.remove",
+                "Take a model out of the pool; refused while something uses it.",
                 ONE_MODEL,
             ),
-            |c: &C, input: OneModel, change| turn_off(c, &input.model, change),
+            |c: &C, input: OneModel, change| remove_model(c, &input.model, change),
         ),
         changing(
             spec(
@@ -354,8 +380,7 @@ fn list<C: WithPool>(c: &C, side: Side) -> Result<Value, Error> {
     let mut said = Vec::new();
     for (name, s) in &kept.providers {
         let models: Vec<&PoolModel> = kept.models.iter().filter(|m| m.provider == *name).collect();
-        let on = models.iter().filter(|m| m.on).count();
-        let counted = format!("{} model(s), {on} on", models.len());
+        let counted = format!("{} model(s) added", models.len());
         match s {
             ProviderSetting::Runner { runner } => {
                 said.push(format!(
@@ -366,7 +391,6 @@ fn list<C: WithPool>(c: &C, side: Side) -> Result<Value, Error> {
                     "type": RUNNER_PROVIDER,
                     "runner": runner,
                     "models": models.len(),
-                    "on": on,
                 }));
             }
             _ => {
@@ -408,7 +432,6 @@ fn list<C: WithPool>(c: &C, side: Side) -> Result<Value, Error> {
                     "key_env": env,
                     "max_concurrent": most,
                     "models": models.len(),
-                    "on": on,
                 }));
             }
         }
@@ -558,10 +581,8 @@ fn add<C: WithPool>(c: &C, input: Add, change: Change) -> Result<Value, Error> {
     if let Some((var, key)) = &keep {
         c.keep_key(var, Some(key))?;
     }
-    let models = found.clone().unwrap_or_default();
     let kept = c.change_pool(change, &mut |p| {
         p.providers.insert(name.clone(), setting.clone());
-        merge(p, &name, &models);
         Ok(())
     });
     let note = match kept {
@@ -573,11 +594,15 @@ fn add<C: WithPool>(c: &C, input: Add, change: Change) -> Result<Value, Error> {
             return Err(e);
         }
     };
-    let names: Vec<String> = models.iter().map(|m| format!("{name}:{}", m.id)).collect();
+    let names: Vec<String> = found
+        .iter()
+        .flatten()
+        .map(|m| format!("{name}:{}", m.id))
+        .collect();
     let serves = match &found {
         Some(_) if names.is_empty() => ", which serves no models yet".to_string(),
         Some(_) => format!(
-            ", which serves {}; they are off until you turn them on, as `model on {}`",
+            ", which serves {}; add the ones to use, as `model add {}`",
             listed(&names),
             names[0]
         ),
@@ -607,7 +632,9 @@ fn remove<C: WithPool>(c: &C, name: &str, change: Change) -> Result<Value, Error
     {
         c.keep_key(&var, None)?;
     }
-    Ok(json!({ "said": format!("removed provider {name}, with its models"), "note": note }))
+    Ok(
+        json!({ "said": format!("removed provider {name}, with the models added of it"), "note": note }),
+    )
 }
 
 fn test<C: WithPool>(c: &C, name: Option<&str>) -> Result<Value, Error> {
@@ -740,8 +767,8 @@ fn set_key<C: WithPool>(c: &C, input: SetKey, change: Change) -> Result<Value, E
 }
 
 /// Ask the providers (`name` alone, or every one) which models they serve,
-/// and keep what changed with `change`: a model listed newly, off; one no
-/// longer listed, missing.
+/// and keep what changed of the models added with `change`: one no longer
+/// listed, missing; one listed again, no longer missing.
 fn refresh<C: WithPool>(c: &C, name: Option<&str>, change: Change) -> Result<Value, Error> {
     let kept = c.kept_pool()?;
     if let Some(name) = name
@@ -771,25 +798,23 @@ fn refresh<C: WithPool>(c: &C, name: Option<&str>, change: Change) -> Result<Val
     let mut now = kept.clone();
     for (n, found) in &answers {
         let before = now.clone();
-        merge(&mut now, n, found);
-        let new = now
-            .models
-            .iter()
-            .filter(|m| m.provider == *n && before.model(n, &m.id).is_none())
-            .count();
-        let gone = now
-            .models
-            .iter()
-            .filter(|m| {
-                m.provider == *n && m.missing && !before.model(n, &m.id).is_some_and(|b| b.missing)
-            })
-            .count();
-        said.push(match (new, gone) {
+        mark(&mut now, n, found);
+        let changed = |gone: bool| {
+            now.models
+                .iter()
+                .filter(|m| {
+                    m.provider == *n
+                        && m.missing == gone
+                        && before.model(n, &m.id).is_some_and(|b| b.missing != gone)
+                })
+                .count()
+        };
+        said.push(match (changed(true), changed(false)) {
             (0, 0) => format!("{n}: no change"),
-            (new, 0) => format!("{n}: {new} new model(s), off until you turn them on"),
-            (0, gone) => format!("{n}: {gone} model(s) no longer served, marked missing"),
-            (new, gone) => format!(
-                "{n}: {new} new model(s), off until you turn them on; {gone} no longer served, marked missing"
+            (gone, 0) => format!("{n}: {gone} model(s) no longer served, marked missing"),
+            (0, back) => format!("{n}: {back} model(s) served again"),
+            (gone, back) => format!(
+                "{n}: {gone} model(s) no longer served, marked missing; {back} served again"
             ),
         });
     }
@@ -797,7 +822,7 @@ fn refresh<C: WithPool>(c: &C, name: Option<&str>, change: Change) -> Result<Val
         c.change_pool(change, &mut |p| {
             for (n, found) in &answers {
                 if p.providers.contains_key(n) {
-                    merge(p, n, found);
+                    mark(p, n, found);
                 }
             }
             Ok(())
@@ -820,39 +845,67 @@ pub fn refresh_all<C: WithPool>(c: &C) -> String {
     }
 }
 
-/// Keep in `pool` what `provider` answered it serves now: a model new to it,
-/// off; one it serves again, no longer missing, and known now if it was not;
-/// one it no longer serves, missing. The models stay in the order of their
-/// providers and ids.
-fn merge(pool: &mut AnnPoolSetting, provider: &str, found: &[Found]) {
-    for f in found {
-        match pool.model_mut(provider, &f.id) {
-            Some(m) => {
-                m.missing = false;
-                if m.kind == ModelKind::Unknown {
-                    m.kind = f.kind;
-                }
-            }
-            None => pool.models.push(PoolModel {
-                provider: provider.to_string(),
-                id: f.id.clone(),
-                kind: f.kind,
-                on: false,
-                missing: false,
-                shared: false,
-            }),
-        }
-    }
+/// Mark the models added of `provider` in `pool` as what it answered it
+/// serves now says: one it no longer lists, missing; one it lists, not. What
+/// a person said of a model stays as it is, and nothing is added.
+fn mark(pool: &mut AnnPoolSetting, provider: &str, found: &[Found]) {
     for m in pool.models.iter_mut().filter(|m| m.provider == provider) {
-        if !found.iter().any(|f| f.id == m.id) {
-            m.missing = true;
-        }
+        m.missing = !found.iter().any(|f| f.id == m.id);
     }
-    pool.models
-        .sort_by(|a, b| (&a.provider, &a.id).cmp(&(&b.provider, &b.id)));
 }
 
-/// Each model, or those of `provider`: what it is, and whether it is on.
+/// What the provider `name` serves now, as it answers: another runner's
+/// shared models, or what its server lists.
+fn serving<C: WithPool>(c: &C, kept: &AnnPoolSetting, name: &str) -> Result<Vec<Found>, Error> {
+    match kept.providers.get(name) {
+        Some(ProviderSetting::Runner { runner }) => c.shared_by(runner),
+        Some(_) => match c.pool()?.direct.get(name) {
+            Some(provider) => ask(provider, false),
+            None => Err(Error::new(
+                Code::Unavailable,
+                format!("{name} is not usable now"),
+            )),
+        },
+        None => Err(Error::not_found(format!("there is no provider '{name}'")).on("name")),
+    }
+}
+
+/// What the provider `name` serves now, each with what it is as far as it
+/// says and whether it is in the pool; nothing is kept.
+fn served<C: WithPool>(c: &C, name: &str) -> Result<Value, Error> {
+    let kept = c.kept_pool()?;
+    let found = serving(c, &kept, name)?;
+    let mut said = Vec::new();
+    let mut rows = Vec::new();
+    for f in &found {
+        let added = kept.model(name, &f.id).is_some();
+        let what = f
+            .kind
+            .map_or_else(|| "what it is is not said".to_string(), |k| k.describe());
+        said.push(format!(
+            "{name}:{}  {what}{}",
+            f.id,
+            if added { "  (in the pool)" } else { "" }
+        ));
+        let mut row = json!({
+            "name": format!("{name}:{}", f.id),
+            "id": f.id,
+            "type": f.kind.map(|k| k.type_id()),
+            "added": added,
+        });
+        if let Some(ModelKind::Llm { tier, .. }) = f.kind {
+            row["tier"] = json!(tier.as_str());
+        }
+        rows.push(row);
+    }
+    if said.is_empty() {
+        said.push(format!("{name} serves no models"));
+    }
+    Ok(json!({ "said": said.join("\n"), "models": rows }))
+}
+
+/// Each model added, or those of `provider`: what it is, and whether its
+/// provider still serves it.
 fn list_models<C: WithPool>(c: &C, side: Side, provider: Option<&str>) -> Result<Value, Error> {
     let kept = c.kept_pool()?;
     if let Some(s) = provider
@@ -867,25 +920,28 @@ fn list_models<C: WithPool>(c: &C, side: Side, provider: Option<&str>) -> Result
         .iter()
         .filter(|m| provider.is_none_or(|s| m.provider == s))
     {
-        let mut state = vec![if m.on { "on" } else { "off" }];
+        let mut state = Vec::new();
         if m.missing {
             state.push("missing");
         }
         if m.shared {
             state.push("shared through the hub");
         }
-        said.push(format!(
-            "{}  {}  ({})",
-            m.name(),
-            m.kind.describe(),
-            state.join(", ")
-        ));
+        said.push(if state.is_empty() {
+            format!("{}  {}", m.name(), m.kind.describe())
+        } else {
+            format!(
+                "{}  {}  ({})",
+                m.name(),
+                m.kind.describe(),
+                state.join(", ")
+            )
+        });
         let mut row = json!({
             "name": m.name(),
             "provider": m.provider,
             "id": m.id,
             "type": m.kind.type_id(),
-            "on": m.on,
             "missing": m.missing,
             "shared": m.shared,
         });
@@ -900,16 +956,18 @@ fn list_models<C: WithPool>(c: &C, side: Side, provider: Option<&str>) -> Result
                 row["tools"] = json!(tools);
             }
             ModelKind::Embedding { dimensions } => row["dimensions"] = json!(dimensions),
-            ModelKind::Unknown => {}
         }
         rows.push(row);
     }
     if said.is_empty() {
         said.push(match provider {
-            Some(s) => format!("{s} serves no models; `provider refresh {s}` asks it again"),
+            Some(s) => format!(
+                "no model of {s} is in the pool; `{p} provider models {s}` lists what it serves, and `{p} model add {s}:<model>` adds one",
+                p = side.program()
+            ),
             None => format!(
-                "no models yet; `{} provider add` adds a provider, and its models with it",
-                side.program()
+                "no models yet; `{p} provider add` adds a provider, and `{p} model add <provider>:<model>` a model it serves",
+                p = side.program()
             ),
         });
     }
@@ -927,7 +985,7 @@ fn model_of<'a>(pool: &'a AnnPoolSetting, given: &str) -> Result<&'a PoolModel, 
     pool.model(provider, id).ok_or_else(|| {
         Error::not_found(format!("there is no model '{provider}:{id}'"))
             .on("model")
-            .hint("`model list` lists them; `provider refresh` asks the providers again")
+            .hint("`model list` lists those in the pool; `model add` adds one")
     })
 }
 
@@ -942,86 +1000,130 @@ fn tier_of(given: Option<&str>) -> Result<Option<Tier>, Error> {
         .transpose()
 }
 
-fn turn_on<C: WithPool>(c: &C, input: On, change: Change) -> Result<Value, Error> {
-    let kept = c.kept_pool()?;
-    let model = model_of(&kept, &input.model)?.clone();
-    let tier = tier_of(input.tier.as_deref())?;
-    let mut kind = model.kind;
-    if kind == ModelKind::Unknown {
-        kind = asked_kind(c, &model)?;
+/// `yes` or `no`, as `field` takes it.
+fn yes_no(given: Option<&str>, field: &'static str) -> Result<Option<bool>, Error> {
+    match given.map(str::trim) {
+        None => Ok(None),
+        Some("yes") => Ok(Some(true)),
+        Some("no") => Ok(Some(false)),
+        Some(other) => Err(Error::invalid(format!("'{other}' must be yes or no")).on(field)),
     }
-    if let Some(t) = tier {
-        match &mut kind {
-            ModelKind::Llm { tier, .. } => *tier = t,
-            other => {
-                return Err(Error::invalid(format!(
-                    "{} is not an LLM: it is {}",
-                    model.name(),
-                    other.describe()
-                ))
-                .on("tier"));
+}
+
+fn add_model<C: WithPool>(c: &C, input: AddModel, change: Change) -> Result<Value, Error> {
+    let (provider, id) = split_name(&input.model).ok_or_else(|| {
+        Error::invalid(format!(
+            "'{}' must be <provider>:<model>, such as local:qwen3.5:9b",
+            input.model
+        ))
+        .on("model")
+    })?;
+    let kept = c.kept_pool()?;
+    if !kept.providers.contains_key(provider) {
+        return Err(
+            Error::not_found(format!("there is no provider '{provider}'"))
+                .on("model")
+                .hint("`provider add` adds one"),
+        );
+    }
+    let name = format!("{provider}:{id}");
+    if kept.model(provider, id).is_some() {
+        return Ok(json!({ "said": format!("{name} is in the pool already") }));
+    }
+    let tier = tier_of(input.tier.as_deref())?;
+    let tools = yes_no(input.tools.as_deref(), "tools")?;
+    if input.context_window == Some(0) {
+        return Err(Error::invalid("`context_window` must be greater than 0").on("context_window"));
+    }
+    let found = serving(c, &kept, provider)?;
+    let Some(said) = found.into_iter().find(|f| f.id == id) else {
+        return Err(Error::not_found(format!("{provider} does not serve {id}"))
+            .on("model")
+            .hint(format!("`provider models {provider}` lists what it serves")));
+    };
+    let mut kind = match said.kind {
+        Some(kind) => kind,
+        None => asked_kind(c, provider, id)?,
+    };
+    match &mut kind {
+        ModelKind::Llm {
+            tier: t,
+            context_window,
+            tools: makes_calls,
+        } => {
+            if let Some(given) = tier {
+                *t = given;
+            }
+            if input.context_window.is_some() {
+                *context_window = input.context_window;
+            }
+            if tools.is_some() {
+                *makes_calls = tools;
+            }
+        }
+        other => {
+            for (given, field) in [
+                (tier.is_some(), "tier"),
+                (input.context_window.is_some(), "context_window"),
+                (tools.is_some(), "tools"),
+            ] {
+                if given {
+                    return Err(Error::invalid(format!(
+                        "{name} is not an LLM: it is {}",
+                        other.describe()
+                    ))
+                    .on(field));
+                }
             }
         }
     }
-    if model.on && kind == model.kind {
-        return Ok(json!({ "said": format!("{} is on already", model.name()) }));
-    }
     let note = c.change_pool(change, &mut |p| {
-        if let Some(m) = p.model_mut(&model.provider, &model.id) {
-            m.kind = kind;
-            m.on = true;
-        }
+        p.add(provider, id, kind);
         Ok(())
     })?;
     Ok(json!({
-        "said": format!("{} is on: {}", model.name(), kind.describe()),
+        "said": format!("{name} is in the pool: {}", kind.describe()),
         "note": note,
     }))
 }
 
-/// What `model`, whose provider did not say, is: an embedding model when its
-/// provider embeds a text with it, else an LLM.
-fn asked_kind<C: WithPool>(c: &C, model: &PoolModel) -> Result<ModelKind, Error> {
+/// What the model `id` of `provider`, which did not say, is: an embedding
+/// model when the provider embeds a text with it, else an LLM.
+fn asked_kind<C: WithPool>(c: &C, provider: &str, id: &str) -> Result<ModelKind, Error> {
     let pool = c.pool()?;
-    let Some(provider) = pool.direct.get(&model.provider) else {
+    let Some(server) = pool.direct.get(provider) else {
         return Err(Error::new(
             Code::Unavailable,
             format!(
-                "what {} is is not known, and only the runner that shares it can ask",
-                model.name()
+                "what {provider}:{id} is is not said, and only the runner that shares it can ask"
             ),
         ));
     };
-    if matches!(provider.settings, BackendSettings::Anthropic { .. }) {
-        return Ok(llm(&model.id));
+    if matches!(server.settings, BackendSettings::Anthropic { .. }) {
+        return Ok(llm(id));
     }
     Ok(
-        match crate::embed::embed(provider, &model.id, &["check".to_string()]) {
+        match crate::embed::embed(server, id, &["check".to_string()]) {
             Ok(vectors) => match vectors.first().map(Vec::len) {
                 Some(n) if n > 0 => ModelKind::Embedding {
                     dimensions: u32::try_from(n).unwrap_or(u32::MAX),
                 },
-                _ => llm(&model.id),
+                _ => llm(id),
             },
-            Err(_) => llm(&model.id),
+            Err(_) => llm(id),
         },
     )
 }
 
-fn turn_off<C: WithPool>(c: &C, given: &str, change: Change) -> Result<Value, Error> {
+fn remove_model<C: WithPool>(c: &C, given: &str, change: Change) -> Result<Value, Error> {
     let kept = c.kept_pool()?;
     let model = model_of(&kept, given)?.clone();
-    if !model.on {
-        return Ok(json!({ "said": format!("{} is off already", model.name()) }));
-    }
     let note = c.change_pool(change, &mut |p| {
-        if let Some(m) = p.model_mut(&model.provider, &model.id) {
-            m.on = false;
-            m.shared = false;
-        }
+        p.models
+            .retain(|m| !(m.provider == model.provider && m.id == model.id));
         Ok(())
     })?;
-    Ok(json!({ "said": format!("{} is off", model.name()), "note": note }))
+    Ok(json!({ "said": format!("{} is out of the pool", model.name()), "note": note }))
 }
 
 fn set<C: WithPool>(c: &C, input: Set, change: Change) -> Result<Value, Error> {
@@ -1043,14 +1145,7 @@ fn set<C: WithPool>(c: &C, input: Set, change: Change) -> Result<Value, Error> {
     if input.context_window == Some(0) {
         return Err(Error::invalid("`context_window` must be greater than 0").on("context_window"));
     }
-    let tools_now = match input.tools.as_deref().map(str::trim) {
-        None => tools,
-        Some("yes") => Some(true),
-        Some("no") => Some(false),
-        Some(other) => {
-            return Err(Error::invalid(format!("'{other}' must be yes or no")).on("tools"));
-        }
-    };
+    let tools_now = yes_no(input.tools.as_deref(), "tools")?.or(tools);
     let kind = ModelKind::Llm {
         tier: tier_of(input.tier.as_deref())?.unwrap_or(tier),
         context_window: input.context_window.or(context_window),
@@ -1081,14 +1176,6 @@ fn share<C: WithPool>(c: &C, given: &str, on: bool, change: Change) -> Result<Va
             "is not shared"
         };
         return Ok(json!({ "said": format!("{} {state}", model.name()) }));
-    }
-    if on && !model.on {
-        return Err(Error::invalid(format!(
-            "{} is off; turn it on first with `model on {}`",
-            model.name(),
-            model.name()
-        ))
-        .on("model"));
     }
     if on
         && !matches!(
@@ -1229,41 +1316,34 @@ fn listed(models: &[String]) -> String {
 mod tests {
     use super::*;
 
-    fn found(id: &str, kind: ModelKind) -> Found {
+    fn found(id: &str) -> Found {
         Found {
             id: id.into(),
-            kind,
+            kind: None,
         }
     }
 
     #[test]
-    fn a_model_listed_newly_is_off_and_one_no_longer_listed_is_missing() {
+    fn a_model_no_longer_listed_is_missing_and_nothing_listed_is_added() {
         let mut pool = AnnPoolSetting::default();
         let small = ModelKind::Llm {
             tier: Tier::Small,
             context_window: None,
             tools: None,
         };
-        merge(
-            &mut pool,
-            "local",
-            &[found("b", small), found("a", ModelKind::Unknown)],
-        );
+        pool.add("local", "b", small);
+        mark(&mut pool, "local", &[found("a"), found("b")]);
         assert_eq!(
             pool.models.iter().map(PoolModel::name).collect::<Vec<_>>(),
-            ["local:a", "local:b"],
-            "in the order of their ids"
+            ["local:b"],
+            "only what a person added"
         );
-        assert!(pool.models.iter().all(|m| !m.on && !m.missing));
-        pool.model_mut("local", "b").unwrap().on = true;
-        // `b` is gone, `a` is known now.
-        let embedding = ModelKind::Embedding { dimensions: 8 };
-        merge(&mut pool, "local", &[found("a", embedding)]);
-        let b = pool.model("local", "b").unwrap();
-        assert!(b.missing && b.on, "missing, and on as it was");
-        assert_eq!(pool.model("local", "a").unwrap().kind, embedding);
+        assert!(!pool.models[0].missing);
+        // `b` is gone.
+        mark(&mut pool, "local", &[found("a")]);
+        assert!(pool.model("local", "b").unwrap().missing);
         // Back again, and what a person said of it is kept.
-        merge(&mut pool, "local", &[found("b", ModelKind::Unknown)]);
+        mark(&mut pool, "local", &[found("b")]);
         let b = pool.model("local", "b").unwrap();
         assert!(!b.missing);
         assert_eq!(b.kind, small);

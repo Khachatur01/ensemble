@@ -64,15 +64,15 @@ pub fn projects(asked: &Asked) -> Vec<String> {
     }
 }
 
-/// The models of the ANN pool that are on and of `kind`, `llm` or
-/// `embedding`, as `<provider>:<model>`, each with what it is (`model.list`).
+/// The models of the ANN pool of `kind`, `llm` or `embedding`, as
+/// `<provider>:<model>`, each with what it is (`model.list`).
 pub fn pool_models(asked: &Asked, kind: &str) -> Vec<(String, String)> {
     match &*asked.read() {
         Some(Ok(out)) => out["models"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|m| m["on"] == true && m["type"] == kind)
+            .filter(|m| m["type"] == kind)
             .filter_map(|m| {
                 let name = m["name"].as_str()?.to_string();
                 let about = match m["tier"].as_str() {

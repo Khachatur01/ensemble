@@ -11,7 +11,7 @@
 //! model of it.
 
 use ensemble_backends::models::Found;
-use ensemble_config::{BackendSettings, LlmBackend, ModelKind, Runner};
+use ensemble_config::{BackendSettings, LlmBackend, Runner};
 use ensemble_core::runtime;
 use ensemble_link::client::{Failure, Token, relay_socket};
 use ensemble_link::loopback::Opener;
@@ -454,7 +454,7 @@ pub fn shared_models(listed: &Value) -> Vec<Found> {
         .filter_map(|m| {
             Some(Found {
                 id: format!("{}:{}", m["provider"].as_str()?, m["id"].as_str()?),
-                kind: serde_json::from_value(m["kind"].clone()).unwrap_or(ModelKind::Unknown),
+                kind: serde_json::from_value(m["kind"].clone()).ok(),
             })
         })
         .collect()

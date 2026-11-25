@@ -57,13 +57,13 @@ fn means(command: Option<String>, max_concurrent: u32) -> Arc<Means> {
     let harnesses = command
         .map(|command| Harness {
             kind: HarnessKind::OpenCode,
-            on: true,
             missing: false,
             command: Some(command),
             max_seconds: 1800,
             max_steps: 30,
             max_concurrent,
             max_tokens: None,
+            models: Vec::new(),
         })
         .into_iter()
         .collect();
@@ -81,12 +81,11 @@ fn means(command: Option<String>, max_concurrent: u32) -> Arc<Means> {
             context_window: Some(32768),
             tools: Some(true),
         },
-        on: true,
         missing: false,
         shared: false,
     }];
     let backends = pool.direct.clone();
-    Arc::new(Means::new(harnesses, pool, backends, |_| Vec::new()))
+    Arc::new(Means::new(harnesses, pool, backends))
 }
 
 /// A runner that runs `body` as OpenCode, in a fresh git repository.

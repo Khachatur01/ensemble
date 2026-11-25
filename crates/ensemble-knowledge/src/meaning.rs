@@ -273,7 +273,7 @@ mod tests {
     /// one about lunch.
     fn memory_with(tmp: &TempDir, url: &str) -> Memory {
         let mut settings = crate::tests::settings_on(url);
-        settings.ann_pool.turn_on(
+        settings.ann_pool.add(
             "local",
             "e",
             ensemble_config::ModelKind::Embedding { dimensions: 2 },

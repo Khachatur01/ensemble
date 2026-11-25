@@ -127,7 +127,6 @@ pub fn pool_rows(pool: &AnnPoolSetting) -> Vec<(&'static str, Vec<Value>)> {
     for m in &pool.models {
         let flag = |on: bool| int(i64::from(on));
         let (tier, context_window, tools, dimensions) = match m.kind {
-            ModelKind::Unknown => (Value::Null, Value::Null, Value::Null, Value::Null),
             ModelKind::Llm {
                 tier,
                 context_window,
@@ -143,7 +142,7 @@ pub fn pool_rows(pool: &AnnPoolSetting) -> Vec<(&'static str, Vec<Value>)> {
             }
         };
         out.push((
-            "INSERT INTO ann_models (provider, id, kind, tier, context_window, tools, dimensions, turned_on, missing, shared) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO ann_models (provider, id, kind, tier, context_window, tools, dimensions, missing, shared) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             vec![
                 txt(&m.provider),
                 txt(&m.id),
@@ -152,7 +151,6 @@ pub fn pool_rows(pool: &AnnPoolSetting) -> Vec<(&'static str, Vec<Value>)> {
                 context_window,
                 tools,
                 dimensions,
-                flag(m.on),
                 flag(m.missing),
                 flag(m.shared),
             ],
@@ -204,7 +202,7 @@ pub async fn read_pool(c: &turso::Connection) -> Result<AnnPoolSetting, String> 
     }
     for r in rows(
         c,
-        "SELECT provider, id, kind, tier, context_window, tools, dimensions, turned_on, missing, shared FROM ann_models ORDER BY provider, id",
+        "SELECT provider, id, kind, tier, context_window, tools, dimensions, missing, shared FROM ann_models ORDER BY provider, id",
         vec![],
     )
     .await?
@@ -214,7 +212,6 @@ pub async fn read_pool(c: &turso::Connection) -> Result<AnnPoolSetting, String> 
         let at = format!("ann_models.{provider}:{id}");
         let flag = |v: &Value, what: &str| num::<i64>(v, &format!("{at}.{what}")).map(|n| n != 0);
         let kind = match some_text(&r[2], &format!("{at}.kind"))?.as_str() {
-            "unknown" => ModelKind::Unknown,
             "llm" => ModelKind::Llm {
                 tier: named(&r[3], &format!("{at}.tier"))?,
                 context_window: match &r[4] {
@@ -235,9 +232,8 @@ pub async fn read_pool(c: &turso::Connection) -> Result<AnnPoolSetting, String> 
             provider,
             id,
             kind,
-            on: flag(&r[7], "turned_on")?,
-            missing: flag(&r[8], "missing")?,
-            shared: flag(&r[9], "shared")?,
+            missing: flag(&r[7], "missing")?,
+            shared: flag(&r[8], "shared")?,
         });
     }
     Ok(pool)

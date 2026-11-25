@@ -1,10 +1,9 @@
 //! Asking a provider of the ANN pool which models it serves, and what each is.
 //!
-//! An agent's harness calls its model; only a light `direct` agent is a request
-//! Ensemble makes itself, through `chat`. This is only the health check:
-//! `GET /models` is the cheapest request that proves the server is up and the
-//! key is accepted, it spends no tokens, and its answer says whether the model
-//! an agent names is really there.
+//! A harness calls its model itself. Ensemble asks a provider only what it
+//! serves: `GET /models` is the cheapest request that proves the server is up
+//! and the key is accepted, it spends no tokens, and its answer says whether
+//! a model a person adds, or added, is really there.
 
 use crate::catalog;
 use ensemble_config::{BackendSettings, LlmBackend, ModelKind, Tier};
@@ -53,13 +52,15 @@ pub fn models(backend: &LlmBackend) -> Result<Vec<String>, Error> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
     pub id: String,
-    pub kind: ModelKind,
+    /// None: the provider did not say whether it is an LLM or an embedding
+    /// model.
+    pub kind: Option<ModelKind>,
 }
 
 /// The models `backend` serves, each with what it is: Anthropic's are LLMs,
 /// Ollama says what each of its can do, and of another OpenAI-compatible
-/// server only the LLMs of a family Ensemble knows are known before they are
-/// turned on.
+/// server only the LLMs of a family Ensemble knows are known before one is
+/// added.
 pub fn discover(backend: &LlmBackend) -> Result<Vec<Found>, Error> {
     let ids = models(backend)?;
     let ollama = match &backend.settings {
@@ -70,20 +71,17 @@ pub fn discover(backend: &LlmBackend) -> Result<Vec<Found>, Error> {
         .into_iter()
         .map(|id| {
             let kind = match (&backend.settings, &ollama) {
-                (BackendSettings::Anthropic { .. }, _) => ModelKind::Llm {
+                (BackendSettings::Anthropic { .. }, _) => Some(ModelKind::Llm {
                     tier: catalog::tier(&id).unwrap_or(Tier::Medium),
                     context_window: None,
                     tools: Some(true),
-                },
+                }),
                 (_, Some(origin)) => ollama_kind(origin, &id),
-                (_, None) => match catalog::family(&id) {
-                    Some(tier) => ModelKind::Llm {
-                        tier,
-                        context_window: None,
-                        tools: None,
-                    },
-                    None => ModelKind::Unknown,
-                },
+                (_, None) => catalog::family(&id).map(|tier| ModelKind::Llm {
+                    tier,
+                    context_window: None,
+                    tools: None,
+                }),
             };
             Found { id, kind }
         })
@@ -122,7 +120,7 @@ fn ollama_at(base_url: &str) -> Option<String> {
 }
 
 /// What Ollama at `origin` says the model `id` is.
-fn ollama_kind(origin: &str, id: &str) -> ModelKind {
+fn ollama_kind(origin: &str, id: &str) -> Option<ModelKind> {
     let shown = agent()
         .post(format!("{origin}/api/show"))
         .header("content-type", "application/json")
@@ -131,14 +129,11 @@ fn ollama_kind(origin: &str, id: &str) -> ModelKind {
         .filter(|r| r.status().as_u16() == 200)
         .and_then(|mut r| r.body_mut().read_to_string().ok())
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-    match shown {
-        Some(shown) => ollama_says(id, &shown),
-        None => ModelKind::Unknown,
-    }
+    ollama_says(id, &shown?)
 }
 
 /// What a model is, by what Ollama's `/api/show` answered for it.
-fn ollama_says(id: &str, shown: &serde_json::Value) -> ModelKind {
+fn ollama_says(id: &str, shown: &serde_json::Value) -> Option<ModelKind> {
     let can = |what: &str| {
         shown["capabilities"]
             .as_array()
@@ -155,26 +150,25 @@ fn ollama_says(id: &str, shown: &serde_json::Value) -> ModelKind {
         })
     };
     if can("embedding") {
-        return match info(".embedding_length") {
-            Some(dimensions) if dimensions > 0 => ModelKind::Embedding { dimensions },
-            _ => ModelKind::Unknown,
-        };
+        return info(".embedding_length")
+            .filter(|d| *d > 0)
+            .map(|dimensions| ModelKind::Embedding { dimensions });
     }
     if !can("completion") {
-        return ModelKind::Unknown;
+        return None;
     }
     let size = shown["details"]["parameter_size"]
         .as_str()
         .and_then(catalog::billions)
         .map(catalog::by_size);
-    ModelKind::Llm {
+    Some(ModelKind::Llm {
         tier: catalog::family(id)
             .or(size)
             .or_else(|| catalog::tier(id))
             .unwrap_or(Tier::Medium),
         context_window: info(".context_length").filter(|n| *n > 0),
         tools: Some(can("tools")),
-    }
+    })
 }
 
 /// A read that ran out of time is a timeout, not a generic transport failure.
@@ -231,11 +225,11 @@ mod tests {
         });
         assert_eq!(
             ollama_says("my-qwen", &chat),
-            ModelKind::Llm {
+            Some(ModelKind::Llm {
                 tier: Tier::Strong,
                 context_window: Some(32768),
                 tools: Some(true),
-            }
+            })
         );
         let embedding = serde_json::json!({
             "capabilities": ["embedding"],
@@ -243,9 +237,9 @@ mod tests {
         });
         assert_eq!(
             ollama_says("nomic-embed-text", &embedding),
-            ModelKind::Embedding { dimensions: 768 }
+            Some(ModelKind::Embedding { dimensions: 768 })
         );
-        assert_eq!(ollama_says("x", &serde_json::json!({})), ModelKind::Unknown);
+        assert_eq!(ollama_says("x", &serde_json::json!({})), None);
     }
 
     #[test]

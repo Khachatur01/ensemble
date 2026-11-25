@@ -134,7 +134,7 @@ fn status() -> Result<ExitCode, String> {
     println!(
         "  runs tasks on: {}",
         if pairs.is_empty() {
-            "nothing yet: turn a harness on with `ensemble-runner harness on <harness>`".to_string()
+            "nothing yet: add a harness with `ensemble-runner harness add <harness>`".to_string()
         } else {
             pairs
                 .iter()
@@ -977,16 +977,20 @@ fn setup(name: Option<String>, workspace: Option<String>, yes: bool) -> Result<E
             "Made the runner '{name}', working in {workspace}, kept in {}.",
             dir.database().display()
         );
-        let found: Vec<&str> = settings
-            .harnesses
-            .each()
+        let installed: Vec<&str> = setup::not_added(&settings.harnesses)
             .into_iter()
-            .filter(|h| !h.missing)
-            .map(|h| h.kind.as_str())
+            .map(|k| k.as_str())
             .collect();
         println!(
-            "Its harnesses: {}; each is off until you turn it on with `ensemble-runner harness on <harness>`.",
-            found.join(", ")
+            "It has no harness yet{}: add one with `ensemble-runner harness add <harness> --max-seconds <s> --max-steps <n> --max-concurrent <n>`, and nothing runs until you do.",
+            if installed.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " (installed here: {}, and builtin, which needs nothing)",
+                    installed.join(", ")
+                )
+            }
         );
     }
     println!();

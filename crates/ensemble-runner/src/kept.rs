@@ -3,18 +3,18 @@
 //! `<config-dir>/runner/core/database.db`, so that its operations change
 //! them, and where it runs, such as the NixOS module, only runs it. The
 //! ANN pool, the keys, sealed by the `master.key` beside the database, and
-//! the audit log are kept as a hub's are ([`ensemble_store::kept`]). Its
-//! teams are the folders of its teams directory, beside its core.
+//! the audit log are kept as a hub's are ([`ensemble_store::kept`]), and its
+//! harnesses in tables of their own.
 //!
 //! A variable is looked for in the environment, then among the keys kept.
 
 use ensemble_config::kept::{Change, Keep};
 use ensemble_config::{
-    BuiltinHarness, CliHarness, HarnessKind, HarnessesSetting, Runner, RunnerSettings,
+    BuiltinHarness, CliHarness, HarnessKind, HarnessModel, HarnessesSetting, Runner, RunnerSettings,
 };
 use ensemble_core::state::RunnerDir;
 use ensemble_link::tokens::normal;
-use ensemble_store::kept::{self, audited, int, num, pool_rows, read_pool, some_text, txt};
+use ensemble_store::kept::{self, audited, int, named, num, pool_rows, read_pool, some_text, txt};
 use ensemble_store::{optional, rows, text, transaction};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,8 +26,9 @@ const PROGRAM: &str = "ensemble-runner";
 pub const SETTINGS_NAME: &str = "the runner's settings";
 
 /// The tables of a runner's settings, besides its ANN pool: one row of
-/// them and one for each harness; and of its hub tokens, each sealed by the
-/// master key.
+/// them, one for each harness a person added and one for each model of its
+/// own vendor's added to Claude Code or Codex; and of its hub tokens, each
+/// sealed by the master key.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS runner_settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -37,13 +38,18 @@ CREATE TABLE IF NOT EXISTS runner_settings (
 );
 CREATE TABLE IF NOT EXISTS harnesses (
     kind TEXT PRIMARY KEY,
-    turned_on INTEGER NOT NULL,
     missing INTEGER NOT NULL,
     command TEXT,
     max_seconds INTEGER NOT NULL,
     max_steps INTEGER NOT NULL,
     max_concurrent INTEGER NOT NULL,
     max_tokens INTEGER
+);
+CREATE TABLE IF NOT EXISTS harness_models (
+    harness TEXT NOT NULL,
+    id TEXT NOT NULL,
+    tier TEXT NOT NULL,
+    PRIMARY KEY (harness, id)
 );
 CREATE TABLE IF NOT EXISTS hub_tokens (
     url TEXT PRIMARY KEY,
@@ -149,17 +155,18 @@ impl Keep<RunnerSettings> for RunnerStore {
 }
 
 /// The statements that keep `harnesses` in place of those kept: a row for
-/// each.
+/// each a person added, and one for each model of its own vendor's.
 fn harness_rows(harnesses: &HarnessesSetting) -> Vec<(&'static str, Vec<ensemble_store::Value>)> {
-    let flag = |on: bool| int(i64::from(on));
-    let mut out = vec![("DELETE FROM harnesses", vec![])];
+    let mut out = vec![
+        ("DELETE FROM harnesses", vec![]),
+        ("DELETE FROM harness_models", vec![]),
+    ];
     for h in harnesses.each() {
         out.push((
-            "INSERT INTO harnesses (kind, turned_on, missing, command, max_seconds, max_steps, max_concurrent, max_tokens) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO harnesses (kind, missing, command, max_seconds, max_steps, max_concurrent, max_tokens) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             vec![
                 txt(h.kind.as_str()),
-                flag(h.on),
-                flag(h.missing),
+                int(i64::from(h.missing)),
                 optional(h.command.as_deref()),
                 int(h.max_seconds as i64),
                 int(h.max_steps),
@@ -167,17 +174,41 @@ fn harness_rows(harnesses: &HarnessesSetting) -> Vec<(&'static str, Vec<ensemble
                 h.max_tokens.map_or(ensemble_store::Value::Null, int),
             ],
         ));
+        for m in &h.models {
+            out.push((
+                "INSERT INTO harness_models (harness, id, tier) VALUES (?1, ?2, ?3)",
+                vec![txt(h.kind.as_str()), txt(&m.id), txt(m.tier.as_str())],
+            ));
+        }
     }
     out
 }
 
-/// The harnesses kept: one of each kind, each refused by name when its row
-/// is not there.
+/// The harnesses kept: those a person added, each with the models of its own
+/// vendor's added to it.
 async fn read_harnesses(c: &ensemble_store::Connection) -> Result<HarnessesSetting, String> {
-    let mut found = BTreeMap::new();
+    let mut models: BTreeMap<HarnessKind, Vec<HarnessModel>> = BTreeMap::new();
     for r in rows(
         c,
-        "SELECT kind, turned_on, missing, command, max_seconds, max_steps, max_concurrent, max_tokens FROM harnesses",
+        "SELECT harness, id, tier FROM harness_models ORDER BY harness, id",
+        vec![],
+    )
+    .await?
+    {
+        let name = some_text(&r[0], "harness_models.harness")?;
+        let kind = HarnessKind::parse(&name)
+            .ok_or_else(|| format!("harness_models: the harness '{name}' is unknown"))?;
+        let id = some_text(&r[1], &format!("harness_models.{name}.id"))?;
+        let tier = named(&r[2], &format!("harness_models.{name}:{id}.tier"))?;
+        models
+            .entry(kind)
+            .or_default()
+            .push(HarnessModel { id, tier });
+    }
+    let mut harnesses = HarnessesSetting::default();
+    for r in rows(
+        c,
+        "SELECT kind, missing, command, max_seconds, max_steps, max_concurrent, max_tokens FROM harnesses",
         vec![],
     )
     .await?
@@ -185,39 +216,38 @@ async fn read_harnesses(c: &ensemble_store::Connection) -> Result<HarnessesSetti
         let name = some_text(&r[0], "harnesses.kind")?;
         let kind = HarnessKind::parse(&name)
             .ok_or_else(|| format!("harnesses: the kind '{name}' is unknown"))?;
-        found.insert(kind, r);
+        let at = |what: &str| format!("harnesses.{name}.{what}");
+        let max_seconds = num(&r[3], &at("max_seconds"))?;
+        let max_steps = num(&r[4], &at("max_steps"))?;
+        let max_concurrent = num(&r[5], &at("max_concurrent"))?;
+        match harnesses.cli_slot(kind) {
+            Some(slot) => {
+                *slot = Some(CliHarness {
+                    missing: num::<i64>(&r[1], &at("missing"))? != 0,
+                    command: some_text(&r[2], &at("command"))?,
+                    max_seconds,
+                    max_steps,
+                    max_concurrent,
+                    models: models.remove(&kind).unwrap_or_default(),
+                });
+            }
+            None => {
+                harnesses.builtin = Some(BuiltinHarness {
+                    max_seconds,
+                    max_steps,
+                    max_concurrent,
+                    max_tokens: num(&r[6], &at("max_tokens"))?,
+                });
+            }
+        }
     }
-    let row = |kind: HarnessKind| {
-        found
-            .get(&kind)
-            .ok_or_else(|| format!("harnesses.{}: is not kept", kind.as_str()))
-    };
-    let at = |kind: HarnessKind, what: &str| format!("harnesses.{}.{what}", kind.as_str());
-    let on = |kind, v| num::<i64>(v, &at(kind, "turned_on")).map(|n| n != 0);
-    let cli = |kind: HarnessKind| -> Result<CliHarness, String> {
-        let r = row(kind)?;
-        Ok(CliHarness {
-            on: on(kind, &r[1])?,
-            missing: num::<i64>(&r[2], &at(kind, "missing"))? != 0,
-            command: some_text(&r[3], &at(kind, "command"))?,
-            max_seconds: num(&r[4], &at(kind, "max_seconds"))?,
-            max_steps: num(&r[5], &at(kind, "max_steps"))?,
-            max_concurrent: num(&r[6], &at(kind, "max_concurrent"))?,
-        })
-    };
-    let builtin = row(HarnessKind::Builtin)?;
-    Ok(HarnessesSetting {
-        claude_code: cli(HarnessKind::ClaudeCode)?,
-        codex: cli(HarnessKind::Codex)?,
-        opencode: cli(HarnessKind::OpenCode)?,
-        builtin: BuiltinHarness {
-            on: on(HarnessKind::Builtin, &builtin[1])?,
-            max_seconds: num(&builtin[4], &at(HarnessKind::Builtin, "max_seconds"))?,
-            max_steps: num(&builtin[5], &at(HarnessKind::Builtin, "max_steps"))?,
-            max_concurrent: num(&builtin[6], &at(HarnessKind::Builtin, "max_concurrent"))?,
-            max_tokens: num(&builtin[7], &at(HarnessKind::Builtin, "max_tokens"))?,
-        },
-    })
+    if let Some(kind) = models.keys().next() {
+        return Err(format!(
+            "harness_models: models of {}, which is not added",
+            kind.as_str()
+        ));
+    }
+    Ok(harnesses)
 }
 
 /// The runner's hub tokens, one per hub URL, each sealed by its master key
@@ -313,7 +343,7 @@ mod tests {
                 max_concurrent: 2,
             },
         );
-        runner.ann_pool.turn_on(
+        runner.ann_pool.add(
             "local",
             "small",
             ModelKind::Llm {
@@ -324,15 +354,25 @@ mod tests {
         );
         runner
             .ann_pool
-            .turn_on("local", "e", ModelKind::Embedding { dimensions: 8 });
+            .add("local", "e", ModelKind::Embedding { dimensions: 8 });
         runner.ann_pool.model_mut("local", "small").unwrap().shared = true;
-        runner.ann_pool.models.push(ensemble_config::PoolModel {
-            provider: "local".into(),
-            id: "z".into(),
-            kind: ModelKind::Unknown,
-            on: false,
-            missing: true,
-            shared: false,
+        runner.ann_pool.model_mut("local", "e").unwrap().missing = true;
+        runner.harnesses.claude_code = Some(ensemble_config::CliHarness {
+            missing: false,
+            command: "claude".into(),
+            max_seconds: 600,
+            max_steps: 20,
+            max_concurrent: 2,
+            models: vec![HarnessModel {
+                id: "sonnet".into(),
+                tier: ensemble_config::Tier::Strong,
+            }],
+        });
+        runner.harnesses.builtin = Some(BuiltinHarness {
+            max_seconds: 900,
+            max_steps: 30,
+            max_concurrent: 1,
+            max_tokens: 4000,
         });
         store
             .write(&runner, &Change::by_this_computer("init"))
