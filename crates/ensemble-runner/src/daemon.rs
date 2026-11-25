@@ -18,7 +18,7 @@
 //! leaked on purpose.
 
 use crate::cmd::runner::RunnerContext;
-use ensemble_agents::picker::Means;
+use ensemble_agents::means::Means;
 use ensemble_agents::router::Ensemble;
 use ensemble_config::Runner;
 use ensemble_link::Link;

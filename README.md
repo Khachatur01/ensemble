@@ -43,9 +43,10 @@ the work on the computers you have.
 ```
 
 Nobody writes a team. A runner offers what its computer has, and a task
-names no agent: for each task, a **picker** chooses a harness and an LLM the
-runner may run it on, the strongest free one for now (a decision model may
-take its place). Nothing of Ensemble lives in your projects.
+names no agent: for each task, the hub's **task picker**, a decision model,
+chooses which of your runners works on it, with which harness and LLM, from
+what the task says and what each model is good at. Nothing of Ensemble lives
+in your projects.
 
 Ensemble mostly runs no agent loop of its own. The runner starts the
 harness's CLI headless in the task's own git worktree, reads what it does as
@@ -80,7 +81,7 @@ installed on the computer is used until you add it.
         |  a worker for each git repository of its workspace, cloned there
         |  for a task when it has none
         v
-  the picker: a harness and an LLM, of its harnesses and its ANN pool
+  the pair the hub's task picker chose: a harness and an LLM of the runner's
         |
         +--> claude -p / opencode run / codex exec   agent CLIs, headless
         +--> builtin                                 a loop in Ensemble
@@ -95,8 +96,8 @@ installed on the computer is used until you add it.
 - **Your agent reaches the hub over MCP.** It adds the hub with its address and
   your token, and sees tools: `share` and `recall` for knowledge, and
   `submit`, `tasks`, `task`, `answer`, `gate`, `cancel` and `runners` for
-  tasks. It never names a harness or a model: the runner that takes a task
-  picks them.
+  tasks, and `choose` when the hub asks you to. It never names a harness or a
+  model: the hub's task picker chooses them.
 - **The hub keeps the knowledge and the tasks.** What your agent shares
   becomes notes in a git vault that later work recalls. Tasks are kept on the
   hub, made by your agent or by a tracker's issues assigned to you; the hub
@@ -441,7 +442,7 @@ actually run is what `GET /api/v1/ops` lists for it.
 An account's own work is operations too, which only the running hub answers,
 each as the runners' link and MCP do, the permission it needs checked:
 `task.projects`, `task.list`, `task.show`, `task.create`, `task.answer`,
-`task.gate`, `task.confirm-gate`, `task.reassign` and `task.cancel`
+`task.gate`, `task.confirm-gate`, `task.reassign`, `task.choose` and `task.cancel`
 (`tasks`), `runner.list`, the runners that work for you with what each runs
 tasks on (`tasks`), `knowledge.share` (`share`) and `knowledge.find`
 (`recall`).
@@ -555,6 +556,7 @@ The tools are what the token may do:
 | `gate` | give a task that is not running the check its work must pass, `{command, timeout_seconds, attempts}`, or, without one, take it away |
 | `confirm_gate` | confirm the gate of a task someone gave you (`gate_unconfirmed`), once you have read its command, so your runners take it |
 | `reassign` | give a task that is not running to another person (`to`, their account's name): it becomes a task of theirs, with a new id |
+| `choose` | choose the worker of a task whose `pick` is `needs_choice`, as the hub's decision model was not sure: a `runner` of yours connected now, its `harness` and the `model` it drives, such as one its `decision` ranks |
 | `cancel` | cancel a task; a runner working on it stops |
 
 The task tools need the `tasks` permission, and each names the
@@ -878,7 +880,7 @@ A harness is never shared: a task runs on its own account's runners. Each
 takes at most `max_concurrent` runs at once (`harness set --max-concurrent`),
 and `builtin` at most `max_tokens` of answer per model call
 (`--max-tokens`). How a task gets a harness and a model is in
-[The picker](#the-picker).
+[The task picker](#the-task-picker).
 
 ### Running the runner
 
@@ -961,9 +963,9 @@ $ ensemble-hub model add gpu:local:qwen3.5:72b
 
 Nobody writes a team. A runner offers what its computer has: its
 **harnesses**, the programs that drive an LLM to work in a repository, and
-the models of its **ANN pool**. For each task, a **picker** chooses a harness
-and an LLM, and the task's own text is what the run is asked; Ensemble adds no
-prompt of its own.
+the models of its **ANN pool**. For each task, the hub's **task picker**
+chooses a runner, a harness and an LLM, and the task's own text is what the
+run is asked; Ensemble adds no prompt of its own.
 
 What the runner keeps while it runs is in its folder,
 `~/.local/state/ensemble/runner/` (`runner/` in `--config-dir`), outside every
@@ -978,9 +980,9 @@ repository:
 | `records.jsonl` | every run: its harness and model, its time and its tokens |
 | `worker.lock` | the runner's own lock |
 
-### The picker
+### The task picker
 
-The **pairs** a runner may run a task on are its harnesses that are on, found
+The **workers** a runner may run a task on are its harnesses that are on, found
 and not known to be logged out, each with the LLMs it can drive:
 
 | harness | what it drives |
@@ -990,18 +992,45 @@ and not known to be logged out, each with the LLMs it can drive:
 | `opencode` | the pool's LLMs that are on, of an OpenAI-compatible provider, whose context window is known |
 | `builtin` | the pool's LLMs that are on, whose context window is known, and that are not known to make no tool calls |
 
-A pair is free while its harness runs fewer than its `max_concurrent` runs
-and its model's provider takes fewer than its `max_concurrent` calls, counted
-over every repository of the runner. The picker takes the strongest free
-pair, the least busy harness among equals, then a fixed order (`claude-code`,
-`codex`, `opencode`, `builtin`; then the model's name). With nothing free a
-task waits; with no pair at all the runner runs no task, and `ensemble-runner
-doctor` says how to give it one. When a task's gate fails, its next run asks
-for a pair a tier stronger than the last, or the strongest there is, and
-waits for one to be free. `ensemble-runner status` lists the pairs.
+Each runner tells the hub its workers, with each model's tier, context
+window, tool calls and the abilities you wrote (`model set --abilities`,
+`harness set-model --abilities`), and how busy each harness and provider is.
+With no worker at all the runner runs no task, and `ensemble-runner doctor`
+says how to give it one; `ensemble-runner status` lists them.
 
-The picker is a trait, and the rules are its one implementation; a decision
-model may take their place.
+The hub chooses the worker of each task with a **decision model**, the
+task picker an admin sets (see [By what you mean](#by-what-you-mean)): once a
+task may start, the decision models are asked in order, the next when one
+fails, first the questions the admin wrote, then which worker, among the
+workers of your runners connected now that the answers allow (a runner that
+gave the task back is left out), at most 100, the busiest and the weakest
+left out first. What they are told is the task's project, title, text,
+definition of done, goal and constraints, and what came of its earlier runs:
+**the hub sends your task's text to the decision model's provider**, a third
+party for TypeSafe's Jev, your own computer for Laya's `laya-serve`. The
+workers at least as likely as the picker's least confidence are its
+candidates, one an answer prefers first; the task is offered to the first
+of them whose harness and provider are free, that runner alone claims it,
+and it runs exactly that harness and model. With every candidate busy, the
+task waits for one.
+
+When the decision model is not sure (an answer, or every worker, less likely
+than its least confidence), or no worker fits the answers, the task waits for
+**you to choose**: its `pick` is `needs_choice`, with the workers ranked, and
+you choose one with `choose` (MCP), `task choose` or the task's page. Your
+choice is kept with the decision, to learn from later. With no task picker,
+or no decision model answering, a task waits, saying why in its `pick`, and is
+tried again later; no task is handed out by rules. Each decision, with every
+answer's probabilities, the workers ranked and the decision model that
+answered, is kept with the task (`decision`).
+
+A change to the task picker, to its decision models, or to the workers
+connected has the tasks decided and not yet offered, or waiting for your
+choice, chosen for again; your choice stays while its worker is there. A
+runner that goes away before it starts a task offered to it, or gives it
+back, has it chosen for again without it. When a task's gate fails and it
+has runs left, its work is pushed and its next run is chosen for again, told
+how the gate failed.
 
 ### How each harness runs
 
@@ -1074,7 +1103,8 @@ makes one from a tracker's issue (see
 [Tasks from a tracker](#tasks-from-a-tracker)). Ids are numbered within the
 project, so an id names one task. `submit` answers at once with the id; the
 work goes on without your agent's conversation. A task names no harness and
-no model: the runner that takes it picks them.
+no model: the hub's task picker chooses them (see
+[The task picker](#the-task-picker)).
 
 Each of your runners with a repository of the project's name in its
 workspace has a worker for it, and a runner with none gets one for a task
@@ -1151,9 +1181,10 @@ says "done" too early is sent back instead of being believed. With `gate`,
 its command runs once the run is done:
 
 1. It passes: the task is `done`.
-2. It fails: the task runs again, on a pair a tier stronger, told the
-   command, how it ended, the last 60 lines of its output and the previous
-   reply.
+2. It fails: its work is kept on its branch, and the task runs again, on a
+   worker the hub's task picker chooses again, told of the failed run, and
+   the run told the command, how it ended, the last 60 lines of its output
+   and the previous reply.
 3. This repeats until it passes or the task has had `attempts` runs in all.
    Then it is `failed`.
 
@@ -1645,12 +1676,12 @@ command lines and the REST API are made from), `ensemble-config`
 keys of a hub or a runner, and the hub's accounts and tasks), `ensemble-knowledge` (the
 vault and its pipeline), `ensemble-link` (the link between a runner and a hub:
 its messages, and the runner's side), `ensemble-agents` (the harnesses, the
-picker and the router), `ensemble-tasks` (tasks as a runner leases them, and the worker that
+runner's means and the router), `ensemble-tasks` (tasks as a runner leases them, and the worker that
 runs a repository's tasks), `ensemble-runner` (the runner: its commands, its
 workers, the projects it clones, its teams, and the models it shares) and
 `ensemble-hub`
-(the hub: accounts, the tasks it keeps, the tracker inbox, MCP, the REST API
-and the server runners connect to). The runner is built of none of the hub's
+(the hub: accounts, the tasks it keeps, its task picker, the tracker inbox,
+MCP, the REST API and the server runners connect to). The runner is built of none of the hub's
 crates (`ensemble-hub`, `ensemble-knowledge`);
 `tests/workspace.rs` checks that, and the order.
 [ARCHITECTURE.md](ARCHITECTURE.md) says what each file does and how the pieces
@@ -1659,7 +1690,7 @@ work together at run time.
 The settings of a hub and of a runner have no file, nor schema: they are
 typed rows of their databases (`ensemble-store`'s `kept.rs`).
 
-A task's worker knows the picker and the router; it does not know which CLIs
+A task's worker knows the runner's means and the router; it does not know which CLIs
 exist. Only the adapters in `crates/ensemble-agents/src/external/` know how a
 CLI is started and read.
 
@@ -1690,14 +1721,15 @@ scripts stand in for the CLIs.
 | --- | --- |
 | `crates/ensemble-config/src/tests.rs` | every validation rule of a hub's and a runner's settings, environment precedence, secrets, typos, the harnesses' limits |
 | `crates/ensemble-agents/src/external/` | each CLI's command line, generated config and event stream, denials, limits, failures, the time limit killing the process tree |
-| `crates/ensemble-agents/src/picker.rs`, `router.rs`, `crates/ensemble-backends/` | the pairs each harness drives, the strongest free one taken and held, a retry a tier stronger, a run recorded with its harness and model, the chat request in both formats; what a provider lists, as Ollama says or the catalog knows; a model new to a provider kept off, and one gone marked missing |
+| `crates/ensemble-agents/src/means.rs`, `router.rs`, `crates/ensemble-backends/` | the pairs each harness drives, the one the hub chose taken while free and held, a run recorded with its harness and model, the chat request in both formats; what a provider lists, as Ollama says or the catalog knows; a model new to a provider kept off, and one gone marked missing |
 | `crates/ensemble-knowledge/` | shares kept as they arrived, notes and the log, commits by the lock holder, the secret check; the pipeline against a stub model: new notes, merges, chatter skipped, unusable answers to review, waiting for a model, rebuild |
 | `ui/server/` | the app's files served with its pages and nothing outside them, a call to the API passed on as from the hub's origin only from a page of the UI, the hub's cookies Secure behind TLS |
 | `crates/ensemble-hub/` | sign-up, approval and the REST API's codes, a browser's session in a cookie no page of another origin may use, an account's tasks, runners and knowledge as operations, tokens kept as hashes and revoked at once, join codes spent once and before they expire, a runner signing in over the link with a password (and the lockout) or a code, a link without a token refused all else, a runner of another protocol version refused with what to update, roles checked per request, shares under the signed-in name; the hub's MCP: a token needed, the tools a token allows, share and recall as its account, tasks made and followed, with a `repository` and a `gate`, a gate changed or taken away; every connected runner listed to its owner alone with what it runs tasks on, model calls streamed from a runner; tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the runner holding the lease with the harness and model of the run, questions, cancelling, tasks given back and blocked until a runner that has not connects or they are answered again, the answer to where a project is kept as its repository, the tasks waiting for a runner in every project, the notes recalled into a new task, over the link as the signed-in account; the inbox: markdown issues read and written with only the status line changed, issues to tasks of the account matched by tracker name, questions and answers through comments, results posted once, a closed issue cancelling its task |
 | `crates/ensemble-link/` | the token file 0600, the link opened again when it breaks, a hub of another protocol version named with what to update |
 | `crates/ensemble-core/` | the state directories and their hashes, the worker lock, run records |
 | `crates/ensemble-tasks/` | tickets, questions in a reply, run logs |
-| `crates/ensemble-hub/tests/queue.rs` | the worker of a repository: tasks run in worktrees within a harness's `max_concurrent`, closing the worker interrupting running tasks, cancel, `after`, gates, `repo`, questions and answers, a runner with no harness waiting |
+| `crates/ensemble-hub/src/dispatch.rs` | the task picker against a stub decision model: a task waiting with no picker or no decision model answering, offered to the worker it is sure of, chosen by a person when it is not, its answers narrowing the workers, a busy worker waited for, a change sending what was decided back, a runner that gave it back or went away left out |
+| `crates/ensemble-hub/tests/queue.rs` | the worker of a repository: tasks run in worktrees within a harness's `max_concurrent`, closing the worker interrupting running tasks, cancel, `after`, gates, `repo`, questions and answers, a gate that fails sending the task back to be chosen for again, a task offered on a worker the runner does not have given back |
 | `tests/workspace.rs` | the crates depend on each other in one direction only, and the runner on none of the hub's |
 | `tests/end_to_end.rs` | the real executables, `ensemble-hub` and `ensemble-runner`: their commands; setup and doctor against a stub server; every run in `stats`; the runner working on the tasks of a repository in its workspace, a task made through the hub's MCP; a task resumed when the runner starts again; a task stopped on one computer and carried on by another from its pushed branch; an issue from the tracker worked on a member's runner; a repository added to the workspace while the runner runs, a runner listed with what it runs tasks on, and a task's notes in its prompt; a task's repository cloned and its branch pushed there; a runner asking where a project is and cloning the answer; a task whose repository cannot be cloned given back and blocked; a runner's models through the hub, run by another runner's `builtin`; signing in and joining with a code, a hub refusing another protocol or a bad token, settings and harnesses changed from the command line |
 | `crates/ensemble-agents/tests/fixtures/` | saved event streams per CLI version, replayed through each adapter's parser (see its README) |
@@ -1710,10 +1742,12 @@ scripts stand in for the CLIs.
   `builtin`.
 - **Only `opencode` and `builtin` run on the ANN pool**, and an Anthropic
   provider only `builtin`. Claude Code and Codex use your own login.
-- **The picker follows rules.** It takes the strongest free pair; nothing
-  says yet what a task needs (whether it only asks for an answer, how hard it
-  is), so every task goes to a harness, and a model alone is called only for
-  the hub's own work. A decision model may take the rules' place.
+- **A decision model chooses, or nobody.** With no task picker set, or no
+  decision model answering, no task is handed out. Laya is near chance until
+  it is fit on labels, so expect to choose often at first; what you choose is
+  kept, but nothing learns from it yet. Every task goes to a harness: one
+  that only needs an answer is not yet run on a model alone, which is called
+  only for the hub's own work.
 - **Only the end of a run can ask.** A run stops with a question
   (`NEEDS INPUT:`) at the end of a run, never halfway through one: the CLIs'
   headless modes do not wait for an answer. The task waits for the answer,

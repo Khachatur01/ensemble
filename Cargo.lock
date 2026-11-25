@@ -649,6 +649,7 @@ name = "ensemble"
 version = "0.1.0"
 dependencies = [
  "ensemble-agents",
+ "ensemble-backends",
  "ensemble-config",
  "ensemble-core",
  "ensemble-hub",

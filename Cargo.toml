@@ -98,6 +98,8 @@ ensemble-runner.workspace = true
 # std harness and shell scripts standing in for the agent CLIs, so `cargo test`
 # needs no network, model server or agent CLI.
 ensemble-agents = { workspace = true, features = ["test-support"] }
+# A decision model for the hub to ask.
+ensemble-backends = { workspace = true, features = ["test-support"] }
 ensemble-core = { workspace = true, features = ["test-support"] }
 # The hub's settings, as its database keeps them.
 ensemble-config.workspace = true

@@ -14,7 +14,7 @@ use serde_json::Value;
 /// The version of what is said here. The runner sends it as the
 /// [`VERSION_HEADER`] of every link it opens, and a hub refuses one of
 /// another version, or of none, before anything else.
-pub const VERSION: u32 = 13;
+pub const VERSION: u32 = 14;
 /// The path of a runner's link on the hub's port.
 pub const PATH: &str = "/link";
 /// The header of the upgrade that carries the runner's [`VERSION`].
@@ -64,8 +64,9 @@ pub const TASKS: &str = "tasks";
 pub const TASK: &str = "task";
 /// A new task: `{project, ticket}`, answered with `{id}`.
 pub const TASK_CREATE: &str = "task_create";
-/// Run a task on this runner, for a while: `{project, id, node, seconds}`,
-/// answered with `{claimed}` and, when not, `{why}`.
+/// Run a task the hub offers this runner, for a while: `{project, id, node,
+/// seconds}`, answered with `{claimed}` and, when not, `{why}`. The runner
+/// runs it on the worker it was offered on, the task's `pick`.
 pub const TASK_CLAIM: &str = "task_claim";
 /// Keep running it: `{project, id, node, seconds}`, answered with `{renewal}`:
 /// `kept`, `cancel` (someone cancelled it) or `lost` (another runner has it).
@@ -92,20 +93,26 @@ pub const TASK_REASSIGN: &str = "task_reassign";
 /// Cancel a task: `{project, id}`, answered with `{cancel}`: `before` it
 /// started, `running` (its runner stops it) or `ended` already.
 pub const TASK_CANCEL: &str = "task_cancel";
-/// The account's tasks, in every project, that wait for a runner and that
-/// this one has not given back: `{runner}`, answered with
-/// `{tasks: [{project, task}]}`. A runner looks for the projects it has no
-/// folder for.
+/// The account's tasks, in every project, the hub offers this runner, each on
+/// the worker its `pick` names: `{runner}`, answered with `{tasks: [{project,
+/// task}]}`. A runner looks for the projects it has no folder for among them.
 pub const TASKS_WAITING: &str = "tasks_waiting";
 /// Give a task back, for another runner: `{project, id, runner, why}`, such
-/// as when this computer cannot reach its repository. Answered with
-/// `{blocked}`: whether no connected runner that may take it is left to try.
+/// as when this computer cannot reach its repository, or no longer has the
+/// worker it was offered on. Answered with `{blocked}`: whether no connected
+/// runner that may take it is left to try. The hub chooses its worker again,
+/// without this runner.
 pub const TASK_GIVE_BACK: &str = "task_give_back";
 /// The projects the account has tasks in: `{}`, answered with `{projects:
 /// [{project, tasks}]}`, each with how many tasks it has.
 pub const TASK_PROJECTS: &str = "task_projects";
+/// Choose the worker of a task the decision models were not sure of (its
+/// `pick` is `needs_choice`): `{project, id, worker: {runner, harness,
+/// model}}`, a worker of one of the account's runners connected now. It is
+/// kept with their decision, to learn from.
+pub const TASK_CHOOSE: &str = "task_choose";
 /// Every task method, for the server to pass on.
-pub const TASK_METHODS: [&str; 15] = [
+pub const TASK_METHODS: [&str; 16] = [
     TASKS,
     TASK,
     TASK_CREATE,
@@ -121,6 +128,7 @@ pub const TASK_METHODS: [&str; 15] = [
     TASKS_WAITING,
     TASK_GIVE_BACK,
     TASK_PROJECTS,
+    TASK_CHOOSE,
 ];
 
 /// This connection is a runner, said once it connects: `{name, harnesses:

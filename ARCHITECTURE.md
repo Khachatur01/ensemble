@@ -19,7 +19,8 @@ its settings, and its providers' keys sealed by a master key, in its database,
 as a GitLab instance does, and a NixOS module only runs it. "Models and
 harnesses" (decided 2026-11-25) is built but for reassigning a task to
 another person: nobody makes a team, a runner offers its ANN pool and its
-harnesses, and a picker chooses what works on each task.
+harnesses, and the hub's task picker, a decision model, chooses which
+runner, harness and model work on each task.
 
 `README.md` is the user's guide: every setting, command and tool. This document
 is the map behind it.
@@ -52,9 +53,11 @@ executables, `ensemble-hub` and `ensemble-runner`, in these roles:
   own loop). Nothing installed on its computer is used until a person adds
   it. It takes its owner's tasks alone. It serves no client. It is its own process too, `ensemble-runner
   serve`, one per computer, and its executable holds nothing of the hub's.
-- **The picker**: for each task, a harness and an LLM of what the runner
-  has, the pair a run is started on (an agent CLI headless, or Ensemble's own
-  loop). Nobody writes a team, and a task names no agent.
+- **The task picker**: the hub's. For each task, a decision model chooses
+  its worker: a runner of the task's account, and a harness and an LLM of
+  it, the pair a run is started on (an agent CLI headless, or Ensemble's own
+  loop), and the hub offers the task to that runner. Nobody writes a team,
+  and a task names no agent.
 - **The ways in**, all connectors of the hub: the agent CLI a person already
   uses, which reaches the hub over MCP with an account's token as the API key
   and installs nothing of Ensemble: it shares, recalls and makes tasks; the
@@ -73,7 +76,7 @@ executables, `ensemble-hub` and `ensemble-runner`, in these roles:
         │                     of its workspace, which leases its tasks; the
         │                     repositories of tasks it has none of cloned
         ▼
-  the picker: a harness and an LLM of its harnesses and its ANN pool
+  the pair the hub chose: a harness and an LLM of the runner's
         │  router: the run in the task's worktree
         ▼
   claude -p · opencode run · codex exec        agent CLIs, as subprocesses
@@ -125,21 +128,21 @@ and the runner on none of the hub's alone: `ensemble-knowledge` and
 | --- | --- | --- |
 | `ensemble-core` | what everything shares | the error vocabulary (`port.rs`); the per-user state, cache and config directories (`state.rs`); the working folder, a `repo` inside it and what a run changed (`workspace.rs`); the record of runs behind `ensemble-runner stats`, by harness and model (`records.rs`); the one-worker lock (`lock.rs`); dates in UTC (`time.rs`); the async runtime and its bridges to code that blocks (`runtime.rs`) |
 | `ensemble-ops` | operations, defined once for every interface, and what both command lines share | the operation, its spec (name, summary, who may run it, input fields), errors as data, the caller, and the registry that checks both before it runs one (`lib.rs`); the commands made from the operations, each with `--json`, and asking at the terminal (`cli.rs`); an output as plain lines (`lines`, `lib.rs`); operations run by the running process over its socket, or here, and stopping or starting again on a signal or a change (`local.rs`) |
-| `ensemble-config` | the settings of the hub and the runner | the resolved providers and model lists, and settings that do not resolve (`lib.rs`); the environment, and the variables Ensemble names for keys it keeps (`env.rs`); the hub's settings as kept, `HubSettings`, and resolved (`hub.rs`); the runner's, `RunnerSettings` (`runner.rs`), with its harnesses (`harness.rs`); their ANN pool, its providers and the models they serve, as kept and resolved, and a model named in a setting checked to be one of it that is on and of the right kind (`ann.rs`); kept settings as operations change them, each change checked and kept with who made it (`kept.rs`) |
+| `ensemble-config` | the settings of the hub and the runner | the resolved providers and model lists, and settings that do not resolve (`lib.rs`); the environment, and the variables Ensemble names for keys it keeps (`env.rs`); the hub's settings as kept, `HubSettings`, and resolved (`hub.rs`); the runner's, `RunnerSettings` (`runner.rs`), with its harnesses (`harness.rs`); their ANN pool, its providers and the models they serve, as kept and resolved, and a model named in a setting checked to be one of it that is on and of the right kind (`ann.rs`); the hub's task picker, its decision models, questions, effects and templates (`picker.rs`); kept settings as operations change them, each change checked and kept with who made it (`kept.rs`) |
 | `ensemble-backends` | talking to the providers of the ANN pool | one chat request in the server's own format (`chat.rs`); which models a provider serves, and what each is, as Ollama says or Ensemble knows (`models.rs`), from a catalog of known families and sizes (`catalog.rs`); the operations on the pool, `provider.*` and `model.*`, for the hub and the runner (`ops.rs`); the first usable model of a `try` list (`resolve.rs`); texts as vectors (`embed.rs`); a stand-in server for tests (`testing.rs`) |
 | `ensemble-store` | Turso files | the hub's `database.db`, opened for each read or change, with the tables of `ensemble-hub`, and any other Turso file, such as the vault's cache of vectors (`lib.rs`); the settings of a hub or a runner as typed rows (a row of settings; the ANN pool's providers and models, roles, the models used and trackers), the audit log of their changes, and the keys sealed by `master.key`, the runner's in a `database.db` of its own with only its tables (`kept.rs`) |
 | `ensemble-knowledge` | the hub's knowledge, the hub's alone | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); notes by meaning, with their vectors in `.ensemble/embeddings.db` (`meaning.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait (`lib.rs`) |
 | `ensemble-link` | what the runner and the hub share of the link | the frames of the link (`protocol.rs`); bytes as text, for a model's answer (`base64.rs`); the runner's side, `Connection` and `Link`, one reconnecting, which says who its token is, and signing in without a token, for one (`client.rs`); the token file (`tokens.rs`) |
-| `ensemble-agents` | running a task once | the harnesses (`external/`): `claude_code.rs`, `opencode.rs`, `codex.rs`, `builtin.rs`, the subprocess runner (`process.rs`) and gates (`gate.rs`); how one run is started, its fixed tools and permissions (`spec.rs`); the runner's means, its pairs of a harness and an LLM, the `Picker` trait and its rules, and what is busy (`picker.rs`); a git worktree per task (`worktree.rs`); the router: a run of what the picker took, recorded (`router.rs`) |
-| `ensemble-tasks` | the work a runner does | tickets and tasks as the hub has them (`tasks.rs`); how they are leased and given back: the `Board` trait, a runner's `RemoteBoard`, over the link, for its account, and the tasks waiting for a runner in every project (`board.rs`); what a runner keeps of its runs (`runs.rs`); the worker that runs a repository's tasks on the pairs the picker takes, a gate's retry a tier stronger (`queue.rs`); one run and what it came to (`delegation.rs`) |
+| `ensemble-agents` | running a task once | the harnesses (`external/`): `claude_code.rs`, `opencode.rs`, `codex.rs`, `builtin.rs`, the subprocess runner (`process.rs`) and gates (`gate.rs`); how one run is started, its fixed tools and permissions (`spec.rs`); the runner's means, its pairs of a harness and an LLM, the pair the hub chose taken while free, and what is busy (`means.rs`); a git worktree per task (`worktree.rs`); the router: a run of the pair taken, recorded (`router.rs`) |
+| `ensemble-tasks` | the work a runner does | tickets and tasks as the hub has them, with where choosing their worker stands and the decisions (`tasks.rs`); how they are leased and given back: the `Board` trait, a runner's `RemoteBoard`, over the link, for its account, and the tasks offered to a runner in every project (`board.rs`); what a runner keeps of its runs (`runs.rs`); the worker that runs the tasks the hub offers it of a repository on the pair the hub chose, a run whose gate failed handed back to be chosen for again (`queue.rs`); one run and what it came to (`delegation.rs`) |
 | `ensemble-runner` | the runner, and its executable | `main` and the global options (`lib.rs`); where it keeps its settings and keys (`kept.rs`); the command line, parsed with clap (`cli.rs`), and what each group of commands does (`cmd/`: `runner`, and its `harness`es); its means, the harnesses that may run and its pool (`means`, `lib.rs`); the runner's workers, the repositories it clones for tasks, what it asks and gives back, and its socket (`daemon.rs`); `Worker`: the link that says the runner is connected, with what it runs tasks on (`worker.rs`); `Relay`: its relay socket, serving others' calls to the models it shares and carrying its runs' calls to other runners' (`relay.rs`); what `setup` and `doctor` find and check: the harnesses, the pairs, the providers in use (`setup.rs`) |
-| `ensemble-hub` | the hub, and its executable | `main` and the global options (`lib.rs`); the command line (`cli.rs`) and what its commands do (`cmd.rs`); MCP over HTTP for client agents (`mcp.rs`); the hub's operations, its accounts, tokens, join codes, sessions and settings (`accounts.rs`); its settings and its providers' keys in its database, sealed by `master.key` (`kept.rs`); accounts, and hashed tokens and join codes (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API, each route one of the operations (`api.rs`), the operations only the running hub answers, an account's tasks, runners and knowledge (`served.rs`), and its OpenAPI document (`openapi.rs`), over a small HTTP reader (`http.rs`); the hub's side of the link, a task per connection (`server.rs`); connected runners (`runners.rs`); runners' relay sockets, the models each shares, and the model calls between them and from the hub, who may make them and how many at once to each provider (`calls.rs`); the tasks it keeps and leases, offered to the account's runners, given back and blocked, with the notes recalled into each, `DbBoard`, and the `Service` that answers the link (`board.rs`), and a runner's worker run against them (`tests/queue.rs`); the tracker inbox (`inbox/`): the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`), an issue made a task and what the task reports (`work.rs`), the hub's inbox, one for each tracker (`relay.rs`) |
+| `ensemble-hub` | the hub, and its executable | `main` and the global options (`lib.rs`); the command line (`cli.rs`) and what its commands do (`cmd.rs`); MCP over HTTP for client agents (`mcp.rs`); the hub's operations, its accounts, tokens, join codes, sessions and settings (`accounts.rs`); its settings and its providers' keys in its database, sealed by `master.key` (`kept.rs`); accounts, and hashed tokens and join codes (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API, each route one of the operations (`api.rs`), the operations only the running hub answers, an account's tasks, runners and knowledge (`served.rs`), and its OpenAPI document (`openapi.rs`), over a small HTTP reader (`http.rs`); the hub's side of the link, a task per connection (`server.rs`); connected runners (`runners.rs`); runners' relay sockets, the models each shares, and the model calls between them and from the hub, who may make them and how many at once to each provider (`calls.rs`); the task picker at work, the decision models asked and a task offered to the runner of the worker chosen (`dispatch.rs`), and its settings' operations (`task_picker.rs`); the tasks it keeps and leases, offered to the worker chosen, chosen by a person when the decision model was not sure, given back and blocked, with the notes recalled into each, `DbBoard`, and the `Service` that answers the link (`board.rs`), and a runner's worker run against them (`tests/queue.rs`); the tracker inbox (`inbox/`): the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`), an issue made a task and what the task reports (`work.rs`), the hub's inbox, one for each tracker (`relay.rs`) |
 | `ensemble` (the root) | the two executables, and the tests of the whole | `src/bin/ensemble-hub.rs` and `src/bin/ensemble-runner.rs`, each its crate's `main`; the end-to-end suite, which runs both (`tests/end_to_end.rs`); the checks against the real agent CLIs (`tests/real_cli.rs`); the layering of the crates (`tests/workspace.rs`) |
 | `ensemble-ui-app` (`ui/app`, in the UI's own workspace) | the web UI's app, for WebAssembly | the pages and routes (`main.rs`), the REST API as the page calls it (`api.rs`), the form made from an operation (`form.rs`), the pages (`pages.rs`); `ui/build.sh` builds `ui/dist` |
 | `ensemble-ui` (`ui/server`, in the UI's own workspace) | the web UI's executable, apart from the hub | the app's files, embedded or from `--dist`, and the calls to `/api/` passed on to the hub as from its own origin, only from a page of the UI (`main.rs`) |
 | `nix/` | not a crate: the NixOS module (`nixos-module.nix`: the hub and the runner, each a user service of the person it is for, the hub's lingering so it runs from boot), the Home Manager module (`home-manager-module.nix`: the runner on Linux or macOS), what they share about a runner (`runner.nix`), and an example configuration the flake's checks build (`example.nix`). The flake packages each executable on its own (`ensemble-hub`, `ensemble-runner`) and both together. The hub is only run, on the address and port the module says: its settings are kept in its database, and made at its first start by `serve`. The runner is only run too: its settings, keys and harnesses are made and changed with `ensemble-runner`, as on any platform, and a runner named for the computer is made at its first start by `serve`. A secrets manager's file is the service's `EnvironmentFile` |
 
-Two rules keep the layers apart. The worker knows the picker and the router,
+Two rules keep the layers apart. The worker knows the means and the router,
 not which CLIs exist. Only the adapters know how a CLI is started and read.
 
 ## Configuration and state
@@ -230,9 +233,9 @@ What a runner keeps for a repository, and what a hub server's connections
 borrow, is made once and lives as long as the process, so it is leaked on
 purpose (`Box::leak`) and borrowed as `'static`.
 
-## Harnesses and the picker
+## Harnesses and the task picker
 
-A runner's **means** (`Means`, in `ensemble-agents`'s `picker.rs`) are what it
+A runner's **means** (`Means`, in `ensemble-agents`'s `means.rs`) are what it
 runs tasks on, made once as `ensemble-runner serve` starts (`means` in
 `ensemble-runner`), after it looks for its harnesses' CLIs: its harnesses that
 are on, found and not known to be logged out, and its ANN pool, with its
@@ -246,13 +249,55 @@ OpenCode with the pool's LLMs that are on, of an OpenAI-compatible provider and
 a known context window, and `builtin` with those that are on, of a known
 context window and not known to make no tool calls. A pair is free while its
 harness runs fewer than its `max_concurrent` runs and its provider takes fewer
-than its `max_concurrent` calls. `Means::take` asks the `Picker` for one of
-them and holds its harness's run and its provider's call (`Taken`) until the
-run ends. The picker is a trait; `Rules`, its one implementation, takes the
-strongest free pair at least as strong as it is asked for (or the strongest
-there is, when none is that strong), the least busy harness among equals, then
-the fixed order of the pairs (by harness, then model). The runner says what
-it runs tasks on, `offers`, to the hub as it connects.
+than its `max_concurrent` calls. The runner says what it runs tasks on, its
+pairs (`offers`), to the hub as it connects, and how busy each harness and
+provider is whenever that changes. `Means::take` takes the one pair the hub
+chose, once it is free, and holds its harness's run and its provider's call
+(`Taken`) until the run ends; a runner that no longer has it gives the task
+back.
+
+The hub's **task picker** (`dispatch.rs`, in `ensemble-hub`; its settings in
+`ensemble-config`'s `picker.rs`) chooses the worker of each task: a thread of
+the hub's that looks at every task once a second. A task not ended, answered,
+its gate confirmed, what it waits for done and not running is **undecided**
+until the decision models of `task_picker` are asked, in order, the next when
+one fails, over `/v1/systemone` (`ensemble_backends::decide`). The state is
+the task: its project, title, text, definition of done, goal, constraints,
+and what came of its earlier runs (its **attempts**: a run that stopped,
+asked, gave it back or whose gate failed). The questions a person wrote come
+first, in one request; the answer taken for each is its likeliest, and each
+answer's **effects** narrow the workers: `min_tier`, `min_context` (a model
+whose context nobody said passes), `needs_tools`, `avoid` a harness or a
+model; `prefer` one puts it first among the candidates. Then, in a second
+request with those answers in the state, one `choice`, `worker`: the
+workers of the account's runners connected now that the effects allow,
+those that gave the task back left out, and only its runner's when its work
+is pinned, each described by its harness, model, tier, context window, tool
+calls, computer and abilities, at most 100 (the busiest and the weakest
+left out first, as Laya takes no more options). The workers most likely
+first are kept as the **decision**, with every answer's probabilities, the
+decision model and when; those at least `worker_min_confidence` likely are
+its **candidates**. A question's answer less likely than its
+`min_confidence`, or no candidate, or no worker that fits, makes the task
+**needs_choice**: its account chooses one of its workers (`task.choose`,
+MCP's `choose`, the web UI), kept with the decision as
+`picked_by_person`, to learn from. Otherwise it is **decided**, and offered
+(`offered`) to the first candidate whose harness and provider are free,
+counting the runs the runner says go on and the tasks offered to it not yet
+started; a task whose candidates are all busy waits. With no task picker,
+or no decision model answering, the task stays undecided, saying why, and
+is tried again after 10 seconds, then twice as long each time, at most five
+minutes.
+
+What a decision was made of may change: a change to the task picker or to
+its decision models' providers (`Dispatcher::apply`, as the hub's settings
+change), or to the workers connected, sends every task decided and not
+offered, or waiting for a choice, back to undecided, and clears the waits;
+a person's choice stays while its worker is there. A runner that goes away
+before it claims a task offered to it has the offer taken back. A run that
+ends without ending the task sends it back to undecided, kept as an
+attempt, and a runner that gave it back is left out of its options until it
+is answered again.
 
 ## A run
 
@@ -303,23 +348,28 @@ runner's workspace, every two seconds and whenever a run ends, asks the hub for
 its project's tasks (`RemoteBoard`, over one link that opens again when it
 breaks), and:
 
-1. skips tasks that ended, waiting for an answer or for their gate to be
-   confirmed, with `after` tasks not yet `done`, running on another runner,
-   or given back by this one;
-2. takes a pair of the runner's means for each, oldest first, while one is
-   free; with none free, the task waits, which its activity log says once;
-3. **claims** the task for a minute (`task_claim`); another runner that was
-   first wins, and the task is left and its pair given back;
+1. takes the tasks the hub offers this runner (`pick` `offered`, see
+   "Harnesses and the task picker"), skipping those that ended, wait for an
+   answer, for their gate to be confirmed or for `after` tasks not yet
+   `done`, or run on another runner;
+2. takes the pair the hub chose for each, oldest first, once it is free;
+   while it is busy the task waits, which its activity log says once, and a
+   task offered on a pair the runner does not have is given back, saying so;
+3. **claims** the task for a minute (`task_claim`), which the hub grants only
+   to the runner it was offered to;
 4. makes or reuses a git worktree on the branch `ensemble/<id>`, from where its
    work was last pushed when it has been;
 5. runs it (see "A run"), asked the ticket's sections and then its notes,
    marked as reference data, then the task's **gate** if it has one (its
    command, run with `sh -c` in the worktree, passing on exit status 0 within
-   its `timeout_seconds`), running it again with the gate's output, on a pair
-   a tier stronger than the last (or the strongest there is), waited for until
-   one is free, until it passes or `attempts` are used, all the while
-   renewing the claim every 15 seconds (`task_renew`), which also says when
-   someone cancelled the task;
+   its `timeout_seconds`), all the while renewing the claim every 15 seconds
+   (`task_renew`), which also says when someone cancelled the task. A gate
+   that fails with runs of the task left ends the run (`retry`): its work is
+   committed and pushed as unfinished work is, how the gate failed is kept,
+   and the hub chooses the worker of the next run again, told of the
+   attempt; the next run is told the gate's output and its reply, to fix
+   what the gate reports. The last run whose gate fails ends the task
+   failed;
 6. says how the run ended (`task_finish`): `NEEDS INPUT: <question>` keeps the
    question and the task waits for an answer; otherwise its result (`done`,
    `failed` or `cancelled`), with the harness and the model of its last run,
@@ -345,8 +395,7 @@ first claim, and no other runner may claim it.
 
 **Projects a runner has no folder for.** Every 30 seconds, as it looks at
 its workspace, a runner that runs tasks asks the hub for the account's tasks,
-in every project, that wait for a runner and that it has not given back
-(`tasks_waiting`). For each project with no folder in its workspace, and no
+in every project, that the hub offers it (`tasks_waiting`). For each project with no folder in its workspace, and no
 task of it waiting for an answer:
 
 - a task names a `repository`: the runner clones it into
@@ -434,7 +483,7 @@ tool calls) and what a person wrote it is good and bad at, and how many
 calls each provider of its pool takes at once; then how busy it is
 (`runner_busy`): the runs going on on each harness and holding a call of
 each provider, again whenever that changes. The hub keeps both while the
-runner is connected: what it chooses a worker for a task from. So the hub knows
+runner is connected: what the task picker chooses a worker for a task from. So the hub knows
 which runners are connected and which run tasks: which may take an account's
 tasks, and whether a task given back is blocked, depend on them, and MCP's
 `runners` and `ensemble-runner peers` list an account's runners
@@ -468,7 +517,7 @@ to the hub.
 | --- | --- | --- |
 | a token, on a link without one | `login` (a name, a password and the client's name, `runner <name>`) or `join` (a join code and the client's name), each answered with a new access token of the client's own, named after it | |
 | who it is | `hello` (who am I, which permissions) | |
-| tasks | each with its `project`: `tasks`, `task`, `task_claim`, `task_renew`, `task_release`, `task_finish`, `task_give_back` (with why), `task_gate` (a task's gate, or none, while it neither runs nor has ended), `task_confirm_gate` (the gate of a task given to the account) and `task_reassign` (to another account, as a task of its own there); and across projects, `tasks_waiting` (the account's tasks that this runner has not given back) | |
+| tasks | each with its `project`: `tasks`, `task`, `task_claim`, `task_renew`, `task_release`, `task_finish`, `task_give_back` (with why), `task_gate` (a task's gate, or none, while it neither runs nor has ended), `task_confirm_gate` (the gate of a task given to the account), `task_reassign` (to another account, as a task of its own there) and `task_choose` (the worker of a task the decision model was not sure of); and across projects, `tasks_waiting` (the account's tasks the hub offers this runner) | |
 | runners | `runner` (I am a runner: name, the harnesses that may run, each with how many runs it takes and the models it drives, what each is and its abilities, and my providers' limits), `runner_busy` (the runs going on on each harness and provider, whenever that changes), `runners` (mine, each with what it runs on, how busy it is and the models it shares) | |
 | model calls, on the relay socket | the models it shares, by provider, and how many calls each provider takes at once, then calls to other runners' models: `open` (the runner and the provider), the request's body in chunks, `end`, or `cancel` | the answers to its calls, and calls to the models it shares, which it answers: `head`, the body in chunks, `done`, or `error` |
 
@@ -482,7 +531,7 @@ or the account for itself with a session, `me.join-code`
 tokens, signs in as no one, and is good once within 24 hours; a client
 without the link spends it with `POST /api/v1/join`. The hub's MCP runs its tools as the same requests (`share`, `recall`, and
 `task_create`, `task_answer`, `task_gate`, `task_confirm_gate`,
-`task_reassign`, `task_cancel` with the reading ones, and `runners`), so the link and MCP cannot differ. Every request is checked against the
+`task_reassign`, `task_choose`, `task_cancel` with the reading ones, and `runners`), so the link and MCP cannot differ. Every request is checked against the
 token's permissions (its role, narrowed by its scopes), read again from the
 hub's state, so a revoked token stops at once. The permissions are `share`,
 `recall`, `tasks` and `admin`. The same port serves the
@@ -871,12 +920,20 @@ person.
 **A run** works in the task's own git worktree, on the branch `ensemble/<id>`,
 where the harness may edit files and run commands. Ensemble never merges it.
 
-**The picker** chooses the harness and the LLM a task runs on. It is a trait,
-so a decision model can take the rules' place. Until then it follows rules:
-among the pairs it may use now (added, found, with a free place, within their
-limits), the strongest tier first, and the least busy among equals. When the
-task's gate fails, the next try goes one tier up. Every run records what was
-picked.
+**The task picker** is the hub's, one for the hub, not per account
+(decided 2026-11-25): its `task_picker` settings name the decision models
+asked, in order, the questions a person writes, what each answer means for
+the worker (a fixed vocabulary: least tier, least context, tool calls, a
+harness or model preferred or avoided) and how sure each answer and the
+worker must be. A decision model chooses, from the task and what each
+worker's model is and is good at (its abilities, which a person writes on
+models, not on harnesses), which runner, harness and model work on it. There
+are no rules: with no decision model answering, no task is handed out
+(decided 2026-11-25), and a decision model Ensemble cannot be sure of hands
+the choice to the task's person, whose choice is kept to learn from. A
+template, `basic`, is a start an admin may choose, never used unless chosen.
+Every run records what it ran on, and every decision what was asked and
+answered.
 
 **Gates** are the task's: the command its work must pass, how long it may run
 and how many tries it gets. Only the task's account sets one, through MCP, the
@@ -886,8 +943,9 @@ gate only once that person confirms it, since someone else wrote the command.
 
 The hub has an ANN pool too, for its own work: the distiller, the embedding
 model and the source filter, on its own providers and on the models runners
-share with it. A model alone is called, with no harness, only there: until
-tasks say what they need (an open question), every task goes to a harness.
+share with it. A model alone is called, with no harness, only there for now;
+a task that only needs an answer is to run on a model alone, as the task
+picker decides (not built yet).
 
 The agent loop of Ensemble's own is the `builtin` harness: harness-rs's
 `AgentLoop`, its file and shell tools, and its model clients, on the pool's
@@ -927,8 +985,8 @@ Two kinds of work (decided 2026-11-17):
   on it: runners **lease** them (see "A task" in part one), and when a runner
   stops or dies another runner of the account takes the task up. Runners work
   only on tasks; there is no delegation outside them. (Decided 2026-11-19.) A
-  task names no agent: the picker chooses what works on it (see "Models and
-  harnesses"). It is reassigned only to another person, whose runners then
+  task names no agent: the hub's task picker chooses what works on it (see
+  "Models and harnesses"). It is reassigned only to another person, whose runners then
   take it. (Decided 2026-11-25.)
 
 A harness never calls a tracker itself. Each tracker implements one
@@ -948,8 +1006,8 @@ An issue carries an explicit signal that agents may take it: a label, such as
 1. The inbox sees an issue assigned to me with the signal and makes it a task
    of mine: its text the task, its `## Definition of done` section the
    task's. An issue without one is blocked, saying so.
-2. A runner of mine takes it, with the vault's notes about it, which the hub
-   puts into the task, and the picker chooses what works on it.
+2. The hub puts the vault's notes about it into the task, its task picker
+   chooses the worker, and that runner of mine takes it.
 3. If it is unclear, the agent asks; the question goes to a tracker comment and
    my answer comes back the same way.
 4. It works, checks the task's gate, and may make further tasks.
@@ -1233,8 +1291,9 @@ crate holds it today.
 | identity | users, tokens, scopes; one implicit user standalone | core | `ensemble-hub` (`users.rs`) |
 | backends | endpoints, the chat client, format translation, health, quotas | core | `ensemble-backends` (no quotas yet) |
 | agents | the harnesses, `builtin`, workspace, worktrees, gates | backends | `ensemble-agents` |
-| picker | the runner's means, its pairs of a harness and an LLM, the rules | agents | `ensemble-agents` (`picker.rs`) |
-| tasks | tasks kept on the hub and leased, the inbox, `IssueTracker` adapters | identity, picker | `ensemble-tasks`, and `ensemble-hub` (`board.rs`, `inbox/`) |
+| means | the runner's means, its pairs of a harness and an LLM, the pair chosen taken | agents | `ensemble-agents` (`means.rs`) |
+| task picker | the decision models that choose each task's worker, the questions they are asked, a person's choice when they are not sure | backends, tasks | `ensemble-hub` (`dispatch.rs`, `task_picker.rs`), `ensemble-config` (`picker.rs`) |
+| tasks | tasks kept on the hub and leased, the inbox, `IssueTracker` adapters | identity, means | `ensemble-tasks`, and `ensemble-hub` (`board.rs`, `inbox/`) |
 | vault | vault repositories, schema, index, visibility | identity | `ensemble-knowledge` (no visibility yet) |
 | pipeline | ingest, filter, extract, integrate, review | vault, backends | `ensemble-knowledge` |
 | recall | context packages | vault | `ensemble-knowledge`, and `ensemble-hub` (`mcp.rs`) for client agents |
@@ -1508,10 +1567,14 @@ crate holds it today.
     and provider is, link protocol 13; `task_picker` in the hub's settings,
     its decision models to try, its questions, what each answer does and
     how sure it must be, and a starting template (`picker set`, `picker
-    question`, `picker template`, the web UI's Task picker). Not yet: the hub choosing, a task waiting for a person to
-    choose when it is not sure, and the rules on the runner gone; a task
-    that only needs an answer run on a model alone; learning from what
-    people chose.)
+    question`, `picker template`, the web UI's Task picker); the hub
+    choosing each task's worker and offering the task to its runner alone,
+    a task waiting for its person to choose when the decision model is not
+    sure (`task.choose`, MCP's `choose`), the choice kept with the decision,
+    a task chosen for again when what it was chosen of changes, a gate's
+    retry chosen for again, and the rules on the runner gone; link protocol
+    14. Not yet: a task that only needs an answer run on a model alone;
+    learning from what people chose.)
 33. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
     and Teams, Telegram); a runner's operations from the hub, for its own
     account; the remaining goal operations (people, computers); chat.
@@ -1528,12 +1591,21 @@ adapters like the web UI.
    how. Left for later on 2026-11-19.
 4. Several hubs for one person (a home hub and a workplace hub): a runner
    names one hub; whether it may name several.
-5. How a task says what it needs (whether it changes code or only asks for
-   an answer, how hard it is) and what decides it: the person's agent as it
-   makes the task, an LLM, or a decision model. Until it is decided, every
-   task goes to a harness and the picker follows its rules. Left for later on
-   2026-11-24.
+5. How a task says what it needs, and what decides it. Decided 2026-11-25:
+   whoever makes a task gives only its title, text and definition of done; a
+   decision model of the hub's task picker decides, by the questions an
+   admin writes and the abilities a person writes on each model, which
+   runner, harness and model work on it, and asks the task's person when it
+   is not sure (see "Models and harnesses", and "Harnesses and the task
+   picker" in part one). Whether a task needs a harness at all, or a model
+   alone, is the task picker's to decide too (not built yet).
 6. Skills, folders of instructions a harness loads when the work calls for
    them, as the expertise a team's prompts once gave: where they live, and
    whether the vault's how-to notes become some. Left for later on
    2026-11-25.
+7. Who a task is for. People own tasks: a task is its maker's, an issue's
+   assignee's, or the person it was reassigned to, and the decision model
+   chooses only the worker. A tracker's issue with the hub's label and no
+   assignee is left alone now; the decision model could suggest a person
+   for it, from what each person's account says they do, for a person to
+   confirm. Not built; raised 2026-11-25.

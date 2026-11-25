@@ -278,10 +278,38 @@ fn status(task: &Value) -> String {
     if !task["running_on"].is_null() {
         return "running".into();
     }
-    match task["status"].as_str() {
-        Some(s) => s.to_string(),
-        None => "waiting".into(),
+    match (task["status"].as_str(), task["pick"]["state"].as_str()) {
+        (Some(s), _) => s.to_string(),
+        (None, Some("needs_choice")) => "choose its worker".into(),
+        (None, Some("offered")) => "offered".into(),
+        _ => "waiting".into(),
     }
+}
+
+/// Where choosing the worker of a task that has not ended stands, in words.
+fn pick_said(task: &Value) -> Option<String> {
+    let pick = &task["pick"];
+    let worker = |w: &Value| {
+        format!(
+            "{} on {} on {}",
+            text(w, "harness"),
+            text(w, "model"),
+            text(w, "runner")
+        )
+    };
+    Some(match pick["state"].as_str()? {
+        "undecided" => match pick["why"].as_str() {
+            Some(why) => format!("Its worker is not chosen yet: {why}."),
+            None => "The hub's decision model is to choose its worker.".into(),
+        },
+        "decided" => "Its worker is chosen; it waits for one to be free.".into(),
+        "offered" => format!("It is offered to {}.", worker(&pick["worker"])),
+        "needs_choice" => format!(
+            "The decision model was not sure ({}): choose its worker.",
+            text(pick, "why")
+        ),
+        _ => return None,
+    })
 }
 
 /// Is the task over, so nothing more is done to it?
@@ -368,6 +396,22 @@ pub fn TaskPage(project: String, id: String) -> Element {
                 None => "None: its work is done when the run says so.".into(),
             };
             let unconfirmed = shown["gate_unconfirmed"] == true;
+            let picked = if over || !shown["running_on"].is_null() { None } else { pick_said(shown) };
+            let choosing = shown["pick"]["state"] == "needs_choice";
+            let ranked: Vec<(String, String, String, String)> = shown["decision"]["ranked"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|r| {
+                    let w = &r["worker"];
+                    (
+                        text(w, "runner"),
+                        text(w, "harness"),
+                        text(w, "model"),
+                        format!("{:.2}", r["probability"].as_f64().unwrap_or(0.0)),
+                    )
+                })
+                .collect();
             let moves: Vec<String> = shown["moves"]
                 .as_array()
                 .into_iter()
@@ -382,6 +426,42 @@ pub fn TaskPage(project: String, id: String) -> Element {
                 }
                 for moved in moves {
                     p { class: "muted", "{moved}" }
+                }
+                if let Some(said) = picked.filter(|_| !choosing) {
+                    p { class: "muted", "{said}" }
+                }
+                if choosing {
+                    section { class: "panel notice",
+                        p { {pick_said(shown).unwrap_or_default()} }
+                        table {
+                            thead { tr { th { "Runner" } th { "Harness" } th { "Model" } th { "Likely" } th {} } }
+                            tbody {
+                                for (runner, harness, model, p) in ranked {
+                                    tr { key: "{runner}/{harness}/{model}",
+                                        td { "{runner}" }
+                                        td { "{harness}" }
+                                        td { code { "{model}" } }
+                                        td { "{p}" }
+                                        td { class: "end",
+                                            OpForm {
+                                                op: "task.choose",
+                                                fixed: {
+                                                    let mut f = on_task.clone();
+                                                    f.push(("runner".to_string(), json!(runner)));
+                                                    f.push(("harness".to_string(), json!(harness)));
+                                                    f.push(("model".to_string(), json!(model)));
+                                                    f
+                                                },
+                                                submit: "Choose",
+                                                quiet: true,
+                                                on_done: move |_| task.restart(),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 if unconfirmed {
                     section { class: "panel notice",

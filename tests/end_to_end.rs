@@ -1081,9 +1081,20 @@ fn write_hub(hub: &Path, settings: Value) -> Result<(), String> {
         .write(&settings, &Change::by_this_computer("test"))
 }
 
+/// A decision model's API that chooses the first of every question's
+/// answers, sure of it: the first worker, as no test here has more than one
+/// fit. It runs until the tests end.
+fn decision_stub() -> String {
+    ensemble_backends::testing::decision_server(|asked| {
+        ensemble_backends::testing::answers(asked, |_, options| (options[0].clone(), 0.95))
+    })
+    .url
+}
+
 /// A hub made by `ensemble-hub init` on the scratch computer, with a model
-/// server, `central`, that distills, embeds and filters, open to sign-ups,
-/// and watching a folder of issues.
+/// server, `central`, that distills, embeds and filters, a decision model,
+/// `decide:stub`, that chooses who works on each task, open to sign-ups, and
+/// watching a folder of issues.
 fn hub_server_of(scratch: &Scratch) -> PathBuf {
     let out = hub_command(scratch)
         .args(["init", "--owner", "Acme"])
@@ -1095,17 +1106,32 @@ fn hub_server_of(scratch: &Scratch) -> PathBuf {
     let central = json!([{ "provider": "central", "model": "qwen3.5-72b" }]);
     s["registration"] = json!({ "type": "approval", "max_pending": 20 });
     s["ann_pool"] = json!({
-        "providers": { "central": {
-            "type": "openai-compatible-api",
-            "base_url": "http://127.0.0.1:8000/v1",
-            "api_key_env": "CENTRAL_API_KEY",
-            "timeout_seconds": 300,
-            "max_concurrent": 4,
-        } },
+        "providers": {
+            "central": {
+                "type": "openai-compatible-api",
+                "base_url": "http://127.0.0.1:8000/v1",
+                "api_key_env": "CENTRAL_API_KEY",
+                "timeout_seconds": 300,
+                "max_concurrent": 4,
+            },
+            "decide": {
+                "type": "decision-api",
+                "base_url": decision_stub(),
+                "api_key_env": null,
+                "timeout_seconds": 10,
+                "max_concurrent": 4,
+            },
+        },
         "models": [
             embedding_added("central", "nomic-embed-text"),
             model_added("central", "qwen3.5-72b"),
+            { "provider": "decide", "id": "stub", "kind": { "type": "decision" }, "missing": false, "shared": false },
         ],
+    });
+    s["task_picker"] = json!({
+        "decision_models": [{ "provider": "decide", "model": "stub" }],
+        "worker_min_confidence": 0.5,
+        "questions": [],
     });
     s["distill"]["try"] = central.clone();
     s["embed"] =
@@ -1315,12 +1341,12 @@ fn a_hub_server_refuses_another_protocol_or_a_bad_token_and_stops_on_sigterm() {
     assert!(status.contains("426"), "no protocol named: {status}");
     let status = upgrade(
         "/link",
-        "Ensemble-Protocol: 13\r\nAuthorization: Bearer ens_wrong\r\n",
+        "Ensemble-Protocol: 14\r\nAuthorization: Bearer ens_wrong\r\n",
     );
     assert!(status.contains("401"), "{status}");
-    let status = upgrade("/", "Ensemble-Protocol: 13\r\n");
+    let status = upgrade("/", "Ensemble-Protocol: 14\r\n");
     assert!(status.contains("404"), "the link is at /link: {status}");
-    let status = upgrade("/link", "Ensemble-Protocol: 13\r\n");
+    let status = upgrade("/link", "Ensemble-Protocol: 14\r\n");
     assert!(
         status.contains("101"),
         "no token: signing in only: {status}"
@@ -2750,6 +2776,8 @@ fn an_admin_adds_providers_and_their_keys_without_naming_a_variable_and_adds_mod
 
     // The task picker: decision models alone, how sure of the worker they
     // must be, and the questions they are asked first.
+    let out = hub_with_stdin(&s, &["picker", "set", "--off"], "");
+    assert!(out.status.success(), "{}", stderr_of(&out));
     let shown = stdout_of(&hub_with_stdin(&s, &["picker", "show"], ""));
     assert!(shown.contains("There is no task picker"), "{shown}");
     let out = hub_with_stdin(&s, &["picker", "set", "central:qwen3.5-72b"], "");

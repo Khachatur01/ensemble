@@ -2,7 +2,7 @@
 //! what it did, or why it failed and whether another attempt could work. The
 //! queue runs each task, and each retry after a failed gate, as one.
 
-use ensemble_agents::picker::Taken;
+use ensemble_agents::means::Taken;
 use ensemble_agents::router::Ensemble;
 use std::sync::atomic::AtomicBool;
 

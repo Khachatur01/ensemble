@@ -6,7 +6,7 @@
 //! it can drive. So the hub knows which runners are connected, and which may
 //! take an account's tasks.
 
-use ensemble_agents::picker::{Busy, Means, Pair};
+use ensemble_agents::means::{Busy, Means, Pair};
 use ensemble_config::{HarnessKind, Runner};
 use ensemble_core::runtime;
 use ensemble_link::client::{Connection, Failure, Token};
@@ -151,12 +151,8 @@ impl Worker {
 
 /// A model a harness can drive, as the runner tells the hub.
 fn model(pair: &Pair) -> Value {
-    let model = match &pair.provider {
-        Some(p) => format!("{p}:{}", pair.model),
-        None => pair.model.clone(),
-    };
     json!({
-        "model": model,
+        "model": pair.model_name(),
         "provider": pair.provider,
         "tier": pair.tier.as_str(),
         "context_window": pair.context_window,

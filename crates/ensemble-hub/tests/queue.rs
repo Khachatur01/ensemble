@@ -1,9 +1,11 @@
 //! A runner's worker (`ensemble_tasks::queue`) running the tasks this hub
 //! keeps ([`DbBoard`]): claimed, renewed, ended, asked and cancelled as a
 //! runner does, each in a worktree of its own, on OpenCode run as a
-//! stand-in script on a model the picker takes.
+//! stand-in script on the model the hub offers each task on. No decision
+//! model is asked here: every task that may be chosen for is offered to
+//! the runner's one worker, as the hub would.
 
-use ensemble_agents::picker::Means;
+use ensemble_agents::means::Means;
 use ensemble_agents::router::Ensemble;
 use ensemble_agents::worktree::testing::repo;
 use ensemble_config::{AnnPool, Harness, HarnessKind, LlmBackend, ModelKind, PoolModel, Tier};
@@ -12,10 +14,11 @@ use ensemble_hub::board::DbBoard;
 use ensemble_tasks::board::End;
 use ensemble_tasks::queue::Queue;
 use ensemble_tasks::runs::Runs;
-use ensemble_tasks::tasks::{Gate, Outcome, Status, Task, Ticket};
+use ensemble_tasks::tasks::{Gate, Outcome, Pick, Status, Task, Ticket, Worker};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// The runner every worker here runs as.
@@ -139,17 +142,48 @@ fn board(tmp: &TempDir) -> DbBoard {
     board_at(&project(tmp).join(".ensemble"))
 }
 
+/// The runner's one worker: OpenCode on the local server's strong model.
+fn desk() -> Worker {
+    Worker {
+        runner: RUNNER.into(),
+        harness: "opencode".into(),
+        model: "local:big".into(),
+    }
+}
+
+/// Offer every task of `board` that is to be chosen for to the runner's one
+/// worker, unless the runner gave it back, as the hub would.
+fn offer(board: &DbBoard) {
+    for t in board.list().unwrap() {
+        if t.status.is_none()
+            && matches!(t.pick, Pick::Undecided { .. })
+            && !t.given_back.iter().any(|g| g.runner == RUNNER)
+        {
+            let _ = board.put_on(t.id(), &desk());
+        }
+    }
+}
+
 /// Run the worker of `e`'s project, as a runner does, while `script` goes
-/// on; then close it, as when the runner stops, and wait for it to end.
+/// on, the hub offering it what is to be chosen for; then close it, as when
+/// the runner stops, and wait for it to end.
 fn working(e: &Ensemble, script: impl FnOnce()) {
     let state = e.state_dir().unwrap();
     let queue = Queue::new(e, Runs::new(&state), board_at(&state), RUNNER)
         .with_lease(Duration::from_secs(2));
+    let done = AtomicBool::new(false);
     std::thread::scope(|s| {
         let worker = s.spawn(|| ensemble_core::runtime::block_on(queue.work()));
+        s.spawn(|| {
+            while !done.load(Ordering::Relaxed) {
+                offer(&board_at(&state));
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
         script();
         queue.close();
         worker.join().unwrap();
+        done.store(true, Ordering::Relaxed);
     });
 }
 
@@ -313,6 +347,11 @@ fn a_cancelled_task_stops_and_an_ended_one_does_not_run_again() {
     let (e, tmp) = runner_with(&sleeper(), 1);
     write_task(&tmp, "0001-a", "a");
     write_task(&tmp, "0002-b", "b");
+    let laptop = Worker {
+        runner: "laptop".into(),
+        ..desk()
+    };
+    board(&tmp).put_on("0002-b", &laptop).unwrap();
     board(&tmp).take("0002-b", "laptop", 60, true).unwrap();
     board(&tmp)
         .end(
@@ -554,23 +593,32 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
 }
 
 #[test]
-fn a_runner_with_no_harness_on_leaves_its_tasks_waiting_and_says_why() {
+fn a_runner_offered_a_worker_it_does_not_have_gives_the_task_back_saying_why() {
     let tmp = TempDir::new();
     std::fs::create_dir_all(project(&tmp)).unwrap();
     repo(&project(&tmp));
     let e = on(&tmp, None, 1);
     assert!(!e.means().can_run());
     write_task(&tmp, "0001-a", "a");
-    let log = project(&tmp).join(".ensemble/runs/0001-a/log.txt");
     working(&e, || {
-        until("it says why it waits", || {
-            std::fs::read_to_string(&log)
-                .ok()
-                .filter(|l| l.contains("waiting for a harness and a model to be free"))
+        until("it gives it back", || {
+            task(&tmp, "0001-a")
+                .given_back
+                .into_iter()
+                .find(|g| g.runner == RUNNER)
         });
     });
     let a = task(&tmp, "0001-a");
     assert_eq!((a.status, a.running_on), (None, None), "never claimed");
+    assert!(
+        a.given_back[0]
+            .why
+            .contains("it has no opencode on local:big now"),
+        "{:?}",
+        a.given_back
+    );
+    assert_eq!(a.pick, Pick::Undecided { why: None }, "to be chosen again");
+    assert_eq!(a.attempts.len(), 1, "{:?}", a.attempts);
 }
 
 #[test]

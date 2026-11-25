@@ -3,7 +3,7 @@
 //! what they need as arguments, so tests can run them without a terminal or a
 //! network.
 
-use ensemble_agents::picker::Means;
+use ensemble_agents::means::Means;
 use ensemble_config::{HarnessKind, HarnessesSetting};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};

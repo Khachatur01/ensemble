@@ -19,8 +19,8 @@ use ensemble_config::Permission;
 use ensemble_core::runtime::blocking;
 use ensemble_knowledge::Visibility;
 use ensemble_link::protocol::{
-    RECALL, RUNNERS, Request, SHARE, TASK, TASK_ANSWER, TASK_CANCEL, TASK_CONFIRM_GATE,
-    TASK_CREATE, TASK_GATE, TASK_REASSIGN, TASKS,
+    RECALL, RUNNERS, Request, SHARE, TASK, TASK_ANSWER, TASK_CANCEL, TASK_CHOOSE,
+    TASK_CONFIRM_GATE, TASK_CREATE, TASK_GATE, TASK_REASSIGN, TASKS,
 };
 use serde_json::{Map, Value, json};
 use tokio::net::TcpStream;
@@ -44,6 +44,7 @@ const GATE: &str = "gate";
 const CONFIRM_GATE: &str = "confirm_gate";
 const REASSIGN: &str = "reassign";
 const CANCEL: &str = "cancel";
+const CHOOSE: &str = "choose";
 
 impl Server<'_> {
     /// Answer one MCP request on `stream`, then close it.
@@ -193,7 +194,7 @@ impl Server<'_> {
         if self.keeps_tasks() && permissions.contains(&Permission::Tasks) {
             out.push_str(
                 "\n\nThe user's runners work through tasks kept here, each on a harness and a \
-                 model the runner picks. Make one with `submit` when the user wants work done \
+                 model the hub's decision model chooses (its `pick`). Make one with `submit` when the user wants work done \
                  that goes on without this conversation, naming the project (the repository's \
                  name), and its `repository` (the URL or path to clone it from) when you know it, \
                  and giving the run everything it needs: it cannot see this conversation. \
@@ -203,7 +204,9 @@ impl Server<'_> {
                  tell the user, and `answer` or make it again once that is fixed. `reassign` \
                  gives a task to another person; a task given to the user with a gate waits \
                  (`gate_unconfirmed`) until the user has read the gate's command and you \
-                 `confirm_gate` it.",
+                 `confirm_gate` it. A task whose `pick` is `needs_choice` waits for the user \
+                 to choose its worker: show them its `decision` (the workers ranked, and why it \
+                 was not sure) and `choose` the one they name.",
             );
         }
         out
@@ -339,6 +342,25 @@ impl Server<'_> {
                     field("id"),
                     field("to"),
                     moved["id"].as_str().unwrap_or("?")
+                ))
+            }
+            CHOOSE => {
+                tasks()?;
+                let worker = json!({
+                    "runner": field("runner"),
+                    "harness": field("harness"),
+                    "model": field("model"),
+                });
+                ask(
+                    TASK_CHOOSE,
+                    json!({ "project": field("project"), "id": field("id"), "worker": worker }),
+                )?;
+                Ok(format!(
+                    "Task {} runs on {} on {} on {}, once that is free.",
+                    field("id"),
+                    field("harness"),
+                    field("model"),
+                    field("runner")
                 ))
             }
             CANCEL => {
@@ -526,7 +548,8 @@ fn task_tools() -> Vec<Value> {
         tool(
             SUBMIT,
             "Make a task, kept on the hub, and return its id at once. One of the user's runners \
-             takes it, picks a harness and a model for it, finds the project in its workspace \
+             takes it, on the harness and the model the hub's decision model chooses, finds \
+             the project in its workspace \
              or clones it from `repository`, and works on it on a branch it pushes, after this \
              conversation ends; without `repository`, a runner with no copy asks for it on the \
              task. The hub adds the notes it knows related to the task.",
@@ -585,6 +608,20 @@ fn task_tools() -> Vec<Value> {
              their runners take it, and it gets a new id among their tasks.",
             json!({ "project": project, "id": id, "to": { "type": "string", "description": "The account to give it to." } }),
             &["project", "id", "to"],
+        ),
+        tool(
+            CHOOSE,
+            "Choose the worker of a task the decision model was not sure of (its `pick` is \
+             `needs_choice`): a runner of the user's connected now, and the harness and the \
+             model it runs it on, such as the likeliest the task's `decision` ranks.",
+            json!({
+                "project": project,
+                "id": id,
+                "runner": { "type": "string", "description": "The runner, by its name." },
+                "harness": { "type": "string", "description": "Its harness, such as `claude-code`." },
+                "model": { "type": "string", "description": "The model the harness drives, as the runner names it, such as `sonnet` or `local:qwen3.5:9b`." },
+            }),
+            &["project", "id", "runner", "harness", "model"],
         ),
         tool(
             CANCEL,
@@ -824,6 +861,7 @@ mod tests {
                 "gate",
                 "confirm_gate",
                 "reassign",
+                "choose",
                 "cancel"
             ]
         );
@@ -979,6 +1017,24 @@ mod tests {
         assert!(asked.iter().any(|(user, method, params)| user == "ana"
             && method == "task_reassign"
             && params == &json!({"project": "shop", "id": "t-1", "to": "bo"})));
+        let (text, _) = tool(
+            &hub,
+            &hub.ana,
+            "choose",
+            json!({"project": "shop", "id": "t-1", "runner": "desk", "harness": "claude-code", "model": "sonnet"}),
+        );
+        assert_eq!(
+            text,
+            "Task t-1 runs on claude-code on sonnet on desk, once that is free."
+        );
+        let asked = tasks.asked.lock().unwrap().clone();
+        assert!(
+            asked
+                .iter()
+                .any(|(_, method, params)| method == "task_choose"
+                    && params["worker"]
+                        == json!({"runner": "desk", "harness": "claude-code", "model": "sonnet"}))
+        );
         let (text, _) = tool(&hub, &hub.ana, "runners", json!({}));
         assert!(text.starts_with("No runner that works for you"), "{text}");
     }

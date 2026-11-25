@@ -131,8 +131,8 @@ pub fn config(agent: &RunSpec, oc: &OpenCodeAdapter, backend: &LlmBackend) -> Va
 /// A provider of the ANN pool as an OpenCode provider serving the run's one
 /// model.
 fn provider(backend: &LlmBackend, oc: &OpenCodeAdapter) -> Value {
-    // The picker gives OpenCode only OpenAI-compatible providers; the URL and
-    // key are the same either way if one gets this far.
+    // The runner pairs OpenCode only with OpenAI-compatible providers; the URL
+    // and key are the same either way if one gets this far.
     let (base_url, api_key) = (backend.settings.base_url(), backend.settings.api_key());
     let mut options = json!({
         "baseURL": base_url,

@@ -10,14 +10,15 @@
 //! | `task.list`, `task.show`, `task.create` | `tasks`, `task`, `task_create` | `tasks` |
 //! | `task.answer`, `task.gate`, `task.cancel` | `task_answer`, `task_gate`, `task_cancel` | `tasks` |
 //! | `task.reassign`, `task.confirm-gate` | `task_reassign`, `task_confirm_gate` | `tasks` |
+//! | `task.choose` | `task_choose` | `tasks` |
 //! | `runner.list` | `runners` | `tasks` |
 //! | `knowledge.share` | `share` | `share` |
 //! | `knowledge.find` | `recall` | `recall` |
 
 use crate::accounts::HubContext;
 use ensemble_link::protocol::{
-    RECALL, RUNNERS, SHARE, TASK, TASK_ANSWER, TASK_CANCEL, TASK_CONFIRM_GATE, TASK_CREATE,
-    TASK_GATE, TASK_PROJECTS, TASK_REASSIGN, TASKS,
+    RECALL, RUNNERS, SHARE, TASK, TASK_ANSWER, TASK_CANCEL, TASK_CHOOSE, TASK_CONFIRM_GATE,
+    TASK_CREATE, TASK_GATE, TASK_PROJECTS, TASK_REASSIGN, TASKS,
 };
 use ensemble_ops::{Access, Caller, Error, Field, Kind, Operation, Spec, operation};
 use serde::Deserialize;
@@ -62,6 +63,17 @@ const REASSIGN: &[Field] = &[
     Field::text(
         "to",
         "The account to give it to: its runners take it, once it confirms the task's gate.",
+    )
+    .required(),
+];
+const CHOOSE: &[Field] = &[
+    PROJECT,
+    ID,
+    Field::text("runner", "The runner of yours to run it, connected now.").required(),
+    Field::text("harness", "The harness of that runner to run it on, such as claude-code.").required(),
+    Field::text(
+        "model",
+        "The model that harness drives, as the runner names it, such as sonnet or local:qwen3.5:9b.",
     )
     .required(),
 ];
@@ -118,6 +130,15 @@ struct OnProject {
 struct OnTask {
     project: String,
     id: String,
+}
+
+#[derive(Deserialize)]
+struct Choose {
+    project: String,
+    id: String,
+    runner: String,
+    harness: String,
+    model: String,
 }
 
 #[derive(Deserialize)]
@@ -343,6 +364,25 @@ pub(crate) fn operations() -> Vec<Operation<HubContext>> {
                     caller,
                     TASK_REASSIGN,
                     json!({ "project": input.project, "id": input.id, "to": input.to }),
+                )
+            },
+        ),
+        operation(
+            Spec {
+                name: "task.choose",
+                summary: "Choose the worker of one of your tasks the decision models were not sure of: a runner of yours, and the harness and the model it runs it on.",
+                access: SIGNED,
+                input: CHOOSE,
+            },
+            |c: &HubContext, caller: &Caller, input: Choose| {
+                c.ask(
+                    caller,
+                    TASK_CHOOSE,
+                    json!({
+                        "project": input.project,
+                        "id": input.id,
+                        "worker": { "runner": input.runner, "harness": input.harness, "model": input.model },
+                    }),
                 )
             },
         ),

@@ -10,7 +10,7 @@
 //!   ensemble-runner serve                  (daemon, worker)
 //!         |  a worker per repository of its workspace (ensemble-tasks: queue)
 //!         v
-//!   the picker: a harness and an LLM       (ensemble-agents: picker)
+//!   the pair the hub chose for the task   (ensemble-agents: means)
 //!         v
 //!   claude -p, opencode run, codex exec, builtin
 //!                                          (ensemble-agents: external)
@@ -19,7 +19,7 @@
 //! Each harness is a CLI the user already has, started headless in the
 //! task's worktree, or `builtin` (a loop in this binary). Ensemble reads what
 //! the run does as it works and reports what it changed. The worker knows the
-//! picker and the router and nothing about the CLIs; the adapters in
+//! runner's means and the router and nothing about the CLIs; the adapters in
 //! `external` know how each CLI is started and read. `ARCHITECTURE.md` is the
 //! map of the whole.
 //!
@@ -38,7 +38,7 @@ mod worker;
 
 use clap::FromArgMatches;
 use cmd::runner::RunnerContext;
-use ensemble_agents::picker::Means;
+use ensemble_agents::means::Means;
 use ensemble_config::{self as config, RelayAt};
 use ensemble_core::state;
 use ensemble_ops::cli::matched;

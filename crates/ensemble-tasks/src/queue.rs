@@ -2,9 +2,11 @@
 //! repository's project ([`crate::board`]).
 //!
 //! While the worker runs ([`Queue::work`], in the runner), it claims every
-//! task of the project that may start, oldest id first, each on a harness and
-//! an LLM the picker takes for it of what is free on the runner, renews its
-//! claim while the run works, and tells the hub how the run ended. A task the
+//! task of the project the hub offers this runner, oldest id first, each on
+//! the harness and the LLM the hub's task picker chose for it once that pair
+//! is free here, renews its claim while the run works, and tells the hub how
+//! the run ended. A task offered on a pair the runner no longer has is given
+//! back, for the hub to choose again. A task the
 //! worker's end interrupts is put back, and a runner that dies stops
 //! renewing, so either way another run takes it up. What each run does as it
 //! goes is kept in its activity log ([`Runs`]).
@@ -15,13 +17,14 @@
 use super::delegation::{RunResult, run_delegation};
 use crate::board::{Board, Claim, End, LEASE, Progress, Renewal};
 use crate::runs::Runs;
-use crate::tasks::{ASK_MARKER, Detail, Status, Task, Ticket, question_in, utc, waiting_for};
+use crate::tasks::{
+    ASK_MARKER, Detail, GateFailed, Pick, Status, Task, Ticket, question_in, utc, waiting_for,
+};
 use ensemble_agents::external::gate;
-use ensemble_agents::picker::{Taken, above};
+use ensemble_agents::means::Taken;
 use ensemble_agents::router::Ensemble;
 use ensemble_agents::runtime::blocking;
 use ensemble_agents::worktree;
-use ensemble_config::Tier;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
@@ -35,9 +38,6 @@ use tokio::sync::futures::Notified;
 
 /// How often the worker looks at the hub for tasks that may start.
 const SCAN_EVERY: Duration = Duration::from_secs(2);
-
-/// How often a retry looks again for a pair strong enough to be free.
-const WAIT_FOR_A_PAIR: Duration = Duration::from_secs(1);
 
 /// How many times a run's end is told to the hub before it is given up.
 const FINISH_ATTEMPTS: u32 = 3;
@@ -59,6 +59,8 @@ struct Looked {
     claimed: Vec<(Ticket, Taken, Arc<AtomicBool>)>,
     /// The worker is closing: nothing new starts.
     closed: bool,
+    /// Tasks offered on a pair this runner does not have, and why.
+    unfit: Vec<(String, String)>,
 }
 
 #[derive(Default)]
@@ -66,8 +68,8 @@ struct Inner {
     /// Set by `close`: nothing new starts.
     closed: bool,
     live: BTreeMap<String, Live>,
-    /// Tasks already noted as waiting for a free harness and model, so the
-    /// note is written once per wait, not once per scan.
+    /// Tasks already noted as waiting for their harness and model to be
+    /// free, so the note is written once per wait, not once per scan.
     waits: HashSet<String>,
     /// Whether the hub could not be reached at the last look, so that is said
     /// once, not every few seconds.
@@ -157,6 +159,12 @@ impl<'e> Queue<'e> {
                     self.run_ticket(ticket, taken, &cancel).await
                 }));
             }
+            for (id, why) in looked.unfit {
+                self.note(&id, &format!("gave it back: {why}"));
+                if let Err(e) = self.board.give_back(&id, &self.runner, &why).await {
+                    self.note(&id, &format!("could not give it back: {e}"));
+                }
+            }
             if runs.is_empty() && looked.closed {
                 return;
             }
@@ -168,16 +176,22 @@ impl<'e> Queue<'e> {
         }
     }
 
-    /// Whether `task` may start here: not ended, not asking, not waiting for
-    /// its gate to be confirmed or another task, not running on another
-    /// runner, and not given back by this one.
-    fn may_start(&self, task: &Task, all: &[Task]) -> bool {
-        task.status.is_none()
+    /// The harness and the model the hub offers `task` to this runner on,
+    /// when it may start here: not ended, not asking, not waiting for its gate
+    /// to be confirmed or another task, not running on another runner, and
+    /// not given back by this one.
+    fn offered<'t>(&self, task: &'t Task, all: &[Task]) -> Option<(&'t str, &'t str)> {
+        let Pick::Offered { worker } = &task.pick else {
+            return None;
+        };
+        let may = worker.runner == self.runner
+            && task.status.is_none()
             && task.question.is_none()
             && !task.gate_unconfirmed
             && task.running_on.as_ref().is_none_or(|n| *n == self.runner)
             && !task.given_back.iter().any(|g| g.runner == self.runner)
-            && waiting_for(&task.ticket, all).is_empty()
+            && waiting_for(&task.ticket, all).is_empty();
+        may.then_some((worker.harness.as_str(), worker.model.as_str()))
     }
 
     /// The board's tasks. A board that cannot be reached is said once, until
@@ -202,26 +216,40 @@ impl<'e> Queue<'e> {
         }
     }
 
-    /// One look at what to start: the board's tasks that may start, each
-    /// claimed with the pair the picker took for it.
+    /// One look at what to start: the tasks the hub offers this runner,
+    /// each claimed with the pair the hub chose for it once that is free.
     async fn look(&self) -> Looked {
         let all = self.scan().await;
         let means = self.ensemble.means();
         // Taken a pair for, to claim on the board.
         let mut picked = Vec::new();
+        let mut unfit = Vec::new();
         let closed = {
             let mut inner = self.lock();
             let closed = inner.closed;
             for task in all.iter().filter(|_| !closed) {
                 let ticket = &task.ticket;
-                if inner.live.contains_key(&ticket.id) || !self.may_start(task, &all) {
+                if inner.live.contains_key(&ticket.id) {
                     continue;
                 }
-                let Some(taken) = means.take(None) else {
-                    if inner.waits.insert(ticket.id.clone()) {
-                        self.note(&ticket.id, "waiting for a harness and a model to be free");
+                let Some((harness, model)) = self.offered(task, &all) else {
+                    continue;
+                };
+                let taken = match means.take(harness, model) {
+                    Ok(Some(taken)) => taken,
+                    Ok(None) => {
+                        if inner.waits.insert(ticket.id.clone()) {
+                            self.note(
+                                &ticket.id,
+                                &format!("waiting for {harness} on {model} to be free"),
+                            );
+                        }
+                        continue;
                     }
-                    break;
+                    Err(why) => {
+                        unfit.push((ticket.id.clone(), format!("{}: {why}", self.runner)));
+                        continue;
+                    }
                 };
                 let cancel = Arc::new(AtomicBool::new(false));
                 inner.live.insert(
@@ -255,7 +283,11 @@ impl<'e> Queue<'e> {
                 }
             }
         }
-        Looked { claimed, closed }
+        Looked {
+            claimed,
+            closed,
+            unfit,
+        }
     }
 
     /// Keep this runner's claim on task `id` while it runs: renewed four times
@@ -396,10 +428,10 @@ impl<'e> Queue<'e> {
                     self.work_on(&ticket, detail.as_ref(), &wt.dir, taken, cancel)
                         .await
                 }
-                Err(e) => (RunResult::err(e.clone()), Vec::new(), ran_on),
+                Err(e) => (RunResult::err(e.clone()), Vec::new(), ran_on, None),
             }
         };
-        let (mut result, mut extra, ran_on) = tokio::select! {
+        let (mut result, mut extra, ran_on, gate_failed) = tokio::select! {
             done = work => done,
             () = self.hold(&ticket.id, cancel, &lost) => unreachable!("holding never ends"),
         };
@@ -417,9 +449,13 @@ impl<'e> Queue<'e> {
         if let Some(question) = &question {
             self.note(&ticket.id, &format!("needs input: {question}"));
         }
+        // Its work to be done again after its gate failed stays on its branch
+        // too, for the next run, wherever it is.
+        let again = gate_failed.is_some() && !interrupted_now;
         if let Ok(wt) = &place
             && !interrupted_now
             && question.is_none()
+            && !again
         {
             extra.push(("branch", wt.branch.clone()));
             let message = format!("{}: {}", ticket.id, ticket.title);
@@ -443,7 +479,7 @@ impl<'e> Queue<'e> {
         // and the branch goes to the remote, for the next run wherever it is.
         let progress = match &place {
             Ok(wt) if !lost => {
-                if interrupted_now || question.is_some() {
+                if interrupted_now || question.is_some() || again {
                     let message = format!("{}: work so far", ticket.id);
                     if let Err(e) = blocking(|| worktree::commit(wt, &message)) {
                         self.note(
@@ -466,6 +502,12 @@ impl<'e> Queue<'e> {
         } else if interrupted_now {
             // The worker ended under it: put back, to run again.
             Some(None)
+        } else if let Some(gate) = gate_failed.filter(|_| again) {
+            Some(Some(End::Retry {
+                harness: ran_on.harness,
+                model: ran_on.model,
+                gate,
+            }))
         } else if let Some(question) = question {
             Some(Some(End::Ask {
                 question,
@@ -496,40 +538,33 @@ impl<'e> Queue<'e> {
         self.changed.notify_waiters();
     }
 
-    /// A pair at least `at_least` strong, when one that strong exists, taken
-    /// as soon as one is free; none once the run is cancelled.
-    async fn take_when_free(&self, at_least: Tier, cancel: &AtomicBool) -> Option<Taken> {
-        loop {
-            if let Some(taken) = self.ensemble.means().take(Some(at_least)) {
-                return Some(taken);
-            }
-            if cancel.load(Ordering::Relaxed) {
-                return None;
-            }
-            tokio::time::sleep(WAIT_FOR_A_PAIR).await;
-        }
-    }
-
-    /// Run `taken` on `ticket` in `dir`, then its gate if it has one. While
-    /// the gate fails and attempts remain, it runs again with the gate's
-    /// output, on a pair a tier stronger. Returns the outcome, front matter
-    /// for the result, and what the last run was on.
+    /// Run `taken` on `ticket` in `dir`, then its gate if it has one. A run
+    /// whose work does not pass the gate, with runs of the task left, comes
+    /// back with how the gate failed, for the hub to choose the worker of the
+    /// next run, which is told. Returns the outcome, front matter for the
+    /// result, what the run was on, and how the gate failed when it is to run
+    /// again.
     async fn work_on(
         &self,
         ticket: &Ticket,
         detail: Option<&Detail>,
         dir: &Path,
-        mut taken: Taken,
+        taken: Taken,
         cancel: &AtomicBool,
-    ) -> (RunResult, Vec<(&'static str, String)>, RanOn) {
+    ) -> (
+        RunResult,
+        Vec<(&'static str, String)>,
+        RanOn,
+        Option<GateFailed>,
+    ) {
         let note = |line: &str| self.note(&ticket.id, line);
-        let ran_on = |taken: &Taken| RanOn {
+        let ran_on = RanOn {
             harness: taken.spec.kind().to_string(),
             model: taken.spec.model().to_string(),
         };
-        let mut base = ticket.prompt();
+        let mut prompt = ticket.prompt();
         if let Some((questions, reply)) = detail.and_then(|d| d.conversation.as_ref()) {
-            base.push_str(&format!(
+            prompt.push_str(&format!(
                 "\n\nYou stopped earlier to ask. The questions and their answers:\n\n{}\n\nYour reply when you last stopped:\n{}\n\nGo on from there.",
                 questions.trim(),
                 reply.trim()
@@ -539,98 +574,77 @@ impl<'e> Queue<'e> {
             .and_then(|d| d.progress.as_ref())
             .filter(|p| p.node != self.runner)
         {
-            base.push_str(&format!(
+            prompt.push_str(&format!(
                 "\n\nThis task was started on {}: its work so far is in this folder, committed on {} at {}. Go on from there; do not start over.",
                 p.node, p.branch, p.commit
             ));
         }
-        base.push_str(&format!(
+        if let (Some(gate), Some(failed)) =
+            (&ticket.gate, detail.and_then(|d| d.gate_failed.as_ref()))
+        {
+            prompt.push_str(&format!(
+                "\n\nA previous attempt did not pass the check `{}` ({}). Its output:\n```\n{}\n```\n\nIts reply was:\n{}\n\nFix what the check reports.",
+                gate.command, failed.ended, failed.output, failed.reply
+            ));
+        }
+        prompt.push_str(&format!(
             "\n\nIf you cannot finish without a decision that only the person who asked can make, stop and end your reply with one line: {ASK_MARKER} <your question>"
         ));
-        let delegate = async |taken: &Taken, prompt: &str| {
-            note(&format!("running on {}", taken.spec.name));
-            run_delegation(
-                self.ensemble,
-                taken,
-                prompt,
-                ticket.context.as_deref(),
-                dir,
-                &note,
-                cancel,
-            )
-            .await
-        };
+        note(&format!("running on {}", taken.spec.name));
+        let result = run_delegation(
+            self.ensemble,
+            &taken,
+            &prompt,
+            ticket.context.as_deref(),
+            dir,
+            &note,
+            cancel,
+        )
+        .await;
+        drop(taken);
         let Some(gate) = &ticket.gate else {
-            let result = delegate(&taken, &base).await;
-            return (result, Vec::new(), ran_on(&taken));
+            return (result, Vec::new(), ran_on, None);
         };
         let attempts = gate.attempts.max(1);
+        let attempt = detail.map_or(0, |d| d.task.gate_failures) + 1;
         let command = serde_json::to_string(&gate.command).expect("a string serializes");
-        let mut prompt = base.clone();
-        let mut attempt = 1;
-        loop {
-            let reported = |verdict: &str| {
-                vec![
-                    ("gate", command.clone()),
-                    ("gate_result", verdict.to_string()),
-                    ("attempts", attempt.to_string()),
-                ]
-            };
-            let result = delegate(&taken, &prompt).await;
-            if result.is_error
-                || cancel.load(Ordering::Relaxed)
-                || question_in(&result.text).is_some()
-            {
-                return (result, reported("not run"), ran_on(&taken));
-            }
-            note(&format!("gate: running `{}`", gate.command));
-            let verdict = gate::run(&gate.command, gate.timeout_seconds, dir, cancel).await;
-            if verdict.passed {
-                let text = format!(
-                    "{}\n\n[gate: passed on attempt {attempt} of {attempts}]",
-                    result.text
-                );
-                return (RunResult::ok(text), reported("passed"), ran_on(&taken));
-            }
-            note(&format!(
-                "gate: failed ({}) on attempt {attempt} of {attempts}",
-                verdict.ended
-            ));
-            let failed = |why: &str| {
-                format!(
-                    "{}\n\n[gate: failed ({}) on attempt {attempt} of {attempts}{why}]\n```\n{}\n```",
-                    result.text, verdict.ended, verdict.output
-                )
-            };
-            if attempt >= attempts || cancel.load(Ordering::Relaxed) {
-                return (
-                    RunResult::err(failed("")),
-                    reported("failed"),
-                    ran_on(&taken),
-                );
-            }
-            // The next attempt asks for a tier above the last, and waits for
-            // a pair that strong to be free.
-            let at_least = above(taken.spec.tier);
-            let last = ran_on(&taken);
-            drop(taken);
-            self.changed.notify_waiters();
-            taken = match self.take_when_free(at_least, cancel).await {
-                Some(next) => next,
-                None => {
-                    return (
-                        RunResult::err(failed("; no retry: the task was stopped")),
-                        reported("failed"),
-                        last,
-                    );
-                }
-            };
-            attempt += 1;
-            prompt = format!(
-                "{}\n\nA previous attempt did not pass the check `{}` ({}). Its output:\n```\n{}\n```\n\nIts reply was:\n{}\n\nFix what the check reports.",
-                base, gate.command, verdict.ended, verdict.output, result.text
-            );
+        let reported = |verdict: &str| {
+            vec![
+                ("gate", command.clone()),
+                ("gate_result", verdict.to_string()),
+                ("attempts", attempt.to_string()),
+            ]
+        };
+        if result.is_error || cancel.load(Ordering::Relaxed) || question_in(&result.text).is_some()
+        {
+            return (result, reported("not run"), ran_on, None);
         }
+        note(&format!("gate: running `{}`", gate.command));
+        let verdict = gate::run(&gate.command, gate.timeout_seconds, dir, cancel).await;
+        if verdict.passed {
+            let text = format!(
+                "{}\n\n[gate: passed on attempt {attempt} of {attempts}]",
+                result.text
+            );
+            return (RunResult::ok(text), reported("passed"), ran_on, None);
+        }
+        note(&format!(
+            "gate: failed ({}) on attempt {attempt} of {attempts}",
+            verdict.ended
+        ));
+        if attempt >= attempts || cancel.load(Ordering::Relaxed) {
+            let text = format!(
+                "{}\n\n[gate: failed ({}) on attempt {attempt} of {attempts}]\n```\n{}\n```",
+                result.text, verdict.ended, verdict.output
+            );
+            return (RunResult::err(text), reported("failed"), ran_on, None);
+        }
+        let failed = GateFailed {
+            ended: verdict.ended.to_string(),
+            output: verdict.output,
+            reply: result.text.clone(),
+        };
+        (result, reported("failed"), ran_on, Some(failed))
     }
 
     /// Stop every run, and start nothing more, for when the worker ends.

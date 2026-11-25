@@ -108,6 +108,14 @@ pub enum End {
         #[serde(default)]
         repository: bool,
     },
+    /// Its work did not pass its gate, and it has runs left: the hub chooses
+    /// the worker of its next run again, which is told how the gate failed.
+    Retry {
+        /// The harness and the model the run was on.
+        harness: String,
+        model: String,
+        gate: crate::tasks::GateFailed,
+    },
 }
 
 /// One project's tasks, wherever they are kept.
@@ -235,16 +243,15 @@ impl Board for RemoteBoard {
     }
 }
 
-/// A task that waits for a runner: its project, and the task.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+/// A task offered to a runner: its project, and the task.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Waiting {
     pub project: String,
     pub task: Task,
 }
 
-/// The tasks, in every project, that wait for a runner and that `runner` has
-/// not given back, over `link`: what a runner looks at for the projects it
-/// has no folder for.
+/// The tasks, in every project, the hub offers `runner`, over `link`: what a
+/// runner looks at for the projects it has no folder for.
 pub async fn waiting(link: &Link, runner: &str) -> Result<Vec<Waiting>, String> {
     let params = json!({ "runner": runner });
     read(&link.ask(TASKS_WAITING, params).await?, "tasks")

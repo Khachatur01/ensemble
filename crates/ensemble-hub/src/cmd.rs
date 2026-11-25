@@ -399,6 +399,11 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
     });
     let server: &'static crate::server::Server<'static> = Box::leak(Box::new(server));
     server.answer_operations();
+    // The task picker chooses the worker of each task of the runners
+    // connected now.
+    let dispatcher = crate::dispatch::Dispatcher::new(&dir.tasks(), move || server.routes.now());
+    dispatcher.apply(hub.task_picker.as_ref(), &hub.llm.direct);
+    let dispatcher: &'static crate::dispatch::Dispatcher = Box::leak(Box::new(dispatcher));
     // A change to its settings, or to a key they name: used at once where it
     // can be, else it starts again.
     server.operations().1.when_changed(move || {
@@ -418,6 +423,7 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
         }
         loopback.set_names(now.llm.routes());
         memory.apply(&now);
+        dispatcher.apply(now.task_picker.as_ref(), &now.llm.direct);
         Some("The running hub uses it now.".into())
     });
     std::thread::scope(|scope| {
@@ -427,6 +433,7 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
             say(&format!("the providers: {}", said.replace('\n', "; ")));
         });
         scope.spawn(|| memory.work(&STOP, &say));
+        scope.spawn(|| dispatcher.work(&STOP, &say));
         for inbox in &inboxes {
             scope.spawn(|| inbox.work(&STOP, &say));
         }

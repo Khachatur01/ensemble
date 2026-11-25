@@ -1,5 +1,5 @@
-//! One run, as the picker set it up (`picker`): the harness that drives it,
-//! the model it runs on, and how long it may take. Nothing of it is a
+//! One run, as the pair taken for it sets it up (`means`): the harness that
+//! drives it, the model it runs on, and how long it may take. Nothing of it is a
 //! setting of its own: the harness entry and the ANN pool say it all, and a
 //! run works in its task's own worktree, where the harness may edit files and
 //! run commands.

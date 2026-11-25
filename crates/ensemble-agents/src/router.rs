@@ -1,10 +1,9 @@
-//! Where a task's work goes: the run the picker set up (`picker`), started
-//! in the task's worktree with the task, and what it did. Nothing a caller
-//! passes in names a model or a harness: the picker chooses those, and the
-//! result reports them.
+//! Where a task's work goes: the run of the pair taken for it (`means`),
+//! started in the task's worktree with the task, and what it did. The hub's
+//! task picker chooses the pair, and the result reports it.
 
 use crate::external::AgentRun;
-use crate::picker::{Means, Taken};
+use crate::means::{Means, Taken};
 use crate::spec::{Adapter, RunSpec};
 use ensemble_core::port::Error;
 use ensemble_core::workspace::Changes;
@@ -270,7 +269,7 @@ mod tests {
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let (e, means) = ensemble(&script.display().to_string(), &tmp.0);
-        let taken = means.take(None).unwrap();
+        let taken = means.take("claude-code", "sonnet").unwrap().unwrap();
         let out = crate::runtime::block_on(e.run(
             &taken,
             "do it",
@@ -295,7 +294,7 @@ mod tests {
     fn a_harness_that_is_not_installed_is_reported_by_name_and_recorded_failed() {
         let tmp = TempDir::new();
         let (e, means) = ensemble("/nonexistent/claude", &tmp.0);
-        let taken = means.take(None).unwrap();
+        let taken = means.take("claude-code", "sonnet").unwrap().unwrap();
         let err = crate::runtime::block_on(e.run(
             &taken,
             "do it",

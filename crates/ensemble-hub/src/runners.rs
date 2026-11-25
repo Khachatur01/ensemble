@@ -4,15 +4,20 @@
 //! it signed in as), a name, and the harnesses it runs tasks on, each with the
 //! models it can drive; a runner with none runs no task. The hub keeps no
 //! runner when its connection is gone; runners are presence, not state. Who is
-//! connected says which runners may take an account's tasks, and whether a
-//! task they gave back is blocked (`board`).
+//! connected, with its workers and how busy each harness and provider is, is
+//! what the hub's task picker chooses the worker of a task from
+//! (`dispatch`), and says whether a task they gave back is blocked
+//! (`board`).
 //!
 //! Every connection has an outbox here: events for it are put there by
 //! whichever connection has them, and the connection's own task sends them.
 
 use crate::board::Present;
+use crate::dispatch::{RunnerNow, WorkerNow};
 use ensemble_link::protocol::Event;
+use ensemble_tasks::tasks::Worker;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,6 +45,58 @@ impl Runner {
     fn id(&self) -> String {
         format!("{}/{}", self.owner, self.name)
     }
+
+    /// It as the task picker sees it.
+    fn now(&self) -> RunnerNow {
+        let mut workers = Vec::new();
+        let mut harness_limits = BTreeMap::new();
+        for h in &self.harnesses {
+            let Some(harness) = h["harness"].as_str() else {
+                continue;
+            };
+            if let Some(n) = h["max_concurrent"].as_u64() {
+                harness_limits.insert(harness.to_string(), n as u32);
+            }
+            for m in h["models"].as_array().into_iter().flatten() {
+                let (Some(model), Some(tier)) = (
+                    m["model"].as_str(),
+                    m["tier"].as_str().and_then(ensemble_config::Tier::parse),
+                ) else {
+                    continue;
+                };
+                workers.push(WorkerNow {
+                    worker: Worker {
+                        runner: self.name.clone(),
+                        harness: harness.to_string(),
+                        model: model.to_string(),
+                    },
+                    provider: m["provider"].as_str().map(String::from),
+                    tier,
+                    context_window: m["context_window"].as_u64().map(|n| n as u32),
+                    tools: m["tools"].as_bool(),
+                    abilities: m["abilities"].as_str().map(String::from),
+                });
+            }
+        }
+        RunnerNow {
+            owner: self.owner.clone(),
+            name: self.name.clone(),
+            workers,
+            harness_limits,
+            provider_limits: numbers(&self.providers),
+            busy_harnesses: numbers(&self.busy["harnesses"]),
+            busy_providers: numbers(&self.busy["providers"]),
+        }
+    }
+}
+
+/// A map of names to counts, as kept.
+fn numbers(kept: &Value) -> BTreeMap<String, u32> {
+    kept.as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(k, v)| Some((k.clone(), v.as_u64()? as u32)))
+        .collect()
 }
 
 #[derive(Default)]
@@ -146,19 +203,24 @@ impl Routes {
     }
 
     /// The runners connected now that may take `account`'s tasks: its own
-    /// that run tasks, by their names.
+    /// that run tasks, by their names, each with its workers.
     pub(crate) fn present(&self, account: &str) -> Vec<Present> {
-        let mut present: Vec<Present> = self
-            .lock()
-            .runners
-            .values()
-            .filter(|r| r.owner == account && !r.harnesses.is_empty())
+        self.now()
+            .into_iter()
+            .filter(|r| r.owner == account && !r.workers.is_empty())
             .map(|r| Present {
-                name: r.name.clone(),
+                workers: r.workers.into_iter().map(|w| w.worker).collect(),
+                name: r.name,
             })
-            .collect();
-        present.sort_by(|a, b| a.name.cmp(&b.name));
-        present
+            .collect()
+    }
+
+    /// Every runner connected now, with its workers and how busy it is, by
+    /// its owner and name.
+    pub(crate) fn now(&self) -> Vec<RunnerNow> {
+        let mut all: Vec<RunnerNow> = self.lock().runners.values().map(Runner::now).collect();
+        all.sort_by(|a, b| (&a.owner, &a.name).cmp(&(&b.owner, &b.name)));
+        all
     }
 }
 

@@ -231,8 +231,103 @@ impl Outcome {
     }
 }
 
-/// A task as the hub has it now.
+/// A worker: a runner's harness and the model it drives, the model named as
+/// the runner tells the hub of it (`<provider>:<id>` of its pool, or one of
+/// the harness's own by its id).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize, Serialize)]
+pub struct Worker {
+    pub runner: String,
+    pub harness: String,
+    pub model: String,
+}
+
+impl Worker {
+    /// `opencode on local:qwen3.5:9b on laptop`.
+    pub fn name(&self) -> String {
+        format!("{} on {} on {}", self.harness, self.model, self.runner)
+    }
+}
+
+/// Where choosing a task's worker stands.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Pick {
+    /// The hub's task picker is to choose one; `why` it waits, when it
+    /// could not.
+    Undecided { why: Option<String> },
+    /// Chosen: it waits for one of its candidates to be free.
+    Decided,
+    /// The decision models were not sure enough, or no worker fits: its
+    /// account chooses one (`task_choose`).
+    NeedsChoice { why: String },
+    /// Offered to `worker`'s runner, which runs it on that worker.
+    Offered { worker: Worker },
+}
+
+impl Default for Pick {
+    fn default() -> Self {
+        Pick::Undecided { why: None }
+    }
+}
+
+/// What the decision models answered when they chose a task's worker.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct Decision {
+    pub at: String,
+    /// The decision model that answered, `<provider>:<model>`.
+    pub by: String,
+    /// Each question asked first, with the answer taken.
+    pub answers: Vec<Answered>,
+    /// Every worker it was asked about, most likely first.
+    pub ranked: Vec<Ranked>,
+    /// The workers that may take it, in the order it is offered to them.
+    pub candidates: Vec<Worker>,
+    /// The worker a person chose when the decision models were not sure:
+    /// kept, to learn from.
+    pub picked_by_person: Option<Worker>,
+}
+
+/// A question's answer.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct Answered {
+    pub question: String,
+    /// The most likely answer.
+    pub answer: String,
+    /// Its probability.
+    pub probability: f64,
+    /// Every answer's.
+    pub probabilities: std::collections::BTreeMap<String, f64>,
+}
+
+/// A worker, and how likely the decision model found it the one.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct Ranked {
+    pub worker: Worker,
+    pub probability: f64,
+}
+
+/// A run of a task that did not end it, and how it ended: what the next
+/// choice of its worker is told.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Attempt {
+    pub at: String,
+    pub worker: Worker,
+    pub outcome: String,
+}
+
+/// The last run's work that did not pass the task's gate, for the next run
+/// to fix.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct GateFailed {
+    /// How the gate ended, such as `exit status 1`.
+    pub ended: String,
+    pub output: String,
+    /// What the run replied.
+    pub reply: String,
+}
+
+/// A task as the hub has it now.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Task {
     pub ticket: Ticket,
     /// How it ended, once it has.
@@ -258,6 +353,17 @@ pub struct Task {
     pub gate_unconfirmed: bool,
     /// Who it was given by and to, oldest first.
     pub moves: Vec<Moved>,
+    /// Where choosing its worker stands.
+    pub pick: Pick,
+    /// Counts the times its pick went back to undecided, so a decision
+    /// made meanwhile is not kept.
+    pub round: u64,
+    /// The last decision of its worker, when there was one.
+    pub decision: Option<Decision>,
+    /// Its runs that did not end it, oldest first.
+    pub attempts: Vec<Attempt>,
+    /// How many of its runs did not pass its gate.
+    pub gate_failures: u32,
 }
 
 /// A task given by one account to another.
@@ -284,7 +390,7 @@ impl Task {
 }
 
 /// A task with what it said: its result and its questions.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Detail {
     pub task: Task,
     pub outcome: Option<Outcome>,
@@ -292,6 +398,9 @@ pub struct Detail {
     pub conversation: Option<(String, String)>,
     /// Where its work was pushed when a run of it last stopped.
     pub progress: Option<crate::board::Progress>,
+    /// How its last run's work did not pass its gate, while it is to run
+    /// again.
+    pub gate_failed: Option<GateFailed>,
 }
 
 /// What `ticket` still waits for: each task in its `after` that is not done,
@@ -384,6 +493,11 @@ mod tests {
             blocked: false,
             gate_unconfirmed: false,
             moves: Vec::new(),
+            pick: Pick::default(),
+            round: 0,
+            decision: None,
+            attempts: Vec::new(),
+            gate_failures: 0,
         }
     }
 

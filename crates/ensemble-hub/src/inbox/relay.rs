@@ -502,6 +502,8 @@ mod tests {
         assert!(w.inbox.pass().unwrap().is_empty(), "said once");
         assert_eq!(w.board().list().unwrap().len(), 1, "made once");
 
+        let laptop = crate::board::worker("laptop");
+        w.board().put_on(&ticket.id, &laptop).unwrap();
         assert_eq!(
             w.board().take(&ticket.id, "laptop", 60, true).unwrap(),
             Claim::Taken
@@ -521,6 +523,9 @@ mod tests {
         w.issue("1", "ana.p", "shop");
         w.inbox.pass().unwrap();
         let id = w.board().list().unwrap()[0].ticket.id.clone();
+        w.board()
+            .put_on(&id, &crate::board::worker("laptop"))
+            .unwrap();
         w.board().take(&id, "laptop", 60, true).unwrap();
         w.board()
             .end(
@@ -563,6 +568,10 @@ mod tests {
             questions.contains("### Answer\nThe one they came from."),
             "{questions}"
         );
+
+        w.board()
+            .put_on(&id, &crate::board::worker("laptop"))
+            .unwrap();
 
         w.board().take(&id, "laptop", 60, true).unwrap();
         w.board()

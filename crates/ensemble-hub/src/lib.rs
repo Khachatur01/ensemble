@@ -34,6 +34,7 @@ pub mod board;
 pub mod calls;
 mod cli;
 mod cmd;
+pub mod dispatch;
 mod goals;
 mod http;
 pub mod inbox;

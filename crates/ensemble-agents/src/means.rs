@@ -1,16 +1,15 @@
-//! What works on a task: a harness and an LLM, picked from what the runner
-//! has (`Means`). Its harnesses a person added that are found and not known
-//! to be logged out, each with the LLMs it can drive, are the **pairs**:
+//! What a runner has to work on tasks with (`Means`): its harnesses a person
+//! added that are found and not known to be logged out, each with the LLMs
+//! it can drive. Each such **pair** is a worker the runner tells the hub of:
 //! Claude Code and Codex with the models of their own vendor's a person added
 //! to them, OpenCode with the pool's LLMs of an OpenAI-compatible provider and
 //! of a known context window, and `builtin` with the pool's LLMs of a known
 //! context window and not known to make no tool calls.
 //!
-//! A pair is usable now while its harness has a free run and its model's
-//! provider a free call. The [`Picker`] chooses among them; the one Ensemble
-//! has is [`Rules`], and a decision model may take its place. What a run
-//! takes it holds until it ends ([`Taken`]), on every repository's worker of
-//! the runner at once.
+//! The hub's task picker chooses the worker of each task, and the runner runs
+//! exactly that pair ([`Means::take`]), once its harness has a free run and
+//! its model's provider a free call. What a run takes it holds until it ends
+//! ([`Taken`]), on every repository's worker of the runner at once.
 
 use crate::spec::{
     Adapter, BUILTIN_TOOLS, BuiltinAdapter, CLAUDE_CODE_PERMISSION_MODE, CLAUDE_CODE_TOOLS,
@@ -42,50 +41,16 @@ pub struct Pair {
 impl Pair {
     /// `opencode on local:qwen3.5:9b`, `claude-code on sonnet`.
     pub fn name(&self) -> String {
+        format!("{} on {}", self.harness.as_str(), self.model_name())
+    }
+
+    /// Its model as the runner tells the hub of it: a model of the pool as
+    /// `<provider>:<id>`, one of the harness's own by its id alone.
+    pub fn model_name(&self) -> String {
         match &self.provider {
-            Some(p) => format!("{} on {p}:{}", self.harness.as_str(), self.model),
-            None => format!("{} on {}", self.harness.as_str(), self.model),
+            Some(p) => format!("{p}:{}", self.model),
+            None => self.model.clone(),
         }
-    }
-}
-
-/// A pair as the picker sees it now.
-#[derive(Debug, Clone, Copy)]
-pub struct Choice<'a> {
-    pub pair: &'a Pair,
-    /// Its harness has a free run and its provider a free call.
-    pub free: bool,
-    /// Runs on its harness now.
-    pub busy: u32,
-}
-
-/// Chooses the pair a run takes, of `choices`, in their fixed order (by
-/// harness, then model): one at least `at_least` strong, when a pair that
-/// strong exists, else one of the strongest. None: nothing fit is free now,
-/// and the run waits.
-pub trait Picker: Send + Sync {
-    fn pick(&self, choices: &[Choice<'_>], at_least: Option<Tier>) -> Option<usize>;
-}
-
-/// The rules: the strongest free pair, the least busy harness among equals,
-/// then the fixed order.
-pub struct Rules;
-
-impl Picker for Rules {
-    fn pick(&self, choices: &[Choice<'_>], at_least: Option<Tier>) -> Option<usize> {
-        let strongest = choices.iter().map(|c| c.pair.tier).max()?;
-        let floor = at_least.map(|t| t.min(strongest));
-        (0..choices.len())
-            .filter(|&i| choices[i].free && floor.is_none_or(|f| choices[i].pair.tier >= f))
-            .min_by_key(|&i| (std::cmp::Reverse(choices[i].pair.tier), choices[i].busy, i))
-    }
-}
-
-/// The tier above `tier`, or `tier` when it is the strongest.
-pub fn above(tier: Tier) -> Tier {
-    match tier {
-        Tier::Small => Tier::Medium,
-        Tier::Medium | Tier::Strong => Tier::Strong,
     }
 }
 
@@ -107,7 +72,6 @@ pub struct Means {
     pool: AnnPool,
     /// The pool's providers, by name, as a run reaches them.
     backends: BTreeMap<String, LlmBackend>,
-    picker: Box<dyn Picker>,
     busy: Mutex<Busy>,
     /// What is busy, each time it changes.
     told: tokio::sync::watch::Sender<Busy>,
@@ -115,7 +79,7 @@ pub struct Means {
 
 impl Means {
     /// `harnesses`, those that may run, on `pool`, whose providers a run
-    /// reaches as `backends` says; picked by the [`Rules`].
+    /// reaches as `backends` says.
     pub fn new(
         harnesses: Vec<Harness>,
         pool: AnnPool,
@@ -125,16 +89,9 @@ impl Means {
             harnesses,
             pool,
             backends,
-            picker: Box::new(Rules),
             busy: Mutex::new(Busy::default()),
             told: tokio::sync::watch::Sender::new(Busy::default()),
         }
-    }
-
-    /// Picked by `picker` in place of the rules.
-    pub fn with_picker(mut self, picker: impl Picker + 'static) -> Self {
-        self.picker = Box::new(picker);
-        self
     }
 
     fn lock(&self) -> MutexGuard<'_, Busy> {
@@ -237,33 +194,31 @@ impl Means {
         out
     }
 
-    /// Take the pair the picker chooses now, at least `at_least` strong when
-    /// a pair that strong exists: its harness's run and its provider's call
-    /// are held until the [`Taken`] is dropped. None: nothing fit is free.
-    pub fn take(self: &Arc<Self>, at_least: Option<Tier>) -> Option<Taken> {
-        let pairs = self.pairs();
+    /// Take the pair of the harness `harness` and the model `model`, named as
+    /// the runner tells the hub of it ([`Pair::model_name`]), when it is
+    /// free: its harness's run and its provider's call are held until the
+    /// [`Taken`] is dropped. None while it is busy; why, when the runner has
+    /// no such pair.
+    pub fn take(self: &Arc<Self>, harness: &str, model: &str) -> Result<Option<Taken>, String> {
+        let pair = self
+            .pairs()
+            .into_iter()
+            .find(|p| p.harness.as_str() == harness && p.model_name() == model)
+            .ok_or_else(|| format!("it has no {harness} on {model} now"))?;
         let mut busy = self.lock();
-        let choices: Vec<Choice<'_>> = pairs
-            .iter()
-            .map(|pair| {
-                let runs = busy.harnesses.get(&pair.harness).copied().unwrap_or(0);
-                let harness_free = self
-                    .harness(pair.harness)
-                    .is_some_and(|h| runs < h.max_concurrent);
-                let provider_free = pair.provider.as_ref().is_none_or(|p| {
-                    self.pool
-                        .max_concurrent
-                        .get(p)
-                        .is_none_or(|max| busy.providers.get(p).copied().unwrap_or(0) < *max)
-                });
-                Choice {
-                    pair,
-                    free: harness_free && provider_free,
-                    busy: runs,
-                }
-            })
-            .collect();
-        let pair = pairs[self.picker.pick(&choices, at_least)?].clone();
+        let runs = busy.harnesses.get(&pair.harness).copied().unwrap_or(0);
+        let harness_free = self
+            .harness(pair.harness)
+            .is_some_and(|h| runs < h.max_concurrent);
+        let provider_free = pair.provider.as_ref().is_none_or(|p| {
+            self.pool
+                .max_concurrent
+                .get(p)
+                .is_none_or(|max| busy.providers.get(p).copied().unwrap_or(0) < *max)
+        });
+        if !harness_free || !provider_free {
+            return Ok(None);
+        }
         *busy.harnesses.entry(pair.harness).or_default() += 1;
         if let Some(p) = &pair.provider {
             *busy.providers.entry(p.clone()).or_default() += 1;
@@ -271,11 +226,11 @@ impl Means {
         self.told.send_replace(busy.clone());
         drop(busy);
         let spec = self.spec(&pair);
-        Some(Taken {
+        Ok(Some(Taken {
             means: self.clone(),
             pair,
             spec,
-        })
+        }))
     }
 
     /// How a run on `pair` is started.
@@ -473,13 +428,13 @@ mod tests {
     }
 
     #[test]
-    fn the_strongest_free_pair_is_taken_and_held_until_it_is_dropped() {
+    fn the_pair_named_is_taken_while_free_and_held_until_it_is_dropped() {
         let m = means(vec![
             harness(HarnessKind::OpenCode, 2),
             harness(HarnessKind::Builtin, 1),
         ]);
         let told = m.busy();
-        let first = m.take(None).unwrap();
+        let first = m.take("opencode", "local:big").unwrap().unwrap();
         assert_eq!(first.spec.name, "opencode on local:big");
         assert_eq!(
             told.borrow().harnesses[&HarnessKind::OpenCode],
@@ -487,86 +442,24 @@ mod tests {
             "what is busy is told"
         );
         assert_eq!(told.borrow().providers["local"], 1);
-        // The local server takes one call at a time: its strong model is
-        // busy, so the strongest free one is Anthropic's, on builtin.
-        let second = m.take(None).unwrap();
-        assert_eq!(second.spec.name, "builtin on claude:sonnet-api");
-        // builtin runs one at a time, and the local server is busy.
-        assert!(m.take(None).is_none());
+        // The local server takes one call at a time.
+        assert!(m.take("opencode", "local:small").unwrap().is_none());
+        let second = m.take("builtin", "claude:sonnet-api").unwrap().unwrap();
+        // builtin runs one at a time.
+        assert!(m.take("builtin", "claude:sonnet-api").unwrap().is_none());
+        let err = m.take("claude-code", "sonnet").err().unwrap();
+        assert!(err.contains("no claude-code on sonnet"), "{err}");
         drop(first);
+        drop(second);
         assert_eq!(told.borrow().harnesses[&HarnessKind::OpenCode], 0);
         assert_eq!(told.borrow().providers["local"], 0);
-        assert_eq!(m.take(None).unwrap().spec.name, "opencode on local:big");
-    }
-
-    #[test]
-    fn a_retry_asks_for_a_stronger_tier_or_the_strongest_there_is() {
-        let m = means(vec![harness(HarnessKind::ClaudeCode, 1)]);
-        let rules = Rules;
-        let pairs = m.pairs();
-        let choices: Vec<Choice<'_>> = pairs
-            .iter()
-            .map(|pair| Choice {
-                pair,
-                free: pair.model != "sonnet",
-                busy: 0,
-            })
-            .collect();
-        // Sonnet is busy: a run that needs strong waits for it.
-        assert_eq!(rules.pick(&choices, Some(Tier::Strong)), None);
-        assert_eq!(rules.pick(&choices, Some(Tier::Medium)), Some(0));
-        assert_eq!(above(Tier::Small), Tier::Medium);
-        assert_eq!(above(Tier::Strong), Tier::Strong);
-
-        // With nothing strong at all, the strongest there is will do.
-        let small = Pair {
-            tier: Tier::Small,
-            ..pairs[0].clone()
-        };
-        let only = [Choice {
-            pair: &small,
-            free: true,
-            busy: 0,
-        }];
-        assert_eq!(rules.pick(&only, Some(Tier::Strong)), Some(0));
-    }
-
-    #[test]
-    fn the_least_busy_harness_wins_among_equals() {
-        let m = means(Vec::new());
-        let a = Pair {
-            harness: HarnessKind::OpenCode,
-            provider: Some("local".into()),
-            model: "m".into(),
-            tier: Tier::Medium,
-            context_window: Some(1),
-            tools: None,
-            abilities: None,
-        };
-        let b = Pair {
-            harness: HarnessKind::Builtin,
-            ..a.clone()
-        };
-        let choices = [
-            Choice {
-                pair: &a,
-                free: true,
-                busy: 2,
-            },
-            Choice {
-                pair: &b,
-                free: true,
-                busy: 0,
-            },
-        ];
-        assert_eq!(Rules.pick(&choices, None), Some(1));
-        assert!(m.pairs().is_empty());
+        assert!(m.take("opencode", "local:small").unwrap().is_some());
     }
 
     #[test]
     fn a_run_is_started_from_its_harness_entry() {
         let m = means(vec![harness(HarnessKind::Builtin, 1)]);
-        let taken = m.take(None).unwrap();
+        let taken = m.take("builtin", "claude:sonnet-api").unwrap().unwrap();
         assert_eq!(taken.spec.max_seconds, 60);
         match &taken.spec.adapter {
             Adapter::Builtin(b) => {

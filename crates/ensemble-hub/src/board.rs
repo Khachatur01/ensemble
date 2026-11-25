@@ -5,20 +5,26 @@
 //! connected now that may take an account's tasks ([`Present`]), which say
 //! whether a task given back is blocked.
 //!
-//! A task is offered to the runners of its account that run tasks: those with
-//! a harness and an LLM it can drive. Being busy is not giving back: a task
-//! waits while such a runner is connected and has not given it back.
+//! The hub's task picker (`crate::dispatch`) chooses the worker of each task,
+//! a runner of its account and the harness and the model it runs it on, and
+//! offers it to that runner alone, which claims it. A run that ends without
+//! ending the task (it stopped, asked, gave it back, or its gate failed)
+//! sends it back to be chosen again, what came of the run kept as an
+//! attempt the next choice is told of.
 
 use async_trait::async_trait;
 use ensemble_core::runtime::blocking;
 use ensemble_link::protocol::{
-    TASK, TASK_ANSWER, TASK_CANCEL, TASK_CLAIM, TASK_CONFIRM_GATE, TASK_CREATE, TASK_FINISH,
-    TASK_GATE, TASK_GIVE_BACK, TASK_PROJECTS, TASK_REASSIGN, TASK_RELEASE, TASK_RENEW, TASKS,
-    TASKS_WAITING,
+    TASK, TASK_ANSWER, TASK_CANCEL, TASK_CHOOSE, TASK_CLAIM, TASK_CONFIRM_GATE, TASK_CREATE,
+    TASK_FINISH, TASK_GATE, TASK_GIVE_BACK, TASK_PROJECTS, TASK_REASSIGN, TASK_RELEASE, TASK_RENEW,
+    TASKS, TASKS_WAITING,
 };
 use ensemble_store::{self as store, Value as Sql};
 use ensemble_tasks::board::{Board, Cancelled, Claim, End, LEASE, Progress, Renewal, Waiting};
-use ensemble_tasks::tasks::{Detail, Gate, GivenBack, Moved, Outcome, Status, Task, Ticket, utc};
+use ensemble_tasks::tasks::{
+    Attempt, Decision, Detail, Gate, GateFailed, GivenBack, Moved, Outcome, Pick, Status, Task,
+    Ticket, Worker, utc,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -44,6 +50,22 @@ fn with<T>(
     work: impl AsyncFnOnce(&store::Connection) -> Result<T, String>,
 ) -> Result<T, String> {
     store::with(dir, SCHEMA, work)
+}
+
+/// Every account and project there are tasks of.
+pub fn boards(dir: &Path) -> Result<Vec<(String, String)>, String> {
+    let rows = with(dir, async |c| {
+        store::rows(
+            c,
+            "SELECT DISTINCT owner, project FROM tasks ORDER BY owner, project",
+            vec![],
+        )
+        .await
+    })?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| Some((store::text(&row[0])?, store::text(&row[1])?)))
+        .collect())
 }
 
 /// The projects `owner` has tasks in, each with how many, by name.
@@ -93,6 +115,8 @@ pub struct Asker<'a> {
 pub struct Present {
     /// Its name, as its claims name it.
     pub name: String,
+    /// Its workers: each harness with each model it can drive.
+    pub workers: Vec<Worker>,
 }
 
 /// A task as the hub keeps it.
@@ -117,6 +141,19 @@ struct Record {
     /// Given to its account with a gate it has not confirmed.
     gate_unconfirmed: bool,
     moves: Vec<Moved>,
+    /// Where choosing its worker stands.
+    pick: Pick,
+    /// Counts the times its pick went back to undecided.
+    round: u64,
+    /// Every decision of its worker, oldest first: what a person chose is
+    /// kept, to learn from.
+    decisions: Vec<Decision>,
+    /// Its runs that did not end it.
+    attempts: Vec<Attempt>,
+    /// How many of its runs did not pass its gate.
+    gate_failures: u32,
+    /// How the last of those failed, while it is to run again.
+    gate_failed: Option<GateFailed>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -147,6 +184,21 @@ impl Record {
 
     fn open_question(&self) -> Option<&Question> {
         self.questions.last().filter(|q| q.answer.is_none())
+    }
+
+    /// Send its pick back to undecided, for the hub to choose its worker
+    /// again; what the run on the worker it was offered to came to, when it
+    /// ran, is kept as an attempt.
+    fn again(&mut self, outcome: Option<String>) {
+        if let (Some(outcome), Pick::Offered { worker }) = (outcome, &self.pick) {
+            self.attempts.push(Attempt {
+                at: utc(SystemTime::now()),
+                worker: worker.clone(),
+                outcome,
+            });
+        }
+        self.pick = Pick::default();
+        self.round += 1;
     }
 
     /// Whether every runner of `present` that may take it gave it back, when
@@ -185,6 +237,11 @@ impl Record {
             blocked: self.blocked(present),
             gate_unconfirmed: self.gate_unconfirmed,
             moves: self.moves.clone(),
+            pick: self.pick.clone(),
+            round: self.round,
+            decision: self.decisions.last().cloned(),
+            attempts: self.attempts.clone(),
+            gate_failures: self.gate_failures,
         }
     }
 
@@ -212,6 +269,7 @@ impl Record {
             outcome: self.result.clone(),
             conversation,
             progress: self.progress.clone(),
+            gate_failed: self.gate_failed.clone(),
         }
     }
 }
@@ -246,6 +304,11 @@ impl DbBoard {
     pub fn with_runners(mut self, runners: &[Present]) -> Self {
         self.present = Some(runners.to_vec());
         self
+    }
+
+    /// Whose tasks these are.
+    pub fn owner(&self) -> &str {
+        &self.owner
     }
 
     fn keys(&self) -> Vec<Sql> {
@@ -371,6 +434,12 @@ impl DbBoard {
             given_back: Vec::new(),
             gate_unconfirmed: false,
             moves: Vec::new(),
+            pick: Pick::default(),
+            round: 0,
+            decisions: Vec::new(),
+            attempts: Vec::new(),
+            gate_failures: 0,
+            gate_failed: None,
         };
         let data = serde_json::to_string(&record).map_err(|e| e.to_string())?;
         let mut params = self.keys();
@@ -440,6 +509,7 @@ impl DbBoard {
         record.lease = None;
         record.interrupted_on = None;
         record.given_back.clear();
+        record.again(None);
         record.gate_unconfirmed = record.ticket.gate.is_some();
         record.moves.push(Moved {
             at: utc(SystemTime::now()),
@@ -473,8 +543,9 @@ impl DbBoard {
         Ok(new_id)
     }
 
-    /// Lease task `id` to `node` for `seconds`, if it may start: not ended, not waiting on an answer or another task, not running on
-    /// another runner, and not pinned to one.
+    /// Lease task `id` to `node` for `seconds`, if it may start: offered to
+    /// `node`, not ended, not waiting on an answer or another task, not
+    /// running on another runner, and not pinned to one.
     /// A runner that claims a task it held before, such as after it started
     /// again, gets it back. Unless the run is `movable`, the task is pinned
     /// to `node`.
@@ -511,6 +582,14 @@ impl DbBoard {
                 return refused(&format!(
                     "its work is in {pinned}'s folder, so it waits for {pinned}"
                 ));
+            }
+            match &r.pick {
+                Pick::Offered { worker } if worker.runner == node => {}
+                _ if r.holder(now) == Some(node) => {}
+                Pick::Offered { worker } => {
+                    return refused(&format!("it is offered to {}", worker.runner));
+                }
+                _ => return refused(&format!("it is not offered to {node}")),
             }
             r.lease = Some(Lease {
                 node: node.to_string(),
@@ -565,6 +644,7 @@ impl DbBoard {
                 ));
             } else {
                 r.interrupted_on = Some(node.to_string());
+                r.again(Some(format!("stopped unfinished on {node}")));
             }
             Ok(())
         })
@@ -608,6 +688,15 @@ impl DbBoard {
                         &text,
                     ));
                     r.cancel = false;
+                    r.gate_failed = None;
+                }
+                End::Retry { gate, .. } => {
+                    r.gate_failures += 1;
+                    r.again(Some(format!(
+                        "its work did not pass the gate ({})",
+                        gate.ended
+                    )));
+                    r.gate_failed = Some(gate);
                 }
                 End::Ask {
                     question,
@@ -625,6 +714,7 @@ impl DbBoard {
                     if !repository {
                         r.reply = reply;
                     }
+                    r.again(Some(format!("asked: {}", question.trim())));
                 }
             }
             Ok(())
@@ -669,6 +759,7 @@ impl DbBoard {
                 runner: node.to_string(),
                 why: why.trim().to_string(),
             });
+            r.again(Some(format!("{node} gave it back: {}", why.trim())));
             Ok(r.blocked(present.as_deref()))
         })
     }
@@ -700,6 +791,121 @@ impl DbBoard {
                 return Err(format!("{id} has no gate waiting to be confirmed."));
             }
             r.gate_unconfirmed = false;
+            Ok(())
+        })
+    }
+
+    /// Keep `decision` of task `id`'s worker, and where its pick stands now,
+    /// when it is still undecided in `round`: false when its pick moved on
+    /// meanwhile, and the decision is not kept.
+    pub fn decide(
+        &self,
+        id: &str,
+        round: u64,
+        decision: Decision,
+        pick: Pick,
+    ) -> Result<bool, String> {
+        self.change(id, |r, _| {
+            if r.round != round || !matches!(r.pick, Pick::Undecided { .. }) || r.result.is_some() {
+                return Ok(false);
+            }
+            r.decisions.push(decision);
+            r.pick = pick;
+            Ok(true)
+        })
+    }
+
+    /// Say why task `id` waits undecided, when it still is in `round`.
+    pub fn wait(&self, id: &str, round: u64, why: &str) -> Result<(), String> {
+        self.change(id, |r, _| {
+            if r.round == round && matches!(r.pick, Pick::Undecided { .. }) {
+                r.pick = Pick::Undecided {
+                    why: Some(why.to_string()),
+                };
+            }
+            Ok(())
+        })
+    }
+
+    /// Offer task `id`, decided, to `worker`'s runner: false when it is not
+    /// decided any more.
+    pub fn offer(&self, id: &str, worker: &Worker) -> Result<bool, String> {
+        self.change(id, |r, _| {
+            if r.pick != Pick::Decided || r.result.is_some() {
+                return Ok(false);
+            }
+            r.pick = Pick::Offered {
+                worker: worker.clone(),
+            };
+            Ok(true)
+        })
+    }
+
+    /// Send task `id`'s pick back to undecided, unless it runs, has ended or
+    /// a person chose its worker: its decision is not to be kept, such as
+    /// when what it was chosen of changed. Whether it did.
+    pub fn reconsider(&self, id: &str) -> Result<bool, String> {
+        self.change(id, |r, now| {
+            let person = r
+                .decisions
+                .last()
+                .is_some_and(|d| d.picked_by_person.is_some());
+            let undo = r.result.is_none()
+                && r.holder(now).is_none()
+                && match &r.pick {
+                    Pick::Undecided { why } => why.is_some(),
+                    Pick::NeedsChoice { .. } => true,
+                    Pick::Decided => !person,
+                    Pick::Offered { .. } => false,
+                };
+            if undo {
+                r.again(None);
+            }
+            Ok(undo)
+        })
+    }
+
+    /// Take back the offer of task `id` to `runner`, which went away before it
+    /// ran it, for it to be chosen again. Whether it did.
+    pub fn withdraw(&self, id: &str, runner: &str) -> Result<bool, String> {
+        self.change(id, |r, now| {
+            let offered = matches!(&r.pick, Pick::Offered { worker } if worker.runner == runner);
+            if !offered || r.holder(now).is_some() || r.result.is_some() {
+                return Ok(false);
+            }
+            r.again(None);
+            Ok(true)
+        })
+    }
+
+    /// Offer task `id` to `worker` at once, with no decision, unless it has
+    /// ended: for tests, which have no decision model to ask.
+    pub fn put_on(&self, id: &str, worker: &Worker) -> Result<(), String> {
+        self.change(id, |r, _| {
+            if r.result.is_some() {
+                return Err(format!("{id} has ended"));
+            }
+            r.pick = Pick::Offered {
+                worker: worker.clone(),
+            };
+            Ok(())
+        })
+    }
+
+    /// Its account chooses the worker of task `id`, as the decision models
+    /// were not sure: kept with their decision, to learn from, and the task
+    /// is offered to it once it is free.
+    pub fn choose(&self, id: &str, worker: &Worker) -> Result<(), String> {
+        self.change(id, |r, _| {
+            if !matches!(r.pick, Pick::NeedsChoice { .. }) {
+                return Err(format!("{id} does not wait for you to choose its worker."));
+            }
+            let Some(decision) = r.decisions.last_mut() else {
+                return Err(format!("{id} has no decision to choose from."));
+            };
+            decision.picked_by_person = Some(worker.clone());
+            decision.candidates = vec![worker.clone()];
+            r.pick = Pick::Decided;
             Ok(())
         })
     }
@@ -856,12 +1062,10 @@ impl Board for DbBoard {
     }
 }
 
-/// Every task of `owner`'s, in every project, that waits for a runner and
-/// that `runner`, a runner of `owner`'s, may take or ask about: not
-/// ended, not waiting for its gate to be confirmed, not given back by it,
-/// and neither running on nor pinned to another runner. Those that wait for
-/// an answer or another task are there too: the runner looks for the
-/// projects it has no copy of.
+/// Every task of `owner`'s, in every project, offered to `runner`, a runner of
+/// `owner`'s: not ended, not waiting for its gate to be confirmed, not given
+/// back by it, and neither running on nor pinned to another runner. The
+/// runner looks for the projects it has no copy of among them.
 pub fn waiting(
     dir: &Path,
     owner: &str,
@@ -885,7 +1089,9 @@ pub fn waiting(
         let r: Record =
             serde_json::from_str(&data).map_err(|e| format!("a task is unreadable: {e}"))?;
         let mine = |n: &str| n == runner;
-        if r.result.is_some()
+        let offered = matches!(&r.pick, Pick::Offered { worker } if mine(&worker.runner));
+        if !offered
+            || r.result.is_some()
             || r.gate_unconfirmed
             || r.given_back.iter().any(|g| mine(&g.runner))
             || r.holder(now).is_some_and(|h| !mine(h))
@@ -1123,12 +1329,36 @@ impl TaskService for Service {
                 Ok(json!({ "id": board.reassign(text("id")?, to, notes)? }))
             }
             TASK_CANCEL => Ok(json!({ "cancel": board.stop(text("id")?)? })),
+            TASK_CHOOSE => {
+                let worker: Worker = serde_json::from_value(parsed("worker")?).map_err(|e| {
+                    format!("{method}: `worker` is {{runner, harness, model}}: {e}")
+                })?;
+                let theirs = (asker.runners)(user);
+                if !theirs.iter().any(|r| r.workers.contains(&worker)) {
+                    return Err(format!(
+                        "{method}: none of your runners connected now has {}",
+                        worker.name()
+                    ));
+                }
+                board.choose(text("id")?, &worker)?;
+                Ok(json!({ "chosen": true }))
+            }
             TASK_GIVE_BACK => {
                 let blocked = board.give_back(text("id")?, text("runner")?, text("why")?)?;
                 Ok(json!({ "blocked": blocked }))
             }
             other => Err(format!("no method `{other}`")),
         }
+    }
+}
+
+/// A worker of `runner`, for tests.
+#[cfg(test)]
+pub(crate) fn worker(runner: &str) -> Worker {
+    Worker {
+        runner: runner.into(),
+        harness: "opencode".into(),
+        model: "local:qwen3.5:9b".into(),
     }
 }
 
@@ -1145,6 +1375,18 @@ mod tests {
             definition_of_done: "It is done.".into(),
             ..Ticket::default()
         }
+    }
+
+    /// Offer task `id` to `node`, as the hub would, and have `node` claim it.
+    fn took(
+        b: &DbBoard,
+        id: &str,
+        node: &str,
+        seconds: u64,
+        movable: bool,
+    ) -> Result<Claim, String> {
+        b.put_on(id, &worker(node))?;
+        b.take(id, node, seconds, movable)
     }
 
     fn board(tmp: &TempDir) -> DbBoard {
@@ -1246,13 +1488,13 @@ mod tests {
         let tmp = TempDir::new();
         let b = board(&tmp);
         let id = b.add(&draft("A", "t")).unwrap();
-        assert_eq!(b.take(&id, "laptop", 60, true).unwrap(), Claim::Taken);
+        assert_eq!(took(&b, &id, "laptop", 60, true).unwrap(), Claim::Taken);
         assert_eq!(
-            b.take(&id, "gpu-box", 60, true).unwrap(),
+            took(&b, &id, "gpu-box", 60, true).unwrap(),
             Claim::Refused("it runs on laptop".into())
         );
         assert_eq!(
-            b.take(&id, "laptop", 60, true).unwrap(),
+            took(&b, &id, "laptop", 60, true).unwrap(),
             Claim::Taken,
             "its own again"
         );
@@ -1271,7 +1513,7 @@ mod tests {
             (t.running_on.as_deref(), t.interrupted_on.as_deref()),
             (None, Some("laptop"))
         );
-        assert_eq!(b.take(&id, "gpu-box", 60, true).unwrap(), Claim::Taken);
+        assert_eq!(took(&b, &id, "gpu-box", 60, true).unwrap(), Claim::Taken);
         // The laptop comes back: the task is not its any more.
         assert_eq!(b.keep(&id, "laptop", 60).unwrap(), Renewal::Lost);
         let err = b.end(&id, "laptop", result("late"), None).unwrap_err();
@@ -1297,7 +1539,7 @@ mod tests {
         let tmp = TempDir::new();
         let b = board(&tmp);
         let id = b.add(&draft("A", "t")).unwrap();
-        b.take(&id, "laptop", 60, true).unwrap();
+        took(&b, &id, "laptop", 60, true).unwrap();
         b.put_back(&id, "gpu-box", None).unwrap();
         assert_eq!(
             b.list().unwrap()[0].running_on.as_deref(),
@@ -1310,7 +1552,7 @@ mod tests {
             (t.running_on.as_deref(), t.interrupted_on.as_deref()),
             (None, Some("laptop"))
         );
-        assert_eq!(b.take(&id, "gpu-box", 60, true).unwrap(), Claim::Taken);
+        assert_eq!(took(&b, &id, "gpu-box", 60, true).unwrap(), Claim::Taken);
         assert_eq!(b.list().unwrap()[0].interrupted_on, None);
     }
 
@@ -1320,20 +1562,20 @@ mod tests {
         let b = board(&tmp);
         // In the desk's folder: it stays with the desk.
         let here = b.add(&draft("Here", "t")).unwrap();
-        assert_eq!(b.take(&here, "desk", 60, false).unwrap(), Claim::Taken);
+        assert_eq!(took(&b, &here, "desk", 60, false).unwrap(), Claim::Taken);
         b.put_back(&here, "desk", None).unwrap();
         let t = &b.list().unwrap()[0];
         assert_eq!(t.pinned_to.as_deref(), Some("desk"));
         assert_eq!(t.interrupted_on.as_deref(), Some("desk"));
         assert_eq!(
-            b.take(&here, "laptop", 60, true).unwrap(),
+            took(&b, &here, "laptop", 60, true).unwrap(),
             Claim::Refused("its work is in desk's folder, so it waits for desk".into())
         );
-        assert_eq!(b.take(&here, "desk", 60, false).unwrap(), Claim::Taken);
+        assert_eq!(took(&b, &here, "desk", 60, false).unwrap(), Claim::Taken);
 
         // On a pushed branch: the laptop carries on where the desk stopped.
         let moving = b.add(&draft("Moving", "t")).unwrap();
-        b.take(&moving, "desk", 60, true).unwrap();
+        took(&b, &moving, "desk", 60, true).unwrap();
         let pushed = Progress {
             node: "desk".into(),
             branch: "ensemble/0002-moving".into(),
@@ -1342,7 +1584,7 @@ mod tests {
         b.put_back(&moving, "desk", Some(pushed.clone())).unwrap();
         let d = b.detail(&moving).unwrap().unwrap();
         assert_eq!((d.progress, d.task.pinned_to), (Some(pushed), None));
-        assert_eq!(b.take(&moving, "laptop", 60, true).unwrap(), Claim::Taken);
+        assert_eq!(took(&b, &moving, "laptop", 60, true).unwrap(), Claim::Taken);
         let done = Progress {
             node: "laptop".into(),
             commit: "def5678".into(),
@@ -1375,7 +1617,7 @@ mod tests {
         let err = b.set_gate(&id, Some(empty)).unwrap_err();
         assert!(err.contains("`gate.command` is empty"), "{err}");
 
-        b.take(&id, "laptop", 60, true).unwrap();
+        took(&b, &id, "laptop", 60, true).unwrap();
         let err = b.set_gate(&id, None).unwrap_err();
         assert!(err.contains("is running"), "{err}");
         b.put_back(&id, "laptop", None).unwrap();
@@ -1399,11 +1641,11 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            b.take(&second, "laptop", 60, true).unwrap(),
+            took(&b, &second, "laptop", 60, true).unwrap(),
             Claim::Refused(format!("it waits for {first}"))
         );
 
-        b.take(&first, "laptop", 60, true).unwrap();
+        took(&b, &first, "laptop", 60, true).unwrap();
         b.end(
             &first,
             "laptop",
@@ -1420,7 +1662,7 @@ mod tests {
             Some("Which parser?")
         );
         assert_eq!(
-            b.take(&first, "laptop", 60, true).unwrap(),
+            took(&b, &first, "laptop", 60, true).unwrap(),
             Claim::Refused("it waits for an answer".into())
         );
         b.reply(&first, "The new one.").unwrap();
@@ -1432,9 +1674,9 @@ mod tests {
             "{questions}"
         );
         assert!(reply.ends_with("NEEDS INPUT: Which parser?"), "{reply}");
-        assert_eq!(b.take(&first, "laptop", 60, true).unwrap(), Claim::Taken);
+        assert_eq!(took(&b, &first, "laptop", 60, true).unwrap(), Claim::Taken);
         b.end(&first, "laptop", result("done"), None).unwrap();
-        assert_eq!(b.take(&second, "laptop", 60, true).unwrap(), Claim::Taken);
+        assert_eq!(took(&b, &second, "laptop", 60, true).unwrap(), Claim::Taken);
         let ended = b.detail(&first).unwrap().unwrap().outcome.unwrap();
         assert_eq!(ended.field("harness").as_deref(), Some("opencode"));
         assert_eq!(ended.field("model").as_deref(), Some("local:qwen3.5:9b"));
@@ -1442,7 +1684,10 @@ mod tests {
 
     /// A runner of ana's connected now that runs tasks.
     fn present(name: &str) -> Present {
-        Present { name: name.into() }
+        Present {
+            name: name.into(),
+            workers: Vec::new(),
+        }
     }
 
     /// No runner connected.
@@ -1468,19 +1713,71 @@ mod tests {
     }
 
     #[test]
+    fn a_person_chooses_a_worker_of_a_runner_of_theirs_connected_now() {
+        let tmp = TempDir::new();
+        let service = Service::new(&tmp.0);
+        let b = board(&tmp);
+        let id = b.add(&draft("A", "t")).unwrap();
+        let desk = |_: &str| {
+            vec![Present {
+                name: "desk".into(),
+                workers: vec![worker("desk")],
+            }]
+        };
+        let asker = Asker {
+            user: "ana",
+            runners: &desk,
+            accounts: &anyone,
+        };
+        let choose = |w: Worker| {
+            service.handle(
+                &asker,
+                TASK_CHOOSE,
+                &json!({ "project": "shop", "id": id, "worker": w }),
+            )
+        };
+        let err = choose(worker("laptop")).unwrap_err();
+        assert!(
+            err.contains("none of your runners connected now has"),
+            "{err}"
+        );
+        let err = choose(worker("desk")).unwrap_err();
+        assert!(err.contains("does not wait for you to choose"), "{err}");
+        b.change(&id, |r, _| {
+            r.decisions.push(Decision {
+                at: "2026-11-25T00:00:00Z".into(),
+                by: "laya:laya".into(),
+                answers: Vec::new(),
+                ranked: Vec::new(),
+                candidates: Vec::new(),
+                picked_by_person: None,
+            });
+            r.pick = Pick::NeedsChoice {
+                why: "not sure".into(),
+            };
+            Ok(())
+        })
+        .unwrap();
+        choose(worker("desk")).unwrap();
+        let t = b.detail(&id).unwrap().unwrap().task;
+        assert_eq!(t.pick, Pick::Decided);
+        assert_eq!(t.decision.unwrap().picked_by_person, Some(worker("desk")));
+    }
+
+    #[test]
     fn a_task_given_back_by_every_connected_runner_is_blocked() {
         let tmp = TempDir::new();
         let connected = [present("desk"), present("laptop")];
         let b = board(&tmp).with_runners(&connected);
         let id = b.add(&draft("A", "t")).unwrap();
-        assert_eq!(b.take(&id, "desk", 60, true).unwrap(), Claim::Taken);
+        assert_eq!(took(&b, &id, "desk", 60, true).unwrap(), Claim::Taken);
         // The laptop has not tried it yet.
         assert!(
             !b.give_back(&id, "desk", "cannot reach the repository")
                 .unwrap()
         );
         assert_eq!(
-            b.take(&id, "desk", 60, true).unwrap(),
+            took(&b, &id, "desk", 60, true).unwrap(),
             Claim::Refused("desk gave it back: cannot reach the repository".into())
         );
         let t = &b.list().unwrap()[0];
@@ -1504,7 +1801,7 @@ mod tests {
         let more = [present("desk"), present("gpu")];
         let with_gpu = board(&tmp).with_runners(&more);
         assert!(!with_gpu.list().unwrap()[0].blocked);
-        assert_eq!(with_gpu.take(&id, "gpu", 60, true).unwrap(), Claim::Taken);
+        assert_eq!(took(&with_gpu, &id, "gpu", 60, true).unwrap(), Claim::Taken);
         with_gpu.end(&id, "gpu", result("done"), None).unwrap();
         let err = b.give_back(&id, "desk", "late").unwrap_err();
         assert!(err.contains("has ended"), "{err}");
@@ -1515,7 +1812,7 @@ mod tests {
         let tmp = TempDir::new();
         let b = board(&tmp);
         let id = b.add(&draft("A", "t")).unwrap();
-        b.take(&id, "desk", 60, true).unwrap();
+        took(&b, &id, "desk", 60, true).unwrap();
         b.give_back(&id, "laptop", "no key").unwrap();
         b.end(
             &id,
@@ -1549,7 +1846,7 @@ mod tests {
             d.task.given_back.is_empty(),
             "answered: everyone tries again"
         );
-        assert_eq!(b.take(&id, "laptop", 60, true).unwrap(), Claim::Taken);
+        assert_eq!(took(&b, &id, "laptop", 60, true).unwrap(), Claim::Taken);
     }
 
     #[test]
@@ -1568,9 +1865,9 @@ mod tests {
         let given = blog.add(&draft("Given", "t")).unwrap();
         blog.give_back(&given, "desk", "no key").unwrap();
         let running = blog.add(&draft("Running", "t")).unwrap();
-        blog.take(&running, "laptop", 60, true).unwrap();
+        took(&blog, &running, "laptop", 60, true).unwrap();
         let asks = blog.add(&draft("Asks", "t")).unwrap();
-        blog.take(&asks, "desk", 60, true).unwrap();
+        took(&blog, &asks, "desk", 60, true).unwrap();
         blog.end(
             &asks,
             "desk",
@@ -1585,6 +1882,11 @@ mod tests {
         DbBoard::new(&tmp.0, "rex", "blog")
             .add(&draft("Not ana's", "t"))
             .unwrap();
+        // Only what the hub offers desk.
+        let not_offered = blog.add(&draft("Not offered", "t")).unwrap();
+        shop.put_on(&waits, &worker("desk")).unwrap();
+        blog.put_on(&asks, &worker("desk")).unwrap();
+        blog.put_on(&not_offered, &worker("laptop")).unwrap();
         let found = waiting(&tmp.0, "ana", "desk", &[]).unwrap();
         let listed: Vec<(&str, &str)> = found
             .iter()
@@ -1662,7 +1964,7 @@ mod tests {
         assert!(give(&id, "rex").unwrap_err().contains("no `tasks`"));
         assert!(give(&id, "ana").unwrap_err().contains("already"));
         let ana = board(&tmp);
-        ana.take(&first, "desk", 60, true).unwrap();
+        took(&ana, &first, "desk", 60, true).unwrap();
         ana.end(&first, "desk", result("done"), None).unwrap();
 
         let moved = give(&id, "bo").unwrap()["id"].as_str().unwrap().to_string();
@@ -1693,7 +1995,7 @@ mod tests {
                 .all(|w| w.task.id() != moved)
         );
         assert!(
-            matches!(bos.take(&moved, "desk", 60, true).unwrap(), Claim::Refused(why) if why.contains("confirmed"))
+            matches!(took(&bos, &moved, "desk", 60, true).unwrap(), Claim::Refused(why) if why.contains("confirmed"))
         );
         ask(
             "bo",
@@ -1708,7 +2010,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("no gate waiting"), "{err}");
-        assert_eq!(bos.take(&moved, "desk", 60, true).unwrap(), Claim::Taken);
+        assert_eq!(took(&bos, &moved, "desk", 60, true).unwrap(), Claim::Taken);
         // Running, it is not given on.
         let err = ask(
             "bo",
@@ -1727,7 +2029,7 @@ mod tests {
         let moved = ana.reassign(&id, "bo", |_| None).unwrap();
         let bos = DbBoard::new(&tmp.0, "bo", "shop");
         assert!(!bos.detail(&moved).unwrap().unwrap().task.gate_unconfirmed);
-        assert_eq!(bos.take(&moved, "desk", 60, true).unwrap(), Claim::Taken);
+        assert_eq!(took(&bos, &moved, "desk", 60, true).unwrap(), Claim::Taken);
     }
 
     #[test]
@@ -1781,7 +2083,7 @@ mod tests {
         assert_eq!(b.stop(&waiting).unwrap(), Cancelled::Ended);
 
         let running = b.add(&draft("B", "t")).unwrap();
-        b.take(&running, "laptop", 60, true).unwrap();
+        took(&b, &running, "laptop", 60, true).unwrap();
         assert_eq!(
             b.stop(&running).unwrap(),
             Cancelled::Running("laptop".into())
@@ -1802,6 +2104,11 @@ mod tests {
         let kept = DbBoard::new(&tmp.0, "ana", "shop");
         let id = kept.add(&draft("A", "t")).unwrap();
         assert_eq!(id, "0001-a");
+        assert_eq!(
+            laptop.claim(&id, "laptop", LEASE, true).await.unwrap(),
+            Claim::Refused("it is not offered to laptop".into())
+        );
+        kept.put_on(&id, &worker("laptop")).unwrap();
         assert_eq!(
             laptop.claim(&id, "laptop", LEASE, true).await.unwrap(),
             Claim::Taken
@@ -1849,6 +2156,7 @@ mod tests {
         let kept = DbBoard::new(&tmp.0, "ana", "shop");
         let id = kept.add(&ticket).unwrap();
         // Asking is no end: nothing is given.
+        kept.put_on(&id, &worker("laptop")).unwrap();
         laptop.claim(&id, "laptop", LEASE, true).await.unwrap();
         let ask = End::Ask {
             question: "Which status codes?".into(),
@@ -1858,6 +2166,7 @@ mod tests {
         laptop.finish(&id, "laptop", ask, None).await.unwrap();
         assert!(given.lock().unwrap().is_empty());
         kept.reply(&id, "502 and 503").unwrap();
+        kept.put_on(&id, &worker("laptop")).unwrap();
         laptop.claim(&id, "laptop", LEASE, true).await.unwrap();
         laptop
             .finish(

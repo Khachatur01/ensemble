@@ -30,6 +30,7 @@ clap_complete.workspace = true
 [dev-dependencies]
 ureq.workspace = true
 ensemble-agents = { workspace = true, features = ["test-support"] }
+ensemble-backends = { workspace = true, features = ["test-support"] }
 ensemble-core = { workspace = true, features = ["test-support"] }
 # Paused time, for a call that waits for a place.
 tokio = { workspace = true, features = ["test-util"] }
