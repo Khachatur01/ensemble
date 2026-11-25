@@ -1,19 +1,17 @@
 //! Tasks: tickets the calling agent, a person or the hub's inbox writes, that
-//! agents work through. A task is kept on the hub ([`crate::board`]), not on
-//! the computer that runs it, so any of the person's runners with its agent may
-//! run it, and another takes it over when that runner stops. What a run does as
+//! runners work through. A task is kept on the hub ([`crate::board`]), not on
+//! the computer that runs it, so any of the person's runners may run it, and another takes it over when that runner stops. What a run does as
 //! it goes, its log and its worktree, stays on the runner that runs it
 //! ([`crate::runs`]).
 //!
-//! A ticket says what to do: a `title`, the `agent` it is for (none: the
-//! backlog), the task itself, and optionally its `context`, `goal`,
+//! A ticket says what to do: a `title`, the task itself, and optionally its `context`, `goal`,
 //! `constraints`, `files`, `done_when`, the tasks it comes `after`, the
 //! `repository` its project is cloned from, the `repo` folder of it it works
 //! in and the `gate` its work must pass: a command of its own, which only the
 //! task's account gives it. The hub adds the `notes` its
 //! knowledge holds about it.
 //!
-//! An agent that cannot go on without a decision ends its reply with
+//! A run that cannot go on without a decision ends its reply with
 //! `NEEDS INPUT: <question>`. The task waits until the question is answered;
 //! then it runs again with the questions and answers so far. A runner with no
 //! copy of the project, and no `repository` to clone it from, asks the same
@@ -21,25 +19,21 @@
 
 use serde::{Deserialize, Serialize};
 
-/// How an agent asks: a line of its reply starting with this.
+/// How a run asks: a line of its reply starting with this.
 pub const ASK_MARKER: &str = "NEEDS INPUT:";
 
-/// How an agent hands a task on: a line of its reply starting with this, then
-/// the agent and what remains.
-pub const HANDOFF_MARKER: &str = "HAND OFF:";
-
 /// A task's gate: the command its work must pass, how long it may run, and
-/// how many runs of the agent the task gets to pass it. Only the task's
+/// how many runs the task gets to pass it. Only the task's
 /// account gives a task one, and it runs only on that account's runners.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Gate {
     /// A shell command, run with `sh -c` in the task's working directory
-    /// after the agent is done; exit status 0 passes.
+    /// after the run is done; exit status 0 passes.
     pub command: String,
     /// Seconds it may run before it is stopped and counts as failed.
     pub timeout_seconds: u32,
-    /// Runs of the agent in all, the first included.
+    /// Runs in all, the first included.
     pub attempts: u32,
 }
 
@@ -50,14 +44,11 @@ pub struct Ticket {
     /// Given by the hub when the task is made.
     pub id: String,
     pub title: String,
-    /// Its assignee, `<team>/<agent>`. Empty for a task in the backlog, which
-    /// no agent works on until it is assigned.
-    pub agent: String,
-    /// Background for the agent, passed as the delegation's context.
+    /// Background for the run, passed as its context.
     pub context: Option<String>,
     /// The outcome wanted, in a sentence.
     pub goal: Option<String>,
-    /// What the agent must not do or change.
+    /// What the run must not do or change.
     pub constraints: Vec<String>,
     /// Where the work is.
     pub files: Vec<String>,
@@ -80,7 +71,7 @@ pub struct Ticket {
 }
 
 impl Ticket {
-    /// What the agent is asked: the task, then its goal, constraints, files
+    /// What the run is asked: the task, then its goal, constraints, files
     /// and acceptance criteria as sections it can check its work against,
     /// then the notes the hub found related to it, as reference data.
     pub fn prompt(&self) -> String {
@@ -200,8 +191,8 @@ impl Status {
     }
 }
 
-/// How a task ended, and what it said: front matter (`status`, `agent`,
-/// `started`, `ended`, and what the run added, such as its `branch`), then
+/// How a task ended, and what it said: front matter (`status`, `harness`,
+/// `model`, `started`, `ended`, and what the run added, such as its `branch`), then
 /// the agent's reply.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Outcome {
@@ -216,13 +207,19 @@ impl Outcome {
         front_matter(&self.text).map_or(self.text.as_str(), |(_, reply)| reply)
     }
 
-    /// A value of its front matter, such as `branch`.
-    pub fn field(&self, key: &str) -> Option<&str> {
+    /// A value of its front matter, such as `branch`, a quoted one read as
+    /// the text it quotes.
+    pub fn field(&self, key: &str) -> Option<String> {
         let (front, _) = front_matter(&self.text)?;
-        front
+        let value = front
             .lines()
-            .find_map(|l| l.strip_prefix(key)?.strip_prefix(':'))
-            .map(str::trim)
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix(':'))?
+            .trim();
+        Some(if value.starts_with('"') {
+            serde_json::from_str(value).unwrap_or_else(|_| value.to_string())
+        } else {
+            value.to_string()
+        })
     }
 }
 
@@ -245,8 +242,8 @@ pub struct Task {
     /// its repository. None of them takes it again until it is assigned or
     /// answered again.
     pub given_back: Vec<GivenBack>,
-    /// Every connected runner of its account with its agent gave it back: it
-    /// waits for one that has not, or to be assigned again.
+    /// Every connected runner of its account that runs tasks gave it back: it
+    /// waits for one that has not, or to be answered again.
     pub blocked: bool,
 }
 
@@ -263,15 +260,13 @@ impl Task {
     }
 }
 
-/// A task with what it said: its result, its questions, what earlier agents
-/// handed on.
+/// A task with what it said: its result and its questions.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Detail {
     pub task: Task,
     pub outcome: Option<Outcome>,
     /// The questions and answers so far, and the reply that last asked.
     pub conversation: Option<(String, String)>,
-    pub handoffs: Option<String>,
     /// Where its work was pushed when a run of it last stopped.
     pub progress: Option<crate::board::Progress>,
 }
@@ -300,7 +295,7 @@ pub fn waiting_for(ticket: &Ticket, all: &[Task]) -> Vec<String> {
         .collect()
 }
 
-/// The question an agent's reply asks, if it asks one: the last line that
+/// The question a reply asks, if it asks one: the last line that
 /// starts with [`ASK_MARKER`].
 pub fn question_in(reply: &str) -> Option<String> {
     reply
@@ -309,19 +304,6 @@ pub fn question_in(reply: &str) -> Option<String> {
         .find_map(|l| l.trim().strip_prefix(ASK_MARKER))
         .map(|q| q.trim().to_string())
         .filter(|q| !q.is_empty())
-}
-
-/// Where an agent's reply hands the task: the last line that starts with
-/// [`HANDOFF_MARKER`], as the agent named and the note after it.
-pub fn handoff_in(reply: &str) -> Option<(String, String)> {
-    let rest = reply
-        .lines()
-        .rev()
-        .find_map(|l| l.trim().strip_prefix(HANDOFF_MARKER))?
-        .trim();
-    let (agent, note) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-    let note = note.trim().trim_start_matches(['—', '-', ':']).trim();
-    (!agent.is_empty()).then(|| (agent.to_string(), note.to_string()))
 }
 
 /// A task id is one word of letters, digits and dashes, such as
@@ -353,10 +335,9 @@ mod tests {
     use super::*;
 
     /// A ticket with only what every ticket has.
-    fn draft(title: &str, agent: &str, text: &str) -> Ticket {
+    fn draft(title: &str, text: &str) -> Ticket {
         Ticket {
             title: title.into(),
-            agent: agent.into(),
             text: text.into(),
             ..Ticket::default()
         }
@@ -368,7 +349,7 @@ mod tests {
             ticket: Ticket {
                 id: id.into(),
                 after: after.iter().map(|a| a.to_string()).collect(),
-                ..draft("t", "coder", "x")
+                ..draft("t", "x")
             },
             status: None,
             question: None,
@@ -386,7 +367,7 @@ mod tests {
             notes: Some(
                 "Notes from the user's knowledge vault.\n\n## Deploy day\nTuesdays.\n".into(),
             ),
-            ..draft("Deploy", "coder", "Ship it.")
+            ..draft("Deploy", "Ship it.")
         };
         let asked = t.prompt();
         assert!(
@@ -396,7 +377,7 @@ mod tests {
         assert!(asked.ends_with("Tuesdays."), "{asked}");
         let blank = Ticket {
             notes: Some("  ".into()),
-            ..draft("Deploy", "coder", "Ship it.")
+            ..draft("Deploy", "Ship it.")
         };
         assert_eq!(blank.prompt(), "Ship it.");
     }
@@ -408,7 +389,7 @@ mod tests {
             constraints: vec!["No new dependency".into()],
             files: vec!["src/fetch.rs".into()],
             done_when: vec!["cargo test passes".into()],
-            ..draft("Add retry", "coder", "Retry three times.")
+            ..draft("Add retry", "Retry three times.")
         };
         assert_eq!(
             t.prompt(),
@@ -418,15 +399,15 @@ mod tests {
 
     #[test]
     fn a_ticket_that_cannot_be_a_task_says_why() {
-        assert!(draft("Look", "scout", "Find it.").check().is_ok());
+        assert!(draft("Look", "Find it.").check().is_ok());
         for (ticket, said) in [
-            (draft("", "scout", "t"), "title"),
-            (draft("a\nb", "scout", "t"), "title"),
-            (draft("Look", "scout", "  "), "no task"),
+            (draft("", "t"), "title"),
+            (draft("a\nb", "t"), "title"),
+            (draft("Look", "  "), "no task"),
             (
                 Ticket {
                     after: vec!["../x".into()],
-                    ..draft("Look", "scout", "t")
+                    ..draft("Look", "t")
                 },
                 "not a task id",
             ),
@@ -437,7 +418,7 @@ mod tests {
                         timeout_seconds: 60,
                         attempts: 0,
                     }),
-                    ..draft("Look", "scout", "t")
+                    ..draft("Look", "t")
                 },
                 "at least 1",
             ),
@@ -448,21 +429,21 @@ mod tests {
                         timeout_seconds: 60,
                         attempts: 1,
                     }),
-                    ..draft("Look", "scout", "t")
+                    ..draft("Look", "t")
                 },
                 "`gate.command` is empty",
             ),
             (
                 Ticket {
                     repository: Some("--upload-pack=touch x".into()),
-                    ..draft("Look", "scout", "t")
+                    ..draft("Look", "t")
                 },
                 "not a git URL",
             ),
             (
                 Ticket {
                     repository: Some(" ".into()),
-                    ..draft("Look", "scout", "t")
+                    ..draft("Look", "t")
                 },
                 "one line",
             ),
@@ -498,7 +479,7 @@ mod tests {
             text: "---\nstatus: done\nbranch: ensemble/0001-a\n---\nAll done.\n".into(),
         };
         assert_eq!(o.reply(), "All done.\n");
-        assert_eq!(o.field("branch"), Some("ensemble/0001-a"));
+        assert_eq!(o.field("branch").as_deref(), Some("ensemble/0001-a"));
         assert_eq!(o.field("commit"), None);
     }
 
@@ -518,18 +499,5 @@ mod tests {
             Some("b?")
         );
         assert_eq!(question_in("NEEDS INPUT:   "), None);
-    }
-
-    #[test]
-    fn the_last_hand_off_line_names_the_agent_and_what_remains() {
-        assert_eq!(handoff_in("done"), None);
-        assert_eq!(
-            handoff_in("x\nHAND OFF: web/reviewer — check the tests\n").unwrap(),
-            ("web/reviewer".to_string(), "check the tests".to_string())
-        );
-        assert_eq!(
-            handoff_in("HAND OFF: web/reviewer").unwrap(),
-            ("web/reviewer".to_string(), String::new())
-        );
     }
 }

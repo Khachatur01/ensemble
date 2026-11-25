@@ -7,8 +7,7 @@
 //!
 //! Codex has no tool list and no turn limit to set. What limits it is its own
 //! sandbox (`read-only`, `workspace-write` or `danger-full-access`), which the
-//! adapter passes on and which the config must name. It has no flag for a
-//! system prompt either, so an agent's `prompt` goes in front of the task.
+//! adapter passes on: `workspace-write`, in the task's own worktree.
 //!
 //! The event shapes read here (`item.completed` with `agent_message`,
 //! `command_execution` and `file_change` items, `turn.completed` with `usage`,
@@ -18,7 +17,8 @@
 
 use super::AgentRun;
 use super::process;
-use ensemble_config::{AgentConfig, CODEX_AGENT, CodexAdapter, codex_sandbox_writes};
+use crate::spec::{CodexAdapter, RunSpec, codex_sandbox_writes};
+use ensemble_config::CODEX_AGENT;
 use ensemble_core::port::{Error, Usage};
 use ensemble_core::workspace::Changes;
 use ensemble_core::workspace::{self, Workspace};
@@ -28,7 +28,7 @@ use std::sync::atomic::AtomicBool;
 
 /// Run a `codex` agent on one task, in `workdir`.
 pub async fn run(
-    agent: &AgentConfig,
+    agent: &RunSpec,
     cx: &CodexAdapter,
     task: &str,
     context: Option<&str>,
@@ -51,11 +51,7 @@ pub async fn run(
 
 /// The command line, less the program. Codex runs in the directory it is
 /// started in, and does not insist that it is a git repository.
-pub fn arguments(agent: &AgentConfig, cx: &CodexAdapter, prompt: &str) -> Vec<String> {
-    let prompt = match agent.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
-        Some(system) => format!("{}\n\n{prompt}", system.trim()),
-        None => prompt.to_string(),
-    };
+pub fn arguments(cx: &CodexAdapter, prompt: &str) -> Vec<String> {
     vec![
         "exec".into(),
         "--json".into(),
@@ -65,14 +61,14 @@ pub fn arguments(agent: &AgentConfig, cx: &CodexAdapter, prompt: &str) -> Vec<St
         "--model".into(),
         cx.model.clone(),
         "--".into(),
-        prompt,
+        prompt.into(),
     ]
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn run_program(
     program: &[String],
-    agent: &AgentConfig,
+    agent: &RunSpec,
     cx: &CodexAdapter,
     task: &str,
     context: Option<&str>,
@@ -101,7 +97,7 @@ async fn run_program(
     let ended = process::Run {
         backend: CODEX_AGENT,
         program,
-        args: arguments(agent, cx, &prompt),
+        args: arguments(cx, &prompt),
         env: Vec::new(),
         workdir: workspace.root(),
         max_seconds: agent.max_seconds,
@@ -289,7 +285,7 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn run_program(
         program: &[String],
-        agent: &AgentConfig,
+        agent: &RunSpec,
         cx: &CodexAdapter,
         task: &str,
         context: Option<&str>,
@@ -301,24 +297,21 @@ mod tests {
             program, agent, cx, task, context, workdir, progress, cancel,
         ))
     }
-    use ensemble_config::Adapter;
+    use crate::spec::Adapter;
     use ensemble_core::workspace::testing::TempDir;
     use serde_json::json;
 
-    fn agent(sandbox: &str, max_seconds: u32) -> (AgentConfig, CodexAdapter) {
+    fn agent(sandbox: &str, max_seconds: u32) -> (RunSpec, CodexAdapter) {
         let cx = CodexAdapter {
             command: "codex".into(),
             model: "gpt-5-codex".into(),
             sandbox: sandbox.into(),
         };
-        let a = AgentConfig {
-            name: "fixer".into(),
-            prompt: Some("You fix things.".into()),
+        let a = RunSpec {
+            name: "codex on gpt-5-codex".into(),
+            harness: ensemble_config::HarnessKind::Codex,
+            tier: ensemble_config::Tier::Strong,
             max_seconds,
-            max_concurrent: 1,
-            isolation: ensemble_config::Isolation::Shared,
-            budget: ensemble_config::Budget::Unlimited,
-            limit: None,
             adapter: Adapter::Codex(cx.clone()),
         };
         (a, cx)
@@ -326,7 +319,7 @@ mod tests {
 
     fn go(
         program: &[String],
-        a: &AgentConfig,
+        a: &RunSpec,
         cx: &CodexAdapter,
         dir: &Path,
     ) -> (Result<AgentRun, Error>, Vec<String>) {
@@ -358,19 +351,16 @@ mod tests {
     }
 
     #[test]
-    fn the_command_line_carries_the_sandbox_model_and_the_prompt_in_front_of_the_task() {
-        let (a, cx) = agent("workspace-write", 60);
-        let argv = arguments(&a, &cx, "do it");
+    fn the_command_line_carries_the_sandbox_model_and_the_task() {
+        let (_, cx) = agent("workspace-write", 60);
+        let argv = arguments(&cx, "do it");
         assert_eq!(&argv[..2], ["exec", "--json"]);
         let at = |flag: &str| argv.iter().position(|x| x == flag).unwrap();
         assert_eq!(argv[at("--sandbox") + 1], "workspace-write");
         assert_eq!(argv[at("--model") + 1], "gpt-5-codex");
         assert!(argv.contains(&"--skip-git-repo-check".to_string()));
         assert_eq!(argv[argv.len() - 2], "--");
-        assert_eq!(argv.last().unwrap(), "You fix things.\n\ndo it");
-        let (mut bare, cx) = agent("read-only", 60);
-        bare.prompt = None;
-        assert_eq!(arguments(&bare, &cx, "do it").last().unwrap(), "do it");
+        assert_eq!(argv.last().unwrap(), "do it");
     }
 
     #[test]
@@ -399,10 +389,10 @@ mod tests {
         assert_eq!(
             seen,
             vec![
-                "fixer · starting Codex",
-                "fixer · step 1 · command(cargo test)",
-                "fixer · step 2 · command(rm -rf /)",
-                "fixer · done",
+                "codex on gpt-5-codex · starting Codex",
+                "codex on gpt-5-codex · step 1 · command(cargo test)",
+                "codex on gpt-5-codex · step 2 · command(rm -rf /)",
+                "codex on gpt-5-codex · done",
             ]
         );
     }

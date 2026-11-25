@@ -1,7 +1,7 @@
-//! A record of every run an agent made: when, how long, on what model, how many
-//! tokens, whether it worked. One line of JSON per run, appended to
-//! `records.jsonl` beside the usage counters, so `ensemble-runner agent stats` can say what
-//! the helper team costs and how it is doing.
+//! A record of every run: on which harness and model, when, how long, how many
+//! tokens, whether it worked. One line of JSON per run, appended to the
+//! runner's `records.jsonl`, so `ensemble-runner stats` can say what each
+//! harness and model costs and how it is doing.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -13,14 +13,14 @@ const FILE: &str = "records.jsonl";
 /// One run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Record {
-    /// The agent's name.
-    pub agent: String,
-    /// What answered, when it said.
-    pub model: Option<String>,
+    /// The harness that ran it.
+    pub harness: String,
+    /// The model, as the harness names it.
+    pub model: String,
     /// Seconds since the epoch.
     pub started: u64,
     pub seconds: f64,
-    /// Tokens, when the agent's CLI or server said. Absent is not zero.
+    /// Tokens, when the harness or the server said. Absent is not zero.
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub steps: u32,
@@ -62,10 +62,11 @@ pub fn read(dir: &Path) -> Vec<Record> {
         .collect()
 }
 
-/// What one agent has done.
+/// What one harness has done on one model.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Summary {
-    pub agent: String,
+    pub harness: String,
+    pub model: String,
     pub runs: u32,
     pub failures: u32,
     pub total_seconds: f64,
@@ -75,15 +76,16 @@ pub struct Summary {
     pub completion_tokens: Option<u64>,
 }
 
-/// Per agent, for the runs that started at or after `since`.
+/// Per harness and model, for the runs that started at or after `since`.
 pub fn summarize(records: &[Record], since: Option<u64>) -> Vec<Summary> {
-    let mut by: BTreeMap<&str, Summary> = BTreeMap::new();
+    let mut by: BTreeMap<(&str, &str), Summary> = BTreeMap::new();
     for r in records
         .iter()
         .filter(|r| since.is_none_or(|s| r.started >= s))
     {
-        let s = by.entry(&r.agent).or_insert_with(|| Summary {
-            agent: r.agent.clone(),
+        let s = by.entry((&r.harness, &r.model)).or_insert_with(|| Summary {
+            harness: r.harness.clone(),
+            model: r.model.clone(),
             runs: 0,
             failures: 0,
             total_seconds: 0.0,
@@ -141,18 +143,18 @@ pub fn table(summaries: &[Summary]) -> String {
     }
     let width = summaries
         .iter()
-        .map(|s| s.agent.len())
+        .map(|s| s.harness.len() + 4 + s.model.len())
         .max()
-        .unwrap_or(5)
-        .max(5);
+        .unwrap_or(3)
+        .max(3);
     let mut out = format!(
         "{:<width$}  {:>5}  {:>8}  {:>9}  {:>8}  {:>10}  {:>10}\n",
-        "agent", "runs", "failures", "total s", "mean s", "tokens in", "tokens out"
+        "run", "runs", "failures", "total s", "mean s", "tokens in", "tokens out"
     );
     for s in summaries {
         out.push_str(&format!(
             "{:<width$}  {:>5}  {:>8}  {:>9.1}  {:>8.1}  {:>10}  {:>10}\n",
-            s.agent,
+            format!("{} on {}", s.harness, s.model),
             s.runs,
             s.failures,
             s.total_seconds,
@@ -174,15 +176,15 @@ mod tests {
     use crate::workspace::testing::TempDir;
 
     fn run(
-        agent: &str,
+        harness: &str,
         started: u64,
         seconds: f64,
         tokens: Option<(u64, u64)>,
         ok: bool,
     ) -> Record {
         Record {
-            agent: agent.into(),
-            model: Some("m".into()),
+            harness: harness.into(),
+            model: "m".into(),
             started,
             seconds,
             prompt_tokens: tokens.map(|t| t.0),
@@ -197,8 +199,8 @@ mod tests {
     #[test]
     fn records_are_appended_and_read_back_and_a_bad_line_is_skipped() {
         let tmp = TempDir::new();
-        append(&tmp.0, &run("a/x", 1, 2.0, Some((3, 4)), true));
-        append(&tmp.0, &run("a/y", 2, 1.0, None, false));
+        append(&tmp.0, &run("codex", 1, 2.0, Some((3, 4)), true));
+        append(&tmp.0, &run("builtin", 2, 1.0, None, false));
         let mut text = std::fs::read_to_string(path(&tmp.0)).unwrap();
         text.push_str("not json\n");
         std::fs::write(path(&tmp.0), text).unwrap();
@@ -211,14 +213,14 @@ mod tests {
     #[test]
     fn a_summary_sums_runs_and_keeps_unknown_tokens_unknown() {
         let records = [
-            run("t/a", 100, 10.0, Some((5, 1)), true),
-            run("t/a", 200, 20.0, None, false),
-            run("t/b", 200, 4.0, None, true),
-            run("t/a", 50, 99.0, Some((1000, 1000)), true),
+            run("opencode", 100, 10.0, Some((5, 1)), true),
+            run("opencode", 200, 20.0, None, false),
+            run("builtin", 200, 4.0, None, true),
+            run("opencode", 50, 99.0, Some((1000, 1000)), true),
         ];
         let all = summarize(&records, None);
-        let a = &all[0];
-        assert_eq!((a.agent.as_str(), a.runs, a.failures), ("t/a", 3, 1));
+        let a = &all[1];
+        assert_eq!((a.harness.as_str(), a.runs, a.failures), ("opencode", 3, 1));
         assert_eq!(a.total_seconds, 129.0);
         assert_eq!(a.mean_seconds, 43.0);
         assert_eq!(
@@ -226,29 +228,31 @@ mod tests {
             (Some(1005), Some(1001))
         );
         assert_eq!(
-            (all[1].prompt_tokens, all[1].completion_tokens),
+            (all[0].prompt_tokens, all[0].completion_tokens),
             (None, None)
         );
 
         let recent = summarize(&records, Some(100));
-        assert_eq!(recent[0].runs, 2);
-        assert_eq!(recent[0].prompt_tokens, Some(5));
+        assert_eq!(recent[1].runs, 2);
+        assert_eq!(recent[1].prompt_tokens, Some(5));
     }
 
     #[test]
     fn a_table_shows_a_dash_for_tokens_nobody_reported() {
-        let text = table(&summarize(&[run("t/b", 1, 4.0, None, true)], None));
+        let text = table(&summarize(&[run("builtin", 1, 4.0, None, true)], None));
         let row = text.lines().nth(1).unwrap();
         assert!(
-            row.starts_with("t/b") && row.trim_end().ends_with("-"),
+            row.starts_with("builtin on m") && row.trim_end().ends_with("-"),
             "{text}"
         );
         let last: Vec<&str> = row.split_whitespace().rev().take(2).collect();
         assert_eq!(last, ["-", "-"], "unknown is not zero: {row}");
         assert_eq!(table(&[]), "No runs recorded.\n");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&json(&summarize(&[run("t/b", 1, 4.0, None, true)], None)))
-                .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json(&summarize(
+            &[run("builtin", 1, 4.0, None, true)],
+            None,
+        )))
+        .unwrap();
         assert_eq!(parsed[0]["prompt_tokens"], serde_json::Value::Null);
     }
 

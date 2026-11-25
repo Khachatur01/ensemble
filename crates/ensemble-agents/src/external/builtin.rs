@@ -1,18 +1,17 @@
-//! The `builtin` adapter: an agent loop in Ensemble itself, so an agent on an
-//! LLM backend needs no CLI installed. The loop is harness-rs's `AgentLoop`:
+//! The `builtin` adapter: an agent loop in Ensemble itself, so a run on an
+//! LLM of the ANN pool needs no CLI installed. The loop is harness-rs's `AgentLoop`:
 //! the model asks for tools, they run in the working directory, their results
 //! go back, until the model answers or `max_steps` is reached.
 //!
 //! The file tools are confined to the working directory by the OS (they open
 //! it as a capability directory). `shell` is not: it runs any program, in the
-//! working directory, which is why it is only there when it is listed.
+//! working directory, the task's own worktree.
 
 use super::AgentRun;
 use crate::runtime::until_set;
+use crate::spec::{BuiltinAdapter, RunSpec, builtin_tool_writes};
 use async_trait::async_trait;
-use ensemble_config::{
-    AgentConfig, BUILTIN_AGENT, BackendSettings, BuiltinAdapter, LlmBackend, builtin_tool_writes,
-};
+use ensemble_config::{BUILTIN_AGENT, BackendSettings, LlmBackend};
 use ensemble_core::port::{Error, Usage};
 use ensemble_core::workspace::{self, Changes, Workspace};
 use harness::{
@@ -26,11 +25,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// Run a `builtin` agent on one task, in `workdir`, on `backend`: the one its
-/// first model is on, once the router has bound it.
+/// Run `builtin` on one task, in `workdir`, on its model of `backend`.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
-    agent: &AgentConfig,
+    agent: &RunSpec,
     ba: &BuiltinAdapter,
     backend: &LlmBackend,
     task: &str,
@@ -64,16 +62,17 @@ pub async fn run(
     for tool in &ba.tools {
         agent_loop = agent_loop.with_tool(tool_named(tool));
     }
-    if let Some(prompt) = agent.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
-        agent_loop = agent_loop.with_system(prompt);
-    }
     let description = match context.filter(|c| !c.trim().is_empty()) {
         Some(ctx) => format!("Context:\n{ctx}\n\n{task}"),
         None => task.to_string(),
     };
     let mut world = harness_context::default_world(workspace.root());
 
-    say(&format!("starting on {} at {}", ba.model(), backend.name));
+    say(&format!(
+        "starting on {} at {}",
+        ba.model.as_str(),
+        backend.name
+    ));
     let run = agent_loop.run_with_max_iters(
         Task {
             description,
@@ -161,7 +160,7 @@ pub async fn run(
     };
     let mut out = AgentRun {
         text: text.unwrap_or_default().trim().to_string(),
-        model: ba.model().to_string(),
+        model: ba.model.as_str().to_string(),
         usage: Usage {
             prompt_tokens: usage.input_tokens,
             completion_tokens: usage.output_tokens,
@@ -190,20 +189,16 @@ pub async fn run(
     Ok(out)
 }
 
-/// The model `ba` is bound to, on `backend`, its answers capped at
+/// The model of `ba`, on `backend`, its answers capped at
 /// `max_tokens`. A request waits at most the backend's `timeout_seconds`.
 fn model(ba: &BuiltinAdapter, backend: &LlmBackend) -> Arc<dyn Model> {
     let config = LlmConfig::new(
         backend.name.clone(),
         backend.settings.base_url(),
         backend.settings.api_key().unwrap_or_default(),
-        ba.model(),
+        ba.model.as_str(),
     );
-    let window = ba
-        .fallback
-        .first()
-        .and_then(|c| c.context_window)
-        .unwrap_or(0);
+    let window = ba.context_window;
     let timeout = Duration::from_secs(backend.timeout_seconds);
     let inner: Arc<dyn Model> = match backend.settings {
         BackendSettings::OpenAiCompatible { .. } => Arc::new(
@@ -244,7 +239,7 @@ impl Model for Capped {
     }
 }
 
-/// The harness-rs tool behind one of [`ensemble_config::BUILTIN_TOOLS`].
+/// The harness-rs tool behind one of [`crate::spec::BUILTIN_TOOLS`].
 fn tool_named(name: &str) -> Arc<dyn Tool> {
     use harness_tools::fs::{EditFile, Glob, Grep, ListDir, ReadFile, WriteFile};
     use harness_tools::shell::ShellExec;
@@ -256,7 +251,7 @@ fn tool_named(name: &str) -> Arc<dyn Tool> {
         "write" => Arc::new(WriteFile),
         "edit" => Arc::new(EditFile),
         "shell" => Arc::new(ShellExec),
-        other => unreachable!("the config allows no builtin tool '{other}'"),
+        other => unreachable!("a run is given no builtin tool '{other}'"),
     }
 }
 
@@ -308,33 +303,25 @@ impl Hook for Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spec::Adapter;
     use ensemble_backends::testing::{ModelServer, chat_server};
-    use ensemble_config::{Adapter, Budget, Candidate, Fallback, Isolation, WhenNone};
     use ensemble_core::workspace::testing::TempDir;
     use serde_json::{Value, json};
 
-    fn agent(tools: &[&str], max_steps: u32, max_seconds: u32) -> (AgentConfig, BuiltinAdapter) {
+    fn agent(tools: &[&str], max_steps: u32, max_seconds: u32) -> (RunSpec, BuiltinAdapter) {
         let ba = BuiltinAdapter {
-            fallback: Fallback {
-                candidates: vec![Candidate {
-                    provider: "local".into(),
-                    model: "small".into(),
-                    context_window: Some(32768),
-                }],
-                when_none: WhenNone::Fail,
-            },
+            provider: "local".into(),
+            model: "small".into(),
+            context_window: 32768,
             tools: tools.iter().map(|t| t.to_string()).collect(),
             max_steps,
             max_tokens: 300,
         };
-        let a = AgentConfig {
-            name: "fixer".into(),
-            prompt: Some("You fix things.".into()),
+        let a = RunSpec {
+            name: "builtin on local:small".into(),
+            harness: ensemble_config::HarnessKind::Builtin,
+            tier: ensemble_config::Tier::Small,
             max_seconds,
-            max_concurrent: 1,
-            isolation: Isolation::Shared,
-            budget: Budget::Unlimited,
-            limit: None,
             adapter: Adapter::Builtin(ba.clone()),
         };
         (a, ba)
@@ -363,7 +350,7 @@ mod tests {
     }
 
     fn go(
-        a: &AgentConfig,
+        a: &RunSpec,
         ba: &BuiltinAdapter,
         server: &ModelServer,
         dir: &Path,
@@ -428,9 +415,7 @@ mod tests {
         assert!(tools.contains(&"read_file") && tools.contains(&"write_file"));
         let said = requests[0].as_str();
         assert!(
-            said.contains("You fix things.")
-                && said.contains("It says helo.")
-                && said.contains("Fix the greeting."),
+            said.contains("It says helo.") && said.contains("Fix the greeting."),
             "{said}"
         );
     }

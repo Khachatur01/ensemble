@@ -1,4 +1,4 @@
-//! The `opencode` adapter: the OpenCode CLI as a member of the helper team.
+//! The `opencode` adapter: the OpenCode CLI, as a harness of the runner.
 //!
 //! OpenCode is a whole agent: it runs its own loop with its own tools in the
 //! project directory, on whichever provider and model it is given. Its `run`
@@ -6,13 +6,12 @@
 //! hands it an agent of its own instead: `OPENCODE_CONFIG_CONTENT` carries an
 //! agent definition with the step cap and a permission set that denies
 //! everything (`"*": "deny"`) but the tools listed. OpenCode hides denied
-//! tools from the model, so it cannot even try them. The agent's prompt goes
-//! in as the definition's `prompt`, which replaces OpenCode's own system
-//! prompt, or as an instruction file, which OpenCode adds after its own.
+//! tools from the model, so it cannot even try them. OpenCode keeps its own
+//! system prompt: Ensemble adds none.
 //!
-//! An agent on one of the LLM backends gets that backend as an OpenCode
-//! provider in the same inline config, so the endpoint and its key are set
-//! once, in Ensemble's config, and never written anywhere else.
+//! The run.s model is on a provider of the ANN pool, which goes in as an
+//! OpenCode provider in the same inline config, so the endpoint and its key
+//! are kept by the runner alone and never written anywhere else.
 //!
 //! `opencode run --standalone` starts a private server for the run, which
 //! inherits this environment; the shared background service would not.
@@ -21,14 +20,13 @@
 
 use super::AgentRun;
 use super::process;
-use ensemble_config::{
-    AgentConfig, LlmBackend, OPENCODE_AGENT, OpenCodeAdapter, SystemPrompt, opencode_tool_writes,
-};
+use crate::spec::{OpenCodeAdapter, RunSpec, opencode_tool_writes};
+use ensemble_config::{LlmBackend, OPENCODE_AGENT};
 use ensemble_core::port::{Error, Usage};
 use ensemble_core::workspace::{self, Changes, Workspace};
 use serde_json::{Map, Value, json};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 /// The AI SDK package OpenCode talks to an OpenAI-compatible endpoint with.
 const OPENAI_COMPATIBLE_PACKAGE: &str = "@ai-sdk/openai-compatible";
@@ -37,16 +35,15 @@ const OPENAI_COMPATIBLE_PACKAGE: &str = "@ai-sdk/openai-compatible";
 /// when that is less.
 const MAX_OUTPUT_TOKENS: u32 = 32_768;
 
-/// Shown by `ensemble-runner agent show` in place of an API key.
+/// Shown in place of an API key.
 pub const REDACTED: &str = "<redacted>";
 
-/// Run an `opencode` agent on one task, in `workdir`. `backend` is the LLM
-/// backend the agent names, if it names one.
+/// Run OpenCode on one task, in `workdir`, on its model of `backend`.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
-    agent: &AgentConfig,
+    agent: &RunSpec,
     oc: &OpenCodeAdapter,
-    backend: Option<&LlmBackend>,
+    backend: &LlmBackend,
     task: &str,
     context: Option<&str>,
     workdir: &Path,
@@ -68,7 +65,7 @@ pub async fn run(
 }
 
 /// The name the agent runs under inside OpenCode.
-pub fn agent_id(agent: &AgentConfig) -> String {
+pub fn agent_id(agent: &RunSpec) -> String {
     format!("ensemble-{}", safe(&agent.name))
 }
 
@@ -115,88 +112,27 @@ pub fn permissions(tools: &[String]) -> Value {
     Value::Object(p)
 }
 
-/// The agent's prompt, when it has one worth sending.
-fn prompt(agent: &AgentConfig) -> Option<&str> {
-    agent.prompt.as_deref().filter(|p| !p.trim().is_empty())
-}
-
-/// The inline OpenCode config that defines the agent and, when it runs on an
-/// LLM backend, the provider for it. It holds the backend's API key: it goes
-/// only into the CLI's environment, and [`redact`] hides it for display.
-///
-/// An agent's prompt replaces OpenCode's own system prompt as the agent's
-/// `prompt`, or follows it as an instruction file, `prompt_file`, which
-/// holds the prompt for the run.
-pub fn config(
-    agent: &AgentConfig,
-    oc: &OpenCodeAdapter,
-    backend: Option<&LlmBackend>,
-    prompt_file: &Path,
-) -> Value {
-    let mut def = json!({
-        "description": format!("Ensemble agent '{}'", agent.name),
+/// The inline OpenCode config that defines the agent and the provider of its
+/// model. It holds the provider's API key: it goes only into the CLI's
+/// environment, and [`redact`] hides it for display.
+pub fn config(agent: &RunSpec, oc: &OpenCodeAdapter, backend: &LlmBackend) -> Value {
+    let def = json!({
+        "description": format!("Ensemble's run, {}", agent.name),
         "mode": "primary",
         "steps": oc.max_steps,
         "permission": permissions(&oc.tools),
     });
-    let mut cfg = json!({});
-    if let Some(prompt) = prompt(agent) {
-        match oc.system_prompt {
-            SystemPrompt::Replace => def["prompt"] = json!(prompt),
-            SystemPrompt::Append => {
-                cfg["instructions"] = json!([prompt_file.display().to_string()]);
-            }
-        }
-    }
-    cfg["agent"] = json!({ agent_id(agent): def });
-    if let Some(backend) = backend {
-        cfg["provider"] = json!({ provider_id(backend): provider(backend, oc) });
-    }
-    cfg
+    json!({
+        "agent": { agent_id(agent): def },
+        "provider": { provider_id(backend): provider(backend, oc) },
+    })
 }
 
-/// Shown by `ensemble-runner agent show` in place of the file a run writes the prompt to.
-pub const SHOWN_PROMPT_FILE: &str = "<the agent's prompt, in a file for the run>";
-
-/// The file an agent with `system_prompt: append` has its prompt in for one
-/// run: OpenCode has no flag that adds to its system prompt, but it reads
-/// the files its config lists as `instructions` into it. Removed when the run
-/// ends.
-struct PromptFile(PathBuf);
-
-impl PromptFile {
-    fn write(agent: &AgentConfig, oc: &OpenCodeAdapter) -> Result<Self, Error> {
-        static RUNS: AtomicU64 = AtomicU64::new(0);
-        let file = PromptFile(std::env::temp_dir().join(format!(
-            "{}-{}-{}.md",
-            agent_id(agent),
-            std::process::id(),
-            RUNS.fetch_add(1, Ordering::Relaxed)
-        )));
-        if let (SystemPrompt::Append, Some(prompt)) = (oc.system_prompt, prompt(agent)) {
-            std::fs::write(&file.0, prompt).map_err(|e| Error::Unsupported {
-                backend: OPENCODE_AGENT.into(),
-                detail: format!(
-                    "agent '{}' cannot start: writing its prompt to {}: {e}",
-                    agent.name,
-                    file.0.display()
-                ),
-            })?;
-        }
-        Ok(file)
-    }
-}
-
-impl Drop for PromptFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-/// An LLM backend as an OpenCode provider serving the agent's one model.
+/// A provider of the ANN pool as an OpenCode provider serving the run's one
+/// model.
 fn provider(backend: &LlmBackend, oc: &OpenCodeAdapter) -> Value {
-    // Config loading refuses an Anthropic backend here; the URL and key are the
-    // same either way if one gets this far.
+    // The picker gives OpenCode only OpenAI-compatible providers; the URL and
+    // key are the same either way if one gets this far.
     let (base_url, api_key) = (backend.settings.base_url(), backend.settings.api_key());
     let mut options = json!({
         "baseURL": base_url,
@@ -205,18 +141,18 @@ fn provider(backend: &LlmBackend, oc: &OpenCodeAdapter) -> Value {
     if let Some(key) = api_key {
         options["apiKey"] = json!(key);
     }
-    let mut model = json!({ "name": oc.model_id() });
-    if let Some(context) = oc.context_window() {
-        model["limit"] = json!({
-            "context": context,
-            "output": (context / 4).min(MAX_OUTPUT_TOKENS),
-        });
-    }
+    let model = json!({
+        "name": oc.model,
+        "limit": {
+            "context": oc.context_window,
+            "output": (oc.context_window / 4).min(MAX_OUTPUT_TOKENS),
+        },
+    });
     json!({
         "npm": OPENAI_COMPATIBLE_PACKAGE,
         "name": format!("Ensemble provider '{}'", backend.name),
         "options": options,
-        "models": { oc.model_id(): model },
+        "models": { oc.model.clone(): model },
     })
 }
 
@@ -231,21 +167,18 @@ pub fn redact(cfg: &mut Value) {
     }
 }
 
-/// The model as OpenCode names it: `provider/model`, with the provider made
-/// from the LLM backend when the agent runs on one.
-pub fn model_ref(oc: &OpenCodeAdapter, backend: Option<&LlmBackend>) -> String {
-    match backend {
-        Some(b) => format!("{}/{}", provider_id(b), oc.model_id()),
-        None => oc.model_id().to_string(),
-    }
+/// The model as OpenCode names it: `provider/model`, the provider made from
+/// the pool's.
+pub fn model_ref(oc: &OpenCodeAdapter, backend: &LlmBackend) -> String {
+    format!("{}/{}", provider_id(backend), oc.model)
 }
 
 /// The command line, less the program. `--` keeps a task that starts with a
 /// dash from being read as a flag.
 pub fn arguments(
-    agent: &AgentConfig,
+    agent: &RunSpec,
     oc: &OpenCodeAdapter,
-    backend: Option<&LlmBackend>,
+    backend: &LlmBackend,
     prompt: &str,
 ) -> Vec<String> {
     vec![
@@ -267,9 +200,9 @@ pub fn arguments(
 #[allow(clippy::too_many_arguments)]
 async fn run_program(
     program: &[String],
-    agent: &AgentConfig,
+    agent: &RunSpec,
     oc: &OpenCodeAdapter,
-    backend: Option<&LlmBackend>,
+    backend: &LlmBackend,
     task: &str,
     context: Option<&str>,
     workdir: &Path,
@@ -295,8 +228,6 @@ async fn run_program(
         .then(|| workspace::snapshot(&workspace))
         .flatten();
 
-    let prompt_file = PromptFile::write(agent, oc)?;
-
     say("starting OpenCode");
     let mut stream = Stream::new(&workspace, &say);
     let ended = process::Run {
@@ -305,7 +236,7 @@ async fn run_program(
         args: arguments(agent, oc, backend, &prompt),
         env: vec![(
             "OPENCODE_CONFIG_CONTENT".into(),
-            config(agent, oc, backend, &prompt_file.0).to_string(),
+            config(agent, oc, backend).to_string(),
         )],
         workdir: workspace.root(),
         max_seconds: agent.max_seconds,
@@ -316,7 +247,7 @@ async fn run_program(
 
     let mut out = AgentRun {
         text: String::new(),
-        model: oc.model_id().to_string(),
+        model: oc.model.clone(),
         usage: stream.usage,
         steps: stream.steps,
         tool_calls: stream.tool_calls,
@@ -475,9 +406,9 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn run_program(
         program: &[String],
-        agent: &AgentConfig,
+        agent: &RunSpec,
         oc: &OpenCodeAdapter,
-        backend: Option<&LlmBackend>,
+        backend: &LlmBackend,
         task: &str,
         context: Option<&str>,
         workdir: &Path,
@@ -488,28 +419,24 @@ mod tests {
             program, agent, oc, backend, task, context, workdir, progress, cancel,
         ))
     }
+    use crate::spec::Adapter;
     use ensemble_config::BackendSettings;
-    use ensemble_config::{Adapter, OpenCodeModel};
     use ensemble_core::workspace::testing::TempDir;
 
-    fn agent(tools: &[&str], max_seconds: u32) -> (AgentConfig, OpenCodeAdapter) {
+    fn agent(tools: &[&str], max_seconds: u32) -> (RunSpec, OpenCodeAdapter) {
         let oc = OpenCodeAdapter {
             command: "opencode".into(),
-            model: OpenCodeModel::Provider {
-                model: "ollama/qwen3.5:9b".into(),
-            },
+            provider: "local box".into(),
+            model: "qwen3.5-9b".into(),
+            context_window: 65536,
             tools: tools.iter().map(|t| t.to_string()).collect(),
-            system_prompt: SystemPrompt::Replace,
             max_steps: 9,
         };
-        let a = AgentConfig {
-            name: "code reviewer".into(),
-            prompt: Some("You review code.".into()),
+        let a = RunSpec {
+            name: "opencode on local box:qwen3.5-9b".into(),
+            harness: ensemble_config::HarnessKind::OpenCode,
+            tier: ensemble_config::Tier::Medium,
             max_seconds,
-            max_concurrent: 1,
-            isolation: ensemble_config::Isolation::Shared,
-            budget: ensemble_config::Budget::Unlimited,
-            limit: None,
             adapter: Adapter::OpenCode(oc.clone()),
         };
         (a, oc)
@@ -533,7 +460,7 @@ mod tests {
 
     fn go(
         program: &[String],
-        a: &AgentConfig,
+        a: &RunSpec,
         oc: &OpenCodeAdapter,
         dir: &Path,
     ) -> (Result<AgentRun, Error>, Vec<String>) {
@@ -542,7 +469,7 @@ mod tests {
             program,
             a,
             oc,
-            None,
+            &local_backend(None),
             "review it",
             None,
             dir,
@@ -550,17 +477,6 @@ mod tests {
             &AtomicBool::new(false),
         );
         (r, seen.into_inner().unwrap())
-    }
-
-    fn on_local_box(model: &str, context_window: u32) -> OpenCodeModel {
-        OpenCodeModel::Pool(ensemble_config::Fallback {
-            candidates: vec![ensemble_config::Candidate {
-                provider: "local box".into(),
-                model: model.into(),
-                context_window: Some(context_window),
-            }],
-            when_none: ensemble_config::WhenNone::Fail,
-        })
     }
 
     fn local_backend(api_key: Option<&str>) -> LlmBackend {
@@ -597,11 +513,10 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_on_an_llm_backend_gets_it_as_its_provider() {
-        let (a, mut oc) = agent(&["read"], 60);
-        oc.model = on_local_box("qwen3.5-9b", 65536);
+    fn a_run_gets_its_provider_of_the_pool_as_its_opencode_provider() {
+        let (a, oc) = agent(&["read"], 60);
         let b = local_backend(Some("sk-secret"));
-        let cfg = config(&a, &oc, Some(&b), Path::new("p.md"));
+        let cfg = config(&a, &oc, &b);
         assert_eq!(
             cfg["provider"]["ensemble-local-box"],
             json!({
@@ -616,7 +531,7 @@ mod tests {
                     "limit": {"context": 65536, "output": 16384}}}
             })
         );
-        let args = arguments(&a, &oc, Some(&b), "go");
+        let args = arguments(&a, &oc, &b, "go");
         assert!(
             args.windows(2)
                 .any(|w| w == ["-m", "ensemble-local-box/qwen3.5-9b"]),
@@ -625,22 +540,16 @@ mod tests {
     }
 
     #[test]
-    fn a_backend_without_a_key_sends_none_and_a_shown_config_hides_one() {
-        let (a, mut oc) = agent(&["read"], 60);
-        oc.model = on_local_box("qwen3.5-9b", 32768);
-        let keyless = config(&a, &oc, Some(&local_backend(None)), Path::new("p.md"));
+    fn a_provider_without_a_key_sends_none_and_a_shown_config_hides_one() {
+        let (a, oc) = agent(&["read"], 60);
+        let keyless = config(&a, &oc, &local_backend(None));
         assert!(
             keyless
                 .pointer("/provider/ensemble-local-box/options/apiKey")
                 .is_none()
         );
 
-        let mut shown = config(
-            &a,
-            &oc,
-            Some(&local_backend(Some("sk-secret"))),
-            Path::new("p.md"),
-        );
+        let mut shown = config(&a, &oc, &local_backend(Some("sk-secret")));
         redact(&mut shown);
         let text = shown.to_string();
         assert!(!text.contains("sk-secret"), "{text}");
@@ -650,11 +559,10 @@ mod tests {
     #[test]
     fn the_agent_is_defined_inline_with_everything_denied_but_its_tools() {
         let (a, oc) = agent(&["read", "glob", "bash(git *)", "bash(cargo test*)"], 60);
-        let cfg = config(&a, &oc, None, Path::new("p.md"));
-        assert!(cfg.get("provider").is_none(), "no backend, no provider");
-        assert!(cfg.get("instructions").is_none(), "replace sends no file");
-        let def = &cfg["agent"]["ensemble-code-reviewer"];
-        assert_eq!(def["prompt"], "You review code.");
+        let cfg = config(&a, &oc, &local_backend(None));
+        assert!(cfg.get("instructions").is_none(), "Ensemble adds no prompt");
+        let def = &cfg["agent"]["ensemble-opencode-on-local-box-qwen3-5-9b"];
+        assert!(def.get("prompt").is_none(), "OpenCode keeps its own");
         assert_eq!(def["steps"], 9);
         assert_eq!(def["mode"], "primary");
         assert_eq!(
@@ -667,7 +575,7 @@ mod tests {
             })
         );
 
-        let args = arguments(&a, &oc, None, "-v do it");
+        let args = arguments(&a, &oc, &local_backend(None), "-v do it");
         assert_eq!(
             args,
             [
@@ -676,44 +584,13 @@ mod tests {
                 "--format",
                 "json",
                 "--agent",
-                "ensemble-code-reviewer",
+                "ensemble-opencode-on-local-box-qwen3-5-9b",
                 "-m",
-                "ollama/qwen3.5:9b",
+                "ensemble-local-box/qwen3.5-9b",
                 "--",
                 "-v do it"
             ]
         );
-    }
-
-    #[test]
-    fn an_appended_prompt_goes_in_a_file_for_the_run_only() {
-        let (a, mut oc) = agent(&["read"], 60);
-        oc.system_prompt = SystemPrompt::Append;
-        let cfg = config(&a, &oc, None, Path::new("/tmp/p.md"));
-        assert_eq!(cfg["instructions"], json!(["/tmp/p.md"]));
-        assert!(
-            cfg["agent"]["ensemble-code-reviewer"]
-                .get("prompt")
-                .is_none()
-        );
-
-        // The file holds the prompt while OpenCode runs, and is gone after.
-        let tmp = TempDir::new();
-        let script = format!(
-            "f=$(printf %s \"$OPENCODE_CONFIG_CONTENT\" | sed 's/.*\"instructions\":\\[\"\\([^\"]*\\)\".*/\\1/')\nprintf %s \"$f\" > seen\ngrep -qx 'You review code.' \"$f\" || exit 8\n{}",
-            emitting(&step(vec![text("ok")]))
-        );
-        let (r, _) = go(&fake(&tmp.0, &script), &a, &oc, &tmp.0);
-        assert_eq!(r.unwrap().text, "ok");
-        let seen = std::fs::read_to_string(tmp.0.join("seen")).unwrap();
-        assert!(seen.ends_with(".md"), "{seen}");
-        assert!(!Path::new(&seen).exists(), "{seen} was left behind");
-
-        // An agent without a prompt runs on OpenCode's own alone.
-        let mut bare = a.clone();
-        bare.prompt = None;
-        let cfg = config(&bare, &oc, None, Path::new("/tmp/p.md"));
-        assert!(cfg.get("instructions").is_none());
     }
 
     #[test]
@@ -734,7 +611,7 @@ mod tests {
         events.extend(step(vec![text("All good."), text("No bugs.")]));
         // The definition must reach the CLI through its environment.
         let script = format!(
-            "{}case \"$OPENCODE_CONFIG_CONTENT\" in *ensemble-code-reviewer*) ;; *) exit 9 ;; esac\n",
+            "{}case \"$OPENCODE_CONFIG_CONTENT\" in *ensemble-opencode-on-local-box-qwen3-5-9b*) ;; *) exit 9 ;; esac\n",
             emitting(&events)
         );
         let (a, oc) = agent(&["read", "bash"], 60);
@@ -751,11 +628,11 @@ mod tests {
         assert_eq!(
             seen,
             vec![
-                "code reviewer · starting OpenCode",
-                "code reviewer · step 1 · read(a.rs)",
-                "code reviewer · step 1 · bash(cargo test)",
-                "code reviewer · step 1 · bash(rm -rf /)",
-                "code reviewer · done",
+                "opencode on local box:qwen3.5-9b · starting OpenCode",
+                "opencode on local box:qwen3.5-9b · step 1 · read(a.rs)",
+                "opencode on local box:qwen3.5-9b · step 1 · bash(cargo test)",
+                "opencode on local box:qwen3.5-9b · step 1 · bash(rm -rf /)",
+                "opencode on local box:qwen3.5-9b · done",
             ]
         );
     }

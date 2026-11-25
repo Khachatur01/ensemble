@@ -6,11 +6,11 @@
 //! A runner says where it works (its workspace, a folder of git
 //! repositories, each a project named for its folder, where it clones the
 //! repository of a task whose project it has no copy of), and its ANN pool:
-//! the providers its teams' agents run on, its own and other runners it
+//! the providers its harnesses run on, its own and other runners it
 //! reaches through the hub, the models they serve, and which of its own it
 //! shares through the hub. Its harnesses are the programs that drive an LLM
 //! to work in a repository, each off until a person turns it on (`harness`).
-//! Its teams are the folders of its teams directory (`teams`).
+//! A task runs on a harness and an LLM the picker chooses of them.
 
 use super::ann::AnnPoolSetting;
 use super::harness::HarnessesSetting;
@@ -30,7 +30,8 @@ pub struct Runner {
     /// The hub server it connects to, `ws://` or `wss://`, signed in to with
     /// `ensemble-runner login`. None: it uses no hub.
     pub hub: Option<String>,
-    /// Its ANN pool: the providers its agents run on, and the models it shares.
+    /// Its ANN pool: the providers its harnesses run on, and the models it
+    /// shares.
     pub llm: AnnPool,
     /// Its harnesses: the programs that drive an LLM to work in a repository.
     pub harnesses: HarnessesSetting,
@@ -50,7 +51,7 @@ pub struct RunnerSettings {
     pub workspace: String,
     /// The hub it connects to, `ws://` or `wss://`. None: no hub.
     pub hub: Option<String>,
-    /// The providers its teams' agents run on and the models they serve.
+    /// The providers its harnesses run on and the models they serve.
     pub ann_pool: AnnPoolSetting,
     /// The programs that drive an LLM to work in a repository, one of each
     /// kind.

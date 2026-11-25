@@ -1,7 +1,8 @@
 //! The runners connected to a hub server.
 //!
 //! A runner is a connection that said `runner`: it has an owner (the account
-//! it signed in as), a name, and every agent of its teams. The hub keeps no
+//! it signed in as), a name, and the harnesses it runs tasks on, each with the
+//! models it can drive; a runner with none runs no task. The hub keeps no
 //! runner when its connection is gone; runners are presence, not state. Who is
 //! connected says which runners may take an account's tasks, and whether a
 //! task they gave back is blocked (`board`).
@@ -24,8 +25,8 @@ use tokio::sync::mpsc::{
 struct Runner {
     owner: String,
     name: String,
-    /// Every agent of its teams, with the first line of each one's prompt.
-    agents: Vec<(String, String)>,
+    /// Its harnesses that may run, each `{harness, models: [{model, tier}]}`.
+    harnesses: Vec<Value>,
 }
 
 impl Runner {
@@ -67,7 +68,7 @@ impl Routes {
         inner.runners.remove(&conn);
     }
 
-    /// Make `conn` a runner of `owner`, or say again what it has. Its name
+    /// Make `conn` a runner of `owner`, with what it says it runs on. Its name
     /// must not be taken by another connection of the same owner.
     pub(crate) fn register(&self, conn: u64, owner: &str, params: &Value) -> Result<Value, String> {
         let name = params["name"].as_str().unwrap_or("").trim().to_string();
@@ -76,15 +77,22 @@ impl Routes {
                 "runner: '{name}' is not a runner name: letters, digits, '-', '_' or '.'"
             ));
         }
-        let agents: Vec<(String, String)> = params["agents"]
+        let harnesses: Vec<Value> = params["harnesses"]
             .as_array()
             .map(|a| {
                 a.iter()
-                    .filter_map(|v| {
-                        Some((
-                            v["name"].as_str()?.to_string(),
-                            v["about"].as_str().unwrap_or("").to_string(),
-                        ))
+                    .filter_map(|h| {
+                        let models: Vec<Value> = h["models"]
+                            .as_array()?
+                            .iter()
+                            .filter_map(|m| {
+                                Some(json!({
+                                    "model": m["model"].as_str()?,
+                                    "tier": m["tier"].as_str()?,
+                                }))
+                            })
+                            .collect();
+                        Some(json!({ "harness": h["harness"].as_str()?, "models": models }))
                     })
                     .collect()
             })
@@ -92,7 +100,7 @@ impl Routes {
         let runner = Runner {
             owner: owner.to_string(),
             name,
-            agents,
+            harnesses,
         };
         let mut inner = self.lock();
         let id = runner.id();
@@ -109,7 +117,7 @@ impl Routes {
         Ok(json!({ "runner": id }))
     }
 
-    /// `user`'s runners, each with every agent of its teams.
+    /// `user`'s runners, each with what it runs tasks on.
     pub(crate) fn listed(&self, user: &str) -> Value {
         let inner = self.lock();
         let mut runners: Vec<Value> = inner
@@ -119,7 +127,7 @@ impl Routes {
             .map(|r| {
                 json!({
                     "runner": r.id(),
-                    "agents": r.agents.iter().map(|(name, about)| json!({"name": name, "about": about})).collect::<Vec<_>>(),
+                    "harnesses": r.harnesses,
                 })
             })
             .collect();
@@ -127,17 +135,16 @@ impl Routes {
         json!({ "runners": runners })
     }
 
-    /// The runners connected now that may take `account`'s tasks: its own,
-    /// by their names, with every agent.
+    /// The runners connected now that may take `account`'s tasks: its own
+    /// that run tasks, by their names.
     pub(crate) fn present(&self, account: &str) -> Vec<Present> {
         let mut present: Vec<Present> = self
             .lock()
             .runners
             .values()
-            .filter(|r| r.owner == account)
+            .filter(|r| r.owner == account && !r.harnesses.is_empty())
             .map(|r| Present {
                 name: r.name.clone(),
-                agents: r.agents.iter().map(|(name, _)| name.clone()).collect(),
             })
             .collect();
         present.sort_by(|a, b| a.name.cmp(&b.name));
@@ -153,17 +160,20 @@ mod tests {
     use serde_json::{Value, json};
     use std::time::Duration;
 
-    /// A runner with two agents.
+    /// What a runner on Claude Code and OpenCode says it runs on.
+    fn harnesses() -> Value {
+        json!([
+            {"harness": "claude-code", "models": [{"model": "sonnet", "tier": "strong"}]},
+            {"harness": "opencode", "models": [{"model": "local:qwen3.5:9b", "tier": "medium"}]},
+        ])
+    }
+
+    /// A runner on Claude Code and OpenCode.
     async fn runner(url: &str, token: &str, name: &str) -> Connection {
         let mut link = Connection::open(url, token).await.unwrap();
-        link.call(
-            RUNNER,
-            json!({"name": name,
-                   "agents": [{"name": "web/coder", "about": "Writes code."},
-                              {"name": "web/reviewer", "about": "Reviews it."}]}),
-        )
-        .await
-        .unwrap();
+        link.call(RUNNER, json!({"name": name, "harnesses": harnesses()}))
+            .await
+            .unwrap();
         link
     }
 
@@ -176,29 +186,16 @@ mod tests {
         link.call(method, params).await.unwrap_err().message()
     }
 
-    /// The names of the agents of the runner listed `at`.
-    fn agents(listed: &Value, at: usize) -> Vec<&str> {
-        listed["runners"][at]["agents"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|a| a["name"].as_str().unwrap())
-            .collect()
-    }
-
     #[tokio::test(flavor = "multi_thread")]
-    async fn every_runner_is_listed_to_its_owner_alone_with_all_its_agents() {
+    async fn every_runner_is_listed_to_its_owner_alone_with_what_it_runs_on() {
         let hub = start();
         let _gpu = runner(&hub.url, &hub.root, "gpu-box").await;
         let mut ana = open(&hub.url, &hub.ana).await;
         let said = refused(&mut ana, RUNNER, json!({"name": "a b"})).await;
         assert!(said.contains("not a runner name"), "{said}");
-        ana.call(
-            RUNNER,
-            json!({"name": "laptop", "agents": [{"name": "web/coder", "about": ""}]}),
-        )
-        .await
-        .unwrap();
+        ana.call(RUNNER, json!({"name": "laptop", "harnesses": []}))
+            .await
+            .unwrap();
         let listed = ana.call(RUNNERS, json!({})).await.unwrap();
         assert_eq!(
             listed["runners"].as_array().unwrap().len(),
@@ -206,18 +203,15 @@ mod tests {
             "root's works for root alone"
         );
         assert_eq!(listed["runners"][0]["runner"], "ana/laptop");
-        assert_eq!(agents(&listed, 0), ["web/coder"]);
+        assert_eq!(listed["runners"][0]["harnesses"], json!([]));
+        assert!(
+            hub.server.routes.present("ana").is_empty(),
+            "a runner with no harness runs no task"
+        );
         let mut root = open(&hub.url, &hub.root).await;
         let listed = root.call(RUNNERS, json!({})).await.unwrap();
         assert_eq!(listed["runners"][0]["runner"], "root/gpu-box");
-        assert_eq!(agents(&listed, 0), ["web/coder", "web/reviewer"]);
-        assert_eq!(listed["runners"][0]["agents"][1]["about"], "Reviews it.");
-        // Said again, as when its teams change: what it has now.
-        ana.call(RUNNER, json!({"name": "laptop", "agents": []}))
-            .await
-            .unwrap();
-        let listed = ana.call(RUNNERS, json!({})).await.unwrap();
-        assert!(agents(&listed, 0).is_empty());
+        assert_eq!(listed["runners"][0]["harnesses"], harnesses());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -229,13 +223,7 @@ mod tests {
         assert!(said.contains("connected already"), "{said}");
         let present = hub.server.routes.present("ana");
         assert_eq!(present.len(), 1);
-        assert_eq!(
-            (present[0].name.as_str(), present[0].agents.clone()),
-            (
-                "laptop",
-                vec!["web/coder".to_string(), "web/reviewer".into()]
-            )
-        );
+        assert_eq!(present[0].name, "laptop");
         assert!(hub.server.routes.present("root").is_empty());
         // Another account's runner never takes ana's tasks.
         let _gpu = runner(&hub.url, &hub.root, "gpu-box").await;

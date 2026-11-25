@@ -1,14 +1,13 @@
 //! `ensemble-runner …`: this computer's runner, which runs the tasks of your
-//! hub with your helper teams, in the git repositories of its workspace.
+//! hub on its harnesses and its ANN pool, in the git repositories of its
+//! workspace.
 
 use crate::cli::Command;
-use crate::{Ctx, daemon, host_name, runner_hub, this_runner};
-use crate::{kept, setup, teams};
-use ensemble_agents::router::Ensemble;
+use crate::{daemon, host_name, kept, means, runner_hub, setup, this_runner};
 use ensemble_backends::models::Found;
 use ensemble_backends::ops::{Side, WithPool};
 use ensemble_config::kept::{Change, Keep, Kept, WithKept};
-use ensemble_config::{self as config, AnnPool, AnnPoolSetting, Config, RunnerSettings};
+use ensemble_config::{self as config, AnnPool, AnnPoolSetting, RunnerSettings};
 use ensemble_core::state::{self, RunnerDir};
 use ensemble_ops::cli::ask;
 use ensemble_ops::local;
@@ -17,37 +16,23 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::process::ExitCode;
 
-pub fn run(ctx: &Ctx, command: Command) -> Result<ExitCode, String> {
+pub fn run(command: Command) -> Result<ExitCode, String> {
     match command {
         Command::Setup {
             name,
             workspace,
             yes,
-        } => setup(ctx, name, workspace, yes),
+        } => setup(name, workspace, yes),
         Command::Init { force, keep } => init(force, keep),
-        Command::Serve => serve(ctx),
-        Command::Reload => {
-            let said = ensemble_core::runtime::block_on(daemon::reload(&state::runner_socket(
-                &state::runner_dir()?,
-            )))
-            .map_err(|e| format!("reload: {e}"))?;
-            println!("{said}");
-            Ok(ExitCode::SUCCESS)
-        }
+        Command::Serve => serve(),
         Command::Status => status(),
-        Command::Doctor => {
-            let workspace = this_runner().ok().map(|r| r.workspace);
-            Ok(
-                if report_doctor(&ctx.teams()?, workspace.as_deref(), &ctx.dir)? {
-                    ExitCode::SUCCESS
-                } else {
-                    ExitCode::FAILURE
-                },
-            )
-        }
+        Command::Doctor => Ok(if report_doctor(&this_runner()?)? {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }),
+        Command::Stats { since, json } => stats(since.as_deref(), json),
         Command::Peers => peers(),
-        Command::Team(c) => super::team::run(ctx, c),
-        Command::Agent(c) => super::agent::run(ctx, c),
         Command::Completions { shell } => completions(shell),
     }
 }
@@ -96,7 +81,7 @@ fn init(force: bool, keep: bool) -> Result<ExitCode, String> {
 }
 
 /// `ensemble-runner status`: the runner, whether it runs, its workspace, its
-/// hub and its teams.
+/// hub and what it runs tasks on.
 fn status() -> Result<ExitCode, String> {
     let runner = this_runner()?;
     println!(
@@ -145,47 +130,56 @@ fn status() -> Result<ExitCode, String> {
         }
         None => println!("  hub: none, so no tasks"),
     }
-    let listed = teams::list()?;
-    let (ready, waiting): (Vec<_>, Vec<_>) = listed.iter().partition(|t| !t.pending);
+    let pairs = means(&runner, None).pairs();
     println!(
-        "  teams: {}{}",
-        if ready.is_empty() {
-            "none".to_string()
+        "  runs tasks on: {}",
+        if pairs.is_empty() {
+            "nothing yet: turn a harness on with `ensemble-runner harness on <harness>`".to_string()
         } else {
-            ready
+            pairs
                 .iter()
-                .map(|t| t.name.as_str())
+                .map(|p| format!("{} ({})", p.name(), p.tier.as_str()))
                 .collect::<Vec<_>>()
                 .join(", ")
-        },
-        if waiting.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "; waiting for your approval: {}",
-                waiting
-                    .iter()
-                    .map(|t| t.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
         }
     );
     Ok(ExitCode::SUCCESS)
 }
 
+/// `ensemble-runner stats`: what each harness has done on each model, from
+/// the runner's record of runs.
+fn stats(since: Option<&str>, json: bool) -> Result<ExitCode, String> {
+    use ensemble_core::records;
+    let since = match since {
+        Some(text) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            Some(now.saturating_sub(records::parse_duration(text)?))
+        }
+        None => None,
+    };
+    let summaries = records::summarize(&records::read(&RunnerDir::this()?.records()), since);
+    if json {
+        println!("{}", records::json(&summaries));
+    } else {
+        print!("{}", records::table(&summaries));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 /// `ensemble-runner serve`: run this computer's runner until stopped. With a
-/// hub, it runs the tasks the hub keeps for it with its teams, in the
-/// repositories of its workspace or those it clones there, and tells the hub
-/// it is connected, with its agents and what it offers. A change to
+/// hub, it runs the tasks the hub keeps for it on its harnesses and its ANN
+/// pool, in the repositories of its workspace or those it clones there, and
+/// tells the hub it is connected, with what it runs tasks on. A change to
 /// its settings has it start again, in this process: running tasks start again
 /// from where their work was last pushed.
-fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
+fn serve() -> Result<ExitCode, String> {
     // A new runner, as `init` makes it, when there is none: what installs
     // it only runs it.
     init(false, true)?;
     local::stop_on_signals();
-    if !signed_in(ctx)? {
+    if !signed_in()? {
         eprintln!("ensemble: stopped");
         return Ok(ExitCode::SUCCESS);
     }
@@ -195,7 +189,7 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
         format!("serve: process {pid} already runs the runner '{name}'")
     })?;
     loop {
-        serve_once(ctx, &dir)?;
+        serve_once(&dir)?;
         if !local::restarting() {
             break;
         }
@@ -210,11 +204,11 @@ fn serve(ctx: &Ctx) -> Result<ExitCode, String> {
 /// has, or when it names no hub; false when it is stopped first. It holds
 /// nothing meanwhile, so `ensemble-runner login` and `join` run as they would
 /// with no runner, and it goes on from the token they keep.
-fn signed_in(ctx: &Ctx) -> Result<bool, String> {
+fn signed_in() -> Result<bool, String> {
     const LOOK_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
     let mut said = false;
     loop {
-        let runner = ctx.runner().map_err(|e| format!("serve: {e}"))?;
+        let runner = this_runner().map_err(|e| format!("serve: {e}"))?;
         let Some(url) = runner.hub else {
             return Ok(true);
         };
@@ -238,8 +232,16 @@ fn signed_in(ctx: &Ctx) -> Result<bool, String> {
 }
 
 /// The runner, as its settings say now, until it stops or starts again.
-fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
-    let runner = ctx.runner().map_err(|e| format!("serve: {e}"))?;
+fn serve_once(dir: &Path) -> Result<(), String> {
+    // Where its harnesses' CLIs are now, before it reads its settings: one
+    // gone missing runs no task.
+    match RunnerContext::new()
+        .and_then(|c| super::harness::refresh_at_start(&c).map_err(|e| e.to_string()))
+    {
+        Ok(said) => eprintln!("ensemble: the harnesses: {said}"),
+        Err(e) => eprintln!("ensemble: the harnesses were not looked for: {e}"),
+    }
+    let runner = this_runner().map_err(|e| format!("serve: {e}"))?;
     let say = |line: &str| eprintln!("ensemble: {line}");
     // With a hub: its tasks, and the link that says the runner is there.
     // One token for all of it, replaced when `ensemble-runner login` signs in
@@ -252,7 +254,7 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
         None => None,
     };
     // The relay, when it shares models or reaches other runners' through the
-    // hub, and where its agents reach those.
+    // hub, and where its runs reach those.
     let relay = hub
         .as_ref()
         .filter(|_| !runner.llm.shared().is_empty() || !runner.llm.relayed.is_empty())
@@ -274,11 +276,7 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
         base_url: l.base_url.clone(),
         key: l.key.clone(),
     });
-    let (team, waiting) =
-        teams::load_all(&runner.llm, relay_at.as_ref()).map_err(|e| format!("serve: {e}"))?;
-    for line in &waiting {
-        say(line);
-    }
+    let means = std::sync::Arc::new(means(&runner, relay_at.as_ref()));
     // What its providers serve now: a model new to one is kept off, so the
     // running runner need not start again for it.
     std::thread::spawn(|| match RunnerContext::new() {
@@ -288,36 +286,19 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
         ),
         Err(e) => eprintln!("ensemble: the providers were not asked: {e}"),
     });
-    // And where its harnesses' CLIs are now.
-    std::thread::spawn(|| {
-        let looked = RunnerContext::new()
-            .and_then(|c| super::harness::refresh_at_start(&c).map_err(|e| e.to_string()));
-        match looked {
-            Ok(said) => eprintln!("ensemble: the harnesses: {said}"),
-            Err(e) => eprintln!("ensemble: the harnesses were not looked for: {e}"),
-        }
-    });
     // What `ensemble-runner …` asks of it while it runs.
     let operations = operations();
     let daemon = daemon::Daemon::new(
         runner.clone(),
         hub.clone(),
-        team.clone(),
-        relay_at,
+        means.clone(),
         &operations,
         &say,
     )
     .map_err(|e| format!("serve: {e}"))?;
     let worker = hub.as_ref().map(|(url, token)| {
-        crate::worker::Worker::new(url, token.clone(), runner.clone(), team.clone())
+        crate::worker::Worker::new(url, token.clone(), runner.clone(), means.clone())
     });
-    // What else holds the teams, given them again when they are reloaded.
-    let reloaded = |config: &Config| -> Result<(), String> {
-        if let Some(worker) = &worker {
-            worker.reload(config);
-        }
-        Ok(())
-    };
     let socket = state::runner_socket(dir);
     let refused = std::sync::Mutex::new(None);
     let served = {
@@ -339,7 +320,7 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
             }
         };
         let (served, (), ()) = ensemble_core::runtime::shared()
-            .block_on(async { tokio::join!(daemon.serve(&socket, &reloaded), link, relaying) });
+            .block_on(async { tokio::join!(daemon.serve(&socket), link, relaying) });
         local::STOP.store(true, std::sync::atomic::Ordering::Relaxed);
         served
     };
@@ -400,8 +381,8 @@ impl WithPool for RunnerContext {
         Ok(self.settings.read()?.ann_pool)
     }
 
-    /// The teams name the models of the runner's pool: a change that would
-    /// leave one naming a model that is not there, or off, is refused.
+    /// A change that would leave the runner's settings not loading is
+    /// refused.
     fn change_pool(
         &self,
         change: Change,
@@ -409,11 +390,9 @@ impl WithPool for RunnerContext {
     ) -> Result<Option<String>, Error> {
         self.settings.change(change, |s| {
             edit(&mut s.ann_pool)?;
-            let runner = kept::resolve(s, &self.dir)
-                .map_err(|e| Error::invalid(format!("nothing was changed: {e}")))?;
-            teams::load_all(&runner.llm, None)
+            kept::resolve(s, &self.dir)
                 .map(|_| ())
-                .map_err(|e| Error::new(Code::Conflict, format!("nothing was changed: {e}")))
+                .map_err(|e| Error::invalid(format!("nothing was changed: {e}")))
         })
     }
 
@@ -931,9 +910,9 @@ fn peers() -> Result<ExitCode, String> {
             }
         };
         println!(
-            "{}\n  agents: {}\n  models: {}",
+            "{}\n  harnesses: {}\n  models: {}",
             n["runner"].as_str().unwrap_or("?"),
-            names("agents", Some("name")),
+            names("harnesses", Some("harness")),
             names("models", None)
         );
     }
@@ -941,13 +920,8 @@ fn peers() -> Result<ExitCode, String> {
 }
 
 /// `ensemble-runner setup`: find the agent CLIs, write this computer's runner
-/// if there is none, and check the runner's teams.
-fn setup(
-    ctx: &Ctx,
-    name: Option<String>,
-    workspace: Option<String>,
-    yes: bool,
-) -> Result<ExitCode, String> {
+/// if there is none, and say what it runs tasks on.
+fn setup(name: Option<String>, workspace: Option<String>, yes: bool) -> Result<ExitCode, String> {
     let interactive = std::io::stdin().is_terminal() && !yes;
     let found = setup::detect(true);
     println!(
@@ -971,7 +945,7 @@ fn setup(
     );
     if !(found.claude || found.opencode || found.codex) {
         println!(
-            "No agent CLI is on PATH: agents of type claude-code, opencode or codex need theirs installed (`claude`, `opencode`, `codex`); builtin and direct agents need none."
+            "No agent CLI is on PATH: the harnesses claude-code, opencode and codex need theirs installed (`claude`, `opencode`, `codex`); builtin needs none."
         );
     }
     let dir = kept::dir()?;
@@ -1016,19 +990,8 @@ fn setup(
         );
     }
     println!();
-    let runner = ctx.runner().map_err(|e| format!("setup: {e}"))?;
-    let (team, waiting) = teams::load_all(&runner.llm, None)?;
-    for line in &waiting {
-        println!("{line}");
-    }
-    let healthy = if team.agents.is_empty() {
-        println!(
-            "The runner has no helper team yet. Make one with `ensemble-runner team new <name>`, or pull one with `ensemble-runner team pull <url>`."
-        );
-        true
-    } else {
-        report_doctor(&team, Some(&runner.workspace), &ctx.dir)?
-    };
+    let runner = this_runner().map_err(|e| format!("setup: {e}"))?;
+    let healthy = report_doctor(&runner)?;
     println!();
     if healthy {
         println!(
@@ -1044,14 +1007,11 @@ fn setup(
     }
 }
 
-/// Print what is wrong, each with its fix, and say whether nothing was. The
-/// agent CLIs are started in `dir`.
-fn report_doctor(config: &Config, workspace: Option<&Path>, dir: &Path) -> Result<bool, String> {
-    let mut findings = setup::structure(config, workspace);
-    let ensemble = Ensemble::new(config.clone(), Some(dir.to_path_buf()));
-    for (name, result) in ensemble.health() {
-        findings.push(setup::health_finding(&name, &result, config));
-    }
+/// Print what is wrong with `runner`, each with its fix, and say whether
+/// nothing was.
+fn report_doctor(runner: &config::Runner) -> Result<bool, String> {
+    let mut findings = setup::structure(runner, &means(runner, None));
+    findings.extend(setup::providers(&runner.llm));
     let mut all_ok = true;
     for f in &findings {
         let label = match f.level {

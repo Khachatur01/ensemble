@@ -13,8 +13,6 @@
 //! holds them.
 
 use super::ann::{AnnPoolSetting, Use, check_model};
-use super::raw::{self, RawDirectAdapter};
-use super::validate::direct_adapter;
 use super::*;
 use ensemble_core::state::HubDir;
 use serde::{Deserialize, Serialize};
@@ -104,13 +102,13 @@ pub struct Tasks {
     pub trackers: BTreeMap<String, Tracker>,
 }
 
-/// A tracker: issues in it that carry the label become tasks for the helper
-/// team of the person they are assigned to.
+/// A tracker: issues in it that carry the label become tasks of the person
+/// they are assigned to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tracker {
     pub kind: IssueTracker,
-    /// The signal: an issue with this label is for a helper team;
-    /// `<label>:<agent>` gives it to that agent.
+    /// The signal: an issue with this label is for the runners of the person
+    /// it is assigned to.
     pub label: String,
     pub poll_seconds: u32,
 }
@@ -386,7 +384,6 @@ impl HubSettings {
                     &e.provider,
                     e.model.trim(),
                     Use::Embedding,
-                    false,
                     &self.ann_pool.known(),
                     &mut problems,
                 );
@@ -500,37 +497,32 @@ fn models(
     pool: &AnnPoolSetting,
     problems: &mut Vec<String>,
 ) -> DirectAdapter {
-    let raw = RawDirectAdapter {
-        candidates: kept
-            .candidates
-            .iter()
-            .map(|c| raw::RawDirectCandidate {
-                provider: c.provider.clone(),
-                model: c.model.clone(),
-            })
-            .collect(),
-        when_none: kept.when_none,
-        max_tokens: kept.max_tokens,
-    };
-    let mut found = Vec::new();
-    let adapter = direct_adapter(at, &raw, &mut found);
-    let empty = format!("{at}: `try` is empty");
-    problems.extend(
-        found
-            .into_iter()
-            .filter(|p| !(may_be_empty && p.starts_with(&empty))),
-    );
-    let known = pool.known();
-    for (i, c) in adapter.fallback.candidates.iter().enumerate() {
-        check_model(
-            &format!("{at}.try[{i}]"),
-            &c.provider,
-            &c.model,
-            Use::Llm,
-            false,
-            &known,
-            problems,
-        );
+    if kept.candidates.is_empty() && !may_be_empty {
+        problems.push(format!(
+            "{at}: `try` is empty; name at least one model, as {{ provider, model }}"
+        ));
     }
-    adapter
+    if kept.max_tokens == 0 {
+        problems.push(format!("{at}: `max_tokens` must be greater than 0"));
+    }
+    let known = pool.known();
+    let mut candidates = Vec::new();
+    for (i, c) in kept.candidates.iter().enumerate() {
+        let here = format!("{at}.try[{i}]");
+        if c.model.trim().is_empty() {
+            problems.push(format!("{here}: `model` is empty"));
+        }
+        check_model(&here, &c.provider, &c.model, Use::Llm, &known, problems);
+        candidates.push(Candidate {
+            provider: c.provider.clone(),
+            model: c.model.clone(),
+        });
+    }
+    DirectAdapter {
+        fallback: Fallback {
+            candidates,
+            when_none: kept.when_none,
+        },
+        max_tokens: kept.max_tokens,
+    }
 }

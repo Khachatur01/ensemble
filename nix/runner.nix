@@ -1,9 +1,8 @@
 # What the NixOS and Home Manager modules share about a runner: its options.
-# They only run it. Its settings, the keys of its backends and its hub tokens
+# They only run it. Its settings, the keys of its providers and its hub tokens
 # are kept in its database, `~/.local/state/ensemble/runner/core/database.db`,
-# and changed with `ensemble-runner setup`, `… settings …`, `… backend …` and
-# `… login`; its teams are added with `ensemble-runner team pull`, `link` or
-# `new`. The first time it starts, `ensemble-runner serve` makes a runner named
+# and changed with `ensemble-runner setup`, `… settings …`, `… provider …`,
+# `… model …`, `… harness …` and `… login`. The first time it starts, `ensemble-runner serve` makes a runner named
 # for the computer, working in `~/ensemble`.
 { self, lib }:
 let
@@ -38,8 +37,8 @@ in
         type = types.listOf types.package;
         default = [ ];
         description = ''
-          Programs on the runner's PATH: the agent CLIs its teams run, such as
-          Claude Code or OpenCode. git is always there.
+          Programs on the runner's PATH: the agent CLIs its harnesses run, such
+          as Claude Code or OpenCode. git is always there.
         '';
         example = lib.literalExpression "[ pkgs.claude-code pkgs.opencode ]";
       };

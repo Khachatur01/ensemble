@@ -3,14 +3,13 @@
 //!
 //! A runner does not own a task; it **leases** it. It claims a task that may
 //! start for a while ([`LEASE`]), renews the claim as it runs, and says how the
-//! run ended: a result, a question, or a hand-off to another agent. A runner
-//! that stops cleanly puts its tasks back; one that dies stops renewing, its
-//! lease runs out, and any runner of the person with the agent runs the task
-//! again. A runner whose lease ran out and was taken cannot write a result, so a
+//! run ended: a result or a question. A runner that stops cleanly puts its
+//! tasks back; one that dies stops renewing, its lease runs out, and any
+//! runner of the person runs the task again. A runner whose lease ran out and was taken cannot write a result, so a
 //! task is never done twice.
 //!
 //! Where the work is decides who may go on with it. A task whose run works on
-//! a branch that is pushed (a worktree agent, a repository with a remote) is
+//! a branch that is pushed (a repository with a remote) is
 //! **movable**: when its run stops, the runner says where its branch is
 //! ([`Progress`]), and the next runner fetches it and carries on. Any other task
 //! changes one computer's folder, so once it has run there it is **pinned**
@@ -20,8 +19,7 @@
 //! repository its computer cannot reach, **gives it back** with why, and does
 //! not take it again; the hub offers it to the account's other runners, and
 //! when every one connected that may take it gave it back, the task is
-//! **blocked** until one that has not connects, or it is assigned or answered
-//! again.
+//! **blocked** until one that has not connects, or it is answered again.
 //!
 //! [`Board`] is what the queue uses; a runner reaches the hub's tasks over the
 //! link ([`RemoteBoard`]). The hub keeps them in its database
@@ -89,30 +87,26 @@ pub enum Cancelled {
 #[serde(rename_all = "lowercase")]
 pub enum End {
     /// The task is over: `extra` goes in the result's front matter after the
-    /// usual (`status`, `agent`, `started`, `ended`), such as its `branch`.
+    /// usual (`status`, `harness`, `model`, `started`, `ended`), such as its
+    /// `branch`.
     Result {
         status: Status,
-        agent: String,
+        /// The harness and the model the last run was on.
+        harness: String,
+        model: String,
         /// When the run started, as UTC.
         started: String,
         extra: Vec<(String, String)>,
         text: String,
     },
-    /// The agent stopped to ask; the task waits for the answer. Asked by the
-    /// runner, not the agent, when it has no copy of the project and nowhere to
+    /// The run stopped to ask; the task waits for the answer. Asked by the
+    /// runner, not the run, when it has no copy of the project and nowhere to
     /// clone it from: then the answer is where the project's `repository` is.
     Ask {
         question: String,
         reply: String,
         #[serde(default)]
         repository: bool,
-    },
-    /// The agent handed the task to another agent, with a note.
-    Handoff {
-        from: String,
-        to: String,
-        note: String,
-        reply: String,
     },
 }
 
@@ -149,8 +143,8 @@ pub trait Board: Send + Sync {
         progress: Option<Progress>,
     ) -> Result<(), String>;
     /// Give it back, for another runner, saying `why`: `node` does not take it
-    /// again. Whether it is blocked now: no connected runner with its agent is
-    /// left to try.
+    /// again. Whether it is blocked now: no connected runner that runs tasks
+    /// is left to try.
     async fn give_back(&self, id: &str, node: &str, why: &str) -> Result<bool, String>;
 }
 
@@ -241,17 +235,17 @@ impl Board for RemoteBoard {
     }
 }
 
-/// A task that waits for one of a runner's agents: its project, and the task.
+/// A task that waits for a runner: its project, and the task.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Waiting {
     pub project: String,
     pub task: Task,
 }
 
-/// The tasks, in every project, that wait for one of `agents` and that
-/// `runner` has not given back, over `link`: what a runner looks at for the
-/// projects it has no folder for.
-pub async fn waiting(link: &Link, runner: &str, agents: &[String]) -> Result<Vec<Waiting>, String> {
-    let params = json!({ "runner": runner, "agents": agents });
+/// The tasks, in every project, that wait for a runner and that `runner` has
+/// not given back, over `link`: what a runner looks at for the projects it
+/// has no folder for.
+pub async fn waiting(link: &Link, runner: &str) -> Result<Vec<Waiting>, String> {
+    let params = json!({ "runner": runner });
     read(&link.ask(TASKS_WAITING, params).await?, "tasks")
 }

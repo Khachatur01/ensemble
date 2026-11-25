@@ -14,7 +14,7 @@ use serde_json::Value;
 /// The version of what is said here. The runner sends it as the
 /// [`VERSION_HEADER`] of every link it opens, and a hub refuses one of
 /// another version, or of none, before anything else.
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 /// The path of a runner's link on the hub's port.
 pub const PATH: &str = "/link";
 /// The header of the upgrade that carries the runner's [`VERSION`].
@@ -59,7 +59,7 @@ pub const RECALL: &str = "recall";
 ///
 /// Every task of the project: `{project}`, answered with `{tasks}`.
 pub const TASKS: &str = "tasks";
-/// One task, with its result, questions and hand-offs: `{project, id}`,
+/// One task, with its result and questions: `{project, id}`,
 /// answered with `{task}`, null when there is none.
 pub const TASK: &str = "task";
 /// A new task: `{project, ticket}`, answered with `{id}`.
@@ -77,8 +77,6 @@ pub const TASK_RELEASE: &str = "task_release";
 pub const TASK_FINISH: &str = "task_finish";
 /// Answer the question a task asked: `{project, id, text}`.
 pub const TASK_ANSWER: &str = "task_answer";
-/// Give a task to an agent: `{project, id, agent}`.
-pub const TASK_ASSIGN: &str = "task_assign";
 /// Give a task the gate its work must pass, or none: `{project, id, gate}`,
 /// the gate `{command, timeout_seconds, attempts}` or null; not one that
 /// runs or has ended.
@@ -86,8 +84,8 @@ pub const TASK_GATE: &str = "task_gate";
 /// Cancel a task: `{project, id}`, answered with `{cancel}`: `before` it
 /// started, `running` (its runner stops it) or `ended` already.
 pub const TASK_CANCEL: &str = "task_cancel";
-/// The account's tasks, in every project, that wait for one of the runner's
-/// agents and that it has not given back: `{runner, agents}`, answered with
+/// The account's tasks, in every project, that wait for a runner and that
+/// this one has not given back: `{runner}`, answered with
 /// `{tasks: [{project, task}]}`. A runner looks for the projects it has no
 /// folder for.
 pub const TASKS_WAITING: &str = "tasks_waiting";
@@ -99,7 +97,7 @@ pub const TASK_GIVE_BACK: &str = "task_give_back";
 /// [{project, tasks}]}`, each with how many tasks it has.
 pub const TASK_PROJECTS: &str = "task_projects";
 /// Every task method, for the server to pass on.
-pub const TASK_METHODS: [&str; 14] = [
+pub const TASK_METHODS: [&str; 13] = [
     TASKS,
     TASK,
     TASK_CREATE,
@@ -108,7 +106,6 @@ pub const TASK_METHODS: [&str; 14] = [
     TASK_RELEASE,
     TASK_FINISH,
     TASK_ANSWER,
-    TASK_ASSIGN,
     TASK_GATE,
     TASK_CANCEL,
     TASKS_WAITING,
@@ -116,13 +113,14 @@ pub const TASK_METHODS: [&str; 14] = [
     TASK_PROJECTS,
 ];
 
-/// This connection is a runner, said once it connects and again when its
-/// teams change: `{name, agents: [{name, about}]}`, every agent of its teams.
-/// Answered with `{runner}`, its `<owner>/<name>`.
+/// This connection is a runner, said once it connects: `{name, harnesses:
+/// [{harness, models: [{model, tier}]}]}`, each of its harnesses that may run
+/// with the models it can drive; none when it runs no task. Answered with
+/// `{runner}`, its `<owner>/<name>`.
 pub const RUNNER: &str = "runner";
 /// The account's runners connected now: `{}`, answered with `{runners:
-/// [{runner, agents, models}]}`, each with every agent of its teams and the
-/// models it shares, `[{provider, id, kind}]`, as its relay socket offered them.
+/// [{runner, harnesses, models}]}`, each with what it runs on, as [`RUNNER`]
+/// says, and the models it shares, `[{provider, id, kind}]`, as its relay socket offered them.
 pub const RUNNERS: &str = "runners";
 
 /// The most a WebSocket message may be: a model call's request, and some

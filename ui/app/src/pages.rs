@@ -138,11 +138,11 @@ pub fn Home() -> Element {
             if me.can("tasks") {
                 Link { class: "card", to: Route::Projects {},
                     h2 { "Tasks" }
-                    p { "What your helper team works on, by project." }
+                    p { "What your runners work on, by project." }
                 }
                 Link { class: "card", to: Route::Runners {},
                     h2 { "Runners" }
-                    p { "The runners connected now that work for you, and their agents." }
+                    p { "The runners connected now that work for you, and what each runs tasks on." }
                 }
             }
             if me.can("recall") || me.can("share") {
@@ -190,7 +190,6 @@ fn task_more() -> Vec<String> {
 fn task_labels() -> Vec<(String, String)> {
     vec![
         label("task", "what to do"),
-        label("agent", "agent (empty: the backlog)"),
         label("done_when", "done when"),
         label("gate", "gate: a command its work must pass"),
         label("gate_timeout_seconds", "gate time limit, in seconds"),
@@ -203,22 +202,13 @@ fn gate_labels() -> Vec<(String, String)> {
     vec![
         label("gate", "command, such as cargo test (empty: no gate)"),
         label("gate_timeout_seconds", "time limit, in seconds"),
-        label("gate_attempts", "runs of the agent to pass it"),
+        label("gate_attempts", "runs to pass it"),
     ]
-}
-
-/// The agents to give a task to, suggested: one not connected now may still
-/// be named.
-fn agent_pick(agents: &lookup::Asked) -> Pick {
-    let mut pick = Pick::suggest("agent", []);
-    pick.options = lookup::agents(agents);
-    pick
 }
 
 #[component]
 pub fn Projects() -> Element {
     let mut projects = use_op("task.projects");
-    let agents = use_op("runner.list");
     let known = lookup::projects(&projects);
     rsx! {
         h1 { "Tasks" }
@@ -244,7 +234,7 @@ pub fn Projects() -> Element {
         h2 { "New task" }
         OpForm {
             op: "task.create",
-            picks: vec![Pick::suggest("project", known), agent_pick(&agents)],
+            picks: vec![Pick::suggest("project", known)],
             more: task_more(),
             labels: task_labels(),
             submit: "Make the task",
@@ -267,7 +257,6 @@ fn status(task: &Value) -> String {
     }
     match task["status"].as_str() {
         Some(s) => s.to_string(),
-        None if text(&task["ticket"], "agent").is_empty() => "backlog".into(),
         None => "waiting".into(),
     }
 }
@@ -284,7 +273,6 @@ pub fn ProjectTasks(project: String) -> Element {
         let project = shown.clone();
         async move { api::op("task.list", json!({ "project": project })).await }
     });
-    let agents = use_op("runner.list");
     rsx! {
         p { class: "crumbs", Link { to: Route::Projects {}, "Tasks" } " / {project}" }
         h1 { "{project}" }
@@ -292,7 +280,7 @@ pub fn ProjectTasks(project: String) -> Element {
             let list = out["tasks"].as_array().cloned().unwrap_or_default();
             rsx! {
                 table {
-                    thead { tr { th { "Task" } th { "Title" } th { "Agent" } th { "State" } } }
+                    thead { tr { th { "Task" } th { "Title" } th { "State" } } }
                     tbody {
                         for task in list {
                             tr { key: "{text(&task[\"ticket\"], \"id\")}",
@@ -306,7 +294,6 @@ pub fn ProjectTasks(project: String) -> Element {
                                     }
                                 }
                                 td { "{text(&task[\"ticket\"], \"title\")}" }
-                                td { "{text(&task[\"ticket\"], \"agent\")}" }
                                 td { span { class: "state {status(&task)}", "{status(&task)}" } }
                             }
                         }
@@ -318,7 +305,6 @@ pub fn ProjectTasks(project: String) -> Element {
         OpForm {
             op: "task.create",
             fixed: vec![("project".to_string(), json!(project))],
-            picks: vec![agent_pick(&agents)],
             more: task_more(),
             labels: task_labels(),
             submit: "Make the task",
@@ -335,7 +321,6 @@ pub fn TaskPage(project: String, id: String) -> Element {
         let (project, id) = (p.clone(), i.clone());
         async move { api::op("task.show", json!({ "project": project, "id": id })).await }
     });
-    let agents = use_op("runner.list");
     let on_task = vec![
         ("project".to_string(), json!(project)),
         ("id".to_string(), json!(id)),
@@ -351,22 +336,17 @@ pub fn TaskPage(project: String, id: String) -> Element {
             let detail = &out["task"];
             let shown = if detail["task"].is_null() { detail } else { &detail["task"] };
             let ticket = &shown["ticket"];
-            let agent = match text(ticket, "agent") {
-                agent if !agent.is_empty() => format!("for {agent}"),
-                _ if status(shown) == "backlog" => "in the backlog until it is given to an agent".into(),
-                _ => "for no agent".into(),
-            };
             let question = text(shown, "question");
             let over = finished(shown);
             let gate_said = match ticket["gate"]["command"].as_str() {
                 Some(command) => format!("Its work must pass `{command}`."),
-                None => "None: its work is done when the agent says so.".into(),
+                None => "None: its work is done when the run says so.".into(),
             };
             rsx! {
                 h1 { "{text(ticket, \"title\")}" }
                 p { class: "muted",
                     span { class: "state {status(shown)}", "{status(shown)}" }
-                    " {id}, {agent}"
+                    " {id}"
                 }
                 if !question.is_empty() {
                     section { class: "panel notice",
@@ -383,17 +363,6 @@ pub fn TaskPage(project: String, id: String) -> Element {
                 pre { class: "text", "{text(ticket, \"text\")}" }
                 if !over {
                     div { class: "columns",
-                        section { class: "panel",
-                            h2 { "Give it to an agent" }
-                            OpForm {
-                                op: "task.assign",
-                                fixed: on_task.clone(),
-                                picks: vec![agent_pick(&agents)],
-                                values: vec![value("agent", text(ticket, "agent"))],
-                                submit: "Assign",
-                                on_done: move |_| task.restart(),
-                            }
-                        }
                         section { class: "panel",
                             h2 { "Its gate" }
                             p { class: "muted", "{gate_said}" }
@@ -418,7 +387,7 @@ pub fn TaskPage(project: String, id: String) -> Element {
                                 fixed: on_task.clone(),
                                 submit: "Cancel the task",
                                 danger: true,
-                                confirm: "Cancel {id}? An agent working on it stops.",
+                                confirm: "Cancel {id}? A run working on it stops.",
                                 on_done: move |_| task.restart(),
                             }
                         }
@@ -453,11 +422,15 @@ pub fn Runners() -> Element {
                 for runner in list {
                     section { class: "card", key: "{text(&runner, \"runner\")}",
                         h2 { "{text(&runner, \"runner\")}" }
+                        if runner["harnesses"].as_array().is_none_or(|h| h.is_empty()) {
+                            p { class: "muted", "It runs no task: no harness is on with a model it can drive." }
+                        }
                         ul {
-                            for agent in runner["agents"].as_array().cloned().unwrap_or_default() {
-                                li { key: "{text(&agent, \"name\")}",
-                                    strong { "{text(&agent, \"name\")}" }
-                                    " {text(&agent, \"about\")}"
+                            for harness in runner["harnesses"].as_array().cloned().unwrap_or_default() {
+                                li { key: "{text(&harness, \"harness\")}",
+                                    strong { "{text(&harness, \"harness\")}" }
+                                    " on "
+                                    {harness["models"].as_array().cloned().unwrap_or_default().iter().map(|m| format!("{} ({})", text(m, "model"), text(m, "tier"))).collect::<Vec<_>>().join(", ")}
                                 }
                             }
                         }

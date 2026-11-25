@@ -8,15 +8,15 @@
 //! |---|---|---|
 //! | `task.projects` | `task_projects` | `tasks` |
 //! | `task.list`, `task.show`, `task.create` | `tasks`, `task`, `task_create` | `tasks` |
-//! | `task.answer`, `task.assign`, `task.gate`, `task.cancel` | `task_answer`, `task_assign`, `task_gate`, `task_cancel` | `tasks` |
+//! | `task.answer`, `task.gate`, `task.cancel` | `task_answer`, `task_gate`, `task_cancel` | `tasks` |
 //! | `runner.list` | `runners` | `tasks` |
 //! | `knowledge.share` | `share` | `share` |
 //! | `knowledge.find` | `recall` | `recall` |
 
 use crate::accounts::HubContext;
 use ensemble_link::protocol::{
-    RECALL, RUNNERS, SHARE, TASK, TASK_ANSWER, TASK_ASSIGN, TASK_CANCEL, TASK_CREATE, TASK_GATE,
-    TASK_PROJECTS, TASKS,
+    RECALL, RUNNERS, SHARE, TASK, TASK_ANSWER, TASK_CANCEL, TASK_CREATE, TASK_GATE, TASK_PROJECTS,
+    TASKS,
 };
 use ensemble_ops::{Access, Caller, Error, Field, Kind, Operation, Spec, operation};
 use serde::Deserialize;
@@ -39,15 +39,10 @@ const ANSWER: &[Field] = &[
     ID,
     Field::text("text", "The answer to the question the task asked.").required(),
 ];
-const ASSIGN: &[Field] = &[
-    PROJECT,
-    ID,
-    Field::text("agent", "The agent that does it, as <team>/<agent>.").required(),
-];
 /// A task's gate, as three fields a form shows: no command for none.
 const GATE_COMMAND: Field = Field::text(
     "gate",
-    "A shell command its work must pass, run in its working directory after the agent is done; exit status 0 passes.",
+    "A shell command its work must pass, run in its working directory after the run is done; exit status 0 passes.",
 );
 const GATE_TIMEOUT: Field = Field::new(
     "gate_timeout_seconds",
@@ -57,7 +52,7 @@ const GATE_TIMEOUT: Field = Field::new(
 const GATE_ATTEMPTS: Field = Field::new(
     "gate_attempts",
     Kind::Number,
-    "How many runs of the agent it gets to pass the gate, at least 1.",
+    "How many runs it gets to pass the gate, at least 1.",
 );
 const SET_GATE: &[Field] = &[PROJECT, ID, GATE_COMMAND, GATE_TIMEOUT, GATE_ATTEMPTS];
 const CREATE: &[Field] = &[
@@ -65,22 +60,18 @@ const CREATE: &[Field] = &[
     Field::text("title", "What it is, in one line.").required(),
     Field::text(
         "task",
-        "What to do, with everything the agent needs: it sees nothing else.",
+        "What to do, with everything the run needs: it sees nothing else.",
     )
     .required(),
-    Field::text(
-        "agent",
-        "The agent that does it, as <team>/<agent>; none leaves it in the backlog.",
-    ),
     Field::text(
         "repository",
         "The URL or path its repository is cloned from.",
     ),
     Field::text("context", "What led to it."),
     Field::text("goal", "Why it matters."),
-    Field::new("constraints", Kind::List, "What the agent must keep to."),
+    Field::new("constraints", Kind::List, "What the run must keep to."),
     Field::new("files", Kind::List, "The files it is about."),
-    Field::new("done_when", Kind::List, "How the agent knows it is done."),
+    Field::new("done_when", Kind::List, "How the run knows it is done."),
     Field::new("after", Kind::List, "The ids of the tasks it waits for."),
     GATE_COMMAND,
     GATE_TIMEOUT,
@@ -123,18 +114,10 @@ struct Answer {
 }
 
 #[derive(Deserialize)]
-struct Assign {
-    project: String,
-    id: String,
-    agent: String,
-}
-
-#[derive(Deserialize)]
 struct Create {
     project: String,
     title: String,
     task: String,
-    agent: Option<String>,
     repository: Option<String>,
     context: Option<String>,
     goal: Option<String>,
@@ -181,9 +164,7 @@ fn gate_of(
         (_, None, _) => {
             Err(Error::invalid("a gate needs the seconds it may run").on("gate_timeout_seconds"))
         }
-        (.., None) => Err(
-            Error::invalid("a gate needs how many runs of the agent it gets").on("gate_attempts"),
-        ),
+        (.., None) => Err(Error::invalid("a gate needs how many runs it gets").on("gate_attempts")),
     }
 }
 
@@ -247,7 +228,7 @@ pub(crate) fn operations() -> Vec<Operation<HubContext>> {
         operation(
             Spec {
                 name: "task.create",
-                summary: "Make a task for your helper team, for an agent or for the backlog.",
+                summary: "Make a task for your runners.",
                 access: SIGNED,
                 input: CREATE,
             },
@@ -261,7 +242,6 @@ pub(crate) fn operations() -> Vec<Operation<HubContext>> {
                     "project": input.project,
                     "title": input.title,
                     "task": input.task,
-                    "agent": input.agent,
                     "repository": input.repository,
                     "context": input.context,
                     "goal": input.goal,
@@ -291,21 +271,6 @@ pub(crate) fn operations() -> Vec<Operation<HubContext>> {
                     caller,
                     TASK_ANSWER,
                     json!({ "project": input.project, "id": input.id, "text": input.text }),
-                )
-            },
-        ),
-        operation(
-            Spec {
-                name: "task.assign",
-                summary: "Give one of your tasks to an agent.",
-                access: SIGNED,
-                input: ASSIGN,
-            },
-            |c: &HubContext, caller: &Caller, input: Assign| {
-                c.ask(
-                    caller,
-                    TASK_ASSIGN,
-                    json!({ "project": input.project, "id": input.id, "agent": input.agent }),
                 )
             },
         ),
@@ -349,7 +314,7 @@ pub(crate) fn operations() -> Vec<Operation<HubContext>> {
         operation(
             Spec {
                 name: "runner.list",
-                summary: "The runners connected now that work for you, with their agents.",
+                summary: "The runners connected now that work for you, with the harnesses and models each runs tasks on.",
                 access: SIGNED,
                 input: &[],
             },

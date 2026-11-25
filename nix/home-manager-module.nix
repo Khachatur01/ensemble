@@ -1,7 +1,7 @@
 # The Home Manager module: this computer's runner, `ensemble-runner serve`,
 # for the person whose home it is, on Linux (a systemd user service) and on
 # macOS (a launchd agent). It only runs the runner: its settings, keys and
-# teams are made and changed with `ensemble-runner`, as on any platform.
+# harnesses are made and changed with `ensemble-runner`, as on any platform.
 { self }:
 {
   config,

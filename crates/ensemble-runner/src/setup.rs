@@ -3,9 +3,8 @@
 //! what they need as arguments, so tests can run them without a terminal or a
 //! network.
 
-use ensemble_config::{
-    Adapter, Budget, CLAUDE_CODE_AGENT, Config, HarnessKind, HarnessesSetting, OPENCODE_AGENT,
-};
+use ensemble_agents::picker::Means;
+use ensemble_config::{HarnessKind, HarnessesSetting};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -202,130 +201,117 @@ impl Finding {
     }
 }
 
-/// What a config lets its agents do that deserves a second look. Ensemble adds
-/// no sandbox of its own, so these are the agents' CLIs' own permissions.
-pub fn risks(config: &Config) -> Vec<Finding> {
+/// Checks that start nothing: the runner's harnesses, whether it has a pair
+/// to run a task on, and whether its `workspace` holds a project.
+pub fn structure(runner: &ensemble_config::Runner, means: &Means) -> Vec<Finding> {
     let mut out = Vec::new();
-    for a in config.agents.values() {
-        if let Adapter::Codex(c) = &a.adapter
-            && c.sandbox == "danger-full-access"
-        {
-            out.push(Finding::note(
+    let on: Vec<_> = runner
+        .harnesses
+        .each()
+        .into_iter()
+        .filter(|h| h.on)
+        .collect();
+    for h in &on {
+        let name = h.kind.as_str();
+        if h.command.as_deref().is_some_and(|c| !found(c)) {
+            out.push(Finding::bad(
                 format!(
-                    "{} runs with sandbox 'danger-full-access', which limits nothing",
-                    a.name
+                    "{name} is on, and `{}` is not found",
+                    h.command.as_deref().unwrap_or_default()
                 ),
-                "use `workspace-write`, or `read-only` for an agent that only reads",
+                format!(
+                    "install it, or name it with `ensemble-runner harness set {name} --command <path>`, or `ensemble-runner harness off {name}`"
+                ),
             ));
-        }
-        if let Adapter::ClaudeCode(c) = &a.adapter
-            && matches!(c.permission_mode.as_str(), "bypassPermissions" | "auto")
-        {
-            out.push(Finding::note(
+        } else if logged_in(h.kind) == Some(false) {
+            out.push(Finding::bad(
+                format!("{name} is on, and its CLI is not logged in"),
                 format!(
-                    "{} uses permission mode '{}', which lets it act without asking",
-                    a.name, c.permission_mode
+                    "log in with `{}`, or `ensemble-runner harness off {name}`",
+                    h.command.as_deref().unwrap_or_default()
                 ),
-                "use `dontAsk` with a list of `tools`, which is what limits it",
-            ));
-        }
-        if a.can_change_files() && a.isolation == ensemble_config::Isolation::Shared {
-            out.push(Finding::note(
-                format!(
-                    "{} can change files directly in your working folder (isolation: shared)",
-                    a.name
-                ),
-                "set `isolation: worktree` so its tasks work on a branch of their own",
-            ));
-        }
-        if let Budget::PerHourTokens { .. } = a.budget {
-            out.push(Finding::note(
-                format!(
-                    "{} has a token budget, which counts only the tokens its runs report",
-                    a.name
-                ),
-                "`ensemble-runner agent stats` shows `-` for an agent whose runs report none; its budget never fills",
             ));
         }
     }
-    out
-}
-
-/// Checks that need no running agent: the structure of the helper team, and
-/// whether the runner's `workspace`, when it has one, holds a project.
-pub fn structure(config: &Config, workspace: Option<&Path>) -> Vec<Finding> {
-    let mut out = Vec::new();
-    if config.agents.is_empty() {
+    let pairs = means.pairs();
+    if pairs.is_empty() && on.is_empty() {
+        out.push(Finding::note(
+            "the runner runs no task yet: every harness is off",
+            "turn one on with `ensemble-runner harness on <harness>`, and, for opencode or builtin, a model of the pool with `ensemble-runner model on <provider>:<model>`",
+        ));
+    } else if pairs.is_empty() {
         out.push(Finding::bad(
-            "the runner has no helper team with agents",
-            "make one with `ensemble-runner team new <name>`, or pull one with `ensemble-runner team pull <url>`",
+            "the runner runs no task: no harness is on with a model it can drive",
+            "turn a harness on with `ensemble-runner harness on <harness>`, and, for opencode or builtin, a model of the pool with `ensemble-runner model on <provider>:<model>`",
+        ));
+    } else {
+        out.push(Finding::ok(format!(
+            "it runs tasks on: {}",
+            pairs
+                .iter()
+                .map(|p| format!("{} ({})", p.name(), p.tier.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let repositories = std::fs::read_dir(&runner.workspace)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| e.path().join(".git").exists())
+                .count()
+        })
+        .unwrap_or(0);
+    if repositories == 0 {
+        out.push(Finding::note(
+            format!(
+                "the workspace {} holds no git repository yet",
+                runner.workspace.display()
+            ),
+            "clone the repositories its tasks are for into it, or name each task's `repository` so the runner clones it",
         ));
     }
-    if let Some(workspace) = workspace {
-        let repositories = std::fs::read_dir(workspace)
-            .map(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .filter(|e| e.path().join(".git").exists())
-                    .count()
-            })
-            .unwrap_or(0);
-        if repositories == 0 {
-            out.push(Finding::note(
-                format!(
-                    "the workspace {} holds no git repository, so the runner has no project to work on",
-                    workspace.display()
-                ),
-                "clone the repositories its tasks are for into it",
-            ));
-        }
-    }
-    out.extend(risks(config));
-    if out.iter().all(|f| f.level != Level::Problem) {
-        out.push(Finding::ok(format!("{} agents", config.agents.len())));
-    }
     out
 }
 
-/// A health result as a finding, with what to do about it.
-pub fn health_finding(
-    name: &str,
-    result: &Result<(), ensemble_core::port::Error>,
-    config: &Config,
-) -> Finding {
-    match result {
-        Ok(()) => Finding::ok(format!("{name}: ok")),
-        Err(e) => {
-            let what = format!("{name}: {e}");
-            let kind = name.split(' ').next().unwrap_or(name);
-            let users: Vec<&str> = config
-                .agents
-                .values()
-                .filter(|a| a.kind() == kind || a.pool_models().iter().any(|(b, _)| *b == name))
-                .map(|a| a.name.as_str())
-                .collect();
-            let remove = users
-                .iter()
-                .map(|u| remove_command(u))
-                .collect::<Vec<_>>()
-                .join("; ");
-            let fix = if kind == CLAUDE_CODE_AGENT || kind == OPENCODE_AGENT {
+/// Whether each provider of the pool with a model on answers and serves
+/// those models, as findings.
+pub fn providers(pool: &ensemble_config::AnnPool) -> Vec<Finding> {
+    let mut wanted: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for m in pool.models.iter().filter(|m| m.on) {
+        wanted.entry(&m.provider).or_default().push(&m.id);
+    }
+    let mut out = Vec::new();
+    for (name, models) in wanted {
+        let Some(backend) = pool.direct.get(name) else {
+            continue;
+        };
+        match ensemble_backends::models::models(backend) {
+            Ok(served) => {
+                let gone: Vec<&str> = models
+                    .into_iter()
+                    .filter(|m| !served.iter().any(|s| s == m))
+                    .collect();
+                if gone.is_empty() {
+                    out.push(Finding::ok(format!("{name}: ok")));
+                } else {
+                    out.push(Finding::bad(
+                        format!("{name} does not serve {}", gone.join(", ")),
+                        format!(
+                            "`ensemble-runner provider refresh {name}`, then turn on a model it serves"
+                        ),
+                    ));
+                }
+            }
+            Err(e) => out.push(Finding::bad(
+                format!("{name}: {e}"),
                 format!(
-                    "install `{kind}` and put it on PATH, or change `command` in config.yaml, or drop the agents that use it: {remove}"
-                )
-            } else {
-                format!(
-                    "start the model server, or correct its address with `ensemble-runner provider` and the model names in config.yaml, or drop the agents that use it: {remove}"
-                )
-            };
-            Finding::bad(what, fix)
+                    "start the model server, or correct its address with `ensemble-runner provider`; until then no run takes a model of {name}"
+                ),
+            )),
         }
     }
-}
-
-/// The command that takes `agent`, such as `web/coder`, out of its team.
-fn remove_command(agent: &str) -> String {
-    format!("ensemble-runner agent remove {agent}")
+    out
 }
 
 /// The directory `~` stands for.
@@ -338,36 +324,7 @@ pub fn home() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ensemble_config::parse;
     use std::collections::BTreeMap;
-
-    fn loads(text: &str) -> Config {
-        parse(text, Path::new("config.yaml")).unwrap_or_else(|e| panic!("{e}\n{text}"))
-    }
-
-    /// A team of a coder on OpenCode and a reviewer on Claude Code.
-    fn team() -> String {
-        use ensemble_config::edit::{NewAgent, add_agent, agent_block};
-        let mut text = String::from("version: 1\nlimits: {}\nagents: {}\n");
-        for (name, adapter, writes) in [
-            ("coder", OPENCODE_AGENT, true),
-            ("reviewer", CLAUDE_CODE_AGENT, false),
-        ] {
-            let block = agent_block(
-                name,
-                &NewAgent {
-                    adapter,
-                    prompt: Some("Does the work."),
-                    model: None,
-                    provider: None,
-                    writes,
-                },
-            )
-            .unwrap();
-            text = add_agent(&text, name, &block).unwrap();
-        }
-        text
-    }
 
     #[test]
     fn a_new_runner_is_complete_and_loads() {
@@ -383,57 +340,29 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_health_check_names_the_agents_to_drop_by_their_team() {
-        let c = ensemble_config::teams::combine(
-            vec![("web".into(), loads(&team()))],
-            BTreeMap::new(),
-            PathBuf::from("/teams"),
-        );
-        let failed = Err(ensemble_core::port::Error::Spawn {
-            backend: "opencode".into(),
-            program: "opencode".into(),
-            detail: "not installed".into(),
+    fn a_runner_with_nothing_to_run_a_task_on_is_told_how_to_fix_it() {
+        let mut settings = ensemble_config::RunnerSettings::starting("desk", "/nowhere");
+        settings.harnesses.codex.on = true;
+        settings.harnesses.codex.command = "/nonexistent/codex".into();
+        let runner = settings
+            .resolve(&ensemble_core::state::RunnerDir::new(""), &BTreeMap::new())
+            .unwrap();
+        let means = Means::new(Vec::new(), runner.llm.clone(), Default::default(), |_| {
+            Vec::new()
         });
-        let finding = health_finding("opencode (opencode)", &failed, &c);
-        assert_eq!(finding.level, Level::Problem);
-        let fix = finding.fix.unwrap();
+        let found = structure(&runner, &means);
+        let said: Vec<&str> = found.iter().map(|f| f.what.as_str()).collect();
         assert!(
-            fix.contains("ensemble-runner agent remove web/coder"),
-            "{fix}"
+            said[0].starts_with("codex is on, and `/nonexistent/codex` is not found"),
+            "{said:?}"
         );
-    }
-
-    #[test]
-    fn the_structure_check_names_what_is_wrong() {
-        let c = loads(&team());
-        let tmp = ensemble_core::workspace::testing::TempDir::new();
-        let findings = structure(&c, Some(&tmp.0));
         assert!(
-            findings
+            said.contains(&"the runner runs no task: no harness is on with a model it can drive")
+        );
+        assert!(
+            found
                 .iter()
-                .any(|f| f.level == Level::Note && f.what.contains("holds no git repository")),
-            "{findings:?}"
-        );
-        std::fs::create_dir_all(tmp.0.join("shop/.git")).unwrap();
-        let findings = structure(&c, Some(&tmp.0));
-        assert!(
-            findings.iter().all(|f| f.level == Level::Ok),
-            "{findings:?}"
-        );
-
-        let bare = ensemble_config::edit::remove_agent(
-            &ensemble_config::edit::remove_agent(&team(), "coder").unwrap(),
-            "reviewer",
-        )
-        .unwrap();
-        let findings = structure(&loads(&bare), None);
-        assert!(
-            findings.iter().any(|f| f.level == Level::Problem
-                && f.what.contains("no helper team")
-                && f.fix
-                    .as_deref()
-                    .is_some_and(|x| x.contains("ensemble-runner team new <name>"))),
-            "{findings:?}"
+                .any(|f| f.level == Level::Note && f.what.contains("no git repository"))
         );
     }
 }

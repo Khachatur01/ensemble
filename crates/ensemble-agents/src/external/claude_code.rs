@@ -20,7 +20,8 @@
 
 use super::AgentRun;
 use super::process;
-use ensemble_config::{AgentConfig, CLAUDE_CODE_AGENT, ClaudeCodeAdapter, claude_tool_writes};
+use crate::spec::{ClaudeCodeAdapter, RunSpec, claude_tool_writes};
+use ensemble_config::CLAUDE_CODE_AGENT;
 use ensemble_core::port::{Error, Usage};
 use ensemble_core::workspace::Changes;
 use ensemble_core::workspace::{self, Workspace};
@@ -30,7 +31,7 @@ use std::sync::atomic::AtomicBool;
 
 /// Run a `claude-code` agent on one task, in `workdir`.
 pub async fn run(
-    agent: &AgentConfig,
+    agent: &RunSpec,
     cc: &ClaudeCodeAdapter,
     task: &str,
     context: Option<&str>,
@@ -54,7 +55,7 @@ pub async fn run(
 /// The command line, less the program. One argument per tool: the CLI takes
 /// them space- or comma-separated, and a rule such as `Bash(git log:*)` has a
 /// space in it.
-pub fn arguments(agent: &AgentConfig, cc: &ClaudeCodeAdapter, prompt: &str) -> Vec<String> {
+pub fn arguments(cc: &ClaudeCodeAdapter, prompt: &str) -> Vec<String> {
     let mut v: Vec<String> = vec![
         "-p".into(),
         prompt.into(),
@@ -72,10 +73,6 @@ pub fn arguments(agent: &AgentConfig, cc: &ClaudeCodeAdapter, prompt: &str) -> V
         v.push("--allowedTools".into());
         v.push(cc.tools.join(","));
     }
-    if let Some(system) = agent.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
-        v.push("--append-system-prompt".into());
-        v.push(system.into());
-    }
     v
 }
 
@@ -84,7 +81,7 @@ pub fn arguments(agent: &AgentConfig, cc: &ClaudeCodeAdapter, prompt: &str) -> V
 #[allow(clippy::too_many_arguments)]
 async fn run_program(
     program: &[String],
-    agent: &AgentConfig,
+    agent: &RunSpec,
     cc: &ClaudeCodeAdapter,
     task: &str,
     context: Option<&str>,
@@ -117,7 +114,7 @@ async fn run_program(
     let ended = process::Run {
         backend: CLAUDE_CODE_AGENT,
         program,
-        args: arguments(agent, cc, &prompt),
+        args: arguments(cc, &prompt),
         env: Vec::new(),
         workdir: workspace.root(),
         max_seconds: agent.max_seconds,
@@ -395,7 +392,7 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn run_program(
         program: &[String],
-        agent: &AgentConfig,
+        agent: &RunSpec,
         cc: &ClaudeCodeAdapter,
         task: &str,
         context: Option<&str>,
@@ -407,11 +404,11 @@ mod tests {
             program, agent, cc, task, context, workdir, progress, cancel,
         ))
     }
-    use ensemble_config::Adapter;
+    use crate::spec::Adapter;
     use ensemble_core::workspace::testing::TempDir;
     use std::time::{Duration, Instant};
 
-    fn agent(tools: &[&str], max_seconds: u32) -> (AgentConfig, ClaudeCodeAdapter) {
+    fn agent(tools: &[&str], max_seconds: u32) -> (RunSpec, ClaudeCodeAdapter) {
         let cc = ClaudeCodeAdapter {
             command: "claude".into(),
             model: "sonnet".into(),
@@ -419,14 +416,11 @@ mod tests {
             permission_mode: "dontAsk".into(),
             max_turns: 7,
         };
-        let a = AgentConfig {
-            name: "reviewer".into(),
-            prompt: Some("You review code.".into()),
+        let a = RunSpec {
+            name: "claude-code on sonnet".into(),
+            harness: ensemble_config::HarnessKind::ClaudeCode,
+            tier: ensemble_config::Tier::Strong,
             max_seconds,
-            max_concurrent: 1,
-            isolation: ensemble_config::Isolation::Shared,
-            budget: ensemble_config::Budget::Unlimited,
-            limit: None,
             adapter: Adapter::ClaudeCode(cc.clone()),
         };
         (a, cc)
@@ -456,7 +450,7 @@ mod tests {
 
     fn go(
         program: &[String],
-        a: &AgentConfig,
+        a: &RunSpec,
         cc: &ClaudeCodeAdapter,
         dir: &Path,
     ) -> (Result<AgentRun, Error>, Vec<String>) {
@@ -475,9 +469,9 @@ mod tests {
     }
 
     #[test]
-    fn the_command_line_carries_the_task_tools_model_and_prompt_and_never_bare() {
-        let (a, cc) = agent(&["Read", "Bash(git log:*)"], 60);
-        let args = arguments(&a, &cc, "do it");
+    fn the_command_line_carries_the_task_tools_and_model_and_never_bare() {
+        let (_, cc) = agent(&["Read", "Bash(git log:*)"], 60);
+        let args = arguments(&cc, "do it");
         let at = |flag: &str| {
             let i = args.iter().position(|x| x == flag).unwrap();
             args[i + 1].clone()
@@ -488,7 +482,7 @@ mod tests {
         assert_eq!(at("--permission-mode"), "dontAsk");
         assert_eq!(at("--max-turns"), "7");
         assert_eq!(at("--allowedTools"), "Read,Bash(git log:*)");
-        assert_eq!(at("--append-system-prompt"), "You review code.");
+        assert!(!args.contains(&"--append-system-prompt".to_string()));
         assert!(
             args.contains(&"--verbose".to_string()),
             "stream-json needs it"
@@ -550,11 +544,11 @@ mod tests {
         assert_eq!(
             seen,
             vec![
-                "reviewer · starting Claude Code",
-                "reviewer · turn 1 · Read(a.rs)",
-                "reviewer · turn 2 · Bash(cargo test)",
-                "reviewer · turn 3 · Bash(rm -rf /)",
-                "reviewer · done",
+                "claude-code on sonnet · starting Claude Code",
+                "claude-code on sonnet · turn 1 · Read(a.rs)",
+                "claude-code on sonnet · turn 2 · Bash(cargo test)",
+                "claude-code on sonnet · turn 3 · Bash(rm -rf /)",
+                "claude-code on sonnet · done",
             ]
         );
     }

@@ -13,8 +13,8 @@
 # secrets manager keeps, through `environmentFile`, come from here.
 #
 # The runner is only run from here, too: its settings, the keys of its
-# backends and its teams are made and changed with `ensemble-runner setup`,
-# `… settings …`, `… backend …` and `ensemble-runner team …`. It makes a
+# providers and its harnesses are made and changed with `ensemble-runner
+# setup`, `… settings …`, `… provider …`, `… model …` and `… harness …`. It makes a
 # runner named for the computer the first time it starts.
 #
 # The web UI, `ensemble-ui`, is optional and apart from the hub: a system

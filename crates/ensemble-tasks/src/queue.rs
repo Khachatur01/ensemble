@@ -2,11 +2,12 @@
 //! repository's project ([`crate::board`]).
 //!
 //! While the worker runs ([`Queue::work`], in the runner), it claims every
-//! task of the project that may start, oldest id first, as its agent's slots
-//! and budget allow, renews its claim while the agent works, and tells the hub
-//! how the run ended. A task the worker's end interrupts is put back, and a
-//! runner that dies stops renewing, so either way another run takes it up.
-//! What each run does as it goes is kept in its activity log ([`Runs`]).
+//! task of the project that may start, oldest id first, each on a harness and
+//! an LLM the picker takes for it of what is free on the runner, renews its
+//! claim while the run works, and tells the hub how the run ended. A task the
+//! worker's end interrupts is put back, and a runner that dies stops
+//! renewing, so either way another run takes it up. What each run does as it
+//! goes is kept in its activity log ([`Runs`]).
 //!
 //! Its tests run it against the tasks the hub keeps, in `ensemble-hub`
 //! (`tests/queue.rs`).
@@ -14,17 +15,15 @@
 use super::delegation::{RunResult, run_delegation};
 use crate::board::{Board, Claim, End, LEASE, Progress, Renewal};
 use crate::runs::Runs;
-use crate::tasks::{
-    ASK_MARKER, Detail, HANDOFF_MARKER, Status, Task, Ticket, handoff_in, minutes, question_in,
-    utc, waiting_for,
-};
+use crate::tasks::{ASK_MARKER, Detail, Status, Task, Ticket, question_in, utc, waiting_for};
 use ensemble_agents::external::gate;
+use ensemble_agents::picker::{Taken, above};
 use ensemble_agents::router::Ensemble;
 use ensemble_agents::runtime::blocking;
 use ensemble_agents::worktree;
-use ensemble_config::{Budget, Isolation};
+use ensemble_config::Tier;
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -36,6 +35,10 @@ use tokio::sync::futures::Notified;
 
 /// How often the worker looks at the hub for tasks that may start.
 const SCAN_EVERY: Duration = Duration::from_secs(2);
+
+/// How often a retry looks again for a pair strong enough to be free.
+const WAIT_FOR_A_PAIR: Duration = Duration::from_secs(1);
+
 /// How many times a run's end is told to the hub before it is given up.
 const FINISH_ATTEMPTS: u32 = 3;
 
@@ -50,10 +53,10 @@ struct Live {
 type Run<'q> = Pin<Box<dyn Future<Output = ()> + Send + 'q>>;
 
 /// What one look found to start.
-struct Looked<'q> {
-    /// Tasks claimed on the board, each with a slot of its agent and the flag
+struct Looked {
+    /// Tasks claimed on the board, each with the pair it runs on and the flag
     /// that stops it.
-    claimed: Vec<(Ticket, Slot<'q>, Arc<AtomicBool>)>,
+    claimed: Vec<(Ticket, Taken, Arc<AtomicBool>)>,
     /// The worker is closing: nothing new starts.
     closed: bool,
 }
@@ -63,16 +66,18 @@ struct Inner {
     /// Set by `close`: nothing new starts.
     closed: bool,
     live: BTreeMap<String, Live>,
-    /// Slots in use, per agent.
-    busy: HashMap<String, u32>,
-    /// When each agent with a budget started its runs in the last hour.
-    usage: BTreeMap<String, Vec<u64>>,
-    /// Tasks already noted as waiting for a model, so the note is written
-    /// once per wait, not once per scan.
-    backend_waits: HashSet<String>,
+    /// Tasks already noted as waiting for a free harness and model, so the
+    /// note is written once per wait, not once per scan.
+    waits: HashSet<String>,
     /// Whether the hub could not be reached at the last look, so that is said
     /// once, not every few seconds.
     board_down: bool,
+}
+
+/// What the last run of a task was on, for its result.
+struct RanOn {
+    harness: String,
+    model: String,
 }
 
 /// The tasks of one repository.
@@ -84,46 +89,24 @@ pub struct Queue<'e> {
     runner: String,
     /// How long a claim lasts unless renewed.
     lease: Duration,
-    /// What this runner keeps of its runs here: logs, worktrees, usage.
+    /// What this runner keeps of its runs here: logs and worktrees.
     runs: Runs,
     inner: Mutex<Inner>,
-    /// Signalled whenever something starts, ends or frees a slot.
+    /// Signalled whenever something starts or ends.
     changed: Notify,
-}
-
-/// One slot of an agent, given back when dropped.
-struct Slot<'q> {
-    inner: &'q Mutex<Inner>,
-    changed: &'q Notify,
-    agent: String,
-}
-
-impl Drop for Slot<'_> {
-    fn drop(&mut self) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(n) = inner.busy.get_mut(&self.agent) {
-            *n = n.saturating_sub(1);
-        }
-        drop(inner);
-        self.changed.notify_waiters();
-    }
 }
 
 impl<'e> Queue<'e> {
     /// The tasks of `board`, run with `ensemble` as the runner `runner`,
     /// keeping what it runs in `runs`.
     pub fn new(ensemble: &'e Ensemble, runs: Runs, board: impl Board + 'e, runner: &str) -> Self {
-        let usage = runs.usage();
         Queue {
             ensemble,
             board: Box::new(board),
             runner: runner.to_string(),
             lease: LEASE,
             runs,
-            inner: Mutex::new(Inner {
-                usage,
-                ..Inner::default()
-            }),
+            inner: Mutex::new(Inner::default()),
             changed: Notify::new(),
         }
     }
@@ -146,141 +129,15 @@ impl<'e> Queue<'e> {
         changed
     }
 
-    /// What `agent`'s slots and budget are counted under: its own name, or the
-    /// shared limit it names, so that every agent on one limit uses one count.
-    fn key(&self, agent: &str) -> String {
-        match self
-            .ensemble
-            .config()
-            .agent(agent)
-            .and_then(|a| a.limit.as_ref())
-        {
-            Some(limit) => format!("limit:{limit}"),
-            None => agent.to_string(),
-        }
-    }
-
-    /// Seconds until the runs of `agent`, and of every agent on its limit,
-    /// have used fewer than `tokens` in the last hour, or `None` if they have.
-    /// Counted from the record of runs, from what each reported.
-    fn over_tokens(&self, agent: &str, tokens: u64) -> Option<u64> {
-        let config = self.ensemble.config();
-        let members: Vec<&str> = match config.agent(agent).and_then(|a| a.limit.as_ref()) {
-            Some(limit) => config
-                .agents
-                .values()
-                .filter(|a| a.limit.as_ref() == Some(limit))
-                .map(|a| a.name.as_str())
-                .collect(),
-            None => vec![agent],
-        };
-        let now = unix_now();
-        let mut runs: Vec<(u64, u64)> = ensemble_core::records::read(&self.ensemble.records_dir()?)
-            .into_iter()
-            .filter(|r| members.contains(&r.agent.as_str()) && now < r.started + HOUR)
-            .map(|r| {
-                (
-                    r.started,
-                    r.prompt_tokens.unwrap_or(0) + r.completion_tokens.unwrap_or(0),
-                )
-            })
-            .collect();
-        let mut left: u64 = runs.iter().map(|r| r.1).sum();
-        if left < tokens {
-            return None;
-        }
-        runs.sort_unstable();
-        for (started, used) in runs {
-            left -= used;
-            if left < tokens {
-                return Some((started + HOUR).saturating_sub(now).max(1));
-            }
-        }
-        None
-    }
-
-    /// How many runs of `agent` may go on at once. An unknown agent fails as
-    /// soon as it starts, so it needs no limit.
-    fn limit(&self, agent: &str) -> u32 {
-        self.ensemble
-            .config()
-            .agent(agent)
-            .map_or(u32::MAX, |a| a.max_concurrent)
-    }
-
-    /// Seconds until `agent` may start another run, or `None` if it may now.
-    fn over_budget(&self, inner: &Inner, agent: &str) -> Option<u64> {
-        let key = self.key(agent);
-        let delegations = match self.ensemble.config().agent(agent).map(|a| a.budget) {
-            Some(Budget::PerHour { delegations }) => delegations,
-            Some(Budget::PerHourTokens { tokens }) => return self.over_tokens(agent, tokens),
-            _ => return None,
-        };
-        let now = unix_now();
-        let mut recent: Vec<u64> = inner
-            .usage
-            .get(&key)
-            .map(|runs| runs.iter().copied().filter(|t| now < t + HOUR).collect())
-            .unwrap_or_default();
-        if recent.len() < delegations as usize {
-            return None;
-        }
-        recent.sort_unstable();
-        // The run that frees a place is the one that leaves the hour first.
-        let frees = recent[recent.len() - delegations as usize];
-        Some((frees + HOUR).saturating_sub(now).max(1))
-    }
-
-    /// Count a run of `agent` against its budget, or say how long until it
-    /// may start one.
-    fn spend_locked(&self, inner: &mut Inner, agent: &str) -> Result<(), u64> {
-        if let Some(wait) = self.over_budget(inner, agent) {
-            return Err(wait);
-        }
-        if !matches!(
-            self.ensemble.config().agent(agent).map(|a| a.budget),
-            Some(Budget::PerHour { .. })
-        ) {
-            return Ok(());
-        }
-        let now = unix_now();
-        let started = inner.usage.entry(self.key(agent)).or_default();
-        started.retain(|t| now < t + HOUR);
-        started.push(now);
-        self.runs.save_usage(&inner.usage);
-        Ok(())
-    }
-
-    /// [`Self::spend_locked`], as a refusal one can read.
-    fn spend(&self, agent: &str) -> Result<(), String> {
-        self.spend_locked(&mut self.lock(), agent)
-            .map_err(|wait| over_budget_message(agent, wait))
-    }
-
-    /// Take a slot of `agent` if one is free.
-    fn take(&self, inner: &mut Inner, agent: &str) -> Option<Slot<'_>> {
-        let key = self.key(agent);
-        let used = inner.busy.entry(key.clone()).or_default();
-        if *used >= self.limit(agent) {
-            return None;
-        }
-        *used += 1;
-        Some(Slot {
-            inner: &self.inner,
-            changed: &self.changed,
-            agent: key,
-        })
-    }
-
-    /// Record what the agent of task `id` is doing now.
+    /// Record what the run of task `id` is doing now.
     fn note(&self, id: &str, line: &str) {
         self.runs.log(id, line);
     }
 
-    /// Run every task of the board that may start, oldest id first, as its
-    /// agent's slots allow, until [`Queue::close`] and the runs left end. The
-    /// board is looked at again every few seconds, and at once when a run
-    /// ends.
+    /// Run every task of the board that may start, oldest id first, as the
+    /// runner's harnesses and models allow, until [`Queue::close`] and the
+    /// runs left end. The board is looked at again every few seconds, and at
+    /// once when a run ends.
     pub async fn work(&self) {
         let mut runs: FuturesUnordered<Run<'_>> = FuturesUnordered::new();
         loop {
@@ -295,9 +152,9 @@ impl<'e> Queue<'e> {
                     Some(()) = runs.next(), if !runs.is_empty() => {}
                 }
             };
-            for (ticket, slot, cancel) in looked.claimed {
+            for (ticket, taken, cancel) in looked.claimed {
                 runs.push(Box::pin(async move {
-                    self.run_ticket(ticket, slot, &cancel).await
+                    self.run_ticket(ticket, taken, &cancel).await
                 }));
             }
             if runs.is_empty() && looked.closed {
@@ -311,13 +168,11 @@ impl<'e> Queue<'e> {
         }
     }
 
-    /// Whether `task` may start here: assigned to an agent of this runner's
-    /// teams, not ended, not asking, not waiting for another task, not running
-    /// on another runner, and not given back by this one. A task for an agent
-    /// this runner does not have is left for a runner that does.
+    /// Whether `task` may start here: not ended, not asking, not waiting for
+    /// another task, not running on another runner, and not given back by
+    /// this one.
     fn may_start(&self, task: &Task, all: &[Task]) -> bool {
         task.status.is_none()
-            && self.ensemble.config().agent(&task.ticket.agent).is_some()
             && task.question.is_none()
             && task.running_on.as_ref().is_none_or(|n| *n == self.runner)
             && !task.given_back.iter().any(|g| g.runner == self.runner)
@@ -347,21 +202,11 @@ impl<'e> Queue<'e> {
     }
 
     /// One look at what to start: the board's tasks that may start, each
-    /// claimed with a slot of its agent taken.
-    async fn look(&self) -> Looked<'_> {
+    /// claimed with the pair the picker took for it.
+    async fn look(&self) -> Looked {
         let all = self.scan().await;
-        // Agents whose tasks wait for a backend (`when_none: wait` and no
-        // usable model), found before the lock is taken: asking a backend
-        // can take seconds. Each backend is asked at most once a minute.
-        let mut blocked: HashMap<&str, Option<String>> = HashMap::new();
-        for task in all.iter().filter(|t| self.may_start(t, &all)) {
-            let agent = task.ticket.agent.as_str();
-            if !blocked.contains_key(agent) {
-                let ready = blocking(|| self.ensemble.backend_ready(agent));
-                blocked.insert(agent, ready.err());
-            }
-        }
-        // Taken a slot for, to claim on the board.
+        let means = self.ensemble.means();
+        // Taken a pair for, to claim on the board.
         let mut picked = Vec::new();
         let closed = {
             let mut inner = self.lock();
@@ -371,17 +216,11 @@ impl<'e> Queue<'e> {
                 if inner.live.contains_key(&ticket.id) || !self.may_start(task, &all) {
                     continue;
                 }
-                if let Some(Some(why)) = blocked.get(ticket.agent.as_str()) {
-                    if inner.backend_waits.insert(ticket.id.clone()) {
-                        self.note(&ticket.id, &format!("waiting for a model: {why}"));
+                let Some(taken) = means.take(None) else {
+                    if inner.waits.insert(ticket.id.clone()) {
+                        self.note(&ticket.id, "waiting for a harness and a model to be free");
                     }
-                    continue;
-                }
-                if self.over_budget(&inner, &ticket.agent).is_some() {
-                    continue;
-                }
-                let Some(slot) = self.take(&mut inner, &ticket.agent) else {
-                    continue;
+                    break;
                 };
                 let cancel = Arc::new(AtomicBool::new(false));
                 inner.live.insert(
@@ -391,12 +230,12 @@ impl<'e> Queue<'e> {
                         asked: false,
                     },
                 );
-                picked.push((ticket.clone(), slot, cancel));
+                picked.push((ticket.clone(), taken, cancel));
             }
             closed
         };
         let mut claimed = Vec::new();
-        for (ticket, slot, cancel) in picked {
+        for (ticket, taken, cancel) in picked {
             let movable = self.movable(&ticket);
             match self
                 .board
@@ -404,19 +243,14 @@ impl<'e> Queue<'e> {
                 .await
             {
                 Ok(Claim::Taken) => {
-                    let mut inner = self.lock();
-                    // Checked under the lock above; a run that started since
-                    // may have used the last place, which is counted all the
-                    // same.
-                    let _ = self.spend_locked(&mut inner, &ticket.agent);
-                    inner.backend_waits.remove(&ticket.id);
-                    claimed.push((ticket, slot, cancel));
+                    self.lock().waits.remove(&ticket.id);
+                    claimed.push((ticket, taken, cancel));
                 }
                 // Another runner was first, or the hub could not be asked:
                 // the next look tries again.
                 Ok(Claim::Refused(_)) | Err(_) => {
                     self.lock().live.remove(&ticket.id);
-                    drop(slot);
+                    drop(taken);
                 }
             }
         }
@@ -466,20 +300,13 @@ impl<'e> Queue<'e> {
         }
     }
 
-    /// Whether a run of `ticket` here could be carried on elsewhere: its agent
-    /// works on a branch of its own, which can be pushed to the repository's
-    /// remote. Anything else changes this computer's folder, so the task stays
-    /// with this runner once it has run.
+    /// Whether a run of `ticket` here could be carried on elsewhere: its
+    /// branch can be pushed to the repository's remote. Without one, the
+    /// work is in this computer's folder, so the task stays with this runner
+    /// once it has run.
     fn movable(&self, ticket: &Ticket) -> bool {
-        let worktree = self
-            .ensemble
-            .config()
-            .agent(&ticket.agent)
-            .is_some_and(|a| a.isolation == Isolation::Worktree);
-        worktree
-            && self
-                .project_of(ticket)
-                .is_ok_and(|project| blocking(|| worktree::has_remote(&project)))
+        self.project_of(ticket)
+            .is_ok_and(|project| blocking(|| worktree::has_remote(&project)))
     }
 
     /// Push the task's branch, when its repository has a remote, and say
@@ -543,43 +370,39 @@ impl<'e> Queue<'e> {
         );
     }
 
-    async fn run_ticket(&self, ticket: Ticket, slot: Slot<'_>, cancel: &AtomicBool) {
+    async fn run_ticket(&self, ticket: Ticket, taken: Taken, cancel: &AtomicBool) {
         let since = SystemTime::now();
-        // What it asked and was answered, what earlier agents handed on, and
-        // where the work of an earlier run was pushed.
+        // What it asked and was answered, and where the work of an earlier
+        // run was pushed.
         let detail = self.board.get(&ticket.id).await.ok().flatten();
         let carried = detail
             .as_ref()
             .and_then(|d| d.progress.as_ref())
             .map(|p| p.commit.clone());
         let place = self.project_of(&ticket).and_then(|project| {
-            match self.ensemble.config().agent(&ticket.agent) {
-                Some(a) if a.isolation == Isolation::Worktree => {
-                    self.note(
-                        &ticket.id,
-                        &format!("{}: preparing a git worktree", ticket.agent),
-                    );
-                    let root = self.runs.root();
-                    blocking(|| {
-                        worktree::prepare_from(&project, root, &ticket.id, carried.as_deref())
-                    })
-                    .map(|wt| (wt.dir.clone(), Some(wt)))
-                }
-                _ => Ok((project, None)),
-            }
+            self.note(&ticket.id, "preparing a git worktree");
+            let root = self.runs.root();
+            blocking(|| worktree::prepare_from(&project, root, &ticket.id, carried.as_deref()))
         });
+        let ran_on = RanOn {
+            harness: taken.spec.kind().to_string(),
+            model: taken.spec.model().to_string(),
+        };
         let lost = AtomicBool::new(false);
         let work = async {
             match &place {
-                Ok((dir, _)) => self.work_on(&ticket, detail.as_ref(), dir, cancel).await,
-                Err(e) => (RunResult::err(e.clone()), Vec::new()),
+                Ok(wt) => {
+                    self.work_on(&ticket, detail.as_ref(), &wt.dir, taken, cancel)
+                        .await
+                }
+                Err(e) => (RunResult::err(e.clone()), Vec::new(), ran_on),
             }
         };
-        let (mut result, mut extra) = tokio::select! {
+        let (mut result, mut extra, ran_on) = tokio::select! {
             done = work => done,
             () = self.hold(&ticket.id, cancel, &lost) => unreachable!("holding never ends"),
         };
-        drop(slot);
+        self.changed.notify_waiters();
         let lost = lost.load(Ordering::Relaxed);
         // Commit the work on the task's branch, unless the worker ended under
         // it: then the worktree is left as it is, for the next run.
@@ -590,36 +413,12 @@ impl<'e> Queue<'e> {
         let question = (!result.is_error && !cancel.load(Ordering::Relaxed))
             .then(|| question_in(&result.text))
             .flatten();
-        // Handing the task on is not finishing it: it goes to another agent with
-        // a note, and its worktree stays as it is for that agent.
-        let mut handoff = None;
-        if question.is_none()
-            && !result.is_error
-            && !cancel.load(Ordering::Relaxed)
-            && let Some((target, note)) = handoff_in(&result.text)
-        {
-            match self.ensemble.config().agent(&target) {
-                Some(_) if target != ticket.agent => handoff = Some((target.clone(), note)),
-                Some(_) => {}
-                None => {
-                    result = RunResult::err(format!(
-                        "{}\n\n[it tried to hand the task to '{target}', which is not an agent. Agents: {}.]",
-                        result.text,
-                        self.ensemble.config().agent_names().join(", ")
-                    ));
-                }
-            }
-        }
         if let Some(question) = &question {
-            self.note(
-                &ticket.id,
-                &format!("{}: needs input: {question}", ticket.agent),
-            );
+            self.note(&ticket.id, &format!("needs input: {question}"));
         }
-        if let Ok((_, Some(wt))) = &place
+        if let Ok(wt) = &place
             && !interrupted_now
             && question.is_none()
-            && handoff.is_none()
         {
             extra.push(("branch", wt.branch.clone()));
             let message = format!("{}: {}", ticket.id, ticket.title);
@@ -642,8 +441,8 @@ impl<'e> Queue<'e> {
         // A run that stops unfinished keeps what it did so far on its branch,
         // and the branch goes to the remote, for the next run wherever it is.
         let progress = match &place {
-            Ok((_, Some(wt))) if !lost => {
-                if interrupted_now || question.is_some() || handoff.is_some() {
+            Ok(wt) if !lost => {
+                if interrupted_now || question.is_some() {
                     let message = format!("{}: work so far", ticket.id);
                     if let Err(e) = blocking(|| worktree::commit(wt, &message)) {
                         self.note(
@@ -660,10 +459,7 @@ impl<'e> Queue<'e> {
             // Another runner runs it now; what this run did stays here.
             self.note(
                 &ticket.id,
-                &format!(
-                    "{}: stopped: this runner's claim on the task ran out, and another runner runs it now",
-                    ticket.agent
-                ),
+                "stopped: this runner's claim on the task ran out, and another runner runs it now",
             );
             None
         } else if interrupted_now {
@@ -675,17 +471,6 @@ impl<'e> Queue<'e> {
                 reply: result.text.clone(),
                 repository: false,
             }))
-        } else if let Some((to, note)) = handoff {
-            self.note(
-                &ticket.id,
-                &format!("{} handed the task to {to}", ticket.agent),
-            );
-            Some(Some(End::Handoff {
-                from: ticket.agent.clone(),
-                to,
-                note,
-                reply: result.text.clone(),
-            }))
         } else {
             let status = if asked {
                 Status::Cancelled
@@ -696,7 +481,8 @@ impl<'e> Queue<'e> {
             };
             Some(Some(End::Result {
                 status,
-                agent: ticket.agent.clone(),
+                harness: ran_on.harness,
+                model: ran_on.model,
                 started: utc(since),
                 extra: extra.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
                 text: result.text.clone(),
@@ -709,17 +495,37 @@ impl<'e> Queue<'e> {
         self.changed.notify_waiters();
     }
 
-    /// Run the agent on `ticket` in `dir`, then its gate if it has one. While
-    /// the gate fails and attempts remain, the agent runs again with the
-    /// gate's output. Returns the outcome and front matter for the result.
+    /// A pair at least `at_least` strong, when one that strong exists, taken
+    /// as soon as one is free; none once the run is cancelled.
+    async fn take_when_free(&self, at_least: Tier, cancel: &AtomicBool) -> Option<Taken> {
+        loop {
+            if let Some(taken) = self.ensemble.means().take(Some(at_least)) {
+                return Some(taken);
+            }
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            tokio::time::sleep(WAIT_FOR_A_PAIR).await;
+        }
+    }
+
+    /// Run `taken` on `ticket` in `dir`, then its gate if it has one. While
+    /// the gate fails and attempts remain, it runs again with the gate's
+    /// output, on a pair a tier stronger. Returns the outcome, front matter
+    /// for the result, and what the last run was on.
     async fn work_on(
         &self,
         ticket: &Ticket,
         detail: Option<&Detail>,
         dir: &Path,
+        mut taken: Taken,
         cancel: &AtomicBool,
-    ) -> (RunResult, Vec<(&'static str, String)>) {
+    ) -> (RunResult, Vec<(&'static str, String)>, RanOn) {
         let note = |line: &str| self.note(&ticket.id, line);
+        let ran_on = |taken: &Taken| RanOn {
+            harness: taken.spec.kind().to_string(),
+            model: taken.spec.model().to_string(),
+        };
         let mut base = ticket.prompt();
         if let Some((questions, reply)) = detail.and_then(|d| d.conversation.as_ref()) {
             base.push_str(&format!(
@@ -737,19 +543,14 @@ impl<'e> Queue<'e> {
                 p.node, p.branch, p.commit
             ));
         }
-        if let Some(earlier) = detail.and_then(|d| d.handoffs.as_ref()) {
-            base.push_str(&format!(
-                "\n\nThis task was handed to you. What earlier agents did and left for you:\n\n{}",
-                earlier.trim()
-            ));
-        }
         base.push_str(&format!(
-            "\n\nIf you cannot finish without a decision that only the person who asked can make, stop and end your reply with one line: {ASK_MARKER} <your question>\nIf the next part belongs to another agent, end your reply with one line: {HANDOFF_MARKER} <agent> <what remains>"
+            "\n\nIf you cannot finish without a decision that only the person who asked can make, stop and end your reply with one line: {ASK_MARKER} <your question>"
         ));
-        let delegate = async |prompt: &str| {
+        let delegate = async |taken: &Taken, prompt: &str| {
+            note(&format!("running on {}", taken.spec.name));
             run_delegation(
                 self.ensemble,
-                &ticket.agent,
+                taken,
                 prompt,
                 ticket.context.as_deref(),
                 dir,
@@ -759,7 +560,8 @@ impl<'e> Queue<'e> {
             .await
         };
         let Some(gate) = &ticket.gate else {
-            return (delegate(&base).await, Vec::new());
+            let result = delegate(&taken, &base).await;
+            return (result, Vec::new(), ran_on(&taken));
         };
         let attempts = gate.attempts.max(1);
         let command = serde_json::to_string(&gate.command).expect("a string serializes");
@@ -773,12 +575,12 @@ impl<'e> Queue<'e> {
                     ("attempts", attempt.to_string()),
                 ]
             };
-            let result = delegate(&prompt).await;
+            let result = delegate(&taken, &prompt).await;
             if result.is_error
                 || cancel.load(Ordering::Relaxed)
                 || question_in(&result.text).is_some()
             {
-                return (result, reported("not run"));
+                return (result, reported("not run"), ran_on(&taken));
             }
             note(&format!("gate: running `{}`", gate.command));
             let verdict = gate::run(&gate.command, gate.timeout_seconds, dir, cancel).await;
@@ -787,29 +589,44 @@ impl<'e> Queue<'e> {
                     "{}\n\n[gate: passed on attempt {attempt} of {attempts}]",
                     result.text
                 );
-                return (RunResult::ok(text), reported("passed"));
+                return (RunResult::ok(text), reported("passed"), ran_on(&taken));
             }
             note(&format!(
                 "gate: failed ({}) on attempt {attempt} of {attempts}",
                 verdict.ended
             ));
+            let failed = |why: &str| {
+                format!(
+                    "{}\n\n[gate: failed ({}) on attempt {attempt} of {attempts}{why}]\n```\n{}\n```",
+                    result.text, verdict.ended, verdict.output
+                )
+            };
             if attempt >= attempts || cancel.load(Ordering::Relaxed) {
-                let text = format!(
-                    "{}\n\n[gate: failed ({}) on attempt {attempt} of {attempts}]\n```\n{}\n```",
-                    result.text, verdict.ended, verdict.output
+                return (
+                    RunResult::err(failed("")),
+                    reported("failed"),
+                    ran_on(&taken),
                 );
-                return (RunResult::err(text), reported("failed"));
             }
-            if let Err(refused) = self.spend(&ticket.agent) {
-                let text = format!(
-                    "{}\n\n[gate: failed ({}) on attempt {attempt} of {attempts}; no retry: {refused}]\n```\n{}\n```",
-                    result.text, verdict.ended, verdict.output
-                );
-                return (RunResult::err(text), reported("failed"));
-            }
+            // The next attempt asks for a tier above the last, and waits for
+            // a pair that strong to be free.
+            let at_least = above(taken.spec.tier);
+            let last = ran_on(&taken);
+            drop(taken);
+            self.changed.notify_waiters();
+            taken = match self.take_when_free(at_least, cancel).await {
+                Some(next) => next,
+                None => {
+                    return (
+                        RunResult::err(failed("; no retry: the task was stopped")),
+                        reported("failed"),
+                        last,
+                    );
+                }
+            };
             attempt += 1;
             prompt = format!(
-                "{}\n\nYour previous attempt did not pass the check `{}` ({}). Its output:\n```\n{}\n```\n\nYour previous reply was:\n{}\n\nFix what the check reports.",
+                "{}\n\nA previous attempt did not pass the check `{}` ({}). Its output:\n```\n{}\n```\n\nIts reply was:\n{}\n\nFix what the check reports.",
                 base, gate.command, verdict.ended, verdict.output, result.text
             );
         }
@@ -827,19 +644,4 @@ impl<'e> Queue<'e> {
         drop(inner);
         self.changed.notify_waiters();
     }
-}
-
-const HOUR: u64 = 3600;
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
-fn over_budget_message(agent: &str, wait: u64) -> String {
-    format!(
-        "agent '{agent}' has used its budget for this hour; the next run is allowed in {}.",
-        minutes(wait)
-    )
 }

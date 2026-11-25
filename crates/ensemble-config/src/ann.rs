@@ -6,13 +6,12 @@
 //! turns it on, and a runner may share it through the hub.
 //!
 //! A provider's name is unique in the pool, so whatever names a model (the
-//! hub's distiller and embedding model, a team's agents) names it as
+//! hub's distiller and embedding model) names it as
 //! `<provider>:<id>`. A process reaches the providers it uses through the hub at
 //! a loopback address of its own ([`RelayAt`]), where each looks like any
 //! OpenAI-compatible server; a model of one is named there as the runner
 //! that shares it names it, `<its provider>:<id>`.
 
-use super::validate::resolve_provider;
 use super::*;
 use serde::{Deserialize, Serialize};
 
@@ -446,53 +445,33 @@ pub enum Use {
     Embedding,
 }
 
-/// What a pool is checked against: each provider's name with whether it
-/// serves the OpenAI API, and the models.
+/// What a pool is checked against: each provider's name, and the models.
 pub(crate) struct Known<'a> {
-    pub(crate) openai: BTreeMap<&'a str, bool>,
+    pub(crate) providers: Vec<&'a str>,
     pub(crate) models: &'a [PoolModel],
 }
 
 impl AnnPoolSetting {
     pub(crate) fn known(&self) -> Known<'_> {
         Known {
-            openai: self
-                .providers
-                .iter()
-                .map(|(name, s)| (name.as_str(), s.is_openai()))
-                .collect(),
-            models: &self.models,
-        }
-    }
-}
-
-impl AnnPool {
-    pub(crate) fn known(&self) -> Known<'_> {
-        Known {
-            openai: self
-                .direct
-                .iter()
-                .map(|(name, b)| (name.as_str(), b.type_id() == OPENAI_COMPATIBLE_API))
-                .chain(self.relayed.keys().map(|name| (name.as_str(), true)))
-                .collect(),
+            providers: self.providers.keys().map(String::as_str).collect(),
             models: &self.models,
         }
     }
 }
 
 /// Check that the model `id` of `provider`, named at `at`, is one of `pool`'s,
-/// on, and of `use_`; for OpenCode, of an OpenAI-compatible provider.
+/// on, and of `use_`.
 pub(crate) fn check_model(
     at: &str,
     provider: &str,
     id: &str,
     use_: Use,
-    opencode: bool,
     pool: &Known<'_>,
     problems: &mut Vec<String>,
 ) {
-    let Some(openai) = pool.openai.get(provider) else {
-        let known: Vec<&str> = pool.openai.keys().copied().collect();
+    if !pool.providers.contains(&provider) {
+        let known = &pool.providers;
         problems.push(format!(
             "{at}: there is no provider '{provider}' in the ANN pool. Its providers: {}.",
             if known.is_empty() {
@@ -500,12 +479,6 @@ pub(crate) fn check_model(
             } else {
                 known.join(", ")
             }
-        ));
-        return;
-    };
-    if opencode && !openai {
-        problems.push(format!(
-            "{at}: the provider '{provider}' is of type '{ANTHROPIC_API}', which OpenCode cannot use: it needs an '{OPENAI_COMPATIBLE_API}' one. Use a model of type '{PROVIDER_MODEL}', a `claude-code` agent, or a `direct` agent"
         ));
         return;
     }
@@ -537,5 +510,77 @@ pub(crate) fn check_model(
             "{at}: {name} is not {wanted}: it is {}",
             model.kind.describe()
         ));
+    }
+}
+/// A provider the process calls itself, checked, with its key from `env`: a
+/// URL, a timeout and an optional key. Not another runner.
+pub(crate) fn resolve_provider(
+    at: &str,
+    name: &str,
+    kept: &crate::ann::ProviderSetting,
+    env: &dyn Env,
+) -> Result<LlmBackend, Vec<String>> {
+    use crate::ann::ProviderSetting;
+    let (anthropic, base_url, api_key_env, timeout_seconds) = match kept {
+        ProviderSetting::OpenAiCompatible {
+            base_url,
+            api_key_env,
+            timeout_seconds,
+            ..
+        } => (false, base_url, api_key_env, *timeout_seconds),
+        ProviderSetting::Anthropic {
+            base_url,
+            api_key_env,
+            timeout_seconds,
+            ..
+        } => (true, base_url, api_key_env, *timeout_seconds),
+        ProviderSetting::Runner { .. } => {
+            return Err(vec![format!(
+                "{at}: is another runner, reached through the hub"
+            )]);
+        }
+    };
+    let mut problems = Vec::new();
+    if timeout_seconds == 0 {
+        problems.push(format!("{at}: `timeout_seconds` must be greater than 0"));
+    }
+    let base_url = base_url.trim();
+    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+        problems.push(format!(
+            "{at}: `base_url` '{base_url}' must start with http:// or https://"
+        ));
+    }
+
+    // A key is optional — a local llama-server usually wants none — but a
+    // *named* variable that is empty is a different thing from no variable at
+    // all: somebody expected authentication. Say so rather than sending an
+    // empty bearer token and reading a 401 later.
+    let api_key = match api_key_env {
+        None => None,
+        Some(key_var) => match env.get(key_var).filter(|v| !v.trim().is_empty()) {
+            Some(k) => Some(k),
+            None => {
+                eprintln!(
+                    "ensemble: note: {at} names ${key_var} for its API key, \
+                     but it is unset; requests will be sent unauthenticated"
+                );
+                None
+            }
+        },
+    };
+
+    if problems.is_empty() {
+        let base_url = base_url.trim_end_matches('/').to_string();
+        Ok(LlmBackend {
+            name: name.to_string(),
+            timeout_seconds,
+            settings: if anthropic {
+                BackendSettings::Anthropic { base_url, api_key }
+            } else {
+                BackendSettings::OpenAiCompatible { base_url, api_key }
+            },
+        })
+    } else {
+        Err(problems)
     }
 }

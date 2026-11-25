@@ -1,4 +1,4 @@
-//! Reading the environment, and where an organization's config lives.
+//! Reading the environment, and the variables Ensemble names for keys it keeps.
 
 use super::*;
 
@@ -20,13 +20,6 @@ impl Env for BTreeMap<String, String> {
     fn get(&self, key: &str) -> Option<String> {
         BTreeMap::get(self, key).cloned()
     }
-}
-
-/// The config file of the organization in directory `org`: `config.yaml`.
-/// Parent directories are deliberately not searched, and there is no
-/// user-level fallback: the organization is named, never found.
-pub fn config_path(org: &Path) -> PathBuf {
-    org.join(CONFIG_FILENAME)
 }
 
 /// The variable that holds the API key of the provider `name` when Ensemble

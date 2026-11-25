@@ -104,7 +104,7 @@
           };
           ensemble-runner = executable {
             name = "ensemble-runner";
-            description = "This computer's Ensemble runner: it runs the tasks of a hub with your helper teams";
+            description = "This computer's Ensemble runner: it runs the tasks of a hub on its harnesses and models";
             tests = [
               "ensemble-runner"
               "ensemble-tasks"

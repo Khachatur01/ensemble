@@ -19,8 +19,7 @@ use ensemble_config::Permission;
 use ensemble_core::runtime::blocking;
 use ensemble_knowledge::Visibility;
 use ensemble_link::protocol::{
-    RECALL, RUNNERS, Request, SHARE, TASK, TASK_ANSWER, TASK_ASSIGN, TASK_CANCEL, TASK_CREATE,
-    TASK_GATE, TASKS,
+    RECALL, RUNNERS, Request, SHARE, TASK, TASK_ANSWER, TASK_CANCEL, TASK_CREATE, TASK_GATE, TASKS,
 };
 use serde_json::{Map, Value, json};
 use tokio::net::TcpStream;
@@ -35,12 +34,11 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_MESSAGE: usize = 1024 * 1024;
 
 /// The tools of tasks, and the link's method each runs.
-const AGENTS: &str = "agents";
+const RUNNERS_TOOL: &str = "runners";
 const SUBMIT: &str = "submit";
 const LIST: &str = "tasks";
 const SHOW: &str = "task";
 const ANSWER: &str = "answer";
-const ASSIGN: &str = "assign";
 const GATE: &str = "gate";
 const CANCEL: &str = "cancel";
 
@@ -191,16 +189,15 @@ impl Server<'_> {
         }
         if self.keeps_tasks() && permissions.contains(&Permission::Tasks) {
             out.push_str(
-                "\n\nThe user has a helper team of agents on their runners, which work through \
-                 tasks kept here. Make one with `submit` when the user wants work done that goes \
-                 on without this conversation, naming the project (the repository's name), and \
-                 its `repository` (the URL or path to clone it from) when you know it, and \
-                 giving the agent everything it needs: it cannot see this conversation. `agents` \
-                 lists the agents of the runners connected now. Follow a task with `tasks` and \
-                 `task`; when it asks a question, ask the user and `answer` it. A task is \
-                 `blocked` when every runner gave it back, saying why in `given_back`: tell the \
-                 user, and `assign` it again once that is fixed. A task with no agent waits in \
-                 the backlog until you `assign` it.",
+                "\n\nThe user's runners work through tasks kept here, each on a harness and a \
+                 model the runner picks. Make one with `submit` when the user wants work done \
+                 that goes on without this conversation, naming the project (the repository's \
+                 name), and its `repository` (the URL or path to clone it from) when you know it, \
+                 and giving the run everything it needs: it cannot see this conversation. \
+                 `runners` lists the runners connected now and what each runs on. Follow a task \
+                 with `tasks` and `task`; when it asks a question, ask the user and `answer` it. \
+                 A task is `blocked` when every runner gave it back, saying why in `given_back`: \
+                 tell the user, and `answer` or make it again once that is fixed.",
             );
         }
         out
@@ -272,10 +269,10 @@ impl Server<'_> {
                 let recalled = ask(RECALL, pass(&["query"]))?;
                 Ok(recalled["text"].as_str().unwrap_or("").to_string())
             }
-            AGENTS => {
+            RUNNERS_TOOL => {
                 tasks()?;
                 let listed = ask(RUNNERS, json!({}))?;
-                Ok(agents_text(&listed))
+                Ok(runners_text(&listed))
             }
             SUBMIT => {
                 tasks()?;
@@ -285,14 +282,9 @@ impl Server<'_> {
                     json!({ "project": field("project"), "ticket": ticket }),
                 )?;
                 Ok(format!(
-                    "Made task {} in {}{}.",
+                    "Made task {} in {}.",
                     made["id"].as_str().unwrap_or("?"),
                     field("project"),
-                    if ticket["agent"].as_str().is_some_and(|a| !a.is_empty()) {
-                        format!(", for {}", ticket["agent"].as_str().unwrap_or(""))
-                    } else {
-                        ", in the backlog until it is assigned".into()
-                    }
                 ))
             }
             LIST => {
@@ -311,11 +303,6 @@ impl Server<'_> {
                 tasks()?;
                 ask(TASK_ANSWER, pass(&["project", "id", "text"]))?;
                 Ok(format!("Answered task {}; it goes on.", field("id")))
-            }
-            ASSIGN => {
-                tasks()?;
-                ask(TASK_ASSIGN, pass(&["project", "id", "agent"]))?;
-                Ok(format!("Gave task {} to {}.", field("id"), field("agent")))
             }
             GATE => {
                 tasks()?;
@@ -355,23 +342,40 @@ fn pretty(value: &Value) -> Result<String, String> {
     serde_json::to_string_pretty(value).map_err(|e| e.to_string())
 }
 
-/// The agents of the runners `listed`, the user's own, one per line.
-fn agents_text(listed: &Value) -> String {
+/// The runners `listed`, the user's own, each with what it runs tasks on.
+fn runners_text(listed: &Value) -> String {
     let mut lines = Vec::new();
     for runner in listed["runners"].as_array().into_iter().flatten() {
-        for agent in runner["agents"].as_array().into_iter().flatten() {
-            let about = agent["about"].as_str().unwrap_or("").trim();
-            lines.push(format!(
-                "- {} on {}{}",
-                agent["name"].as_str().unwrap_or("?"),
-                runner["runner"].as_str().unwrap_or("?"),
-                if about.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {about}")
-                }
-            ));
-        }
+        let name = runner["runner"].as_str().unwrap_or("?");
+        let harnesses: Vec<String> = runner["harnesses"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|h| {
+                let models: Vec<String> = h["models"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|m| {
+                        format!(
+                            "{} ({})",
+                            m["model"].as_str().unwrap_or("?"),
+                            m["tier"].as_str().unwrap_or("?")
+                        )
+                    })
+                    .collect();
+                format!(
+                    "{} on {}",
+                    h["harness"].as_str().unwrap_or("?"),
+                    models.join(", ")
+                )
+            })
+            .collect();
+        lines.push(if harnesses.is_empty() {
+            format!("- {name}: runs no task (no harness is on with a model it can drive)")
+        } else {
+            format!("- {name}: {}", harnesses.join("; "))
+        });
     }
     if lines.is_empty() {
         "No runner that works for you is connected now. A task still waits for one.".into()
@@ -420,7 +424,6 @@ pub(crate) fn ticket(args: &Value, what: &str) -> Result<Value, String> {
     let mut ticket = json!({
         "id": "",
         "title": title,
-        "agent": text("agent"),
         "context": optional("context"),
         "goal": optional("goal"),
         "repository": repository,
@@ -458,7 +461,7 @@ pub(crate) fn gate(args: &Value, what: &str) -> Result<Value, String> {
             "attempts": attempts,
         })),
         _ => Err(format!(
-            "{what}: `gate` is {{command, timeout_seconds, attempts}}: the shell command the work must pass, the seconds it may run, and how many runs of the agent it gets to pass it, each at least 1"
+            "{what}: `gate` is {{command, timeout_seconds, attempts}}: the shell command the work must pass, the seconds it may run, and how many runs it gets to pass it, each at least 1"
         )),
     }
 }
@@ -473,11 +476,11 @@ fn task_tools() -> Vec<Value> {
     let list = |about: &str| json!({ "type": "array", "items": { "type": "string" }, "description": about });
     let gate = json!({
         "type": "object",
-        "description": "A check the work must pass: a shell command, run in the task's working directory after the agent is done (exit status 0 passes), how long it may run, and how many runs of the agent the task gets to pass it.",
+        "description": "A check the work must pass: a shell command, run in the task's working directory after the run is done (exit status 0 passes), how long it may run, and how many runs the task gets to pass it.",
         "properties": {
             "command": { "type": "string", "description": "The command, run with `sh -c`, such as `cargo test`." },
             "timeout_seconds": { "type": "integer", "minimum": 1, "description": "Seconds it may run before it is stopped and counts as failed." },
-            "attempts": { "type": "integer", "minimum": 1, "description": "Runs of the agent in all, the first included." },
+            "attempts": { "type": "integer", "minimum": 1, "description": "Runs in all, the first included." },
         },
         "required": ["command", "timeout_seconds", "attempts"],
     });
@@ -490,27 +493,25 @@ fn task_tools() -> Vec<Value> {
     };
     vec![
         tool(
-            AGENTS,
-            "List the helper agents of the user's runners connected now, which may take tasks.",
+            RUNNERS_TOOL,
+            "List the user's runners connected now, each with the harnesses and models it runs tasks on.",
             json!({}),
             &[],
         ),
         tool(
             SUBMIT,
-            "Make a task for a helper agent, kept on the hub, and return its id at once. A runner \
-             with the agent takes it, finds the project in its workspace or clones it from \
-             `repository`, and works on it on a branch it pushes, after this conversation ends; \
-             without `repository`, a runner with no copy asks for it on the task. The hub adds \
-             the notes it knows related to the task. Without `agent` it waits in the backlog \
-             until it is assigned.",
+            "Make a task, kept on the hub, and return its id at once. One of the user's runners \
+             takes it, picks a harness and a model for it, finds the project in its workspace \
+             or clones it from `repository`, and works on it on a branch it pushes, after this \
+             conversation ends; without `repository`, a runner with no copy asks for it on the \
+             task. The hub adds the notes it knows related to the task.",
             json!({
                 "project": project,
                 "title": { "type": "string", "description": "The task in a few words, one line." },
-                "task": { "type": "string", "description": "What to do, self-contained: the agent cannot see this conversation." },
-                "agent": { "type": "string", "description": "The agent, `<team>/<agent>`, as `agents` lists it." },
+                "task": { "type": "string", "description": "What to do, self-contained: the run cannot see this conversation." },
                 "goal": { "type": "string", "description": "The outcome wanted, in a sentence." },
-                "context": { "type": "string", "description": "Background the agent needs." },
-                "constraints": list("What the agent must not do or change."),
+                "context": { "type": "string", "description": "Background the run needs." },
+                "constraints": list("What the run must not do or change."),
                 "files": list("Where the work is."),
                 "done_when": list("How to tell it is done, such as `cargo test passes`."),
                 "after": list("Ids of tasks that must be done first."),
@@ -522,13 +523,13 @@ fn task_tools() -> Vec<Value> {
         ),
         tool(
             LIST,
-            "List the tasks of a project: each one's id, title, agent and state.",
+            "List the tasks of a project: each one's id, title and state.",
             json!({ "project": project }),
             &["project"],
         ),
         tool(
             SHOW,
-            "Show one task: its ticket, state, questions, hand-offs and result.",
+            "Show one task: its ticket, state, questions and result.",
             json!({ "project": project, "id": id }),
             &["project", "id"],
         ),
@@ -537,12 +538,6 @@ fn task_tools() -> Vec<Value> {
             "Answer the question a task asked, so that it goes on.",
             json!({ "project": project, "id": id, "text": { "type": "string", "description": "The answer." } }),
             &["project", "id", "text"],
-        ),
-        tool(
-            ASSIGN,
-            "Give a task to an agent, such as one waiting in the backlog.",
-            json!({ "project": project, "id": id, "agent": { "type": "string", "description": "The agent, `<team>/<agent>`." } }),
-            &["project", "id", "agent"],
         ),
         tool(
             GATE,
@@ -778,8 +773,7 @@ mod tests {
         assert_eq!(
             tool_names(&hub, &hub.ana),
             [
-                "share", "recall", "agents", "submit", "tasks", "task", "answer", "assign", "gate",
-                "cancel"
+                "share", "recall", "runners", "submit", "tasks", "task", "answer", "gate", "cancel"
             ]
         );
         assert_eq!(
@@ -801,17 +795,16 @@ mod tests {
             "submit",
             json!({
                 "project": "shop", "title": "Fix the cart", "task": "The cart loses items.",
-                "agent": "web/coder", "done_when": ["cargo test passes"],
+                "done_when": ["cargo test passes"],
             }),
         );
         assert!(!failed, "{text}");
-        assert_eq!(text, "Made task t-1 in shop, for web/coder.");
+        assert_eq!(text, "Made task t-1 in shop.");
         let (user, method, params) = tasks.asked.lock().unwrap()[0].clone();
         assert_eq!((user.as_str(), method.as_str()), ("ana", "task_create"));
         assert_eq!(params["project"], "shop");
         let ticket = &params["ticket"];
         assert_eq!(ticket["text"], "The cart loses items.");
-        assert_eq!(ticket["agent"], "web/coder");
         assert_eq!(ticket["done_when"], json!(["cargo test passes"]));
         assert_eq!(ticket["constraints"], json!([]));
         assert_eq!(ticket["goal"], Value::Null);
@@ -825,7 +818,7 @@ mod tests {
             "submit",
             json!({
                 "project": "shop", "title": "Fix the cart", "task": "The cart loses items.",
-                "agent": "web/coder", "repository": "git@example.com:acme/shop.git",
+                "repository": "git@example.com:acme/shop.git",
                 "gate": {"command": "cargo test", "timeout_seconds": 600, "attempts": 3},
                 "notes": "mine",
             }),
@@ -908,39 +901,46 @@ mod tests {
             .map(|(_, _, params)| &params["gate"])
             .collect();
         assert_eq!(gated, [&gate, &Value::Null]);
-        let (text, _) = tool(&hub, &hub.ana, "agents", json!({}));
+        let (text, _) = tool(&hub, &hub.ana, "runners", json!({}));
         assert!(text.starts_with("No runner that works for you"), "{text}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn agents_lists_the_accounts_runners_with_their_agents() {
+    async fn runners_lists_the_accounts_runners_with_what_they_run_on() {
         use ensemble_link::client::Connection;
         use ensemble_link::protocol::RUNNER;
         let tasks: &'static Tasks = Box::leak(Box::default());
         let hub = start_with_tasks(tasks);
         let mut desk = Connection::open(&hub.url, &hub.ana).await.unwrap();
-        // It works for ana, with every agent.
         desk.call(
             RUNNER,
-            json!({"name": "desk",
-                   "agents": [{"name": "web/coder", "about": "Writes code."}, {"name": "web/reviewer", "about": ""}]}),
+            json!({"name": "desk", "harnesses": [
+                {"harness": "claude-code", "models": [{"model": "haiku", "tier": "medium"}, {"model": "sonnet", "tier": "strong"}]},
+                {"harness": "builtin", "models": [{"model": "local:qwen3.5:9b", "tier": "medium"}]},
+            ]}),
         )
         .await
         .unwrap();
+        let mut laptop = Connection::open(&hub.url, &hub.ana).await.unwrap();
+        laptop
+            .call(RUNNER, json!({"name": "laptop", "harnesses": []}))
+            .await
+            .unwrap();
         // root's works for root alone.
         let mut gpu = Connection::open(&hub.url, &hub.root).await.unwrap();
         gpu.call(
             RUNNER,
-            json!({"name": "gpu", "agents": [{"name": "lab/big", "about": ""}]}),
+            json!({"name": "gpu", "harnesses": [{"harness": "codex", "models": [{"model": "gpt-5", "tier": "strong"}]}]}),
         )
         .await
         .unwrap();
         let (text, failed) =
-            ensemble_core::runtime::blocking(|| tool(&hub, &hub.ana, "agents", json!({})));
+            ensemble_core::runtime::blocking(|| tool(&hub, &hub.ana, "runners", json!({})));
         assert!(!failed, "{text}");
         assert_eq!(
             text,
-            "- web/coder on ana/desk: Writes code.\n- web/reviewer on ana/desk"
+            "- ana/desk: claude-code on haiku (medium), sonnet (strong); builtin on local:qwen3.5:9b (medium)\n\
+             - ana/laptop: runs no task (no harness is on with a model it can drive)"
         );
     }
 }

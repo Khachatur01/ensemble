@@ -1,7 +1,7 @@
-//! The work of the helper teams: tasks (`tasks`), kept on the hub and leased
-//! by the runners that run them (`board`); what a runner keeps of the runs it
-//! does (`runs`); the worker that runs a repository's tasks within each
-//! agent's slots and budget (`queue`); one run of an agent and what it came to
+//! The work a runner does: tasks (`tasks`), kept on the hub and leased by the
+//! runners that run them (`board`); what a runner keeps of the runs it does
+//! (`runs`); the worker that runs a repository's tasks on the harnesses and
+//! LLMs the picker chooses (`queue`); one run on a task and what it came to
 //! (`delegation`); and the one-worker-per-folder lock (`lock`).
 
 pub mod board;

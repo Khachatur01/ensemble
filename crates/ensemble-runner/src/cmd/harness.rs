@@ -5,7 +5,7 @@
 
 use super::runner::{RunnerContext, changing, edit};
 use crate::setup;
-use ensemble_config::{Harness, HarnessKind};
+use ensemble_config::{Harness, HarnessChange, HarnessKind};
 use ensemble_ops::{Access, Caller, Error, Field, Kind, Operation, Spec, operation};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -26,6 +26,16 @@ const SET: &[Field] = &[
     ),
     Field::new("max_seconds", Kind::Number, "Seconds one run may take."),
     Field::new("max_steps", Kind::Number, "The most steps of one run."),
+    Field::new(
+        "max_concurrent",
+        Kind::Number,
+        "The most runs on it at once.",
+    ),
+    Field::new(
+        "max_tokens",
+        Kind::Number,
+        "The most tokens of answer per model call: builtin's alone.",
+    ),
 ];
 
 #[derive(Deserialize, Serialize)]
@@ -39,6 +49,8 @@ struct Set {
     command: Option<String>,
     max_seconds: Option<u64>,
     max_steps: Option<u32>,
+    max_concurrent: Option<u32>,
+    max_tokens: Option<u32>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -56,7 +68,7 @@ pub fn operations() -> Vec<Operation<RunnerContext>> {
         operation(
             spec(
                 "harness.list",
-                "List the harnesses: each found or missing, on or off, logged in where its CLI says, how long and how many steps a run may take, and what it drives.",
+                "List the harnesses: each found or missing, on or off, logged in where its CLI says, how long and how many steps a run may take, how many run at once, and what it drives.",
                 &[],
             ),
             |c: &RunnerContext, _: &Caller, _: Nothing| list(c),
@@ -76,7 +88,7 @@ pub fn operations() -> Vec<Operation<RunnerContext>> {
         changing(
             spec(
                 "harness.set",
-                "Change a harness's command, or how long and how many steps a run may take.",
+                "Change a harness's command, how long and how many steps a run may take, or how many run at once.",
                 SET,
             ),
             |c, input: Set, change| set(c, input, change),
@@ -127,6 +139,8 @@ fn listed(h: &Harness) -> Value {
         "command": h.command,
         "max_seconds": h.max_seconds,
         "max_steps": h.max_steps,
+        "max_concurrent": h.max_concurrent,
+        "max_tokens": h.max_tokens,
         "logged_in": setup::logged_in(h.kind),
         "models": models,
         "drives": drives(h.kind),
@@ -150,10 +164,11 @@ fn line(h: &Harness) -> String {
         (None, _) => String::new(),
     };
     format!(
-        "{:<12} {state:<8} {program}{} s and {} steps a run; {}",
+        "{:<12} {state:<8} {program}{} s and {} steps a run, {} at once; {}",
         h.kind.as_str(),
         h.max_seconds,
         h.max_steps,
+        h.max_concurrent,
         drives(h.kind)
     )
 }
@@ -199,7 +214,13 @@ fn turn(
         }
     );
     edit(c, change, said, |s| {
-        s.harnesses.change(kind, Some(on), None, None);
+        s.harnesses.change(
+            kind,
+            HarnessChange {
+                on: Some(on),
+                ..HarnessChange::default()
+            },
+        );
         Ok(())
     })
 }
@@ -229,9 +250,25 @@ fn set(
     if input.max_steps == Some(0) {
         return Err(Error::invalid("`max_steps` must be greater than 0").on("max_steps"));
     }
-    if command.is_none() && input.max_seconds.is_none() && input.max_steps.is_none() {
+    if input.max_concurrent == Some(0) {
+        return Err(Error::invalid("`max_concurrent` must be greater than 0").on("max_concurrent"));
+    }
+    if input.max_tokens == Some(0) {
+        return Err(Error::invalid("`max_tokens` must be greater than 0").on("max_tokens"));
+    }
+    if input.max_tokens.is_some() && kind != HarnessKind::Builtin {
+        return Err(
+            Error::invalid("only builtin takes `max_tokens`: a CLI keeps its own").on("max_tokens"),
+        );
+    }
+    if command.is_none()
+        && input.max_seconds.is_none()
+        && input.max_steps.is_none()
+        && input.max_concurrent.is_none()
+        && input.max_tokens.is_none()
+    {
         return Err(Error::invalid(
-            "say what changes: --command, --max-seconds or --max-steps",
+            "say what changes: --command, --max-seconds, --max-steps, --max-concurrent or --max-tokens",
         ));
     }
     let name = kind.as_str();
@@ -240,8 +277,16 @@ fn set(
             h.command = command.to_string();
             h.missing = !setup::found(command);
         }
-        s.harnesses
-            .change(kind, None, input.max_seconds, input.max_steps);
+        s.harnesses.change(
+            kind,
+            HarnessChange {
+                max_seconds: input.max_seconds,
+                max_steps: input.max_steps,
+                max_concurrent: input.max_concurrent,
+                max_tokens: input.max_tokens,
+                ..HarnessChange::default()
+            },
+        );
         Ok(())
     })
 }
@@ -258,9 +303,9 @@ fn refresh(c: &RunnerContext, change: ensemble_config::kept::Change) -> Result<V
     })
 }
 
-/// Look for the harnesses' CLIs as the runner starts, as this computer: what
-/// is found is off until a person turns it on, so the running runner need
-/// not start again for it.
+/// Look for the harnesses' CLIs as the runner starts, as this computer,
+/// before it reads its settings: what is found is off until a person turns
+/// it on, and one gone missing runs no task.
 pub fn refresh_at_start(c: &RunnerContext) -> Result<String, Error> {
     let out = refresh(
         c,

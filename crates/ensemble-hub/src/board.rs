@@ -5,14 +5,14 @@
 //! connected now that may take an account's tasks ([`Present`]), which say
 //! whether a task given back is blocked.
 //!
-//! A task is offered to the runners of its account with its agent. Being
-//! busy is not giving back: a task waits while a runner with its agent is
-//! connected and has not given it back.
+//! A task is offered to the runners of its account that run tasks: those with
+//! a harness and an LLM it can drive. Being busy is not giving back: a task
+//! waits while such a runner is connected and has not given it back.
 
 use async_trait::async_trait;
 use ensemble_core::runtime::blocking;
 use ensemble_link::protocol::{
-    TASK, TASK_ANSWER, TASK_ASSIGN, TASK_CANCEL, TASK_CLAIM, TASK_CREATE, TASK_FINISH, TASK_GATE,
+    TASK, TASK_ANSWER, TASK_CANCEL, TASK_CLAIM, TASK_CREATE, TASK_FINISH, TASK_GATE,
     TASK_GIVE_BACK, TASK_PROJECTS, TASK_RELEASE, TASK_RENEW, TASKS, TASKS_WAITING,
 };
 use ensemble_store::{self as store, Value as Sql};
@@ -83,14 +83,12 @@ pub struct Asker<'a> {
     pub runners: &'a (dyn Fn(&str) -> Vec<Present> + Sync),
 }
 
-/// A runner connected now that may take an account's tasks, and the agents
-/// it takes them with.
+/// A runner connected now that may take an account's tasks: one that runs
+/// tasks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Present {
     /// Its name, as its claims name it.
     pub name: String,
-    /// Every agent of its teams.
-    pub agents: Vec<String>,
 }
 
 /// A task as the hub keeps it.
@@ -101,8 +99,6 @@ struct Record {
     questions: Vec<Question>,
     /// The reply that last asked.
     reply: String,
-    /// What agents handed on, as the next agent reads it.
-    handoffs: String,
     lease: Option<Lease>,
     interrupted_on: Option<String>,
     /// The runner whose folder its work is in, when that work cannot move.
@@ -157,7 +153,6 @@ impl Record {
             && !self.given_back.is_empty()
             && present
                 .iter()
-                .filter(|r| r.agents.contains(&self.ticket.agent))
                 .all(|r| self.given_back.iter().any(|g| g.runner == r.name))
     }
 
@@ -185,7 +180,7 @@ impl Record {
     }
 
     /// The task with what it said. A runner's question where the project is
-    /// is not the agent's, so it is not in what the agent is told it asked.
+    /// is not the run's, so it is not in what the run is told it asked.
     fn detail(&self, now: u64, present: Option<&[Present]>) -> Detail {
         let asked: Vec<&Question> = self.questions.iter().filter(|q| !q.repository).collect();
         let conversation = (!asked.is_empty()).then(|| {
@@ -207,7 +202,6 @@ impl Record {
             task: self.task(now, present),
             outcome: self.result.clone(),
             conversation,
-            handoffs: (!self.handoffs.is_empty()).then(|| self.handoffs.clone()),
             progress: self.progress.clone(),
         }
     }
@@ -370,14 +364,12 @@ impl DbBoard {
             ticket: Ticket {
                 id: id.clone(),
                 title: ticket.title.trim().to_string(),
-                agent: ticket.agent.trim().to_string(),
                 text: ticket.text.trim().to_string(),
                 ..ticket.clone()
             },
             created: utc(SystemTime::now()),
             questions: Vec::new(),
             reply: String::new(),
-            handoffs: String::new(),
             lease: None,
             interrupted_on: None,
             pinned_to: None,
@@ -400,8 +392,7 @@ impl DbBoard {
         Ok(id)
     }
 
-    /// Lease task `id` to `node` for `seconds`, if it may start: assigned,
-    /// not ended, not waiting on an answer or another task, not running on
+    /// Lease task `id` to `node` for `seconds`, if it may start: not ended, not waiting on an answer or another task, not running on
     /// another runner, and not pinned to one.
     /// A runner that claims a task it held before, such as after it started
     /// again, gets it back. Unless the run is `movable`, the task is pinned
@@ -417,9 +408,6 @@ impl DbBoard {
             let refused = |why: &str| Ok(Claim::Refused(why.to_string()));
             if r.result.is_some() {
                 return refused("it has ended");
-            }
-            if r.ticket.agent.is_empty() {
-                return refused("it is in the backlog");
             }
             if r.open_question().is_some() {
                 return refused("it waits for an answer");
@@ -486,7 +474,7 @@ impl DbBoard {
             if r.cancel {
                 r.result = Some(outcome(
                     Status::Cancelled,
-                    &r.ticket.agent,
+                    None,
                     &utc(SystemTime::now()),
                     &[],
                     "Cancelled while it ran.",
@@ -522,12 +510,19 @@ impl DbBoard {
             match end {
                 End::Result {
                     status,
-                    agent,
+                    harness,
+                    model,
                     started,
                     extra,
                     text,
                 } => {
-                    r.result = Some(outcome(status, &agent, &started, &extra, &text));
+                    r.result = Some(outcome(
+                        status,
+                        Some((&harness, &model)),
+                        &started,
+                        &extra,
+                        &text,
+                    ));
                     r.cancel = false;
                 }
                 End::Ask {
@@ -541,28 +536,11 @@ impl DbBoard {
                         answer: None,
                         repository,
                     });
-                    // The runner asked, not the agent: what the agent last
-                    // said stays.
+                    // The runner asked, not the run: what the run last said
+                    // stays.
                     if !repository {
                         r.reply = reply;
                     }
-                }
-                End::Handoff {
-                    from,
-                    to,
-                    note,
-                    reply,
-                } => {
-                    r.handoffs.push_str(&format!(
-                        "## {from} handed this to {to}\n{}\n\nWhat {from} had said:\n{}\n\n",
-                        if note.trim().is_empty() {
-                            "(no note)"
-                        } else {
-                            note.trim()
-                        },
-                        reply.trim()
-                    ));
-                    r.ticket.agent = to;
                 }
             }
             Ok(())
@@ -611,24 +589,6 @@ impl DbBoard {
         })
     }
 
-    /// Give task `id` to `agent`; not one that runs or has ended. Assigned,
-    /// it is offered to every runner again, those that gave it back too.
-    pub fn give(&self, id: &str, agent: &str) -> Result<(), String> {
-        self.change(id, |r, now| {
-            if r.result.is_some() {
-                return Err(format!(
-                    "{id} has ended; it cannot be assigned. Submit it again."
-                ));
-            }
-            if r.holder(now).is_some() {
-                return Err(format!("{id} is running; assign it when it stops."));
-            }
-            r.ticket.agent = agent.trim().to_string();
-            r.given_back.clear();
-            Ok(())
-        })
-    }
-
     /// Give task `id` the gate its work must pass, or none; not one that
     /// runs or has ended.
     pub fn set_gate(&self, id: &str, gate: Option<Gate>) -> Result<(), String> {
@@ -661,7 +621,7 @@ impl DbBoard {
             r.lease = None;
             r.result = Some(outcome(
                 Status::Cancelled,
-                &r.ticket.agent,
+                None,
                 &utc(SystemTime::now()),
                 &[],
                 "Cancelled before it started.",
@@ -671,14 +631,22 @@ impl DbBoard {
     }
 }
 
-/// A result: front matter, then the reply.
+/// A result: front matter, with the harness and the model of its last run
+/// when it ran, then the reply.
 fn outcome(
     status: Status,
-    agent: &str,
+    ran: Option<(&str, &str)>,
     started: &str,
     extra: &[(String, String)],
     reply: &str,
 ) -> Outcome {
+    let ran = ran.map_or(String::new(), |(harness, model)| {
+        format!(
+            "harness: {}\nmodel: {}\n",
+            yaml_str(harness),
+            yaml_str(model)
+        )
+    });
     let extra: String = extra
         .iter()
         .map(|(key, value)| format!("{key}: {value}\n"))
@@ -686,9 +654,8 @@ fn outcome(
     Outcome {
         status,
         text: format!(
-            "---\nstatus: {}\nagent: {}\nstarted: {started}\nended: {}\n{extra}---\n{}\n",
+            "---\nstatus: {}\n{ran}started: {started}\nended: {}\n{extra}---\n{}\n",
             status.as_str(),
-            yaml_str(agent),
             utc(SystemTime::now()),
             reply.trim_end()
         ),
@@ -767,8 +734,8 @@ impl Board for DbBoard {
     }
 }
 
-/// Every task of `owner`'s, in every project, that waits for one of `agents`
-/// and that `runner`, a runner of `owner`'s, may take or ask about: not
+/// Every task of `owner`'s, in every project, that waits for a runner and
+/// that `runner`, a runner of `owner`'s, may take or ask about: not
 /// ended, not given back by it, and neither running on nor pinned to another
 /// runner. Those that wait for an answer or another task are there too: the
 /// runner looks for the projects it has no copy of.
@@ -776,7 +743,6 @@ pub fn waiting(
     dir: &Path,
     owner: &str,
     runner: &str,
-    agents: &[String],
     present: &[Present],
 ) -> Result<Vec<Waiting>, String> {
     let rows = with(dir, async |c| {
@@ -797,7 +763,6 @@ pub fn waiting(
             serde_json::from_str(&data).map_err(|e| format!("a task is unreadable: {e}"))?;
         let mine = |n: &str| n == runner;
         if r.result.is_some()
-            || !agents.contains(&r.ticket.agent)
             || r.given_back.iter().any(|g| mine(&g.runner))
             || r.holder(now).is_some_and(|h| !mine(h))
             || r.pinned_to.as_deref().is_some_and(|p| !mine(p))
@@ -865,7 +830,7 @@ impl Service {
 const MAX_LEARNED: usize = 20_000;
 
 /// A task that ended done, as knowledge to share: a title and a text saying
-/// what was asked, what was asked and answered on the way, and what its agent
+/// what was asked, what was asked and answered on the way, and what its run
 /// reported. None for a task not done.
 pub fn learned(project: &str, task: &Detail) -> Option<(String, String)> {
     let outcome = task.outcome.as_ref()?;
@@ -874,8 +839,13 @@ pub fn learned(project: &str, task: &Detail) -> Option<(String, String)> {
     }
     let t = &task.task.ticket;
     let mut text = format!(
-        "What the helper agent {} reported when it had done task {} in the project {project}.\n\nAsked: {}\n",
-        t.agent, t.id, t.title
+        "What was reported when task {} in the project {project} was done{}.\n\nAsked: {}\n",
+        t.id,
+        outcome
+            .field("harness")
+            .zip(outcome.field("model"))
+            .map_or(String::new(), |(h, m)| format!(", on {h} with {m}")),
+        t.title
     );
     if let Some(goal) = &t.goal {
         text.push_str(&format!("Goal: {goal}\n"));
@@ -935,11 +905,9 @@ impl TaskService for Service {
             }
         };
         if method == TASKS_WAITING {
-            let agents: Vec<String> = serde_json::from_value(parsed("agents")?)
-                .map_err(|e| format!("{method}: `agents` is a list of agents: {e}"))?;
             let runner = text("runner")?;
             let own = (asker.runners)(user);
-            let tasks = waiting(&self.dir, user, runner, &agents, &own)?;
+            let tasks = waiting(&self.dir, user, runner, &own)?;
             return Ok(json!({ "tasks": tasks }));
         }
         if method == TASK_PROJECTS {
@@ -1000,10 +968,6 @@ impl TaskService for Service {
                 board.reply(text("id")?, text("text")?)?;
                 Ok(json!({ "answered": true }))
             }
-            TASK_ASSIGN => {
-                board.give(text("id")?, text("agent")?)?;
-                Ok(json!({ "assigned": true }))
-            }
             TASK_GATE => {
                 let gate: Option<Gate> = serde_json::from_value(
                     params.get("gate").cloned().unwrap_or(Value::Null),
@@ -1032,10 +996,9 @@ mod tests {
     use ensemble_core::workspace::testing::TempDir;
 
     /// A ticket with only what every ticket has.
-    fn draft(title: &str, agent: &str, text: &str) -> Ticket {
+    fn draft(title: &str, text: &str) -> Ticket {
         Ticket {
             title: title.into(),
-            agent: agent.into(),
             text: text.into(),
             ..Ticket::default()
         }
@@ -1048,7 +1011,8 @@ mod tests {
     fn result(text: &str) -> End {
         End::Result {
             status: Status::Done,
-            agent: "web/coder".into(),
+            harness: "opencode".into(),
+            model: "local:qwen3.5:9b".into(),
             started: "2026-10-31T12:00:00Z".into(),
             extra: vec![("branch".into(), "ensemble/0001-a".into())],
             text: text.into(),
@@ -1070,11 +1034,7 @@ mod tests {
                 timeout_seconds: 600,
                 attempts: 3,
             }),
-            ..draft(
-                "Add retry: to the fetcher!",
-                "web/coder",
-                "Retry three times.",
-            )
+            ..draft("Add retry: to the fetcher!", "Retry three times.")
         };
         assert_eq!(
             slug("Add retry: to the fetcher!"),
@@ -1093,25 +1053,25 @@ mod tests {
         let next = b
             .add(&Ticket {
                 after: vec![id.clone()],
-                ..draft("Next", "web/coder", "t")
+                ..draft("Next", "t")
             })
             .unwrap();
         assert_eq!(next, "0002-next");
-        assert_eq!(b.add(&draft("!!", "web/coder", "t")).unwrap(), "0003");
+        assert_eq!(b.add(&draft("!!", "t")).unwrap(), "0003");
         let err = b
             .add(&Ticket {
                 after: vec!["0042".into()],
-                ..draft("Later", "web/coder", "t")
+                ..draft("Later", "t")
             })
             .unwrap_err();
         assert!(err.contains("`after` names '0042'"), "{err}");
-        assert!(b.add(&draft("", "web/coder", "t")).is_err());
+        assert!(b.add(&draft("", "t")).is_err());
     }
 
     #[test]
     fn each_account_and_project_has_its_own_tasks() {
         let tmp = TempDir::new();
-        board(&tmp).add(&draft("Mine", "web/coder", "t")).unwrap();
+        board(&tmp).add(&draft("Mine", "t")).unwrap();
         assert!(
             DbBoard::new(&tmp.0, "rex", "shop")
                 .list()
@@ -1126,7 +1086,7 @@ mod tests {
         );
         assert_eq!(
             DbBoard::new(&tmp.0, "rex", "shop")
-                .add(&draft("Theirs", "web/coder", "t"))
+                .add(&draft("Theirs", "t"))
                 .unwrap(),
             "0001-theirs"
         );
@@ -1142,7 +1102,7 @@ mod tests {
     fn one_node_at_a_time_runs_a_task_until_its_lease_runs_out() {
         let tmp = TempDir::new();
         let b = board(&tmp);
-        let id = b.add(&draft("A", "web/coder", "t")).unwrap();
+        let id = b.add(&draft("A", "t")).unwrap();
         assert_eq!(b.take(&id, "laptop", 60, true).unwrap(), Claim::Taken);
         assert_eq!(
             b.take(&id, "gpu-box", 60, true).unwrap(),
@@ -1178,8 +1138,11 @@ mod tests {
         assert_eq!(d.task.status, Some(Status::Done));
         let outcome = d.outcome.unwrap();
         assert_eq!(outcome.reply(), "All done.\n");
-        assert_eq!(outcome.field("branch"), Some("ensemble/0001-a"));
-        assert_eq!(outcome.field("started"), Some("2026-10-31T12:00:00Z"));
+        assert_eq!(outcome.field("branch").as_deref(), Some("ensemble/0001-a"));
+        assert_eq!(
+            outcome.field("started").as_deref(),
+            Some("2026-10-31T12:00:00Z")
+        );
         assert_eq!(
             b.take(&id, "gpu-box", 60, true).unwrap(),
             Claim::Refused("it has ended".into())
@@ -1190,7 +1153,7 @@ mod tests {
     fn a_task_put_back_is_free_for_any_runner() {
         let tmp = TempDir::new();
         let b = board(&tmp);
-        let id = b.add(&draft("A", "web/coder", "t")).unwrap();
+        let id = b.add(&draft("A", "t")).unwrap();
         b.take(&id, "laptop", 60, true).unwrap();
         b.put_back(&id, "gpu-box", None).unwrap();
         assert_eq!(
@@ -1213,7 +1176,7 @@ mod tests {
         let tmp = TempDir::new();
         let b = board(&tmp);
         // In the desk's folder: it stays with the desk.
-        let here = b.add(&draft("Here", "web/coder", "t")).unwrap();
+        let here = b.add(&draft("Here", "t")).unwrap();
         assert_eq!(b.take(&here, "desk", 60, false).unwrap(), Claim::Taken);
         b.put_back(&here, "desk", None).unwrap();
         let t = &b.list().unwrap()[0];
@@ -1226,7 +1189,7 @@ mod tests {
         assert_eq!(b.take(&here, "desk", 60, false).unwrap(), Claim::Taken);
 
         // On a pushed branch: the laptop carries on where the desk stopped.
-        let moving = b.add(&draft("Moving", "web/coder", "t")).unwrap();
+        let moving = b.add(&draft("Moving", "t")).unwrap();
         b.take(&moving, "desk", 60, true).unwrap();
         let pushed = Progress {
             node: "desk".into(),
@@ -1251,7 +1214,7 @@ mod tests {
     fn a_tasks_gate_is_set_or_cleared_only_while_it_neither_runs_nor_has_ended() {
         let tmp = TempDir::new();
         let b = board(&tmp);
-        let id = b.add(&draft("Fix", "web/coder", "t")).unwrap();
+        let id = b.add(&draft("Fix", "t")).unwrap();
         let gate = Gate {
             command: "make test".into(),
             timeout_seconds: 60,
@@ -1282,29 +1245,20 @@ mod tests {
     }
 
     #[test]
-    fn a_task_starts_only_when_assigned_answered_and_after_what_it_waits_for() {
+    fn a_task_starts_only_when_answered_and_after_what_it_waits_for() {
         let tmp = TempDir::new();
         let b = board(&tmp);
-        let first = b.add(&draft("First", "web/coder", "t")).unwrap();
+        let first = b.add(&draft("First", "t")).unwrap();
         let second = b
             .add(&Ticket {
                 after: vec![first.clone()],
-                ..draft("Second", "web/coder", "t")
+                ..draft("Second", "t")
             })
             .unwrap();
-        let backlog = b.add(&draft("Later", "", "t")).unwrap();
         assert_eq!(
             b.take(&second, "laptop", 60, true).unwrap(),
             Claim::Refused(format!("it waits for {first}"))
         );
-        assert_eq!(
-            b.take(&backlog, "laptop", 60, true).unwrap(),
-            Claim::Refused("it is in the backlog".into())
-        );
-        b.give(&backlog, "web/coder").unwrap();
-        assert_eq!(b.take(&backlog, "laptop", 60, true).unwrap(), Claim::Taken);
-        let err = b.give(&backlog, "web/reviewer").unwrap_err();
-        assert!(err.contains("is running"), "{err}");
 
         b.take(&first, "laptop", 60, true).unwrap();
         b.end(
@@ -1338,49 +1292,14 @@ mod tests {
         assert_eq!(b.take(&first, "laptop", 60, true).unwrap(), Claim::Taken);
         b.end(&first, "laptop", result("done"), None).unwrap();
         assert_eq!(b.take(&second, "laptop", 60, true).unwrap(), Claim::Taken);
-        let err = b.give(&first, "web/reviewer").unwrap_err();
-        assert!(err.contains("has ended"), "{err}");
+        let ended = b.detail(&first).unwrap().unwrap().outcome.unwrap();
+        assert_eq!(ended.field("harness").as_deref(), Some("opencode"));
+        assert_eq!(ended.field("model").as_deref(), Some("local:qwen3.5:9b"));
     }
 
-    #[test]
-    fn a_hand_off_gives_the_task_to_the_next_agent_with_a_note() {
-        let tmp = TempDir::new();
-        let b = board(&tmp);
-        let id = b.add(&draft("A", "web/coder", "t")).unwrap();
-        b.take(&id, "laptop", 60, true).unwrap();
-        b.end(
-            &id,
-            "laptop",
-            End::Handoff {
-                from: "web/coder".into(),
-                to: "web/reviewer".into(),
-                note: "check the tests".into(),
-                reply: "coded it".into(),
-            },
-            None,
-        )
-        .unwrap();
-        let d = b.detail(&id).unwrap().unwrap();
-        assert_eq!(d.task.ticket.agent, "web/reviewer");
-        assert_eq!(d.task.status, None);
-        let handoffs = d.handoffs.unwrap();
-        assert!(
-            handoffs.starts_with("## web/coder handed this to web/reviewer\ncheck the tests"),
-            "{handoffs}"
-        );
-        assert!(
-            handoffs.contains("What web/coder had said:\ncoded it"),
-            "{handoffs}"
-        );
-        assert_eq!(b.take(&id, "gpu-box", 60, true).unwrap(), Claim::Taken);
-    }
-
-    /// A runner of ana's connected now, with `agents`.
-    fn present(name: &str, agents: &[&str]) -> Present {
-        Present {
-            name: name.into(),
-            agents: agents.iter().map(|a| a.to_string()).collect(),
-        }
+    /// A runner of ana's connected now that runs tasks.
+    fn present(name: &str) -> Present {
+        Present { name: name.into() }
     }
 
     /// No runner connected.
@@ -1397,17 +1316,13 @@ mod tests {
     }
 
     #[test]
-    fn a_task_given_back_by_every_connected_runner_with_its_agent_is_blocked() {
+    fn a_task_given_back_by_every_connected_runner_is_blocked() {
         let tmp = TempDir::new();
-        let connected = [
-            present("desk", &["web/coder"]),
-            present("laptop", &["web/coder", "web/reviewer"]),
-            present("lab", &["pcb/router"]),
-        ];
+        let connected = [present("desk"), present("laptop")];
         let b = board(&tmp).with_runners(&connected);
-        let id = b.add(&draft("A", "web/coder", "t")).unwrap();
+        let id = b.add(&draft("A", "t")).unwrap();
         assert_eq!(b.take(&id, "desk", 60, true).unwrap(), Claim::Taken);
-        // The laptop has not tried it yet; the lab has not the agent.
+        // The laptop has not tried it yet.
         assert!(
             !b.give_back(&id, "desk", "cannot reach the repository")
                 .unwrap()
@@ -1433,21 +1348,12 @@ mod tests {
         assert_eq!(b.list().unwrap()[0].given_back.len(), 2);
         // Without knowing who is connected, nothing is said to be blocked.
         assert!(!DbBoard::new(&tmp.0, "ana", "shop").list().unwrap()[0].blocked);
-        // A runner with the agent that has not given it back connects.
-        let more = [
-            present("desk", &["web/coder"]),
-            present("gpu", &["web/coder"]),
-        ];
+        // A runner that has not given it back connects.
+        let more = [present("desk"), present("gpu")];
         let with_gpu = board(&tmp).with_runners(&more);
         assert!(!with_gpu.list().unwrap()[0].blocked);
         assert_eq!(with_gpu.take(&id, "gpu", 60, true).unwrap(), Claim::Taken);
-        with_gpu.put_back(&id, "gpu", None).unwrap();
-        // Assigned again, it is every runner's again.
-        b.give(&id, "web/coder").unwrap();
-        let t = &b.list().unwrap()[0];
-        assert!(t.given_back.is_empty() && !t.blocked);
-        assert_eq!(b.take(&id, "desk", 60, true).unwrap(), Claim::Taken);
-        b.end(&id, "desk", result("done"), None).unwrap();
+        with_gpu.end(&id, "gpu", result("done"), None).unwrap();
         let err = b.give_back(&id, "desk", "late").unwrap_err();
         assert!(err.contains("has ended"), "{err}");
     }
@@ -1456,7 +1362,7 @@ mod tests {
     fn the_answer_to_where_a_project_is_becomes_its_repository() {
         let tmp = TempDir::new();
         let b = board(&tmp);
-        let id = b.add(&draft("A", "web/coder", "t")).unwrap();
+        let id = b.add(&draft("A", "t")).unwrap();
         b.take(&id, "desk", 60, true).unwrap();
         b.give_back(&id, "laptop", "no key").unwrap();
         b.end(
@@ -1476,7 +1382,7 @@ mod tests {
             Some("Which repository should desk clone?")
         );
         assert_eq!(d.task.pinned_to, None, "asking pins it nowhere");
-        assert_eq!(d.conversation, None, "the agent asked nothing");
+        assert_eq!(d.conversation, None, "the run asked nothing");
         let err = b.reply(&id, "--upload-pack=x").unwrap_err();
         assert!(err.contains("not a git URL"), "{err}");
         b.reply(&id, " git@example.com:acme/shop.git ").unwrap();
@@ -1495,25 +1401,23 @@ mod tests {
     }
 
     #[test]
-    fn a_runner_hears_of_the_tasks_for_its_agents_in_every_project() {
+    fn a_runner_hears_of_the_tasks_waiting_in_every_project() {
         let tmp = TempDir::new();
         let shop = DbBoard::new(&tmp.0, "ana", "shop");
         let blog = DbBoard::new(&tmp.0, "ana", "blog");
         let waits = shop
             .add(&Ticket {
                 repository: Some("/srv/shop.git".into()),
-                ..draft("Waits", "web/coder", "t")
+                ..draft("Waits", "t")
             })
             .unwrap();
-        let elsewhere = shop.add(&draft("Elsewhere", "pcb/router", "t")).unwrap();
-        let backlog = shop.add(&draft("Backlog", "", "t")).unwrap();
-        let ended = blog.add(&draft("Ended", "web/coder", "t")).unwrap();
+        let ended = blog.add(&draft("Ended", "t")).unwrap();
         blog.stop(&ended).unwrap();
-        let given = blog.add(&draft("Given", "web/coder", "t")).unwrap();
+        let given = blog.add(&draft("Given", "t")).unwrap();
         blog.give_back(&given, "desk", "no key").unwrap();
-        let running = blog.add(&draft("Running", "web/coder", "t")).unwrap();
+        let running = blog.add(&draft("Running", "t")).unwrap();
         blog.take(&running, "laptop", 60, true).unwrap();
-        let asks = blog.add(&draft("Asks", "web/coder", "t")).unwrap();
+        let asks = blog.add(&draft("Asks", "t")).unwrap();
         blog.take(&asks, "desk", 60, true).unwrap();
         blog.end(
             &asks,
@@ -1527,16 +1431,9 @@ mod tests {
         )
         .unwrap();
         DbBoard::new(&tmp.0, "rex", "blog")
-            .add(&draft("Not ana's", "web/coder", "t"))
+            .add(&draft("Not ana's", "t"))
             .unwrap();
-        let found = waiting(
-            &tmp.0,
-            "ana",
-            "desk",
-            &["web/coder".into(), "web/reviewer".into()],
-            &[],
-        )
-        .unwrap();
+        let found = waiting(&tmp.0, "ana", "desk", &[]).unwrap();
         let listed: Vec<(&str, &str)> = found
             .iter()
             .map(|w| (w.project.as_str(), w.task.id()))
@@ -1547,9 +1444,6 @@ mod tests {
             found[1].task.ticket.repository.as_deref(),
             Some("/srv/shop.git")
         );
-        for left in [elsewhere, backlog] {
-            assert!(!listed.iter().any(|(_, id)| *id == left), "{left}");
-        }
     }
 
     #[test]
@@ -1558,7 +1452,7 @@ mod tests {
         let service = Service::new(&tmp.0).with_notes(|user, query| {
             (!query.contains("nothing")).then(|| format!("notes for {user} about {query}"))
         });
-        let mut ticket = draft("Deploy", "web/coder", "Ship the cart.");
+        let mut ticket = draft("Deploy", "Ship the cart.");
         ticket.notes = Some("mine, not the hub's".into());
         let made = service
             .handle(
@@ -1577,7 +1471,7 @@ mod tests {
             .handle(
                 &alone("ana"),
                 TASK_CREATE,
-                &json!({"project": "shop", "ticket": draft("Other", "web/coder", "nothing")}),
+                &json!({"project": "shop", "ticket": draft("Other", "nothing")}),
             )
             .unwrap();
         let kept = board(&tmp)
@@ -1597,12 +1491,12 @@ mod tests {
     fn a_cancelled_task_ends_at_once_or_when_its_node_hears_of_it() {
         let tmp = TempDir::new();
         let b = board(&tmp);
-        let waiting = b.add(&draft("A", "web/coder", "t")).unwrap();
+        let waiting = b.add(&draft("A", "t")).unwrap();
         assert_eq!(b.stop(&waiting).unwrap(), Cancelled::Before);
         assert_eq!(b.list().unwrap()[0].status, Some(Status::Cancelled));
         assert_eq!(b.stop(&waiting).unwrap(), Cancelled::Ended);
 
-        let running = b.add(&draft("B", "web/coder", "t")).unwrap();
+        let running = b.add(&draft("B", "t")).unwrap();
         b.take(&running, "laptop", 60, true).unwrap();
         assert_eq!(
             b.stop(&running).unwrap(),
@@ -1622,7 +1516,7 @@ mod tests {
             crate::server::testing::start_with_tasks(Box::leak(Box::new(Service::new(&tmp.0))));
         let laptop = ensemble_tasks::board::RemoteBoard::new(&hub.url, &hub.ana, "shop");
         let kept = DbBoard::new(&tmp.0, "ana", "shop");
-        let id = kept.add(&draft("A", "web/coder", "t")).unwrap();
+        let id = kept.add(&draft("A", "t")).unwrap();
         assert_eq!(id, "0001-a");
         assert_eq!(
             laptop.claim(&id, "laptop", LEASE, true).await.unwrap(),
@@ -1666,7 +1560,7 @@ mod tests {
         });
         let hub = crate::server::testing::start_with_tasks(Box::leak(Box::new(service)));
         let laptop = ensemble_tasks::board::RemoteBoard::new(&hub.url, &hub.ana, "shop");
-        let mut ticket = draft("Retry fetches", "web/coder", "t");
+        let mut ticket = draft("Retry fetches", "t");
         ticket.goal = Some("Requests survive a flaky network.".into());
         let kept = DbBoard::new(&tmp.0, "ana", "shop");
         let id = kept.add(&ticket).unwrap();
@@ -1698,8 +1592,7 @@ mod tests {
             ("ana/shop", "Retry fetches")
         );
         for part in [
-            "helper agent web/coder",
-            "task 0001-retry-fetches in the project shop",
+            "task 0001-retry-fetches in the project shop was done, on opencode with local:qwen3.5:9b",
             "Goal: Requests survive a flaky network.",
             "Which status codes?",
             "502 and 503",

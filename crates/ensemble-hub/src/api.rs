@@ -509,12 +509,6 @@ mod tests {
         assert_eq!(status, 404);
         let (status, out) = op(
             &hub.ana,
-            "task.assign",
-            json!({"project": "shop", "id": id, "agent": "web/coder"}),
-        );
-        assert_eq!(status, 200, "{out}");
-        let (status, out) = op(
-            &hub.ana,
             "task.gate",
             json!({"project": "shop", "id": id, "gate": "make test"}),
         );

@@ -1,26 +1,26 @@
 //! `ensemble-runner serve`: the runner, the one long-running process that
-//! holds the helper teams on this computer.
+//! runs tasks on this computer, on its harnesses and its ANN pool.
 //!
-//! It works in its workspace, the folder its `runner.yaml` names: each git
+//! It works in its workspace, the folder its settings name: each git
 //! repository directly inside it is a project, named for its folder, and gets
 //! a worker that runs the tasks the hub keeps for that project ([`Queue`]).
-//! Like a member of a team handed work, it also looks on the hub for the
-//! account's tasks for its agents in projects it has no folder for: it clones
+//! Like a person handed work, it also looks on the hub for the
+//! account's tasks in projects it has no folder for: it clones
 //! the `repository` such a task names into the workspace, asks on the task
 //! where the project is when it names none, and gives the task back, saying
 //! why, when this computer cannot clone it. The workspace and the hub are
 //! looked at again every [`RESCAN`], so a repository added or cloned later
 //! gets a worker too. With a hub, the runner also keeps one link that says it
-//! is connected, with its agents and what it offers (`worker`). Its socket
-//! takes the operations `ensemble-runner …` asks of it, and a reload of its
-//! teams.
+//! is connected, with what it runs tasks on (`worker`). Its socket takes the
+//! operations `ensemble-runner …` asks of it.
 //!
 //! What it keeps for a repository lives as long as the runner, so it is
 //! leaked on purpose.
 
 use crate::cmd::runner::RunnerContext;
+use ensemble_agents::picker::Means;
 use ensemble_agents::router::Ensemble;
-use ensemble_config::{Config, RelayAt, Runner};
+use ensemble_config::Runner;
 use ensemble_link::Link;
 use ensemble_link::Token;
 use ensemble_ops::local::{self, STOP, read_line};
@@ -31,7 +31,7 @@ use ensemble_tasks::runs::Runs;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
@@ -49,21 +49,16 @@ const CLONE_LIMIT: Duration = Duration::from_secs(600);
 
 /// What a runner keeps for one repository of its workspace.
 struct Repository {
-    ensemble: &'static Ensemble,
     queue: &'static Queue<'static>,
 }
 
-/// The runner: its teams, and the repositories it works in.
+/// The runner: what it runs tasks on, and the repositories it works in.
 pub struct Daemon<'a> {
     runner: Runner,
     /// The hub server it names, and its token, replaced when you sign in again.
     hub: Option<(String, Token)>,
-    /// Its teams, as one helper team: `<team>/<agent>`. Replaced when they are
-    /// reloaded.
-    team: RwLock<Config>,
-    /// Where it serves the backends it reaches through the hub, when it
-    /// does.
-    relay: Option<RelayAt>,
+    /// Its harnesses and its ANN pool, shared by every repository's worker.
+    means: Arc<Means>,
     /// The runner's operations, and what they are given here.
     operations: (&'a Registry<RunnerContext>, RunnerContext),
     /// The repositories with a worker, by their folder.
@@ -79,12 +74,11 @@ pub struct Daemon<'a> {
 }
 
 impl<'a> Daemon<'a> {
-    /// A runner from `runner`, its teams loaded as `team`.
+    /// A runner from `runner`, running tasks on `means`.
     pub fn new(
         runner: Runner,
         hub: Option<(String, Token)>,
-        team: Config,
-        relay: Option<RelayAt>,
+        means: Arc<Means>,
         operations: &'a Registry<RunnerContext>,
         say: &'a (dyn Fn(&str) + Sync),
     ) -> Result<Self, String> {
@@ -103,8 +97,7 @@ impl<'a> Daemon<'a> {
             hub_down: AtomicBool::new(false),
             runner,
             hub,
-            team: RwLock::new(team),
-            relay,
+            means,
             operations,
             open: Mutex::new(HashMap::new()),
             workers: Mutex::new(Vec::new()),
@@ -113,13 +106,8 @@ impl<'a> Daemon<'a> {
     }
 
     /// Run the workers of the workspace's repositories, and take what is asked
-    /// on `socket`, until [`STOP`] is set. A reload of the teams, asked on the
-    /// socket, is also given to `reloaded`, for what else holds them.
-    pub async fn serve(
-        &self,
-        socket: &Path,
-        reloaded: &(dyn Fn(&Config) -> Result<(), String> + Sync),
-    ) -> Result<(), String> {
+    /// on `socket`, until [`STOP`] is set.
+    pub async fn serve(&self, socket: &Path) -> Result<(), String> {
         let workspace = &self.runner.workspace;
         std::fs::create_dir_all(workspace)
             .map_err(|e| format!("cannot make the workspace {}: {e}", workspace.display()))?;
@@ -133,6 +121,10 @@ impl<'a> Daemon<'a> {
             (self.say)(
                 "it names no hub, so it has no tasks to run; `ensemble-runner login <url>` names one",
             );
+        } else if !self.means.can_run() {
+            (self.say)(
+                "it runs no task: no harness is on with a model it can drive; `ensemble-runner harness list` and `ensemble-runner model list` say what it has",
+            );
         }
         // What is asked on the socket is answered while the runner looks for
         // work, and while it clones.
@@ -143,7 +135,7 @@ impl<'a> Daemon<'a> {
                     () = tokio::time::sleep(Duration::from_millis(200)) => continue,
                 };
                 let Ok((stream, _)) = accepted else { continue };
-                if let Err(e) = self.answer(stream, reloaded).await {
+                if let Err(e) = self.answer(stream).await {
                     (self.say)(&format!("a request was refused: {e}"));
                 }
             }
@@ -178,13 +170,8 @@ impl<'a> Daemon<'a> {
     }
 
     /// Answer the one line asked on `stream`: `{"op": …, "input": …}` runs
-    /// one of the runner's operations (`local`), and `{"reload": true}`
-    /// reloads its teams. Each answers what it did.
-    async fn answer(
-        &self,
-        mut stream: UnixStream,
-        reloaded: &(dyn Fn(&Config) -> Result<(), String> + Sync),
-    ) -> Result<(), String> {
+    /// one of the runner's operations (`local`), and answers what it did.
+    async fn answer(&self, mut stream: UnixStream) -> Result<(), String> {
         let line = read_line(&mut stream).await?;
         let asked = serde_json::from_str::<serde_json::Value>(&line).unwrap_or_default();
         let reply = if asked.get("op").is_some() {
@@ -192,40 +179,13 @@ impl<'a> Daemon<'a> {
             local::answer(registry, context, &asked).unwrap_or_else(
                 || serde_json::json!({ "error": Error::invalid("`op` must name an operation") }),
             )
-        } else if asked["reload"] == true {
-            match self.reload(reloaded) {
-                Ok(said) => serde_json::json!({"ok": true, "said": said}),
-                Err(e) => serde_json::json!({"error": e}),
-            }
         } else {
-            serde_json::json!({"error": "ask for an operation (`op`) or a reload"})
+            serde_json::json!({"error": "ask for an operation (`op`)"})
         };
         stream
             .write_all(format!("{reply}\n").as_bytes())
             .await
             .map_err(|e| e.to_string())
-    }
-
-    /// Read the teams again and use them: in every repository from its next
-    /// run on, and in what `reloaded` holds. A team that cannot be loaded
-    /// leaves everything as it was, and says why.
-    fn reload(
-        &self,
-        reloaded: &(dyn Fn(&Config) -> Result<(), String> + Sync),
-    ) -> Result<String, String> {
-        let (team, waiting) = crate::teams::load_all(&self.runner.llm, self.relay.as_ref())?;
-        reloaded(&team)?;
-        for repository in self.open.lock().unwrap().values() {
-            repository.ensemble.set_config(team.clone());
-        }
-        let said = format!(
-            "teams reloaded: {} agent(s){}",
-            team.agents.len(),
-            waiting.iter().map(|w| format!("; {w}")).collect::<String>()
-        );
-        *self.team.write().unwrap_or_else(|e| e.into_inner()) = team;
-        (self.say)(&said);
-        Ok(said)
     }
 
     /// Give each git repository of the workspace a worker, when it has none
@@ -258,8 +218,8 @@ impl<'a> Daemon<'a> {
         }
     }
 
-    /// Look on the hub for the tasks that wait for an agent of this runner in
-    /// a project it has no folder for, and get each such project: clone the
+    /// Look on the hub for the tasks that wait for a runner in a project this
+    /// one has no folder for, and get each such project: clone the
     /// repository a task names into the workspace, where the next scan gives
     /// it a worker; ask on the task where the project is when none names one;
     /// and give the task back, saying why, when this computer cannot clone it.
@@ -268,14 +228,10 @@ impl<'a> Daemon<'a> {
         let (Some((url, token)), Some(link)) = (&self.hub, &self.hub_link) else {
             return;
         };
-        let agents: Vec<String> = {
-            let team = self.team.read().unwrap_or_else(|e| e.into_inner());
-            team.agent_names().into_iter().map(String::from).collect()
-        };
-        if agents.is_empty() {
+        if !self.means.can_run() {
             return;
         }
-        let waiting = match ensemble_tasks::board::waiting(link, &self.runner.name, &agents).await {
+        let waiting = match ensemble_tasks::board::waiting(link, &self.runner.name).await {
             Ok(found) => {
                 self.hub_down.store(false, Ordering::Relaxed);
                 found
@@ -387,14 +343,13 @@ impl<'a> Daemon<'a> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .ok_or("it has no name to keep tasks under")?;
-        let config = self.team.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let ensemble: &'static Ensemble =
-            Box::leak(Box::new(Ensemble::new(config, Some(dir.to_path_buf()))));
-        let state = ensemble.state_dir().map_err(|e| e.to_string())?;
-        let mut runs = Runs::new(&state);
-        if let Some(usage) = ensemble.usage_dir() {
-            runs = runs.with_usage_dir(usage);
+        let mut ensemble = Ensemble::new(self.means.clone(), Some(dir.to_path_buf()));
+        if let Ok(runner) = ensemble_core::state::RunnerDir::this() {
+            ensemble = ensemble.with_records(runner.records());
         }
+        let ensemble: &'static Ensemble = Box::leak(Box::new(ensemble));
+        let state = ensemble.state_dir().map_err(|e| e.to_string())?;
+        let runs = Runs::new(&state);
         let board = RemoteBoard::with_token(url, token.clone(), &project);
         let queue: &'static Queue<'static> = Box::leak(Box::new(Queue::new(
             ensemble,
@@ -421,7 +376,7 @@ impl<'a> Daemon<'a> {
                 dir.display()
             )),
         }
-        Ok(Repository { ensemble, queue })
+        Ok(Repository { queue })
     }
 }
 
@@ -485,23 +440,6 @@ pub(crate) fn repositories(workspace: &Path) -> Vec<PathBuf> {
         .collect();
     found.sort();
     found
-}
-
-/// Ask the runner on `socket` to reload its teams, and what it said.
-pub async fn reload(socket: &Path) -> Result<String, String> {
-    let mut stream = UnixStream::connect(socket)
-        .await
-        .map_err(|e| format!("no runner is running ({e})"))?;
-    stream
-        .write_all(format!("{}\n", serde_json::json!({ "reload": true })).as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
-    let reply: serde_json::Value = serde_json::from_str(&read_line(&mut stream).await?)
-        .map_err(|e| format!("the runner answered something else: {e}"))?;
-    match reply["error"].as_str() {
-        Some(e) => Err(format!("the runner kept its teams as they were: {e}")),
-        None => Ok(reply["said"].as_str().unwrap_or("done").to_string()),
-    }
 }
 
 /// Read the token of the hub at `url` again, as `ensemble-runner login` kept

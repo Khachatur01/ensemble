@@ -1,10 +1,9 @@
-//! Adapters for external agents: CLIs that are whole agents of their own,
-//! started in the project with a task and read as they work.
+//! The harnesses: CLIs that are whole agents of their own, started in the
+//! task's worktree and read as they work, and Ensemble's own loop (`builtin`).
 
 pub mod builtin;
 pub mod claude_code;
 pub mod codex;
-pub mod direct;
 pub mod gate;
 pub mod opencode;
 mod process;

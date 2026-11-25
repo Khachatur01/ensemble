@@ -1,5 +1,5 @@
 //! What the forms offer to pick from, read from the hub: its roles, the
-//! agents of the runners connected now, the projects with tasks, and the
+//! projects with tasks, and the
 //! models of the ANN pool that are on. Each is asked for once a page needs
 //! it; a page that may not ask gets none, and its fields stay free to type.
 
@@ -19,7 +19,7 @@ pub fn use_op(op: &'static str) -> Asked {
 pub const PERMISSIONS: &[(&str, &str)] = &[
     ("share", "keep knowledge in the vault"),
     ("recall", "read the vault's notes"),
-    ("tasks", "have tasks worked on by their helper team"),
+    ("tasks", "have tasks worked on by their runners"),
     ("admin", "manage users and the hub's settings"),
 ];
 
@@ -49,25 +49,6 @@ pub fn role_pick(field: &str, roles: &[(String, Vec<String>)]) -> Pick {
             .collect(),
         strict: true,
     }
-}
-
-/// The agents of the runners connected now (`runner.list`), each read with
-/// what it is and its runner.
-pub fn agents(asked: &Asked) -> Vec<(String, String)> {
-    let mut found = Vec::new();
-    if let Some(Ok(out)) = &*asked.read() {
-        for runner in out["runners"].as_array().into_iter().flatten() {
-            let on = runner["runner"].as_str().unwrap_or("");
-            for agent in runner["agents"].as_array().into_iter().flatten() {
-                let name = agent["name"].as_str().unwrap_or("").to_string();
-                let about = agent["about"].as_str().unwrap_or("");
-                if !found.iter().any(|(n, _)| *n == name) {
-                    found.push((name.clone(), format!("{about} (on {on})")));
-                }
-            }
-        }
-    }
-    found
 }
 
 /// The projects with tasks (`task.projects`).

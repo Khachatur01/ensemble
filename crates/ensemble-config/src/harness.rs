@@ -70,6 +70,8 @@ pub struct CliHarness {
     pub max_seconds: u64,
     /// The most steps of one run.
     pub max_steps: u32,
+    /// The most runs on it at once.
+    pub max_concurrent: u32,
 }
 
 /// Ensemble's own loop, which needs nothing installed.
@@ -79,6 +81,9 @@ pub struct BuiltinHarness {
     pub on: bool,
     pub max_seconds: u64,
     pub max_steps: u32,
+    pub max_concurrent: u32,
+    /// The most tokens of answer per model call.
+    pub max_tokens: u32,
 }
 
 /// A runner's harnesses as they are kept: one of each kind.
@@ -91,6 +96,16 @@ pub struct HarnessesSetting {
     pub builtin: BuiltinHarness,
 }
 
+/// A change to a harness: what it names is set, the rest stays as it is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HarnessChange {
+    pub on: Option<bool>,
+    pub max_seconds: Option<u64>,
+    pub max_steps: Option<u32>,
+    pub max_concurrent: Option<u32>,
+    pub max_tokens: Option<u32>,
+}
+
 /// What every harness has, whatever its kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Harness {
@@ -101,12 +116,19 @@ pub struct Harness {
     pub command: Option<String>,
     pub max_seconds: u64,
     pub max_steps: u32,
+    pub max_concurrent: u32,
+    /// The most tokens of answer per model call: `builtin`'s alone.
+    pub max_tokens: Option<u32>,
 }
 
 /// Seconds one run of a new runner's harness may take.
 const STARTING_MAX_SECONDS: u64 = 1800;
 /// The most steps of one run of a new runner's harness.
 const STARTING_MAX_STEPS: u32 = 50;
+/// The most runs at once on a new runner's harness.
+const STARTING_MAX_CONCURRENT: u32 = 1;
+/// The most tokens of answer per model call of a new runner's `builtin`.
+const STARTING_MAX_TOKENS: u32 = 4000;
 
 impl HarnessesSetting {
     /// The harnesses of a new runner: each off, and each CLI missing until
@@ -118,6 +140,7 @@ impl HarnessesSetting {
             command: kind.program().unwrap_or_default().to_string(),
             max_seconds: STARTING_MAX_SECONDS,
             max_steps: STARTING_MAX_STEPS,
+            max_concurrent: STARTING_MAX_CONCURRENT,
         };
         HarnessesSetting {
             claude_code: cli(HarnessKind::ClaudeCode),
@@ -127,6 +150,8 @@ impl HarnessesSetting {
                 on: false,
                 max_seconds: STARTING_MAX_SECONDS,
                 max_steps: STARTING_MAX_STEPS,
+                max_concurrent: STARTING_MAX_CONCURRENT,
+                max_tokens: STARTING_MAX_TOKENS,
             },
         }
     }
@@ -150,6 +175,8 @@ impl HarnessesSetting {
             command: Some(h.command.clone()),
             max_seconds: h.max_seconds,
             max_steps: h.max_steps,
+            max_concurrent: h.max_concurrent,
+            max_tokens: None,
         };
         vec![
             cli(HarnessKind::ClaudeCode, &self.claude_code),
@@ -162,6 +189,8 @@ impl HarnessesSetting {
                 command: None,
                 max_seconds: self.builtin.max_seconds,
                 max_steps: self.builtin.max_steps,
+                max_concurrent: self.builtin.max_concurrent,
+                max_tokens: Some(self.builtin.max_tokens),
             },
         ]
     }
@@ -174,31 +203,39 @@ impl HarnessesSetting {
             .expect("every kind has a harness")
     }
 
-    /// Change the harness of `kind`: whether it is on, and how long and how
-    /// many steps a run may take.
-    pub fn change(
-        &mut self,
-        kind: HarnessKind,
-        on: Option<bool>,
-        max_seconds: Option<u64>,
-        max_steps: Option<u32>,
-    ) {
-        let (now_on, seconds, steps) = match self.cli_mut(kind) {
-            Some(h) => (&mut h.on, &mut h.max_seconds, &mut h.max_steps),
-            None => (
-                &mut self.builtin.on,
-                &mut self.builtin.max_seconds,
-                &mut self.builtin.max_steps,
+    /// Change the harness of `kind` as `change` says: what it leaves out
+    /// stays as it is. `max_tokens` is `builtin`'s alone.
+    pub fn change(&mut self, kind: HarnessKind, change: HarnessChange) {
+        let (on, seconds, steps, concurrent) = match self.cli_mut(kind) {
+            Some(h) => (
+                &mut h.on,
+                &mut h.max_seconds,
+                &mut h.max_steps,
+                &mut h.max_concurrent,
             ),
+            None => {
+                if let Some(t) = change.max_tokens {
+                    self.builtin.max_tokens = t;
+                }
+                (
+                    &mut self.builtin.on,
+                    &mut self.builtin.max_seconds,
+                    &mut self.builtin.max_steps,
+                    &mut self.builtin.max_concurrent,
+                )
+            }
         };
-        if let Some(on) = on {
-            *now_on = on;
+        if let Some(v) = change.on {
+            *on = v;
         }
-        if let Some(s) = max_seconds {
-            *seconds = s;
+        if let Some(v) = change.max_seconds {
+            *seconds = v;
         }
-        if let Some(s) = max_steps {
-            *steps = s;
+        if let Some(v) = change.max_steps {
+            *steps = v;
+        }
+        if let Some(v) = change.max_concurrent {
+            *concurrent = v;
         }
     }
 
@@ -211,6 +248,12 @@ impl HarnessesSetting {
             }
             if h.max_steps == 0 {
                 problems.push(format!("{at}: `max_steps` must be greater than 0"));
+            }
+            if h.max_concurrent == 0 {
+                problems.push(format!("{at}: `max_concurrent` must be greater than 0"));
+            }
+            if h.max_tokens == Some(0) {
+                problems.push(format!("{at}: `max_tokens` must be greater than 0"));
             }
             if h.command.as_deref().is_some_and(|c| c.trim().is_empty()) {
                 problems.push(format!(

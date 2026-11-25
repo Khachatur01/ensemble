@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS harnesses (
     missing INTEGER NOT NULL,
     command TEXT,
     max_seconds INTEGER NOT NULL,
-    max_steps INTEGER NOT NULL
+    max_steps INTEGER NOT NULL,
+    max_concurrent INTEGER NOT NULL,
+    max_tokens INTEGER
 );
 CREATE TABLE IF NOT EXISTS hub_tokens (
     url TEXT PRIMARY KEY,
@@ -153,7 +155,7 @@ fn harness_rows(harnesses: &HarnessesSetting) -> Vec<(&'static str, Vec<ensemble
     let mut out = vec![("DELETE FROM harnesses", vec![])];
     for h in harnesses.each() {
         out.push((
-            "INSERT INTO harnesses (kind, turned_on, missing, command, max_seconds, max_steps) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO harnesses (kind, turned_on, missing, command, max_seconds, max_steps, max_concurrent, max_tokens) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             vec![
                 txt(h.kind.as_str()),
                 flag(h.on),
@@ -161,6 +163,8 @@ fn harness_rows(harnesses: &HarnessesSetting) -> Vec<(&'static str, Vec<ensemble
                 optional(h.command.as_deref()),
                 int(h.max_seconds as i64),
                 int(h.max_steps),
+                int(h.max_concurrent),
+                h.max_tokens.map_or(ensemble_store::Value::Null, int),
             ],
         ));
     }
@@ -173,7 +177,7 @@ async fn read_harnesses(c: &ensemble_store::Connection) -> Result<HarnessesSetti
     let mut found = BTreeMap::new();
     for r in rows(
         c,
-        "SELECT kind, turned_on, missing, command, max_seconds, max_steps FROM harnesses",
+        "SELECT kind, turned_on, missing, command, max_seconds, max_steps, max_concurrent, max_tokens FROM harnesses",
         vec![],
     )
     .await?
@@ -198,6 +202,7 @@ async fn read_harnesses(c: &ensemble_store::Connection) -> Result<HarnessesSetti
             command: some_text(&r[3], &at(kind, "command"))?,
             max_seconds: num(&r[4], &at(kind, "max_seconds"))?,
             max_steps: num(&r[5], &at(kind, "max_steps"))?,
+            max_concurrent: num(&r[6], &at(kind, "max_concurrent"))?,
         })
     };
     let builtin = row(HarnessKind::Builtin)?;
@@ -209,6 +214,8 @@ async fn read_harnesses(c: &ensemble_store::Connection) -> Result<HarnessesSetti
             on: on(HarnessKind::Builtin, &builtin[1])?,
             max_seconds: num(&builtin[4], &at(HarnessKind::Builtin, "max_seconds"))?,
             max_steps: num(&builtin[5], &at(HarnessKind::Builtin, "max_steps"))?,
+            max_concurrent: num(&builtin[6], &at(HarnessKind::Builtin, "max_concurrent"))?,
+            max_tokens: num(&builtin[7], &at(HarnessKind::Builtin, "max_tokens"))?,
         },
     })
 }

@@ -4,7 +4,7 @@
 //! organization's vault and to make and follow tasks. Each member's runner
 //! opens WebSockets to it (`ensemble_link`), signed in with a token: to lease
 //! and run the tasks the hub keeps for its account (`board`), and to say it
-//! is connected, with its agents and the models it serves for others
+//! is connected, with what it runs tasks on and the models it serves for others
 //! (`runners`).
 //!
 //! ```text

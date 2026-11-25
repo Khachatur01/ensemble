@@ -12,9 +12,8 @@
 //!     trackers/          database.db (which issue became which task)
 //!   runner/              this computer's runner (RunnerDir)
 //!     core/              database.db (settings, sealed keys, hub tokens), master.key
-//!     teams/             its helper teams, a folder each
 //!     workdirs/          the runs and worktrees of each repository it works in
-//!     orgs/              what agents of each team used
+//!     records.jsonl      every run: its harness, model, time and tokens
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -53,21 +52,6 @@ pub fn root() -> Result<PathBuf, String> {
                 .filter(|v| !v.is_empty())
                 .ok_or("cannot find a state directory: neither XDG_STATE_HOME nor HOME is set")?;
             PathBuf::from(home).join(".local/state")
-        }
-    };
-    Ok(base.join("ensemble"))
-}
-
-/// `$XDG_CACHE_HOME/ensemble`, or `~/.cache/ensemble`: what can be fetched again,
-/// such as remote helper teams.
-pub fn cache_root() -> Result<PathBuf, String> {
-    let base = match std::env::var_os("XDG_CACHE_HOME").filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => {
-            let home = std::env::var_os("HOME")
-                .filter(|v| !v.is_empty())
-                .ok_or("cannot find a cache directory: neither XDG_CACHE_HOME nor HOME is set")?;
-            PathBuf::from(home).join(".cache")
         }
     };
     Ok(base.join("ensemble"))
@@ -161,15 +145,10 @@ impl RunnerDir {
         self.core().join(DB_FILE)
     }
 
-    /// Its helper teams: a folder per team, named for it.
-    pub fn teams(&self) -> PathBuf {
-        self.0.join("teams")
+    /// Where its record of runs is kept: `records.jsonl` in its folder.
+    pub fn records(&self) -> PathBuf {
+        self.0.clone()
     }
-}
-
-/// The runner's helper teams: a folder per team, named for it.
-pub fn teams_dir() -> Result<PathBuf, String> {
-    Ok(RunnerDir::this()?.teams())
 }
 
 /// The state of the work the runner does in `workdir`: its tasks, runs and
@@ -186,19 +165,6 @@ pub fn dir_in(runner: &Path, workdir: &Path) -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|e| format!("{}: {e}", workdir.display()))?;
     Ok(runner.join("workdirs").join(labelled(&canonical)))
-}
-
-/// What is shared by every project that uses the helper team at `config`: how
-/// many runs each agent has started, because a subscription or a model server
-/// is shared too.
-pub fn team_dir(config: &Path) -> Result<PathBuf, String> {
-    let canonical = config
-        .canonicalize()
-        .map_err(|e| format!("{}: {e}", config.display()))?;
-    Ok(RunnerDir::this()?
-        .path()
-        .join("orgs")
-        .join(labelled(&canonical)))
 }
 
 /// What this computer's runner keeps while it runs: its lock.

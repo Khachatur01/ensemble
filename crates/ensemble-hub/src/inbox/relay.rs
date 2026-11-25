@@ -3,12 +3,11 @@
 //!
 //! 1. An open issue with the label, assigned to someone who is an account's
 //!    tracker name and whose role may receive `tasks`, and naming its project
-//!    (a repository's name), becomes a **task** of that account, for the
-//!    agent its `<label>:<team>/<agent>` label names or in the backlog. The
-//!    issue says so. With no such account, or no project, the issue is
+//!    (a repository's name), becomes a **task** of that account. The issue
+//!    says so. With no such account, or no project, the issue is
 //!    blocked, saying why, once.
-//! 2. The task waits on the hub until one of the account's runners with the
-//!    agent claims it, in a repository of the project's name in its
+//! 2. The task waits on the hub until one of the account's runners claims
+//!    it, in a repository of the project's name in its
 //!    workspace, cloned there first when it had none; the issue goes to
 //!    `in-progress`, naming the runner. A runner with no copy of the
 //!    project and no repository to clone asks where it is, as a question.
@@ -289,21 +288,16 @@ impl ServerInbox {
         };
         d.account = account.clone();
         d.project = project.to_string();
-        let mut ticket = work::ticket_for(issue, &self.settings.label);
+        let mut ticket = work::ticket_for(issue);
         ticket.notes = self
             .notes
             .as_ref()
             .and_then(|recall| recall(&account, &recall_query(&ticket)));
         let task = self.board(&d).add(&ticket)?;
-        let whom = if ticket.agent.is_empty() {
-            "in the backlog, for the helper team to assign".to_string()
-        } else {
-            format!("for {}", ticket.agent)
-        };
         self.say(
             issue,
             &format!(
-                "Picked up as task {task}, {whom}. It runs on the first of {account}'s runners that has the agent, in its folder named {project}; a runner without one asks here which repository to clone."
+                "Picked up as task {task}. It runs on the first of {account}'s runners to take it, in its folder named {project}; a runner without one asks here which repository to clone."
             ),
             Status::Open,
             &mut d,
@@ -457,7 +451,7 @@ mod tests {
         fn issue(&self, id: &str, assignee: &str, project: &str) {
             std::fs::write(
                 self.tmp.0.join("issues").join(format!("{id}.md")),
-                format!("---\ntitle: Fix the login redirect\nassignee: {assignee}\nlabels: [ensemble, \"ensemble:web/coder\"]\nproject: {project}\nstatus: open\n---\nIt redirects to /home.\n"),
+                format!("---\ntitle: Fix the login redirect\nassignee: {assignee}\nlabels: [ensemble]\nproject: {project}\nstatus: open\n---\nIt redirects to /home.\n"),
             )
             .unwrap();
         }
@@ -484,7 +478,7 @@ mod tests {
         w.inbox.pass().unwrap();
         assert!(
             w.last_comment("1")
-                .contains("Picked up as task 0001-fix-the-login-redirect, for web/coder"),
+                .contains("Picked up as task 0001-fix-the-login-redirect. It runs on"),
             "{}",
             w.last_comment("1")
         );
@@ -492,10 +486,7 @@ mod tests {
         let tasks = w.board().list().unwrap();
         assert_eq!(tasks.len(), 1);
         let ticket = &tasks[0].ticket;
-        assert_eq!(
-            (ticket.agent.as_str(), ticket.text.as_str()),
-            ("web/coder", "It redirects to /home.")
-        );
+        assert_eq!(ticket.text, "It redirects to /home.");
         assert!(w.inbox.pass().unwrap().is_empty(), "said once");
         assert_eq!(w.board().list().unwrap().len(), 1, "made once");
 
@@ -568,7 +559,8 @@ mod tests {
                 "laptop",
                 End::Result {
                     status: TaskStatus::Done,
-                    agent: "web/coder".into(),
+                    harness: "opencode".into(),
+                    model: "local:qwen3.5:9b".into(),
                     started: "2026-11-17T00:00:00Z".into(),
                     extra: Vec::new(),
                     text: "Fixed in auth.rs.".into(),

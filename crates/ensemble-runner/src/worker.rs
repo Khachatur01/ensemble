@@ -1,20 +1,20 @@
 //! What a runner tells the hub server it names about itself.
-//! `ensemble-runner serve` keeps it whenever its `runner.yaml` names a hub.
+//! `ensemble-runner serve` keeps it whenever its settings name a hub.
 //!
 //! It keeps one connection to the hub and says what the runner is
-//! (`runner`): its name and every agent of its teams, and says it again when
-//! its teams are reloaded. So the hub knows which runners are connected, with
-//! which agents, and which may take an account's tasks.
+//! (`runner`): its name and its harnesses that may run, each with the models
+//! it can drive. So the hub knows which runners are connected, and which may
+//! take an account's tasks.
 
-use ensemble_config::{Config, Runner};
+use ensemble_agents::picker::Means;
+use ensemble_config::Runner;
 use ensemble_core::runtime;
 use ensemble_link::client::{Connection, Failure, Token};
 use ensemble_link::protocol::RUNNER;
 use serde_json::{Value, json};
-use std::sync::RwLock;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::sync::Notify;
 
 /// Why a connection ended when the token was replaced.
 const REPLACED: &str = "signed in again with a new token";
@@ -24,53 +24,41 @@ pub struct Worker {
     url: String,
     token: Token,
     runner: Runner,
-    /// The runner's teams, as one: the agents it says it has. Replaced when
-    /// they are reloaded.
-    team: RwLock<Config>,
-    /// Told when the teams are reloaded, to say again what the runner has.
-    reloaded: Notify,
+    /// What it runs tasks on.
+    means: Arc<Means>,
 }
 
 impl Worker {
-    /// A worker for `runner`, reaching the hub at `url` with `token`, and
-    /// again with the new one when it is replaced. `team` is its teams,
-    /// loaded as one.
-    pub fn new(url: &str, token: Token, runner: Runner, team: Config) -> Worker {
+    /// A worker for `runner`, running tasks on `means`, reaching the hub at
+    /// `url` with `token`, and again with the new one when it is replaced.
+    pub fn new(url: &str, token: Token, runner: Runner, means: Arc<Means>) -> Worker {
         Worker {
             url: url.to_string(),
             token,
             runner,
-            team: RwLock::new(team),
-            reloaded: Notify::new(),
+            means,
         }
     }
 
-    /// Use `config`, the runner's teams read again, and tell the hub what it
-    /// has now.
-    pub fn reload(&self, config: &Config) {
-        *self.team.write().unwrap_or_else(|e| e.into_inner()) = config.clone();
-        self.reloaded.notify_one();
-    }
-
-    /// What this runner says it is when it connects, and when its teams
-    /// change.
+    /// What this runner says it is when it connects.
     fn hello(&self) -> Value {
-        let team = self.team.read().unwrap_or_else(|e| e.into_inner());
-        let agents: Vec<Value> = team
-            .agents
-            .values()
-            .map(|agent| {
-                let about = agent
-                    .prompt
-                    .as_deref()
-                    .and_then(|p| p.lines().map(str::trim).find(|l| !l.is_empty()))
-                    .unwrap_or("");
-                json!({"name": agent.name, "about": about})
+        let harnesses: Vec<Value> = self
+            .means
+            .offers()
+            .into_iter()
+            .map(|(harness, models)| {
+                json!({
+                    "harness": harness.as_str(),
+                    "models": models
+                        .into_iter()
+                        .map(|(model, tier)| json!({"model": model, "tier": tier.as_str()}))
+                        .collect::<Vec<_>>(),
+                })
             })
             .collect();
         json!({
             "name": self.runner.name,
-            "agents": agents,
+            "harnesses": harnesses,
         })
     }
 
@@ -133,12 +121,6 @@ impl Worker {
             tokio::select! {
                 () = runtime::until_set(stop) => break Ok(()),
                 Ok(()) = replaced.changed() => break Err(Failure::Broken(REPLACED.into())),
-                // Its teams changed: the hub hears what it has now.
-                () = self.reloaded.notified() => {
-                    if let Err(e) = link.call(RUNNER, self.hello()).await {
-                        break Err(e);
-                    }
-                }
                 // The hub tells this link nothing unasked; it notices it went.
                 event = link.next_event() => {
                     if let Err(e) = event {

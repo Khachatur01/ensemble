@@ -341,7 +341,7 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
     let hub: &'static config::Hub = Box::leak(Box::new(hub));
     let memory: &'static ensemble_knowledge::Memory = Box::leak(Box::new(memory));
     // Every task the hub makes keeps the notes related to it, as its account
-    // may see them, for its agent to read as reference data.
+    // may see them, for its run to read as reference data.
     let notes = |user: &str, query: &str| {
         let found = memory.recall_as(user, query);
         found
@@ -356,7 +356,7 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
             .with_notes(notes);
         inboxes.push(Box::leak(Box::new(inbox)));
     }
-    // What a task's agent reported when it was done is shared, so the vault
+    // What a task's run reported when it was done is shared, so the vault
     // learns from the work as from what people share.
     let tasks = crate::board::Service::new(&dir.tasks())
         .with_notes(notes)

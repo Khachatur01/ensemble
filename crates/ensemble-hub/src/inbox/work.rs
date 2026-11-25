@@ -1,5 +1,5 @@
-//! An issue made into a task for the helper team of the person it is assigned
-//! to, and what the task has to say back on the issue.
+//! An issue made into a task of the person it is assigned to, and what the
+//! task has to say back on the issue.
 
 use super::tracker::{Comment, Issue, Status};
 use ensemble_tasks::tasks::{Status as TaskStatus, Ticket};
@@ -26,22 +26,11 @@ pub enum Update {
     Result { status: TaskStatus, reply: String },
 }
 
-/// The task `issue` becomes: for the agent its first `<label>:<team>/<agent>`
-/// label names, else in the backlog, for the helper team to assign. It has no
-/// gate: anyone who may write in the tracker writes its issues, so only the
+/// The task `issue` becomes, for the person's runners. It has no gate: anyone who may write in the tracker writes its issues, so only the
 /// task's account gives it one.
-pub fn ticket_for(issue: &Issue, label: &str) -> Ticket {
-    let prefix = format!("{label}:");
-    let agent = issue
-        .labels
-        .iter()
-        .find_map(|l| l.strip_prefix(&prefix))
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_string();
+pub fn ticket_for(issue: &Issue) -> Ticket {
     Ticket {
         title: issue.title.clone(),
-        agent,
         context: Some(format!(
             "Issue {} in the tracker, assigned to {}. Report what you did; Ensemble posts it on the issue.",
             issue.id, issue.assignee
@@ -60,7 +49,7 @@ pub fn on_issue(task: &str, update: &Update) -> (String, Status) {
     match update {
         Update::Question(q) => (
             format!(
-                "The helper team asks:\n\n{}\n\nAnswer with a comment here.",
+                "The task asks:\n\n{}\n\nAnswer with a comment here.",
                 q.trim()
             ),
             Status::Blocked,
@@ -93,25 +82,16 @@ mod tests {
     }
 
     #[test]
-    fn a_label_names_the_agent_and_without_one_the_task_waits_in_the_backlog() {
-        let t = ticket_for(
-            &issue(&["ensemble", "ensemble:web/coder"], "It loops."),
-            "ensemble",
-        );
-        assert_eq!(
-            (t.agent.as_str(), t.text.as_str()),
-            ("web/coder", "It loops.")
-        );
+    fn an_issue_is_a_task_of_its_body_and_without_one_of_its_title() {
+        let t = ticket_for(&issue(&["ensemble"], "It loops."));
+        assert_eq!(t.text, "It loops.");
         assert_eq!(t.gate, None, "only the task's account gives one");
         assert!(
             t.context
                 .unwrap()
                 .contains("Issue 7 in the tracker, assigned to ana.p")
         );
-        let t = ticket_for(&issue(&["ensemble"], ""), "ensemble");
-        assert_eq!(
-            (t.agent.as_str(), t.text.as_str()),
-            ("", "Fix the redirect")
-        );
+        let t = ticket_for(&issue(&["ensemble"], ""));
+        assert_eq!(t.text, "Fix the redirect");
     }
 }
