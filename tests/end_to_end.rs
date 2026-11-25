@@ -1341,12 +1341,12 @@ fn a_hub_server_refuses_another_protocol_or_a_bad_token_and_stops_on_sigterm() {
     assert!(status.contains("426"), "no protocol named: {status}");
     let status = upgrade(
         "/link",
-        "Ensemble-Protocol: 14\r\nAuthorization: Bearer ens_wrong\r\n",
+        "Ensemble-Protocol: 15\r\nAuthorization: Bearer ens_wrong\r\n",
     );
     assert!(status.contains("401"), "{status}");
-    let status = upgrade("/", "Ensemble-Protocol: 14\r\n");
+    let status = upgrade("/", "Ensemble-Protocol: 15\r\n");
     assert!(status.contains("404"), "the link is at /link: {status}");
-    let status = upgrade("/link", "Ensemble-Protocol: 14\r\n");
+    let status = upgrade("/link", "Ensemble-Protocol: 15\r\n");
     assert!(
         status.contains("101"),
         "no token: signing in only: {status}"
@@ -2853,12 +2853,12 @@ fn an_admin_adds_providers_and_their_keys_without_naming_a_variable_and_adds_mod
     );
     let picker = &yaml()["task_picker"];
     assert_eq!(picker["worker_min_confidence"], json!(0.6));
-    assert_eq!(picker["questions"].as_array().unwrap().len(), 3);
+    assert_eq!(picker["questions"].as_array().unwrap().len(), 4);
     let out = hub_with_stdin(&s, &["picker", "remove-question", "tools"], "");
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(
         yaml()["task_picker"]["questions"].as_array().unwrap().len(),
-        2
+        3
     );
     let out = hub_with_stdin(&s, &["model", "remove", "laya:laya"], "");
     assert!(!out.status.success(), "the task picker uses it");
@@ -3209,5 +3209,59 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
         yaml()["source_filter"]["models"]["when_none"] == "fail",
         "{}",
         yaml()
+    );
+}
+
+#[test]
+fn a_task_that_only_needs_an_answer_is_answered_by_a_model_alone_with_no_folder_for_it() {
+    let s = Scratch::new("alone");
+    let chat = models_stub(
+        r#"{"choices":[{"message":{"role":"assistant","content":"The cart lives in the session, which expires."},"finish_reason":"stop"}]}"#,
+    );
+    s.local_provider(&chat);
+    let (hub, address, token) = hub_server(&s);
+    // The decision model answers yes, sure of it: the task only needs an
+    // answer, and a model alone answers it.
+    let mut settings = read_hub(&hub);
+    settings["task_picker"]["questions"] = json!([{
+        "name": "answer_only",
+        "instructions": "Does the task only need an answer?",
+        "min_confidence": 0.5,
+        "type": "noul",
+        "answers": [
+            { "name": "yes", "description": "", "effects": [{ "type": "model_alone" }] },
+            { "name": "no", "description": "", "effects": [] },
+        ],
+    }]);
+    write_hub(&hub, settings).unwrap();
+    let _hub = serve_hub(&s, &address);
+    runner_with_hub(&s, &format!("ws://{address}"), &token);
+    let _runner = start_runner(&s);
+    let id = add_task(
+        &s,
+        "notes",
+        "Explain the cart",
+        "Why does the cart lose its items?",
+    );
+    assert!(
+        wait_for(60, || outcome_of(&s, "notes", &id).is_some()),
+        "no model answered it: {:?}",
+        task_of(&s, "notes", &id).pick
+    );
+    let outcome = outcome_of(&s, "notes", &id).unwrap();
+    assert_eq!(
+        outcome.status,
+        ensemble_tasks::tasks::Status::Done,
+        "{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("harness: \"alone\"") && outcome.reply().contains("which expires"),
+        "{}",
+        outcome.text
+    );
+    assert!(
+        !s.workspace().join("notes").exists(),
+        "no folder is made for an answer"
     );
 }

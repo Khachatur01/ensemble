@@ -777,6 +777,19 @@ impl DbBoard {
             if r.holder(now).is_some() {
                 return Err(format!("{id} is running; change its gate when it stops."));
             }
+            // A model alone cannot run a gate: what was chosen for it is
+            // chosen again.
+            let alone = match &r.pick {
+                Pick::Offered { worker } => worker.alone(),
+                Pick::Decided => r
+                    .decisions
+                    .last()
+                    .is_some_and(|d| d.candidates.iter().any(Worker::alone)),
+                _ => false,
+            };
+            if gate.is_some() && alone {
+                r.again(None);
+            }
             r.ticket.gate = gate;
             r.gate_unconfirmed = false;
             Ok(())
@@ -899,6 +912,11 @@ impl DbBoard {
         self.change(id, |r, _| {
             if !matches!(r.pick, Pick::NeedsChoice { .. }) {
                 return Err(format!("{id} does not wait for you to choose its worker."));
+            }
+            if worker.alone() && r.ticket.gate.is_some() {
+                return Err(format!(
+                    "{id} has a gate, which runs in a worktree: a model alone cannot work on it."
+                ));
             }
             let Some(decision) = r.decisions.last_mut() else {
                 return Err(format!("{id} has no decision to choose from."));

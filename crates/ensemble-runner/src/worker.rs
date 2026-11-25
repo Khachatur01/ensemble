@@ -2,11 +2,12 @@
 //! `ensemble-runner serve` keeps it whenever its settings name a hub.
 //!
 //! It keeps one connection to the hub and says what the runner is
-//! (`runner`): its name and its harnesses that may run, each with the models
-//! it can drive. So the hub knows which runners are connected, and which may
-//! take an account's tasks.
+//! (`runner`): its name, its harnesses that may run, each with the models it
+//! can drive, and the models of its pool that may answer a task alone. So
+//! the hub knows which runners are connected, and which may take an
+//! account's tasks.
 
-use ensemble_agents::means::{Busy, Means, Pair};
+use ensemble_agents::means::{Alone, Busy, Means, Pair};
 use ensemble_config::{HarnessKind, Runner};
 use ensemble_core::runtime;
 use ensemble_link::client::{Connection, Failure, Token};
@@ -42,7 +43,8 @@ impl Worker {
     }
 
     /// What this runner says it is when it connects: each harness that may
-    /// run with the models it can drive, and its providers' limits.
+    /// run with the models it can drive, the models of its pool that may
+    /// answer a task alone, and its providers' limits.
     fn hello(&self) -> Value {
         let limits: BTreeMap<HarnessKind, u32> = self
             .means
@@ -65,6 +67,7 @@ impl Worker {
         json!({
             "name": self.runner.name,
             "harnesses": harnesses,
+            "alone": self.means.alone().iter().map(alone).collect::<Vec<_>>(),
             "providers": self.means.provider_limits(),
         })
     }
@@ -158,6 +161,19 @@ fn model(pair: &Pair) -> Value {
         "context_window": pair.context_window,
         "tools": pair.tools,
         "abilities": pair.abilities,
+    })
+}
+
+/// A model of the pool that may answer a task alone, as the runner tells
+/// the hub.
+fn alone(a: &Alone) -> Value {
+    json!({
+        "model": a.model_name(),
+        "provider": a.provider,
+        "tier": a.tier.as_str(),
+        "context_window": a.context_window,
+        "tools": a.tools,
+        "abilities": a.abilities,
     })
 }
 

@@ -286,16 +286,23 @@ fn status(task: &Value) -> String {
     }
 }
 
+/// The harness of a worker that is a model alone, answering in one reply.
+const ALONE: &str = "alone";
+
 /// Where choosing the worker of a task that has not ended stands, in words.
 fn pick_said(task: &Value) -> Option<String> {
     let pick = &task["pick"];
     let worker = |w: &Value| {
-        format!(
-            "{} on {} on {}",
-            text(w, "harness"),
-            text(w, "model"),
-            text(w, "runner")
-        )
+        if text(w, "harness") == ALONE {
+            format!("{} alone on {}", text(w, "model"), text(w, "runner"))
+        } else {
+            format!(
+                "{} on {} on {}",
+                text(w, "harness"),
+                text(w, "model"),
+                text(w, "runner")
+            )
+        }
     };
     Some(match pick["state"].as_str()? {
         "undecided" => match pick["why"].as_str() {
@@ -439,7 +446,7 @@ pub fn TaskPage(project: String, id: String) -> Element {
                                 for (runner, harness, model, p) in ranked {
                                     tr { key: "{runner}/{harness}/{model}",
                                         td { "{runner}" }
-                                        td { "{harness}" }
+                                        td { if harness == ALONE { "none: the model alone" } else { "{harness}" } }
                                         td { code { "{model}" } }
                                         td { "{p}" }
                                         td { class: "end",
@@ -563,8 +570,10 @@ pub fn Runners() -> Element {
                 for runner in list {
                     section { class: "card", key: "{text(&runner, \"runner\")}",
                         h2 { "{text(&runner, \"runner\")}" }
-                        if runner["harnesses"].as_array().is_none_or(|h| h.is_empty()) {
-                            p { class: "muted", "It runs no task: no harness is on with a model it can drive." }
+                        if runner["harnesses"].as_array().is_none_or(|h| h.is_empty())
+                            && runner["alone"].as_array().is_none_or(|a| a.is_empty())
+                        {
+                            p { class: "muted", "It runs no task: it has no harness with a model it can drive, and no LLM in its ANN pool." }
                         }
                         ul {
                             for harness in runner["harnesses"].as_array().cloned().unwrap_or_default() {
@@ -573,6 +582,13 @@ pub fn Runners() -> Element {
                                     {runs(&runner, &harness)}
                                     " on "
                                     {harness["models"].as_array().cloned().unwrap_or_default().iter().map(worker).collect::<Vec<_>>().join(", ")}
+                                }
+                            }
+                            if let Some(alone) = runner["alone"].as_array().filter(|a| !a.is_empty()) {
+                                li {
+                                    strong { "answering alone" }
+                                    ", for a task that only needs an answer: "
+                                    {alone.iter().map(worker).collect::<Vec<_>>().join(", ")}
                                 }
                             }
                         }

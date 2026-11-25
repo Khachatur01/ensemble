@@ -1,6 +1,7 @@
 //! The hub's task picker: the decision models that choose which worker, a
-//! runner's harness and the model it drives, works on each task, tried in
-//! order, and what they are asked. One for the hub, not per account.
+//! runner's harness and the model it drives, or a model of a runner's pool
+//! alone, works on each task, tried in order, and what they are asked. One
+//! for the hub, not per account.
 //!
 //! A person writes the questions (`questions`): each a `choice` among named
 //! options, a `score` of ordered levels or a `noul`, yes or no; each answer
@@ -107,6 +108,10 @@ pub enum Effect {
     Prefer { name: String },
     /// No worker of this harness or model.
     Avoid { name: String },
+    /// The task only needs an answer: a model of a runner's pool answers it
+    /// alone, in one reply, with no harness, no worktree and no tools.
+    /// Without it, a model alone never works on a task.
+    ModelAlone,
 }
 
 impl Effect {
@@ -119,6 +124,7 @@ impl Effect {
             Effect::NeedsTools => "needs_tools".into(),
             Effect::Prefer { name } => format!("prefer={name}"),
             Effect::Avoid { name } => format!("avoid={name}"),
+            Effect::ModelAlone => "model_alone".into(),
         }
     }
 
@@ -148,10 +154,11 @@ impl Effect {
                 .map(|tokens| Effect::MinContext { tokens })
                 .ok_or_else(|| format!("'{text}': give the tokens, such as min_context=32768")),
             ("needs_tools", None) => Ok(Effect::NeedsTools),
+            ("model_alone", None) => Ok(Effect::ModelAlone),
             ("prefer", v) => Ok(Effect::Prefer { name: named(v)? }),
             ("avoid", v) => Ok(Effect::Avoid { name: named(v)? }),
             _ => Err(format!(
-                "'{text}' is not an effect: min_tier=<small|medium|strong>, min_context=<tokens>, needs_tools, prefer=<harness or model>, avoid=<harness or model>"
+                "'{text}' is not an effect: min_tier=<small|medium|strong>, min_context=<tokens>, needs_tools, prefer=<harness or model>, avoid=<harness or model>, model_alone"
             )),
         }
     }
@@ -172,7 +179,7 @@ pub const NO: &str = "no";
 /// The starting templates a person may choose, by name, with what each asks.
 pub const TEMPLATES: &[(&str, &str)] = &[(
     "basic",
-    "how hard the task is (easy, medium or hard: the least tier of its model), and whether it needs to run tools",
+    "whether the task only needs an answer (then a model alone answers it), how hard it is (easy, medium or hard: the least tier of its model), and whether it needs to run tools",
 )];
 
 /// The questions of the template `name`.
@@ -184,6 +191,16 @@ pub fn template(name: &str) -> Option<Vec<PickerQuestion>> {
     };
     match name {
         "basic" => Some(vec![
+            PickerQuestion {
+                name: "answer_only".into(),
+                instructions: "Does the task only need an answer, such as an explanation, a review or a plan, with no file to change and no command to run?".into(),
+                min_confidence: 0.5,
+                kind: QuestionKind::Noul,
+                answers: vec![
+                    answer(YES, "", vec![Effect::ModelAlone]),
+                    answer(NO, "", Vec::new()),
+                ],
+            },
             PickerQuestion {
                 name: "difficulty".into(),
                 instructions: "How hard is this task for a programmer who does not know the project?".into(),
@@ -358,6 +375,7 @@ mod tests {
             "min_tier=strong",
             "min_context=32768",
             "needs_tools",
+            "model_alone",
             "prefer=claude-code",
             "avoid=local:qwen3.5:9b",
         ] {
@@ -374,6 +392,7 @@ mod tests {
             "prefer=",
             "faster",
             "needs_tools=1",
+            "model_alone=yes",
         ] {
             assert!(Effect::parse(wrong).is_err(), "{wrong}");
         }

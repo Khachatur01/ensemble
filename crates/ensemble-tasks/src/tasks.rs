@@ -231,9 +231,13 @@ impl Outcome {
     }
 }
 
+/// The `harness` of a worker that is a model alone.
+pub use ensemble_agents::means::ALONE;
+
 /// A worker: a runner's harness and the model it drives, the model named as
 /// the runner tells the hub of it (`<provider>:<id>` of its pool, or one of
-/// the harness's own by its id).
+/// the harness's own by its id); or, its harness [`ALONE`], a model of the
+/// runner's pool alone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize, Serialize)]
 pub struct Worker {
     pub runner: String,
@@ -242,9 +246,19 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// `opencode on local:qwen3.5:9b on laptop`.
+    /// `opencode on local:qwen3.5:9b on laptop`, or `local:qwen3.5:9b alone
+    /// on laptop`.
     pub fn name(&self) -> String {
-        format!("{} on {} on {}", self.harness, self.model, self.runner)
+        if self.alone() {
+            format!("{} alone on {}", self.model, self.runner)
+        } else {
+            format!("{} on {} on {}", self.harness, self.model, self.runner)
+        }
+    }
+
+    /// Whether it is a model alone.
+    pub fn alone(&self) -> bool {
+        self.harness == ALONE
     }
 }
 

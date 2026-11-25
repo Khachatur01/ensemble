@@ -8,7 +8,9 @@
 //! account's tasks in projects it has no folder for: it clones
 //! the `repository` such a task names into the workspace, asks on the task
 //! where the project is when it names none, and gives the task back, saying
-//! why, when this computer cannot clone it. The workspace and the hub are
+//! why, when this computer cannot clone it. A task a model answers alone needs
+//! no folder: a worker of such tasks answers them for a project it has none
+//! for. The workspace and the hub are
 //! looked at again every [`RESCAN`], so a repository added or cloned later
 //! gets a worker too. With a hub, the runner also keeps one link that says it
 //! is connected, with what it runs tasks on (`worker`). Its socket takes the
@@ -28,6 +30,7 @@ use ensemble_ops::{Error, Registry};
 use ensemble_tasks::board::{Board, Claim, End, LEASE, RemoteBoard, Waiting};
 use ensemble_tasks::queue::Queue;
 use ensemble_tasks::runs::Runs;
+use ensemble_tasks::tasks::Pick;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,6 +66,9 @@ pub struct Daemon<'a> {
     operations: (&'a Registry<RunnerContext>, RunnerContext),
     /// The repositories with a worker, by their folder.
     open: Mutex<HashMap<PathBuf, Repository>>,
+    /// The projects it has no folder for with a worker of the tasks a model
+    /// answers alone, by name.
+    answering: Mutex<HashMap<String, Repository>>,
     /// The repositories' workers, which stopping waits for.
     workers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Its link to the hub for the tasks it has no folder for.
@@ -100,6 +106,7 @@ impl<'a> Daemon<'a> {
             means,
             operations,
             open: Mutex::new(HashMap::new()),
+            answering: Mutex::new(HashMap::new()),
             workers: Mutex::new(Vec::new()),
             say,
         })
@@ -123,7 +130,7 @@ impl<'a> Daemon<'a> {
             );
         } else if !self.means.can_run() {
             (self.say)(
-                "it runs no task: no harness is on with a model it can drive; `ensemble-runner harness list` and `ensemble-runner model list` say what it has",
+                "it runs no task: it has no harness with a model it can drive, and no LLM in its ANN pool; `ensemble-runner harness list` and `ensemble-runner model list` say what it has",
             );
         }
         // What is asked on the socket is answered while the runner looks for
@@ -157,6 +164,9 @@ impl<'a> Daemon<'a> {
         tokio::join!(answering, looking);
         (self.say)("stopping: running tasks are stopped and queued again");
         for repository in self.open.lock().unwrap().values() {
+            repository.queue.close();
+        }
+        for repository in self.answering.lock().unwrap().values() {
             repository.queue.close();
         }
         let workers = std::mem::take(&mut *self.workers.lock().unwrap());
@@ -205,6 +215,20 @@ impl<'a> Daemon<'a> {
             }
             there
         });
+        // A project that has a folder now has its answers run by its folder's
+        // worker.
+        self.answering
+            .lock()
+            .unwrap()
+            .retain(|project, repository| {
+                let folder = found
+                    .iter()
+                    .any(|d| d.file_name() == Some(project.as_ref()));
+                if folder {
+                    repository.queue.close();
+                }
+                !folder
+            });
         for dir in found {
             if open.contains_key(&dir) {
                 continue;
@@ -249,9 +273,15 @@ impl<'a> Daemon<'a> {
         let mut projects: BTreeMap<String, Vec<Waiting>> = BTreeMap::new();
         for w in waiting {
             let dir = workspace.join(&w.project);
-            if plain_name(&w.project) && !dir.join(".git").exists() {
-                projects.entry(w.project.clone()).or_default().push(w);
+            if !plain_name(&w.project) || dir.join(".git").exists() {
+                continue;
             }
+            // A model alone answers it: no folder is needed.
+            if matches!(&w.task.pick, Pick::Offered { worker } if worker.alone()) {
+                self.answer_in(&w.project, url, token);
+                continue;
+            }
+            projects.entry(w.project.clone()).or_default().push(w);
         }
         let me = self.runner.name.as_str();
         for (project, tasks) in projects {
@@ -334,6 +364,52 @@ impl<'a> Daemon<'a> {
             )),
             Err(e) => (self.say)(&format!("task {id} of {project}: cannot give it back: {e}")),
         }
+    }
+
+    /// Give `project`, which the runner has no folder for, a worker of the
+    /// tasks of it a model answers alone, when it has none yet. What it keeps
+    /// of its runs is in the runner's folder, under `answers/<project>`.
+    fn answer_in(&self, project: &str, url: &str, token: &Token) {
+        let mut answering = self.answering.lock().unwrap();
+        if answering.contains_key(project) {
+            return;
+        }
+        let state = match ensemble_core::state::RunnerDir::this() {
+            Ok(runner) => runner.path().join("answers").join(project),
+            Err(e) => {
+                (self.say)(&format!("{project}: cannot answer its tasks: {e}"));
+                return;
+            }
+        };
+        if let Err(e) = std::fs::create_dir_all(&state) {
+            (self.say)(&format!("{}: {e}", state.display()));
+            return;
+        }
+        let mut ensemble = Ensemble::new(self.means.clone(), None).with_state(state.clone());
+        if let Ok(runner) = ensemble_core::state::RunnerDir::this() {
+            ensemble = ensemble.with_records(runner.records());
+        }
+        let ensemble: &'static Ensemble = Box::leak(Box::new(ensemble));
+        let board = RemoteBoard::with_token(url, token.clone(), project);
+        let queue: &'static Queue<'static> = Box::leak(Box::new(
+            Queue::new(ensemble, Runs::new(&state), board, &self.runner.name).answers_only(),
+        ));
+        match ensemble_core::lock::acquire(&state) {
+            Ok(lock) => {
+                let worker = tokio::spawn(async move {
+                    let _lock = lock;
+                    queue.work().await;
+                });
+                self.workers.lock().unwrap().push(worker);
+                (self.say)(&format!(
+                    "answering the tasks of {project} a model answers alone, with no folder for it"
+                ));
+            }
+            Err(pid) => (self.say)(&format!(
+                "{project}: process {pid} answers its tasks; this runner leaves them to it"
+            )),
+        }
+        answering.insert(project.to_string(), Repository { queue });
     }
 
     /// A worker for the repository `dir`, which runs the tasks the hub at

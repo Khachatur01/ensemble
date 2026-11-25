@@ -15,7 +15,7 @@
 use crate::board::Present;
 use crate::dispatch::{RunnerNow, WorkerNow};
 use ensemble_link::protocol::Event;
-use ensemble_tasks::tasks::Worker;
+use ensemble_tasks::tasks::{ALONE, Worker};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -34,6 +34,9 @@ struct Runner {
     /// [{model, provider, tier, context_window, tools, abilities}]}`: what the
     /// hub may choose a worker of for a task.
     harnesses: Vec<Value>,
+    /// The LLMs of its pool that may answer a task alone, each `{model,
+    /// provider, tier, context_window, tools, abilities}`.
+    alone: Vec<Value>,
     /// The most calls at once to each provider of its pool.
     providers: Value,
     /// How busy it is, as it last said: `{harnesses, providers}`, the runs on
@@ -44,6 +47,29 @@ struct Runner {
 impl Runner {
     fn id(&self) -> String {
         format!("{}/{}", self.owner, self.name)
+    }
+
+    /// A worker of it: `harness`, or [`ALONE`], and the model `m`, as it
+    /// said it.
+    fn worker(&self, harness: &str, m: &Value) -> Option<WorkerNow> {
+        let (Some(model), Some(tier)) = (
+            m["model"].as_str(),
+            m["tier"].as_str().and_then(ensemble_config::Tier::parse),
+        ) else {
+            return None;
+        };
+        Some(WorkerNow {
+            worker: Worker {
+                runner: self.name.clone(),
+                harness: harness.to_string(),
+                model: model.to_string(),
+            },
+            provider: m["provider"].as_str().map(String::from),
+            tier,
+            context_window: m["context_window"].as_u64().map(|n| n as u32),
+            tools: m["tools"].as_bool(),
+            abilities: m["abilities"].as_str().map(String::from),
+        })
     }
 
     /// It as the task picker sees it.
@@ -58,25 +84,11 @@ impl Runner {
                 harness_limits.insert(harness.to_string(), n as u32);
             }
             for m in h["models"].as_array().into_iter().flatten() {
-                let (Some(model), Some(tier)) = (
-                    m["model"].as_str(),
-                    m["tier"].as_str().and_then(ensemble_config::Tier::parse),
-                ) else {
-                    continue;
-                };
-                workers.push(WorkerNow {
-                    worker: Worker {
-                        runner: self.name.clone(),
-                        harness: harness.to_string(),
-                        model: model.to_string(),
-                    },
-                    provider: m["provider"].as_str().map(String::from),
-                    tier,
-                    context_window: m["context_window"].as_u64().map(|n| n as u32),
-                    tools: m["tools"].as_bool(),
-                    abilities: m["abilities"].as_str().map(String::from),
-                });
+                workers.extend(self.worker(harness, m));
             }
+        }
+        for m in &self.alone {
+            workers.extend(self.worker(ALONE, m));
         }
         RunnerNow {
             owner: self.owner.clone(),
@@ -145,11 +157,16 @@ impl Routes {
             .as_array()
             .map(|a| a.iter().filter_map(harness).collect())
             .unwrap_or_default();
+        let alone: Vec<Value> = params["alone"]
+            .as_array()
+            .map(|a| a.iter().filter_map(model).collect())
+            .unwrap_or_default();
         let providers = counts(&params["providers"]);
         let runner = Runner {
             owner: owner.to_string(),
             name,
             harnesses,
+            alone,
             providers,
             busy: json!({ "harnesses": {}, "providers": {} }),
         };
@@ -193,6 +210,7 @@ impl Routes {
                 json!({
                     "runner": r.id(),
                     "harnesses": r.harnesses,
+                    "alone": r.alone,
                     "providers": r.providers,
                     "busy": r.busy,
                 })
@@ -227,24 +245,24 @@ impl Routes {
 /// A harness as a runner said it, with only what the hub reads of it; none
 /// when it is not one.
 fn harness(h: &Value) -> Option<Value> {
-    let models: Vec<Value> = h["models"]
-        .as_array()?
-        .iter()
-        .filter_map(|m| {
-            Some(json!({
-                "model": m["model"].as_str()?,
-                "provider": m["provider"].as_str(),
-                "tier": m["tier"].as_str()?,
-                "context_window": m["context_window"].as_u64(),
-                "tools": m["tools"].as_bool(),
-                "abilities": m["abilities"].as_str(),
-            }))
-        })
-        .collect();
+    let models: Vec<Value> = h["models"].as_array()?.iter().filter_map(model).collect();
     Some(json!({
         "harness": h["harness"].as_str()?,
         "max_concurrent": h["max_concurrent"].as_u64(),
         "models": models,
+    }))
+}
+
+/// A model as a runner said it, with only what the hub reads of it; none when
+/// it is not one.
+fn model(m: &Value) -> Option<Value> {
+    Some(json!({
+        "model": m["model"].as_str()?,
+        "provider": m["provider"].as_str(),
+        "tier": m["tier"].as_str()?,
+        "context_window": m["context_window"].as_u64(),
+        "tools": m["tools"].as_bool(),
+        "abilities": m["abilities"].as_str(),
     }))
 }
 
@@ -281,12 +299,20 @@ mod tests {
         ])
     }
 
+    /// What a runner whose pool has one LLM says may answer alone.
+    fn alone() -> Value {
+        json!([
+            {"model": "local:qwen3.5:9b", "provider": "local", "tier": "medium",
+             "context_window": 32768, "tools": true, "abilities": null},
+        ])
+    }
+
     /// A runner on Claude Code and OpenCode.
     async fn runner(url: &str, token: &str, name: &str) -> Connection {
         let mut link = Connection::open(url, token).await.unwrap();
         link.call(
             RUNNER,
-            json!({"name": name, "harnesses": harnesses(), "providers": {"local": 1}}),
+            json!({"name": name, "harnesses": harnesses(), "alone": alone(), "providers": {"local": 1}}),
         )
         .await
         .unwrap();
@@ -328,6 +354,18 @@ mod tests {
         let listed = root.call(RUNNERS, json!({})).await.unwrap();
         assert_eq!(listed["runners"][0]["runner"], "root/gpu-box");
         assert_eq!(listed["runners"][0]["harnesses"], harnesses());
+        assert_eq!(listed["runners"][0]["alone"], alone());
+        let now = hub.server.routes.now();
+        let gpu = now.iter().find(|r| r.name == "gpu-box").unwrap();
+        let names: Vec<String> = gpu.workers.iter().map(|w| w.worker.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "claude-code on sonnet on gpu-box",
+                "opencode on local:qwen3.5:9b on gpu-box",
+                "local:qwen3.5:9b alone on gpu-box",
+            ]
+        );
         assert_eq!(listed["runners"][0]["providers"], json!({"local": 1}));
         assert_eq!(
             listed["runners"][0]["busy"],

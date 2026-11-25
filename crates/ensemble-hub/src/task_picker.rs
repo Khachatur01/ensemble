@@ -77,7 +77,7 @@ const QUESTION: &[Field] = &[
     Field::new(
         "effects",
         Kind::List,
-        "What an answer means for the worker, each <answer>:<effect>: min_tier=<small|medium|strong>, min_context=<tokens>, needs_tools, prefer=<harness or model>, avoid=<harness or model>; such as hard:min_tier=strong.",
+        "What an answer means for the worker, each <answer>:<effect>: min_tier=<small|medium|strong>, min_context=<tokens>, needs_tools, prefer=<harness or model>, avoid=<harness or model>, model_alone (a model alone answers it, with no harness); such as hard:min_tier=strong.",
     ),
 ];
 const NAMED: &[Field] = &[QUESTION_NAME];
@@ -85,7 +85,7 @@ const TEMPLATE_NAMES: &[&str] = &["basic"];
 const TEMPLATE: &[Field] = &[Field::new(
     "name",
     Kind::Choice(TEMPLATE_NAMES),
-    "The template: basic asks how hard the task is and whether it needs to run tools.",
+    "The template: basic asks whether the task only needs an answer, how hard it is and whether it needs to run tools.",
 )
 .required()
 .positional()];

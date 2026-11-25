@@ -6,7 +6,9 @@
 //! the harness and the LLM the hub's task picker chose for it once that pair
 //! is free here, renews its claim while the run works, and tells the hub how
 //! the run ended. A task offered on a pair the runner no longer has is given
-//! back, for the hub to choose again. A task the
+//! back, for the hub to choose again. A task offered on a model alone, one
+//! that only needs an answer, is asked of that model in one request, with no
+//! worktree, and its answer is the task's result. A task the
 //! worker's end interrupts is put back, and a runner that dies stops
 //! renewing, so either way another run takes it up. What each run does as it
 //! goes is kept in its activity log ([`Runs`]).
@@ -21,7 +23,7 @@ use crate::tasks::{
     ASK_MARKER, Detail, GateFailed, Pick, Status, Task, Ticket, question_in, utc, waiting_for,
 };
 use ensemble_agents::external::gate;
-use ensemble_agents::means::Taken;
+use ensemble_agents::means::{ALONE, Taken, TakenAlone};
 use ensemble_agents::router::Ensemble;
 use ensemble_agents::runtime::blocking;
 use ensemble_agents::worktree;
@@ -52,11 +54,18 @@ struct Live {
 /// One run of [`Queue::work`].
 type Run<'q> = Pin<Box<dyn Future<Output = ()> + Send + 'q>>;
 
+/// What a run holds of the runner's means: a harness and its model, or a
+/// model alone.
+enum Held {
+    Pair(Taken),
+    Alone(TakenAlone),
+}
+
 /// What one look found to start.
 struct Looked {
-    /// Tasks claimed on the board, each with the pair it runs on and the flag
+    /// Tasks claimed on the board, each with what it runs on and the flag
     /// that stops it.
-    claimed: Vec<(Ticket, Taken, Arc<AtomicBool>)>,
+    claimed: Vec<(Ticket, Held, Arc<AtomicBool>)>,
     /// The worker is closing: nothing new starts.
     closed: bool,
     /// Tasks offered on a pair this runner does not have, and why.
@@ -93,6 +102,9 @@ pub struct Queue<'e> {
     lease: Duration,
     /// What this runner keeps of its runs here: logs and worktrees.
     runs: Runs,
+    /// Whether it runs only what a model answers alone, for a project the
+    /// runner has no folder for.
+    answers_only: bool,
     inner: Mutex<Inner>,
     /// Signalled whenever something starts or ends.
     changed: Notify,
@@ -108,9 +120,17 @@ impl<'e> Queue<'e> {
             runner: runner.to_string(),
             lease: LEASE,
             runs,
+            answers_only: false,
             inner: Mutex::new(Inner::default()),
             changed: Notify::new(),
         }
+    }
+
+    /// Run only the tasks offered on a model alone, which need no folder:
+    /// for a project the runner has no folder for.
+    pub fn answers_only(mut self) -> Self {
+        self.answers_only = true;
+        self
     }
 
     /// Claims that last `lease` unless renewed, in place of [`LEASE`].
@@ -154,9 +174,12 @@ impl<'e> Queue<'e> {
                     Some(()) = runs.next(), if !runs.is_empty() => {}
                 }
             };
-            for (ticket, taken, cancel) in looked.claimed {
+            for (ticket, held, cancel) in looked.claimed {
                 runs.push(Box::pin(async move {
-                    self.run_ticket(ticket, taken, &cancel).await
+                    match held {
+                        Held::Pair(taken) => self.run_ticket(ticket, taken, &cancel).await,
+                        Held::Alone(taken) => self.run_alone(ticket, taken, &cancel).await,
+                    }
                 }));
             }
             for (id, why) in looked.unfit {
@@ -235,14 +258,36 @@ impl<'e> Queue<'e> {
                 let Some((harness, model)) = self.offered(task, &all) else {
                     continue;
                 };
-                let taken = match means.take(harness, model) {
+                let alone = harness == ALONE;
+                if alone && ticket.gate.is_some() {
+                    unfit.push((
+                        ticket.id.clone(),
+                        format!(
+                            "{}: a task with a gate is not answered by a model alone, as its gate runs in a worktree",
+                            self.runner
+                        ),
+                    ));
+                    continue;
+                }
+                if !alone && self.answers_only {
+                    // The runner gets the project's folder for it.
+                    continue;
+                }
+                let taken = if alone {
+                    means.take_alone(model).map(|t| t.map(Held::Alone))
+                } else {
+                    means.take(harness, model).map(|t| t.map(Held::Pair))
+                };
+                let taken = match taken {
                     Ok(Some(taken)) => taken,
                     Ok(None) => {
                         if inner.waits.insert(ticket.id.clone()) {
-                            self.note(
-                                &ticket.id,
-                                &format!("waiting for {harness} on {model} to be free"),
-                            );
+                            let what = if alone {
+                                model.to_string()
+                            } else {
+                                format!("{harness} on {model}")
+                            };
+                            self.note(&ticket.id, &format!("waiting for {what} to be free"));
                         }
                         continue;
                     }
@@ -265,7 +310,8 @@ impl<'e> Queue<'e> {
         };
         let mut claimed = Vec::new();
         for (ticket, taken, cancel) in picked {
-            let movable = self.movable(&ticket);
+            // An answer leaves nothing in a folder: any runner may go on.
+            let movable = matches!(taken, Held::Alone(_)) || self.movable(&ticket);
             match self
                 .board
                 .claim(&ticket.id, &self.runner, self.lease, movable)
@@ -538,6 +584,84 @@ impl<'e> Queue<'e> {
         self.changed.notify_waiters();
     }
 
+    /// Ask the model `taken` holds to answer `ticket` alone, in one request,
+    /// with no worktree, and tell the hub its answer: the task's result, or
+    /// the question it ends with.
+    async fn run_alone(&self, ticket: Ticket, taken: TakenAlone, cancel: &AtomicBool) {
+        let since = SystemTime::now();
+        let detail = self.board.get(&ticket.id).await.ok().flatten();
+        let mut prompt = format!("Task: {}\n\n{}", ticket.title, ticket.prompt());
+        let attempts = detail.as_ref().map_or(&[][..], |d| &d.task.attempts[..]);
+        if !attempts.is_empty() {
+            prompt.push_str("\n\nEarlier runs of this task, and what came of them:");
+            for a in attempts {
+                prompt.push_str(&format!("\n- {}: {}", a.worker.name(), a.outcome));
+            }
+        }
+        prompt.push_str(&asked_before(detail.as_ref()));
+        prompt.push_str(&ask_line());
+        let (name, model) = (taken.alone.name(), taken.alone.model_name());
+        self.note(&ticket.id, &format!("asking {name}"));
+        let lost = AtomicBool::new(false);
+        let work = async {
+            let answered = self.ensemble.answer(&taken, &prompt, cancel).await;
+            drop(taken);
+            answered
+        };
+        let answered = tokio::select! {
+            answered = work => answered,
+            () = self.hold(&ticket.id, cancel, &lost) => unreachable!("holding never ends"),
+        };
+        self.changed.notify_waiters();
+        let asked = self.lock().live.get(&ticket.id).is_some_and(|l| l.asked);
+        let stopped = cancel.load(Ordering::Relaxed);
+        let result = match answered {
+            Ok(out) => RunResult::ok(format!("{}\n\n[{name}: one reply]", out.text)),
+            Err(e) => RunResult::err(format!("the run failed ({name}): {e}")),
+        };
+        let question = (!result.is_error && !stopped)
+            .then(|| question_in(&result.text))
+            .flatten();
+        let end = if lost.load(Ordering::Relaxed) {
+            self.note(
+                &ticket.id,
+                "stopped: this runner's claim on the task ran out, and another runner runs it now",
+            );
+            None
+        } else if stopped && !asked {
+            // The worker ended under it: put back, to run again.
+            Some(None)
+        } else if let Some(question) = question {
+            self.note(&ticket.id, &format!("needs input: {question}"));
+            Some(Some(End::Ask {
+                question,
+                reply: result.text.clone(),
+                repository: false,
+            }))
+        } else {
+            let status = if asked {
+                Status::Cancelled
+            } else if result.is_error {
+                Status::Failed
+            } else {
+                Status::Done
+            };
+            Some(Some(End::Result {
+                status,
+                harness: ALONE.to_string(),
+                model,
+                started: utc(since),
+                extra: Vec::new(),
+                text: result.text.clone(),
+            }))
+        };
+        if let Some(end) = end {
+            self.tell(&ticket.id, end, None).await;
+        }
+        self.lock().live.remove(&ticket.id);
+        self.changed.notify_waiters();
+    }
+
     /// Run `taken` on `ticket` in `dir`, then its gate if it has one. A run
     /// whose work does not pass the gate, with runs of the task left, comes
     /// back with how the gate failed, for the hub to choose the worker of the
@@ -563,13 +687,7 @@ impl<'e> Queue<'e> {
             model: taken.spec.model().to_string(),
         };
         let mut prompt = ticket.prompt();
-        if let Some((questions, reply)) = detail.and_then(|d| d.conversation.as_ref()) {
-            prompt.push_str(&format!(
-                "\n\nYou stopped earlier to ask. The questions and their answers:\n\n{}\n\nYour reply when you last stopped:\n{}\n\nGo on from there.",
-                questions.trim(),
-                reply.trim()
-            ));
-        }
+        prompt.push_str(&asked_before(detail));
         if let Some(p) = detail
             .and_then(|d| d.progress.as_ref())
             .filter(|p| p.node != self.runner)
@@ -587,9 +705,7 @@ impl<'e> Queue<'e> {
                 gate.command, failed.ended, failed.output, failed.reply
             ));
         }
-        prompt.push_str(&format!(
-            "\n\nIf you cannot finish without a decision that only the person who asked can make, stop and end your reply with one line: {ASK_MARKER} <your question>"
-        ));
+        prompt.push_str(&ask_line());
         note(&format!("running on {}", taken.spec.name));
         let result = run_delegation(
             self.ensemble,
@@ -659,4 +775,24 @@ impl<'e> Queue<'e> {
         drop(inner);
         self.changed.notify_waiters();
     }
+}
+
+/// What a run is told of what it asked before and was answered, when it
+/// stopped earlier to ask.
+fn asked_before(detail: Option<&Detail>) -> String {
+    match detail.and_then(|d| d.conversation.as_ref()) {
+        Some((questions, reply)) => format!(
+            "\n\nYou stopped earlier to ask. The questions and their answers:\n\n{}\n\nYour reply when you last stopped:\n{}\n\nGo on from there.",
+            questions.trim(),
+            reply.trim()
+        ),
+        None => String::new(),
+    }
+}
+
+/// How a run is told to ask.
+fn ask_line() -> String {
+    format!(
+        "\n\nIf you cannot finish without a decision that only the person who asked can make, stop and end your reply with one line: {ASK_MARKER} <your question>"
+    )
 }

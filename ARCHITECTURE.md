@@ -268,7 +268,10 @@ asked, gave it back or whose gate failed). The questions a person wrote come
 first, in one request; the answer taken for each is its likeliest, and each
 answer's **effects** narrow the workers: `min_tier`, `min_context` (a model
 whose context nobody said passes), `needs_tools`, `avoid` a harness or a
-model; `prefer` one puts it first among the candidates. Then, in a second
+model; `prefer` one puts it first among the candidates; `model_alone` makes
+the workers models alone, the LLMs of the runners' pools that answer in one
+reply with no harness, and only those (never for a task with a gate, which
+waits for its person to choose instead). Then, in a second
 request with those answers in the state, one `choice`, `worker`: the
 workers of the account's runners connected now that the effects allow,
 those that gave the task back left out, and only its runner's when its work
@@ -943,9 +946,15 @@ gate only once that person confirms it, since someone else wrote the command.
 
 The hub has an ANN pool too, for its own work: the distiller, the embedding
 model and the source filter, on its own providers and on the models runners
-share with it. A model alone is called, with no harness, only there for now;
-a task that only needs an answer is to run on a model alone, as the task
-picker decides (not built yet).
+share with it, and no task. A task that only needs an answer runs on a model
+alone, as the task picker decides (`model_alone`): a worker of a runner whose
+harness is `alone`, an LLM of its pool asked once, with the task, the notes
+recalled for it, what it asked and was answered and its earlier runs, with no
+tools, no clone and no worktree; so a runner answers it for a project it has
+no folder for (`answers/<project>` in its folder). Its answer is the task's
+result, and one that ends asking waits for the answer as any run. It holds a
+call of its provider and asks for at most 8192 tokens, less when the
+model's context window leaves less.
 
 The agent loop of Ensemble's own is the `builtin` harness: harness-rs's
 `AgentLoop`, its file and shell tools, and its model clients, on the pool's
@@ -1573,8 +1582,9 @@ crate holds it today.
     sure (`task.choose`, MCP's `choose`), the choice kept with the decision,
     a task chosen for again when what it was chosen of changes, a gate's
     retry chosen for again, and the rules on the runner gone; link protocol
-    14. Not yet: a task that only needs an answer run on a model alone;
-    learning from what people chose.)
+    14; a task that only needs an answer run on a model alone of a runner's
+    pool, `model_alone`, the runners telling the hub those models, link
+    protocol 15. Not yet: learning from what people chose.)
 33. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
     and Teams, Telegram); a runner's operations from the hub, for its own
     account; the remaining goal operations (people, computers); chat.

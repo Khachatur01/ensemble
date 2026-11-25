@@ -598,7 +598,7 @@ fn a_runner_offered_a_worker_it_does_not_have_gives_the_task_back_saying_why() {
     std::fs::create_dir_all(project(&tmp)).unwrap();
     repo(&project(&tmp));
     let e = on(&tmp, None, 1);
-    assert!(!e.means().can_run());
+    assert!(e.means().pairs().is_empty(), "no harness");
     write_task(&tmp, "0001-a", "a");
     working(&e, || {
         until("it gives it back", || {
@@ -668,4 +668,105 @@ fn a_task_this_runner_gave_back_is_left_for_another() {
         (None, None),
         "never claimed"
     );
+}
+
+/// The runner's local server's strong model, answering alone.
+fn big_alone() -> Worker {
+    Worker {
+        runner: RUNNER.into(),
+        harness: ensemble_tasks::tasks::ALONE.into(),
+        model: "local:big".into(),
+    }
+}
+
+#[test]
+fn a_task_that_only_needs_an_answer_is_answered_by_a_model_alone_with_no_folder() {
+    let server = ensemble_backends::testing::model_server(
+        &["big"],
+        &[
+            "The cart is kept in the session, which expires after an hour.",
+            "It depends on the shop.\nNEEDS INPUT: Which shop?",
+        ],
+    );
+    let tmp = TempDir::new();
+    // No repository: an answer needs none.
+    let state = tmp.0.join("answers");
+    let mut pool = AnnPool::default();
+    pool.direct
+        .insert("local".into(), LlmBackend::openai("local", &server.url, 5));
+    pool.max_concurrent.insert("local".into(), 1);
+    pool.models = vec![PoolModel {
+        provider: "local".into(),
+        id: "big".into(),
+        kind: ModelKind::Llm {
+            tier: Tier::Strong,
+            context_window: Some(32768),
+            tools: Some(true),
+        },
+        missing: false,
+        shared: false,
+        abilities: None,
+    }];
+    let backends = pool.direct.clone();
+    let e = Ensemble::new(Arc::new(Means::new(Vec::new(), pool, backends)), None)
+        .with_state(state.clone())
+        .with_records(state.clone());
+    let board = board_at(&state);
+    let ticket = |title: &str, gate: Option<Gate>| Ticket {
+        title: title.into(),
+        text: "Why does the cart lose its items?".into(),
+        definition_of_done: "The cause is explained.".into(),
+        gate,
+        ..Ticket::default()
+    };
+    let queue = Queue::new(&e, Runs::new(&state), board_at(&state), RUNNER)
+        .answers_only()
+        .with_lease(Duration::from_secs(2));
+    std::thread::scope(|s| {
+        let worker = s.spawn(|| ensemble_core::runtime::block_on(queue.work()));
+        let first = board.add(&ticket("Explain the cart", None)).unwrap();
+        board.put_on(&first, &big_alone()).unwrap();
+        let done = until("the answer is kept", || {
+            board.detail(&first).unwrap().unwrap().outcome
+        });
+        assert_eq!(done.status, Status::Done);
+        assert!(done.text.contains("harness: \"alone\""), "{}", done.text);
+        assert!(done.text.contains("model: \"local:big\""), "{}", done.text);
+        assert!(
+            done.reply().contains("expires after an hour"),
+            "{}",
+            done.text
+        );
+        let asked: Value = serde_json::from_str(&server.requests.lock().unwrap()[0]).unwrap();
+        let said = asked["messages"][0]["content"].as_str().unwrap();
+        assert!(said.starts_with("Task: Explain the cart"), "{said}");
+        assert!(said.contains("The cause is explained."), "{said}");
+        assert!(asked.get("tools").is_none(), "no tools: {asked}");
+        assert!(!state.join("worktrees").exists(), "no worktree");
+
+        // An answer that ends with a question waits for its answer.
+        let second = board.add(&ticket("Explain the other cart", None)).unwrap();
+        board.put_on(&second, &big_alone()).unwrap();
+        let question = until("it asks", || {
+            board.detail(&second).unwrap().unwrap().task.question
+        });
+        assert_eq!(question, "Which shop?");
+
+        // A task with a gate is given back: its gate runs in a worktree.
+        let gate = Gate {
+            command: "true".into(),
+            timeout_seconds: 10,
+            attempts: 1,
+        };
+        let gated = board.add(&ticket("Check the cart", Some(gate))).unwrap();
+        board.put_on(&gated, &big_alone()).unwrap();
+        let given = until("the gated task is given back", || {
+            let t = board.detail(&gated).unwrap().unwrap().task;
+            t.given_back.first().cloned()
+        });
+        assert!(given.why.contains("a task with a gate"), "{}", given.why);
+        queue.close();
+        worker.join().unwrap();
+    });
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
 }

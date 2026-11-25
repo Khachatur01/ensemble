@@ -9,7 +9,9 @@
 //! its earlier runs) as the state: first the questions a person wrote, then
 //! which worker, among the workers of the account's runners connected now
 //! that every answer's effects allow, those that gave the task back left
-//! out. Its workers most likely first, those at least as likely as the
+//! out. A worker is a harness and the model it drives or, when an answer
+//! says the task only needs an answer (`model_alone`), a model of a runner's
+//! pool alone, and then only such a model; never for a task with a gate. Its workers most likely first, those at least as likely as the
 //! picker's least confidence are its candidates, a worker preferred by an
 //! answer first; the first of them that is free is offered the task, and a
 //! task whose candidates are all busy waits for one. An answer less likely
@@ -52,6 +54,10 @@ const LONGEST_WAIT: Duration = Duration::from_secs(300);
 /// What the worker choice asks.
 const WORKER_INSTRUCTIONS: &str = "Which of these workers should work on this task? Each is a harness, the program that works in the repository, and the model it drives; choose the one whose model fits the task best, by how strong it is and what it is good at.";
 
+/// What the worker choice asks when an answer said a model alone answers
+/// the task.
+const ALONE_INSTRUCTIONS: &str = "Which of these models should answer this task? Each answers alone, in one reply, with no harness: it changes no file and runs no command. Choose the one that fits the task best, by how strong it is and what it is good at.";
+
 /// A worker of a runner connected now, with what its runner says of its
 /// model.
 #[derive(Debug, Clone, PartialEq)]
@@ -70,16 +76,20 @@ impl WorkerNow {
     /// It, as the decision model reads it.
     fn describe(&self) -> String {
         let w = &self.worker;
-        let mut said = format!(
-            "{} driving {}, a {} model",
-            w.harness,
-            w.model,
-            self.tier.as_str()
-        );
+        let mut said = if w.alone() {
+            format!("{}, a {} model, alone", w.model, self.tier.as_str())
+        } else {
+            format!(
+                "{} driving {}, a {} model",
+                w.harness,
+                w.model,
+                self.tier.as_str()
+            )
+        };
         if let Some(n) = self.context_window {
             said.push_str(&format!(" with {n} tokens of context"));
         }
-        match self.tools {
+        match self.tools.filter(|_| !w.alone()) {
             Some(true) => said.push_str(", that makes tool calls"),
             Some(false) => said.push_str(", that makes no tool calls"),
             None => {}
@@ -96,9 +106,10 @@ impl WorkerNow {
         match effect {
             Effect::MinTier { tier } => self.tier >= *tier,
             Effect::MinContext { tokens } => self.context_window.is_none_or(|n| n >= *tokens),
-            Effect::NeedsTools => self.tools == Some(true),
+            // A model alone is given no tools.
+            Effect::NeedsTools => !self.worker.alone() && self.tools == Some(true),
             Effect::Avoid { .. } => !self.named(effect),
-            Effect::Prefer { .. } => true,
+            Effect::Prefer { .. } | Effect::ModelAlone => true,
         }
     }
 
@@ -378,8 +389,9 @@ impl Dispatcher {
                             .get(&(k.clone(), w.harness.clone()))
                             .copied()
                             .unwrap_or(0);
+                    // A model alone holds no harness, only its provider's call.
                     let harness_free =
-                        runs < r.harness_limits.get(&w.harness).copied().unwrap_or(1);
+                        w.alone() || runs < r.harness_limits.get(&w.harness).copied().unwrap_or(1);
                     let provider = r
                         .workers
                         .iter()
@@ -640,9 +652,13 @@ fn ask(
                 .collect::<serde_json::Map<_, _>>()
         );
     }
+    // A model alone answers the task only when an answer says so, and then
+    // nothing else does.
+    let alone = effects.contains(&Effect::ModelAlone);
     let mut fitting: Vec<&WorkerNow> = options
         .iter()
         .copied()
+        .filter(|w| w.worker.alone() == alone)
         .filter(|w| effects.iter().all(|e| w.fits(e)))
         .collect();
     let decision = |ranked: Vec<Ranked>, candidates: Vec<Worker>| Decision {
@@ -653,17 +669,29 @@ fn ask(
         candidates,
         picked_by_person: None,
     };
-    if fitting.is_empty() {
-        let written: Vec<String> = effects.iter().map(Effect::written).collect();
-        let ranked = options
+    let unranked = |alone: bool| -> Vec<Ranked> {
+        options
             .iter()
+            .filter(|w| w.worker.alone() == alone)
             .map(|w| Ranked {
                 worker: w.worker.clone(),
                 probability: 0.0,
             })
-            .collect();
+            .collect()
+    };
+    if alone && task.ticket.gate.is_some() {
+        // Its gate runs in a worktree, which a model alone has not.
         return Ok(Chosen {
-            decision: decision(ranked, Vec::new()),
+            decision: decision(unranked(false), Vec::new()),
+            pick: Pick::NeedsChoice {
+                why: "it only needs an answer, the decision model says, but it has a gate, which runs in a worktree: a model alone cannot work on it, so choose a harness, or take its gate away".into(),
+            },
+        });
+    }
+    if fitting.is_empty() {
+        let written: Vec<String> = effects.iter().map(Effect::written).collect();
+        return Ok(Chosen {
+            decision: decision(unranked(alone), Vec::new()),
             pick: Pick::NeedsChoice {
                 why: format!(
                     "no worker connected fits the answers ({})",
@@ -688,7 +716,12 @@ fn ask(
     let asked = BTreeMap::from([(
         WORKER.to_string(),
         Question::Choice {
-            instructions: WORKER_INSTRUCTIONS.into(),
+            instructions: if alone {
+                ALONE_INSTRUCTIONS
+            } else {
+                WORKER_INSTRUCTIONS
+            }
+            .into(),
             criteria: fitting
                 .iter()
                 .zip(&names)
@@ -757,7 +790,7 @@ mod tests {
     use ensemble_config::picker::template;
     use ensemble_config::{BackendSettings, ModelSetting};
     use ensemble_core::workspace::testing::TempDir;
-    use ensemble_tasks::tasks::Ticket;
+    use ensemble_tasks::tasks::{ALONE, Gate, Ticket};
     use std::sync::Arc;
 
     /// What the stub decision model answers: for each question, the answer
@@ -862,7 +895,8 @@ mod tests {
     }
 
     /// A runner of ana's with Claude Code on Sonnet, strong, and OpenCode on
-    /// a small model of its local server, one run of each at once.
+    /// a small model of its local server, one run of each at once, and that
+    /// model alone.
     fn runner(name: &str) -> RunnerNow {
         let now = |harness: &str, model: &str, provider: Option<&str>, tier| WorkerNow {
             worker: worker(name, harness, model),
@@ -878,6 +912,7 @@ mod tests {
             workers: vec![
                 now("claude-code", "sonnet", None, Tier::Strong),
                 now("opencode", "local:small", Some("local"), Tier::Small),
+                now(ALONE, "local:small", Some("local"), Tier::Small),
             ],
             harness_limits: BTreeMap::from([("claude-code".into(), 1), ("opencode".into(), 1)]),
             provider_limits: BTreeMap::from([("local".into(), 1)]),
@@ -1027,6 +1062,7 @@ mod tests {
         let hub = Hub::new();
         hub.runners.lock().unwrap().push(runner("desk"));
         hub.picker(0.6, template("basic").unwrap());
+        hub.answer("answer_only", "no", 0.9);
         hub.answer("difficulty", "hard", 0.8);
         hub.answer("tools", "yes", 0.9);
         hub.answer(WORKER, "small", 0.9);
@@ -1049,7 +1085,7 @@ mod tests {
         let task = hub.task(&id);
         let d = task.decision.unwrap();
         assert_eq!(
-            (d.answers[0].question.as_str(), d.answers[0].answer.as_str()),
+            (d.answers[1].question.as_str(), d.answers[1].answer.as_str()),
             ("difficulty", "hard")
         );
         assert!(matches!(task.pick, Pick::Offered { .. }));
@@ -1136,5 +1172,96 @@ mod tests {
             panic!("{:?}", hub.task(&id).pick)
         };
         assert!(why.contains("no runner of its account"), "{why}");
+    }
+
+    #[test]
+    fn a_task_that_only_needs_an_answer_is_offered_to_a_model_alone() {
+        let hub = Hub::new();
+        let mut desk = runner("desk");
+        // OpenCode is busy, which a model alone does not need.
+        desk.busy_harnesses.insert("opencode".into(), 1);
+        hub.runners.lock().unwrap().push(desk);
+        hub.picker(0.6, template("basic").unwrap());
+        hub.answer("answer_only", "yes", 0.9);
+        hub.answer("difficulty", "easy", 0.9);
+        hub.answer("tools", "no", 0.9);
+        hub.answer(WORKER, "small", 0.9);
+        let id = hub.add();
+        hub.dispatcher.pass().unwrap();
+        let requests = hub.stub.requests.lock().unwrap().clone();
+        let worker_asked: Value = serde_json::from_str(&requests[1]).unwrap();
+        let asked = &worker_asked["questions"]["worker"];
+        let options: Vec<&String> = asked["criteria"].as_object().unwrap().keys().collect();
+        assert_eq!(options, ["local:small alone on desk"], "models alone only");
+        assert!(
+            asked["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("answers alone"),
+            "{asked}"
+        );
+        assert!(
+            asked["criteria"]["local:small alone on desk"]
+                .as_str()
+                .unwrap()
+                .contains("a small model, alone"),
+            "{asked}"
+        );
+        assert_eq!(
+            hub.task(&id).pick,
+            Pick::Offered {
+                worker: worker("desk", ALONE, "local:small")
+            }
+        );
+    }
+
+    #[test]
+    fn a_task_with_a_gate_is_never_answered_by_a_model_alone() {
+        let hub = Hub::new();
+        let mut desk = runner("desk");
+        desk.busy_providers.insert("local".into(), 1);
+        hub.runners.lock().unwrap().push(desk);
+        hub.picker(0.6, template("basic").unwrap());
+        hub.answer("answer_only", "yes", 0.9);
+        hub.answer("tools", "no", 0.9);
+        hub.answer(WORKER, "small", 0.9);
+        let gate = Gate {
+            command: "cargo test".into(),
+            timeout_seconds: 60,
+            attempts: 1,
+        };
+        let gated = hub
+            .board()
+            .add(&Ticket {
+                title: "Explain the cart".into(),
+                text: "Why does the cart lose items?".into(),
+                definition_of_done: "It is explained.".into(),
+                gate: Some(gate.clone()),
+                ..Ticket::default()
+            })
+            .unwrap();
+        // Decided on a model alone, it waits while its provider is busy.
+        let open = hub.add();
+        hub.dispatcher.pass().unwrap();
+        let task = hub.task(&gated);
+        let Pick::NeedsChoice { why } = &task.pick else {
+            panic!("{:?}", task.pick)
+        };
+        assert!(why.contains("it has a gate"), "{why}");
+        let ranked = task.decision.unwrap().ranked;
+        assert!(!ranked.is_empty() && ranked.iter().all(|r| !r.worker.alone()));
+        let err = hub
+            .board()
+            .choose(&gated, &worker("desk", ALONE, "local:small"))
+            .unwrap_err();
+        assert!(err.contains("a model alone cannot work on it"), "{err}");
+        hub.board()
+            .choose(&gated, &worker("desk", "claude-code", "sonnet"))
+            .unwrap();
+
+        // A gate given to a task chosen a model alone has it chosen again.
+        assert_eq!(hub.task(&open).pick, Pick::Decided);
+        hub.board().set_gate(&open, Some(gate)).unwrap();
+        assert_eq!(hub.task(&open).pick, Pick::Undecided { why: None });
     }
 }

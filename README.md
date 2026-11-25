@@ -964,8 +964,9 @@ $ ensemble-hub model add gpu:local:qwen3.5:72b
 Nobody writes a team. A runner offers what its computer has: its
 **harnesses**, the programs that drive an LLM to work in a repository, and
 the models of its **ANN pool**. For each task, the hub's **task picker**
-chooses a runner, a harness and an LLM, and the task's own text is what the
-run is asked; Ensemble adds no prompt of its own.
+chooses a runner, a harness and an LLM, or an LLM alone for a task that only
+needs an answer, and the task's own text is what the run is asked; Ensemble
+adds no prompt of its own.
 
 What the runner keeps while it runs is in its folder,
 `~/.local/state/ensemble/runner/` (`runner/` in `--config-dir`), outside every
@@ -977,6 +978,7 @@ repository:
 | `workdirs/<folder>-<hash>/runs/` | what tasks did as they ran on this computer, for one repository of the workspace |
 | `.../worktrees/` | a git worktree per task |
 | `.../worker.lock` | the lock of the one worker that runs the repository's tasks |
+| `answers/<project>/runs/` | what tasks a model answered alone did, for a project the runner has no folder for |
 | `records.jsonl` | every run: its harness and model, its time and its tokens |
 | `worker.lock` | the runner's own lock |
 
@@ -991,6 +993,21 @@ and not known to be logged out, each with the LLMs it can drive:
 | `codex` | its own models, `gpt-5-codex`, `gpt-5` and `gpt-5-mini` |
 | `opencode` | the pool's LLMs that are on, of an OpenAI-compatible provider, whose context window is known |
 | `builtin` | the pool's LLMs that are on, whose context window is known, and that are not known to make no tool calls |
+
+A task that only needs an answer, such as an explanation, a review or a
+plan, needs no harness: every LLM of the runner's pool may also answer it
+**alone**, a worker whose harness is `alone`. It is one request to the model,
+with the task's title, text, goal, constraints, definition of done, the notes
+recalled for it, what it asked and was answered and what came of its earlier
+runs; no tools, no clone and no worktree, so a runner answers it for a project
+it has no folder for. The answer is the task's result, kept on the hub as any
+run's and posted to its issue for a task from a tracker, and its front matter
+says `harness: alone`; an answer that ends with `NEEDS INPUT:` waits for yours.
+It holds one call of its provider, and asks for at most 8192 tokens of answer,
+less when the model's context window leaves less. A model answers alone only
+when an answer of the task picker's questions says so (`model_alone`), and then
+only a model alone works on the task; never one with a gate, which runs in a
+worktree.
 
 Each runner tells the hub its workers, with each model's tier, context
 window, tool calls and the abilities you wrote (`model set --abilities`,
@@ -1312,8 +1329,11 @@ $ ensemble-runner harness add builtin --max-seconds 1800 --max-steps 50 --max-co
   (its answers lowest first) or a `noul` (yes or no), each answer `name: what
   it means`, its least confidence, and what each answer means for the worker,
   from a fixed list: `min_tier=<small|medium|strong>`, `min_context=<tokens>`,
-  `needs_tools`, `prefer=<harness or model>`, `avoid=<harness or model>`.
-  `picker template basic` replaces the questions with a start to change; no
+  `needs_tools`, `prefer=<harness or model>`, `avoid=<harness or model>`,
+  and `model_alone`: the task only needs an answer, and a model alone
+  answers it. `picker template basic` asks whether the task only needs an
+  answer, how hard it is and whether it needs to run tools, and replaces the
+  questions with that start to change; no
   template is ever used unless chosen. A decision model the picker uses is not
   removed.
 - **Nothing is in the pool until it is added.** `provider models` lists what
@@ -1745,9 +1765,14 @@ scripts stand in for the CLIs.
 - **A decision model chooses, or nobody.** With no task picker set, or no
   decision model answering, no task is handed out. Laya is near chance until
   it is fit on labels, so expect to choose often at first; what you choose is
-  kept, but nothing learns from it yet. Every task goes to a harness: one
-  that only needs an answer is not yet run on a model alone, which is called
-  only for the hub's own work.
+  kept, but nothing learns from it yet.
+- **A model alone answers in one reply.** It runs no tool and reads no file,
+  so it answers from what the task says and the notes recalled for it; its
+  answer is at most 8192 tokens. It answers a task only when a question of
+  the task picker says the task only needs an answer, and never a task with
+  a gate: one the decision model says only needs an answer but has a gate
+  waits for you to choose a harness, or to take the gate away. The hub's own
+  pool answers no task.
 - **Only the end of a run can ask.** A run stops with a question
   (`NEEDS INPUT:`) at the end of a run, never halfway through one: the CLIs'
   headless modes do not wait for an answer. The task waits for the answer,

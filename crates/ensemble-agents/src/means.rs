@@ -4,7 +4,9 @@
 //! Claude Code and Codex with the models of their own vendor's a person added
 //! to them, OpenCode with the pool's LLMs of an OpenAI-compatible provider and
 //! of a known context window, and `builtin` with the pool's LLMs of a known
-//! context window and not known to make no tool calls.
+//! context window and not known to make no tool calls. Every LLM of the pool
+//! whose provider a run reaches may also answer a task alone ([`Alone`]), in
+//! one reply with no harness, for a task that only needs an answer.
 //!
 //! The hub's task picker chooses the worker of each task, and the runner runs
 //! exactly that pair ([`Means::take`]), once its harness has a free run and
@@ -51,6 +53,35 @@ impl Pair {
             Some(p) => format!("{p}:{}", self.model),
             None => self.model.clone(),
         }
+    }
+}
+
+/// The `harness` of a worker that is a model alone, as the hub names it.
+pub const ALONE: &str = "alone";
+
+/// An LLM of the pool that may answer a task alone, in one reply, with no
+/// harness, no worktree and no tools.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alone {
+    /// The provider of the pool it is on.
+    pub provider: String,
+    /// Its id, as its provider serves it.
+    pub model: String,
+    pub tier: Tier,
+    pub context_window: Option<u32>,
+    pub tools: Option<bool>,
+    pub abilities: Option<String>,
+}
+
+impl Alone {
+    /// `<provider>:<id>`, as the runner tells the hub of it.
+    pub fn model_name(&self) -> String {
+        format!("{}:{}", self.provider, self.model)
+    }
+
+    /// `local:qwen3.5:9b alone`.
+    pub fn name(&self) -> String {
+        format!("{} {ALONE}", self.model_name())
     }
 }
 
@@ -177,9 +208,67 @@ impl Means {
         out
     }
 
-    /// Whether it can run a task at all: it has a pair.
+    /// Every LLM of the pool that may answer a task alone: each whose
+    /// provider a run reaches, by provider, then id.
+    pub fn alone(&self) -> Vec<Alone> {
+        let mut out: Vec<Alone> = self
+            .pool
+            .models
+            .iter()
+            .filter(|m| self.backends.contains_key(&m.provider))
+            .filter_map(|m| match m.kind {
+                ModelKind::Llm {
+                    tier,
+                    context_window,
+                    tools,
+                } => Some(Alone {
+                    provider: m.provider.clone(),
+                    model: m.id.clone(),
+                    tier,
+                    context_window,
+                    tools,
+                    abilities: m.abilities.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        out.sort_by(|a, b| (&a.provider, &a.model).cmp(&(&b.provider, &b.model)));
+        out
+    }
+
+    /// Whether it can run a task at all: it has a pair, or a model that may
+    /// answer alone.
     pub fn can_run(&self) -> bool {
-        !self.pairs().is_empty()
+        !self.pairs().is_empty() || !self.alone().is_empty()
+    }
+
+    /// Take the model `model` of the pool, named as the runner tells the hub
+    /// of it (`<provider>:<id>`), to answer a task alone, when its provider
+    /// has a free call: the call is held until the [`TakenAlone`] is
+    /// dropped. None while it is busy; why, when the pool has no such model.
+    pub fn take_alone(self: &Arc<Self>, model: &str) -> Result<Option<TakenAlone>, String> {
+        let alone = self
+            .alone()
+            .into_iter()
+            .find(|a| a.model_name() == model)
+            .ok_or_else(|| format!("it has no {model} in its ANN pool now"))?;
+        let mut busy = self.lock();
+        let calls = busy.providers.get(&alone.provider).copied().unwrap_or(0);
+        if self
+            .pool
+            .max_concurrent
+            .get(&alone.provider)
+            .is_some_and(|max| calls >= *max)
+        {
+            return Ok(None);
+        }
+        *busy.providers.entry(alone.provider.clone()).or_default() += 1;
+        self.told.send_replace(busy.clone());
+        drop(busy);
+        Ok(Some(TakenAlone {
+            means: self.clone(),
+            alone,
+        }))
     }
 
     /// Each harness with the pairs it is in, as the runner tells the hub.
@@ -311,6 +400,30 @@ impl Drop for Taken {
     }
 }
 
+/// A model of the pool a run holds to answer a task alone: its provider's
+/// call, given back when it is dropped.
+pub struct TakenAlone {
+    means: Arc<Means>,
+    pub alone: Alone,
+}
+
+impl TakenAlone {
+    /// The runner's means it was taken of.
+    pub fn means(&self) -> &Means {
+        &self.means
+    }
+}
+
+impl Drop for TakenAlone {
+    fn drop(&mut self) {
+        let mut busy = self.means.lock();
+        if let Some(n) = busy.providers.get_mut(&self.alone.provider) {
+            *n = n.saturating_sub(1);
+        }
+        self.means.told.send_replace(busy.clone());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,7 +537,10 @@ mod tests {
             ]
         );
         assert!(m.can_run());
-        assert!(!means(Vec::new()).can_run(), "no harness, nothing to run");
+        assert!(
+            !Means::new(Vec::new(), AnnPool::default(), BTreeMap::new()).can_run(),
+            "no harness and no LLM, nothing to run"
+        );
     }
 
     #[test]
@@ -454,6 +570,33 @@ mod tests {
         assert_eq!(told.borrow().harnesses[&HarnessKind::OpenCode], 0);
         assert_eq!(told.borrow().providers["local"], 0);
         assert!(m.take("opencode", "local:small").unwrap().is_some());
+    }
+
+    #[test]
+    fn every_llm_of_the_pool_may_answer_alone_holding_a_call_of_its_provider() {
+        let m = means(Vec::new());
+        assert_eq!(
+            m.alone().iter().map(Alone::name).collect::<Vec<_>>(),
+            [
+                "claude:sonnet-api alone",
+                "local:big alone",
+                "local:no-tools alone",
+                "local:no-window alone",
+                "local:small alone",
+            ]
+        );
+        assert!(m.can_run(), "no harness, but models to answer alone");
+        let told = m.busy();
+        let first = m.take_alone("local:small").unwrap().unwrap();
+        assert_eq!(told.borrow().providers["local"], 1);
+        // The local server takes one call at a time, a harness's run included.
+        assert!(m.take_alone("local:big").unwrap().is_none());
+        assert!(m.take_alone("claude:sonnet-api").unwrap().is_some());
+        let err = m.take_alone("local:gone").err().unwrap();
+        assert!(err.contains("no local:gone"), "{err}");
+        drop(first);
+        assert_eq!(told.borrow().providers["local"], 0);
+        assert!(m.take_alone("local:big").unwrap().is_some());
     }
 
     #[test]

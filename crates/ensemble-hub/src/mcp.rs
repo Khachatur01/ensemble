@@ -194,7 +194,8 @@ impl Server<'_> {
         if self.keeps_tasks() && permissions.contains(&Permission::Tasks) {
             out.push_str(
                 "\n\nThe user's runners work through tasks kept here, each on a harness and a \
-                 model the hub's decision model chooses (its `pick`). Make one with `submit` when the user wants work done \
+                 model the hub's decision model chooses (its `pick`), or, when it only needs an \
+                 answer, on a model alone, whose answer is its result. Make one with `submit` when the user wants work done \
                  that goes on without this conversation, naming the project (the repository's \
                  name), and its `repository` (the URL or path to clone it from) when you know it, \
                  and giving the run everything it needs: it cannot see this conversation. \
@@ -417,10 +418,28 @@ fn runners_text(listed: &Value) -> String {
                 )
             })
             .collect();
-        lines.push(if harnesses.is_empty() {
-            format!("- {name}: runs no task (no harness is on with a model it can drive)")
+        let alone: Vec<String> = runner["alone"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|m| {
+                format!(
+                    "{} ({})",
+                    m["model"].as_str().unwrap_or("?"),
+                    m["tier"].as_str().unwrap_or("?")
+                )
+            })
+            .collect();
+        let mut said = harnesses;
+        if !alone.is_empty() {
+            said.push(format!("answering alone: {}", alone.join(", ")));
+        }
+        lines.push(if said.is_empty() {
+            format!(
+                "- {name}: runs no task (no harness with a model it can drive, and no LLM in its ANN pool)"
+            )
         } else {
-            format!("- {name}: {}", harnesses.join("; "))
+            format!("- {name}: {}", said.join("; "))
         });
     }
     if lines.is_empty() {
@@ -618,7 +637,7 @@ fn task_tools() -> Vec<Value> {
                 "project": project,
                 "id": id,
                 "runner": { "type": "string", "description": "The runner, by its name." },
-                "harness": { "type": "string", "description": "Its harness, such as `claude-code`." },
+                "harness": { "type": "string", "description": "Its harness, such as `claude-code`; `alone` for a model that answers alone, with no harness." },
                 "model": { "type": "string", "description": "The model the harness drives, as the runner names it, such as `sonnet` or `local:qwen3.5:9b`." },
             }),
             &["project", "id", "runner", "harness", "model"],
@@ -1051,7 +1070,7 @@ mod tests {
             json!({"name": "desk", "harnesses": [
                 {"harness": "claude-code", "models": [{"model": "haiku", "tier": "medium"}, {"model": "sonnet", "tier": "strong"}]},
                 {"harness": "builtin", "models": [{"model": "local:qwen3.5:9b", "tier": "medium"}]},
-            ]}),
+            ], "alone": [{"model": "local:qwen3.5:9b", "tier": "medium"}]}),
         )
         .await
         .unwrap();
@@ -1073,8 +1092,8 @@ mod tests {
         assert!(!failed, "{text}");
         assert_eq!(
             text,
-            "- ana/desk: claude-code on haiku (medium), sonnet (strong); builtin on local:qwen3.5:9b (medium)\n\
-             - ana/laptop: runs no task (no harness is on with a model it can drive)"
+            "- ana/desk: claude-code on haiku (medium), sonnet (strong); builtin on local:qwen3.5:9b (medium); answering alone: local:qwen3.5:9b (medium)\n\
+             - ana/laptop: runs no task (no harness with a model it can drive, and no LLM in its ANN pool)"
         );
     }
 }
