@@ -2656,6 +2656,43 @@ fn an_admin_adds_providers_and_their_keys_without_naming_a_variable_and_adds_mod
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(vars()["ENSEMBLE_PROVIDER_CLAUDE2_KEY"], "sk-ant");
 
+    // A decision model's API, as Laya's laya-serve or TypeSafe's Jev answers:
+    // what it serves are decision models, and a test asks one a question.
+    let laya = models_stub(
+        r#"{"data":[{"id":"laya"}],"model":"laya","answers":{"answers":{"type":"noul","noul":0.9}}}"#,
+    );
+    let out = hub_with_stdin(
+        &s,
+        &[
+            "provider",
+            "add",
+            "laya",
+            "--type",
+            "decision-api",
+            "--url",
+            &laya,
+            "--max-concurrent",
+            "2",
+        ],
+        "",
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let out = hub_with_stdin(&s, &["model", "add", "laya:laya"], "");
+    assert!(
+        stdout_of(&out).contains("laya:laya is in the pool: decision"),
+        "{}{}",
+        stdout_of(&out),
+        stderr_of(&out)
+    );
+    let out = hub_with_stdin(&s, &["model", "add", "laya:laya", "--tier", "small"], "");
+    assert!(
+        stdout_of(&out).contains("in the pool already"),
+        "{}",
+        stdout_of(&out)
+    );
+    let tested = stdout_of(&hub_with_stdin(&s, &["provider", "test", "laya"], ""));
+    assert!(tested.contains("laya: answers, serves laya"), "{tested}");
+
     // A provider something uses stays; another goes, with its models and the
     // key kept for it.
     let out = hub_with_stdin(&s, &["provider", "remove", "central"], "");
@@ -2731,6 +2768,25 @@ fn a_runners_owner_adds_providers_and_shares_their_models() {
     let mut named = read_runner(&runner_yaml);
     named["hub"] = json!("ws://127.0.0.1:1");
     write_runner(&runner_yaml, named);
+    // A decision model's API is the hub's alone.
+    let out = run(&[
+        "provider",
+        "add",
+        "laya",
+        "--type",
+        "decision-api",
+        "--url",
+        NOWHERE,
+        "--max-concurrent",
+        "1",
+        "--no-check",
+    ]);
+    assert!(
+        stderr_of(&out).contains("a provider of the hub's pool alone"),
+        "{}",
+        stderr_of(&out)
+    );
+
     let server = models_stub(r#"{"data":[{"id":"big"}]}"#);
     let out = run(&[
         "provider",

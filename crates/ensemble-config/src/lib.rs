@@ -28,6 +28,10 @@ use std::path::{Path, PathBuf};
 pub const OPENAI_COMPATIBLE_API: &str = "openai-compatible-api";
 /// Anthropic's own Messages API.
 pub const ANTHROPIC_API: &str = "anthropic-api";
+/// A decision model's API, `POST /v1/systemone`: a state and typed questions
+/// in, typed answers with their probabilities out, as TypeSafe's Jev and
+/// Laya's `laya-serve` answer.
+pub const DECISION_API: &str = "decision-api";
 
 /// The harnesses, by the names their runs are recorded under.
 pub const CLAUDE_CODE_AGENT: &str = "claude-code";
@@ -50,20 +54,28 @@ pub enum BackendSettings {
         base_url: String,
         api_key: Option<String>,
     },
+    /// `POST {base_url}/v1/systemone`, the key as a bearer token: a decision
+    /// model's API, which asks questions and chats with nobody.
+    Decision {
+        base_url: String,
+        api_key: Option<String>,
+    },
 }
 
 impl BackendSettings {
     pub fn base_url(&self) -> &str {
         match self {
             BackendSettings::OpenAiCompatible { base_url, .. }
-            | BackendSettings::Anthropic { base_url, .. } => base_url,
+            | BackendSettings::Anthropic { base_url, .. }
+            | BackendSettings::Decision { base_url, .. } => base_url,
         }
     }
 
     pub fn api_key(&self) -> Option<&str> {
         match self {
             BackendSettings::OpenAiCompatible { api_key, .. }
-            | BackendSettings::Anthropic { api_key, .. } => api_key.as_deref(),
+            | BackendSettings::Anthropic { api_key, .. }
+            | BackendSettings::Decision { api_key, .. } => api_key.as_deref(),
         }
     }
 }
@@ -95,6 +107,7 @@ impl LlmBackend {
         match self.settings {
             BackendSettings::OpenAiCompatible { .. } => OPENAI_COMPATIBLE_API,
             BackendSettings::Anthropic { .. } => ANTHROPIC_API,
+            BackendSettings::Decision { .. } => DECISION_API,
         }
     }
 }

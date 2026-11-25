@@ -34,11 +34,12 @@ pub struct Answer {
     pub usage: Usage,
 }
 
-/// The request for `backend`: the path after its `base_url`, and the body.
+/// The request for `backend`: the path after its `base_url`, and the body. A
+/// decision model's API is never asked to chat: [`send`] refuses it.
 pub fn request(backend: &LlmBackend, ask: &Ask<'_>) -> (&'static str, Value) {
     match backend.settings {
-        BackendSettings::OpenAiCompatible { .. } => ("/chat/completions", openai_body(ask)),
         BackendSettings::Anthropic { .. } => ("/v1/messages", anthropic_body(ask)),
+        _ => ("/chat/completions", openai_body(ask)),
     }
 }
 
@@ -68,11 +69,18 @@ pub fn anthropic_body(ask: &Ask<'_>) -> Value {
 /// Send `body` to `path` of `backend` and read the answer. It waits at most the
 /// backend's `timeout_seconds`.
 pub fn send(backend: &LlmBackend, path: &str, body: &Value) -> Result<Answer, Error> {
+    if let BackendSettings::Decision { .. } = backend.settings {
+        return Err(Error::Protocol {
+            backend: backend.name.clone(),
+            detail: "a decision model's API answers questions, and chats with nobody".into(),
+        });
+    }
     let (status, text) = post(backend, path, body)?;
     let model = body["model"].as_str().unwrap_or("");
     match backend.settings {
         BackendSettings::OpenAiCompatible { .. } => parse(&backend.name, model, status, &text),
         BackendSettings::Anthropic { .. } => parse_anthropic(&backend.name, model, status, &text),
+        BackendSettings::Decision { .. } => unreachable!("refused above"),
     }
 }
 
@@ -89,9 +97,10 @@ pub(crate) fn post(backend: &LlmBackend, path: &str, body: &Value) -> Result<(u1
         .post(format!("{base_url}{path}"))
         .header("content-type", "application/json");
     req = match (&backend.settings, api_key) {
-        (BackendSettings::OpenAiCompatible { .. }, Some(key)) => {
-            req.header("authorization", &format!("Bearer {key}"))
-        }
+        (
+            BackendSettings::OpenAiCompatible { .. } | BackendSettings::Decision { .. },
+            Some(key),
+        ) => req.header("authorization", &format!("Bearer {key}")),
         (BackendSettings::Anthropic { .. }, key) => {
             let req = req.header("anthropic-version", ANTHROPIC_VERSION);
             match key {

@@ -340,8 +340,9 @@ from the command line, where the running hub listens.
 **The ANN pool** holds the models the hub itself calls, such as to distill
 knowledge, in two layers: **providers**, its own servers and APIs, with the
 keys it keeps, and runners that share models through it (`type: runner`, see
-[Sharing models](#sharing-models)); and the **models** each serves, an LLM
-or an embedding model, that someone added, as the provider says it is.
+[Sharing models](#sharing-models)); and the **models** each serves, an LLM,
+an embedding model or a decision model, that someone added, as the provider
+says it is.
 Nothing a provider serves is in the pool until someone adds it, and only a
 model in the pool, of the kind its use needs, may be named, as
 `<provider>:<model>`. `ensemble-hub provider add` adds a provider and keeps
@@ -1230,6 +1231,8 @@ $ ensemble-hub provider key central                   # a new key, or empty to t
 $ ensemble-hub provider list | test [name] | models <name> | refresh [name] | remove <name>
 $ ensemble-hub model add central:qwen3.5:9b --tier medium   # model remove | set
 $ ensemble-hub model add central:embeddinggemma
+$ ensemble-hub provider add laya --type decision-api --url http://127.0.0.1:8000 --max-concurrent 4
+$ ensemble-hub model add laya:laya                    # a decision model
 $ ensemble-hub model list [provider]                  # each model added: what it is, missing
 $ ensemble-hub knowledge models central:qwen3.5:9b claude:claude-haiku-4-5
 $ ensemble-hub knowledge embedding central:embeddinggemma   # or --off
@@ -1250,6 +1253,14 @@ $ ensemble-runner harness add builtin --max-seconds 1800 --max-steps 50 --max-co
   key asked for. `--type runner` names another runner of yours, whose shared
   models the hub or the runner reaches through the hub (`--runner
   <owner>/<name>`), only while it runs.
+- **A decision model's API is the hub's.** `--type decision-api` is a
+  decision model's API, `POST /v1/systemone`: a state and typed questions
+  in, typed answers with their probabilities out. Laya's `laya-serve`
+  (`pip install "laya[serve]"`, Apache 2.0) answers it on a CPU, on a
+  computer of yours; TypeSafe's Jev (`--url https://api.typesafe.ai`, a key)
+  answers it as a service, and so sees what it is asked. What such a provider
+  serves are decision models, and `provider test` asks one a yes or no. A
+  runner keeps none: the hub decides.
 - **Nothing is in the pool until it is added.** `provider models` lists what
   a provider serves now, and keeps none of it; `model add` adds one, once the
   provider lists it. What it is, an LLM or an embedding model, is what Ollama

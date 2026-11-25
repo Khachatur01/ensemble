@@ -1,8 +1,8 @@
 //! The ANN pool of a hub or a runner: the artificial neural networks it may
 //! call, in two layers. A **provider** is where models come from: a server it
 //! calls itself, or another runner, whose shared models it reaches through
-//! the hub (`type: runner`). A **model** is what a provider serves, an LLM or
-//! an embedding model, that a person added, as the provider said it is:
+//! the hub (`type: runner`). A **model** is what a provider serves, an LLM, an
+//! embedding model or a decision model, that a person added, as the provider said it is:
 //! nothing a provider serves is in the pool until a person adds it, and a
 //! runner may share what is through the hub.
 //!
@@ -59,6 +59,17 @@ pub enum ProviderSetting {
         timeout_seconds: u64,
         max_concurrent: u32,
     },
+    /// A decision model's API, `/v1/systemone`: TypeSafe's Jev
+    /// (`https://api.typesafe.ai`), or Laya's `laya-serve` on a computer of
+    /// your own. A hub's alone.
+    #[serde(rename = "decision-api")]
+    Decision {
+        /// Where the API is, without `/v1`: `https://api.typesafe.ai`.
+        base_url: String,
+        api_key_env: Option<String>,
+        timeout_seconds: u64,
+        max_concurrent: u32,
+    },
     /// Another runner, whose shared models are reached through the hub.
     #[serde(rename = "runner")]
     Runner {
@@ -73,6 +84,7 @@ impl ProviderSetting {
         match self {
             ProviderSetting::OpenAiCompatible { .. } => OPENAI_COMPATIBLE_API,
             ProviderSetting::Anthropic { .. } => ANTHROPIC_API,
+            ProviderSetting::Decision { .. } => DECISION_API,
             ProviderSetting::Runner { .. } => RUNNER_PROVIDER,
         }
     }
@@ -81,7 +93,8 @@ impl ProviderSetting {
     pub fn api_key_env(&self) -> Option<&str> {
         match self {
             ProviderSetting::OpenAiCompatible { api_key_env, .. }
-            | ProviderSetting::Anthropic { api_key_env, .. } => api_key_env.as_deref(),
+            | ProviderSetting::Anthropic { api_key_env, .. }
+            | ProviderSetting::Decision { api_key_env, .. } => api_key_env.as_deref(),
             ProviderSetting::Runner { .. } => None,
         }
     }
@@ -89,7 +102,10 @@ impl ProviderSetting {
     /// Whether it serves the OpenAI API: a server of that type, or a runner,
     /// as a runner shares no other.
     pub fn is_openai(&self) -> bool {
-        !matches!(self, ProviderSetting::Anthropic { .. })
+        matches!(
+            self,
+            ProviderSetting::OpenAiCompatible { .. } | ProviderSetting::Runner { .. }
+        )
     }
 }
 
@@ -137,14 +153,18 @@ pub enum ModelKind {
     },
     /// Text in, a vector out.
     Embedding { dimensions: u32 },
+    /// A state and typed questions in, typed answers with their
+    /// probabilities out.
+    Decision,
 }
 
 impl ModelKind {
-    /// Its type, as it is written: `unknown`, `llm` or `embedding`.
+    /// Its type, as it is written: `llm`, `embedding` or `decision`.
     pub fn type_id(&self) -> &'static str {
         match self {
             ModelKind::Llm { .. } => "llm",
             ModelKind::Embedding { .. } => "embedding",
+            ModelKind::Decision => "decision",
         }
     }
 
@@ -168,6 +188,7 @@ impl ModelKind {
                 said
             }
             ModelKind::Embedding { dimensions } => format!("embedding, {dimensions} dimensions"),
+            ModelKind::Decision => "decision".into(),
         }
     }
 }
@@ -202,6 +223,11 @@ impl PoolModel {
     /// Whether it may be used as an embedding model.
     pub fn usable_embedding(&self) -> bool {
         matches!(self.kind, ModelKind::Embedding { .. })
+    }
+
+    /// Whether it may be used as a decision model.
+    pub fn usable_decision(&self) -> bool {
+        matches!(self.kind, ModelKind::Decision)
     }
 }
 
@@ -366,7 +392,13 @@ pub(crate) fn pool(
                 out.relayed.insert(name.clone(), runner);
             }
             ProviderSetting::OpenAiCompatible { max_concurrent, .. }
-            | ProviderSetting::Anthropic { max_concurrent, .. } => {
+            | ProviderSetting::Anthropic { max_concurrent, .. }
+            | ProviderSetting::Decision { max_concurrent, .. } => {
+                if may_share && matches!(s, ProviderSetting::Decision { .. }) {
+                    problems.push(format!(
+                        "{at}: is a decision model's API, which only the hub's pool has"
+                    ));
+                }
                 if *max_concurrent == 0 {
                     problems.push(format!("{at}: `max_concurrent` must be greater than 0"));
                 }
@@ -500,19 +532,30 @@ pub(crate) fn resolve_provider(
     env: &dyn Env,
 ) -> Result<LlmBackend, Vec<String>> {
     use crate::ann::ProviderSetting;
-    let (anthropic, base_url, api_key_env, timeout_seconds) = match kept {
+    let (api, base_url, api_key_env, timeout_seconds) = match kept {
         ProviderSetting::OpenAiCompatible {
             base_url,
             api_key_env,
             timeout_seconds,
             ..
-        } => (false, base_url, api_key_env, *timeout_seconds),
+        } => (
+            OPENAI_COMPATIBLE_API,
+            base_url,
+            api_key_env,
+            *timeout_seconds,
+        ),
         ProviderSetting::Anthropic {
             base_url,
             api_key_env,
             timeout_seconds,
             ..
-        } => (true, base_url, api_key_env, *timeout_seconds),
+        } => (ANTHROPIC_API, base_url, api_key_env, *timeout_seconds),
+        ProviderSetting::Decision {
+            base_url,
+            api_key_env,
+            timeout_seconds,
+            ..
+        } => (DECISION_API, base_url, api_key_env, *timeout_seconds),
         ProviderSetting::Runner { .. } => {
             return Err(vec![format!(
                 "{at}: is another runner, reached through the hub"
@@ -553,10 +596,10 @@ pub(crate) fn resolve_provider(
         Ok(LlmBackend {
             name: name.to_string(),
             timeout_seconds,
-            settings: if anthropic {
-                BackendSettings::Anthropic { base_url, api_key }
-            } else {
-                BackendSettings::OpenAiCompatible { base_url, api_key }
+            settings: match api {
+                ANTHROPIC_API => BackendSettings::Anthropic { base_url, api_key },
+                DECISION_API => BackendSettings::Decision { base_url, api_key },
+                _ => BackendSettings::OpenAiCompatible { base_url, api_key },
             },
         })
     } else {

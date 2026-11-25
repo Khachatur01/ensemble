@@ -100,6 +100,12 @@ pub fn pool_rows(pool: &AnnPoolSetting) -> Vec<(&'static str, Vec<Value>)> {
                 api_key_env,
                 timeout_seconds,
                 max_concurrent,
+            }
+            | ProviderSetting::Decision {
+                base_url,
+                api_key_env,
+                timeout_seconds,
+                max_concurrent,
             } => vec![
                 txt(name),
                 txt(s.type_id()),
@@ -140,6 +146,7 @@ pub fn pool_rows(pool: &AnnPoolSetting) -> Vec<(&'static str, Vec<Value>)> {
             ModelKind::Embedding { dimensions } => {
                 (Value::Null, Value::Null, Value::Null, int(dimensions))
             }
+            ModelKind::Decision => (Value::Null, Value::Null, Value::Null, Value::Null),
         };
         out.push((
             "INSERT INTO ann_models (provider, id, kind, tier, context_window, tools, dimensions, missing, shared) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -195,6 +202,12 @@ pub async fn read_pool(c: &turso::Connection) -> Result<AnnPoolSetting, String> 
                     timeout_seconds,
                     max_concurrent,
                 },
+                ensemble_config::DECISION_API => ProviderSetting::Decision {
+                    base_url,
+                    api_key_env,
+                    timeout_seconds,
+                    max_concurrent,
+                },
                 other => return Err(format!("{at}: the type '{other}' is unknown")),
             }
         };
@@ -226,6 +239,7 @@ pub async fn read_pool(c: &turso::Connection) -> Result<AnnPoolSetting, String> 
             "embedding" => ModelKind::Embedding {
                 dimensions: num(&r[6], &format!("{at}.dimensions"))?,
             },
+            "decision" => ModelKind::Decision,
             other => return Err(format!("{at}: the kind '{other}' is unknown")),
         };
         pool.models.push(PoolModel {

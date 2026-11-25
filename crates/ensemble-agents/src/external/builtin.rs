@@ -200,16 +200,17 @@ fn model(ba: &BuiltinAdapter, backend: &LlmBackend) -> Arc<dyn Model> {
     );
     let window = ba.context_window;
     let timeout = Duration::from_secs(backend.timeout_seconds);
+    // An LLM's provider: no decision model's API is paired with a harness.
     let inner: Arc<dyn Model> = match backend.settings {
-        BackendSettings::OpenAiCompatible { .. } => Arc::new(
-            OpenAiCompat::new(config)
-                .with_streaming(false)
-                .with_timeouts(timeout, timeout)
-                .with_context_window(window),
-        ),
         BackendSettings::Anthropic { .. } => Arc::new(
             AnthropicNative::new(config)
                 .with_streaming(false)
+                .with_context_window(window),
+        ),
+        BackendSettings::OpenAiCompatible { .. } | BackendSettings::Decision { .. } => Arc::new(
+            OpenAiCompat::new(config)
+                .with_streaming(false)
+                .with_timeouts(timeout, timeout)
                 .with_context_window(window),
         ),
     };

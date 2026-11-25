@@ -405,6 +405,10 @@ const SOURCE_TYPES: &[(&str, &str)] = &[
     ("openai-compatible-api", "OpenAI-compatible server"),
     ("anthropic-api", "Anthropic's API"),
     (
+        "decision-api",
+        "A decision model's API: TypeSafe's Jev, or Laya's laya-serve",
+    ),
+    (
         "runner",
         "Another runner, whose shared models are reached through the hub",
     ),
@@ -441,7 +445,7 @@ fn Models() -> Element {
         Some(Ok(out)) => out["models"].as_array().cloned().unwrap_or_default(),
         _ => Vec::new(),
     };
-    let api_types = ["openai-compatible-api", "anthropic-api"];
+    let api_types = ["openai-compatible-api", "anthropic-api", "decision-api"];
     rsx! {
         p { class: "muted",
             "The hub's ANN pool: the providers of models it calls, and the models of each you added. Nothing a provider serves is in the pool until you add it. Keys are kept sealed, never in the settings."
@@ -689,6 +693,7 @@ fn ModelRow(model: Value, on_changed: EventHandler<()>) -> Element {
             }
             said
         }
+        "decision" => "decision model".to_string(),
         _ => format!("embedding model, {} dimensions", text(&model, "dimensions")),
     };
     if model["missing"] == true {

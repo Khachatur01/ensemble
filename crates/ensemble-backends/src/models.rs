@@ -30,6 +30,13 @@ pub fn models(backend: &LlmBackend) -> Result<Vec<String>, Error> {
                 None => req,
             }
         }
+        BackendSettings::Decision { .. } => {
+            let req = agent.get(format!("{base_url}/v1/models"));
+            match api_key {
+                Some(key) => req.header("authorization", &format!("Bearer {key}")),
+                None => req,
+            }
+        }
         BackendSettings::Anthropic { .. } => {
             let req = agent
                 .get(format!("{base_url}/v1/models"))
@@ -58,14 +65,15 @@ pub struct Found {
 }
 
 /// The models `backend` serves, each with what it is: Anthropic's are LLMs,
-/// Ollama says what each of its can do, and of another OpenAI-compatible
+/// a decision model's API's are decision models, Ollama says what each of
+/// its can do, and of another OpenAI-compatible
 /// server only the LLMs of a family Ensemble knows are known before one is
 /// added.
 pub fn discover(backend: &LlmBackend) -> Result<Vec<Found>, Error> {
     let ids = models(backend)?;
     let ollama = match &backend.settings {
         BackendSettings::OpenAiCompatible { base_url, .. } => ollama_at(base_url),
-        BackendSettings::Anthropic { .. } => None,
+        BackendSettings::Anthropic { .. } | BackendSettings::Decision { .. } => None,
     };
     Ok(ids
         .into_iter()
@@ -76,6 +84,7 @@ pub fn discover(backend: &LlmBackend) -> Result<Vec<Found>, Error> {
                     context_window: None,
                     tools: Some(true),
                 }),
+                (BackendSettings::Decision { .. }, _) => Some(ModelKind::Decision),
                 (_, Some(origin)) => ollama_kind(origin, &id),
                 (_, None) => catalog::family(&id).map(|tier| ModelKind::Llm {
                     tier,
@@ -199,8 +208,11 @@ fn parse(backend: &str, status: u16, body: &str) -> Result<Vec<String>, Error> {
         backend: backend.into(),
         detail: format!("/models is not JSON: {e}"),
     })?;
+    // OpenAI's `data` of objects with an `id`; a decision model's API may say
+    // `models`, of names or of objects with an `id` or a `name`.
     let data = json
         .get("data")
+        .or_else(|| json.get("models"))
         .and_then(|d| d.as_array())
         .ok_or_else(|| Error::Protocol {
             backend: backend.into(),
@@ -208,7 +220,12 @@ fn parse(backend: &str, status: u16, body: &str) -> Result<Vec<String>, Error> {
         })?;
     Ok(data
         .iter()
-        .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(String::from))
+        .filter_map(|m| {
+            m.as_str()
+                .or_else(|| m.get("id").and_then(|id| id.as_str()))
+                .or_else(|| m.get("name").and_then(|n| n.as_str()))
+                .map(String::from)
+        })
         .collect())
 }
 
@@ -251,6 +268,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ids, ["qwen3.5-9b", "other"]);
+    }
+
+    #[test]
+    fn a_decision_model_api_may_list_its_models_by_name() {
+        let ids = parse(
+            "laya",
+            200,
+            r#"{"models":["laya",{"name":"laya-multilingual"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(ids, ["laya", "laya-multilingual"]);
     }
 
     #[test]
@@ -349,5 +377,22 @@ mod tests {
             sent.contains("authorization: bearer k") && !sent.contains("x-api-key"),
             "{sent}"
         );
+
+        let (url, request) = answering(r#"{"data":[{"id":"jev-latest"}]}"#);
+        let decision = backend(BackendSettings::Decision {
+            base_url: url,
+            api_key: Some("ts".into()),
+        });
+        let found = discover(&decision).unwrap();
+        assert_eq!(
+            found,
+            [Found {
+                id: "jev-latest".into(),
+                kind: Some(ModelKind::Decision)
+            }]
+        );
+        let sent = request.recv().unwrap().to_ascii_lowercase();
+        assert!(sent.starts_with("get /v1/models "), "{sent}");
+        assert!(sent.contains("authorization: bearer ts"), "{sent}");
     }
 }

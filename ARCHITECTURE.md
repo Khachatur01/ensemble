@@ -824,8 +824,10 @@ two layers:
 
 - A **provider** is where models come from: a model server (an
   OpenAI-compatible one, Ollama, llama.cpp's server), a vendor's API with its
-  key, a decision model's service or file, or the models another runner of
-  the same account shares through the hub. A person adds it, or setup finds
+  key, a decision model's API (`decision-api`, `/v1/systemone`: TypeSafe's
+  Jev as a service, or Laya's `laya-serve` on a computer of one's own; the
+  hub's pool alone), or the models another runner of the same account shares
+  through the hub. A person adds it, or setup finds
   it. It holds what all its models share: the address, the key, how long a
   call may take and how many calls it takes at once.
 - A **model** is what a provider serves that a person added to the pool:
@@ -1487,9 +1489,21 @@ crate holds it today.
     waits for another task or is waited for: it becomes a task of theirs
     in the same project, its notes recalled again as they may see them, who
     gave it to whom kept with it, and its gate confirmed by them
-    (`task.confirm-gate`) before their runners take it; link protocol 12.
-    Not yet: decision models in the pool.)
-32. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
+    (`task.confirm-gate`) before their runners take it; link protocol 12.)
+32. The task picker: the hub decides which runner, harness and model work
+    on a task, with a decision model, by questions its admin sets, and with
+    no rules: with no decision model answering, no task is handed out.
+    (Done: a task's definition of done, required, and an issue's `##
+    Definition of done` section; `decision-api` providers of the hub's pool,
+    their models decision models, a client for `/v1/systemone`. Not yet: an
+    abilities description on each model, and the runners telling the hub
+    their workers and how busy each is; `task_picker` in the hub's settings,
+    its decision models to try, its questions, what each answer does and
+    how sure it must be; the hub choosing, a task waiting for a person to
+    choose when it is not sure, and the rules on the runner gone; a task
+    that only needs an answer run on a model alone; learning from what
+    people chose.)
+33. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
     and Teams, Telegram); a runner's operations from the hub, for its own
     account; the remaining goal operations (people, computers); chat.
 

@@ -26,7 +26,7 @@ use crate::models::{Found, discover, llm};
 use ensemble_config::ann::{RUNNER_PROVIDER, split_name, valid_runner_id};
 use ensemble_config::kept::Change;
 use ensemble_config::{
-    ANTHROPIC_API, AnnPool, AnnPoolSetting, BackendSettings, LlmBackend, ModelKind,
+    ANTHROPIC_API, AnnPool, AnnPoolSetting, BackendSettings, DECISION_API, LlmBackend, ModelKind,
     OPENAI_COMPATIBLE_API, PoolModel, ProviderSetting, Tier, provider_key_variable,
 };
 use ensemble_ops::{Access, Caller, Code, Error, Field, Kind, Operation, Spec, operation};
@@ -77,7 +77,12 @@ pub enum Side {
     Runner,
 }
 
-const TYPES: &[&str] = &[OPENAI_COMPATIBLE_API, ANTHROPIC_API, RUNNER_PROVIDER];
+const TYPES: &[&str] = &[
+    OPENAI_COMPATIBLE_API,
+    ANTHROPIC_API,
+    DECISION_API,
+    RUNNER_PROVIDER,
+];
 /// Seconds one request may take, when an addition does not say.
 const TIMEOUT_SECONDS: u64 = 300;
 const YES_NO: &[&str] = &["yes", "no"];
@@ -120,8 +125,8 @@ const TIER: Field = Field::new(
 );
 const ADD: &[Field] = &[
     NAME,
-    Field::new("type", Kind::Choice(TYPES), "What it is: an OpenAI-compatible server, Anthropic's API, or another runner of yours, whose shared models are reached through the hub.").required(),
-    Field::text("url", "Where the server is, such as http://127.0.0.1:11434/v1 or https://api.anthropic.com."),
+    Field::new("type", Kind::Choice(TYPES), "What it is: an OpenAI-compatible server, Anthropic's API, a decision model's API (TypeSafe's Jev, or Laya's laya-serve; a hub's alone), or another runner of yours, whose shared models are reached through the hub.").required(),
+    Field::text("url", "Where the server is, such as http://127.0.0.1:11434/v1, https://api.anthropic.com or https://api.typesafe.ai."),
     Field::text("runner", "The runner, as the hub knows it: <owner>/<name>."),
     KEY,
     KEY_ENV,
@@ -274,7 +279,7 @@ pub fn operations<C: WithPool + 'static>(side: Side, access: Access) -> Vec<Oper
                 "Add a provider of models, once it answers: its key is kept for you, never written in the settings. None of its models is in the pool until you add it.",
                 ADD,
             ),
-            |c: &C, input: Add, change| add(c, input, change),
+            move |c: &C, input: Add, change| add(c, side, input, change),
         ),
         changing(
             spec(
@@ -417,6 +422,11 @@ fn list<C: WithPool>(c: &C, side: Side) -> Result<Value, Error> {
                         base_url,
                         max_concurrent,
                         ..
+                    }
+                    | ProviderSetting::Decision {
+                        base_url,
+                        max_concurrent,
+                        ..
                     } => (base_url.as_str(), *max_concurrent),
                     ProviderSetting::Runner { .. } => ("", 0),
                 };
@@ -445,9 +455,15 @@ fn list<C: WithPool>(c: &C, side: Side) -> Result<Value, Error> {
     Ok(json!({ "said": said.join("\n"), "providers": rows }))
 }
 
-fn add<C: WithPool>(c: &C, input: Add, change: Change) -> Result<Value, Error> {
+fn add<C: WithPool>(c: &C, side: Side, input: Add, change: Change) -> Result<Value, Error> {
     let name = input.name.trim().to_string();
     check_name(&name)?;
+    if input.kind == DECISION_API && side == Side::Runner {
+        return Err(Error::invalid(
+            "a decision model's API is a provider of the hub's pool alone: the hub decides what works on a task",
+        )
+        .on("type"));
+    }
     let kept = c.kept_pool()?;
     if kept.providers.contains_key(&name) {
         return Err(Error::new(
@@ -567,6 +583,13 @@ fn add<C: WithPool>(c: &C, input: Add, change: Change) -> Result<Value, Error> {
                 timeout_seconds: timeout,
                 max_concurrent,
             }
+        } else if input.kind == DECISION_API {
+            ProviderSetting::Decision {
+                base_url: url,
+                api_key_env: env,
+                timeout_seconds: timeout,
+                max_concurrent,
+            }
         } else {
             ProviderSetting::OpenAiCompatible {
                 base_url: url,
@@ -651,7 +674,7 @@ fn test<C: WithPool>(c: &C, name: Option<&str>) -> Result<Value, Error> {
         if name.is_some_and(|w| w != n) {
             continue;
         }
-        match crate::models::models(b) {
+        match crate::models::models(b).and_then(|m| asks(b, &m).map(|()| m)) {
             Ok(m) => {
                 said.push(format!("{n}: answers, serves {}", listed(&m)));
                 rows.push(json!({ "name": n, "ok": true, "models": m }));
@@ -682,6 +705,23 @@ fn test<C: WithPool>(c: &C, name: Option<&str>) -> Result<Value, Error> {
         said.push("no providers yet".into());
     }
     Ok(json!({ "said": said.join("\n"), "providers": rows }))
+}
+
+/// For a decision model's API, that it answers a question, a yes or no, with
+/// the first of the `models` it serves; nothing for any other provider.
+fn asks(provider: &LlmBackend, models: &[String]) -> Result<(), ensemble_core::port::Error> {
+    let (BackendSettings::Decision { .. }, Some(model)) = (&provider.settings, models.first())
+    else {
+        return Ok(());
+    };
+    let questions = std::collections::BTreeMap::from([(
+        "answers".to_string(),
+        crate::decide::Question::Noul {
+            instructions: "Is this a request to check that you answer?".into(),
+        },
+    )]);
+    let state = json!("Ensemble checks that this provider answers questions.");
+    crate::decide::decide(provider, model, &state, &questions).map(|_| ())
 }
 
 fn set_key<C: WithPool>(c: &C, input: SetKey, change: Change) -> Result<Value, Error> {
@@ -956,6 +996,7 @@ fn list_models<C: WithPool>(c: &C, side: Side, provider: Option<&str>) -> Result
                 row["tools"] = json!(tools);
             }
             ModelKind::Embedding { dimensions } => row["dimensions"] = json!(dimensions),
+            ModelKind::Decision => {}
         }
         rows.push(row);
     }
@@ -1245,16 +1286,20 @@ fn given_key<C: WithPool>(
 }
 
 fn source_of(name: &str, kind: &str, url: &str, timeout: u64, key: Option<String>) -> LlmBackend {
-    let settings = if kind == ANTHROPIC_API {
-        BackendSettings::Anthropic {
-            base_url: url.to_string(),
+    let base_url = url.to_string();
+    let settings = match kind {
+        ANTHROPIC_API => BackendSettings::Anthropic {
+            base_url,
             api_key: key,
-        }
-    } else {
-        BackendSettings::OpenAiCompatible {
-            base_url: url.to_string(),
+        },
+        DECISION_API => BackendSettings::Decision {
+            base_url,
             api_key: key,
-        }
+        },
+        _ => BackendSettings::OpenAiCompatible {
+            base_url,
+            api_key: key,
+        },
     };
     LlmBackend {
         name: name.to_string(),
@@ -1270,6 +1315,10 @@ fn with_key(settings: &BackendSettings, key: Option<String>) -> BackendSettings 
             api_key: key,
         },
         BackendSettings::Anthropic { base_url, .. } => BackendSettings::Anthropic {
+            base_url: base_url.clone(),
+            api_key: key,
+        },
+        BackendSettings::Decision { base_url, .. } => BackendSettings::Decision {
             base_url: base_url.clone(),
             api_key: key,
         },
