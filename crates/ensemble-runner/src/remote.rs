@@ -415,7 +415,7 @@ pub fn describe(config: &Config) -> String {
                 l.fallback
                     .candidates
                     .iter()
-                    .map(|c| format!("{}:{}", c.source, c.model))
+                    .map(|c| format!("{}:{}", c.provider, c.model))
                     .collect::<Vec<_>>()
                     .join(", else ")
             )),
@@ -426,7 +426,7 @@ pub fn describe(config: &Config) -> String {
                     b.fallback
                         .candidates
                         .iter()
-                        .map(|c| format!("{}:{}", c.source, c.model))
+                        .map(|c| format!("{}:{}", c.provider, c.model))
                         .collect::<Vec<_>>()
                         .join(", else "),
                     b.tools.join(", ")
@@ -473,7 +473,7 @@ pub fn describe(config: &Config) -> String {
         .collect();
     named.sort_unstable();
     named.dedup();
-    out.push_str("\nThe sources of the runner's ANN pool it sends your prompts to:\n");
+    out.push_str("\nThe providers of the runner's ANN pool it sends your prompts to:\n");
     for name in &named {
         match config.llm_backends.get(*name) {
             Some(b) => out.push_str(&format!("  {name}: {}\n", b.settings.base_url())),

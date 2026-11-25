@@ -1,5 +1,5 @@
-//! Talking to the sources of the ANN pool: one chat request (`chat`), texts as vectors
-//! (`embed`), asking a source which models it serves and what each is (`models`,
+//! Talking to the providers of the ANN pool: one chat request (`chat`), texts as vectors
+//! (`embed`), asking a provider which models it serves and what each is (`models`,
 //! with what Ensemble knows of models before it asks, `catalog`), and choosing
 //! the first usable model of a `try` list (`resolve`). Nothing here knows about
 //! agents.

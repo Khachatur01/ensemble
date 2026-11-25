@@ -88,7 +88,7 @@ fn init(force: bool, keep: bool) -> Result<ExitCode, String> {
     let settings = setup::starting(&name, setup::WORKSPACE)?;
     store.write(&settings, &Change::by_this_computer("init"))?;
     println!(
-        "Made the runner '{name}', working for you in {}, kept in {}. `ensemble-runner login` signs it in to a hub, `ensemble-runner source add` gives it sources of models, and `ensemble-runner settings show` shows every setting.",
+        "Made the runner '{name}', working for you in {}, kept in {}. `ensemble-runner login` signs it in to a hub, `ensemble-runner provider add` gives it providers of models, and `ensemble-runner settings show` shows every setting.",
         setup::WORKSPACE,
         dir.database().display()
     );
@@ -279,14 +279,14 @@ fn serve_once(ctx: &Ctx, dir: &Path) -> Result<(), String> {
     for line in &waiting {
         say(line);
     }
-    // What its sources serve now: a model new to one is kept off, so the
+    // What its providers serve now: a model new to one is kept off, so the
     // running runner need not start again for it.
     std::thread::spawn(|| match RunnerContext::new() {
         Ok(c) => eprintln!(
-            "ensemble: the sources: {}",
+            "ensemble: the providers: {}",
             ensemble_backends::ops::refresh_all(&c).replace('\n', "; ")
         ),
-        Err(e) => eprintln!("ensemble: the sources were not asked: {e}"),
+        Err(e) => eprintln!("ensemble: the providers were not asked: {e}"),
     });
     // What `ensemble-runner …` asks of it while it runs.
     let operations = operations();
@@ -418,7 +418,7 @@ impl WithPool for RunnerContext {
 
     /// Asked of the hub over a link of its own, as `peers` asks.
     fn shared_by(&self, runner: &str) -> Result<Vec<Found>, Error> {
-        let (url, token) = runner_hub("source").map_err(|e| Error::new(Code::Unavailable, e))?;
+        let (url, token) = runner_hub("provider").map_err(|e| Error::new(Code::Unavailable, e))?;
         let listed = ensemble_core::runtime::block_on(async {
             let mut link = ensemble_link::client::Connection::open(&url, &token).await?;
             let listed = link

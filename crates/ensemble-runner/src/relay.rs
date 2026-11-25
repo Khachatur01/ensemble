@@ -1,7 +1,7 @@
 //! The runner's relay socket to its hub (`ensemble_link::relay`), beside its
 //! link. On it, the runner serves others' calls to the models it shares,
-//! calling its own source, and carries its agents' calls to the models of
-//! other runners it reaches through the hub (sources of type `runner`), which
+//! calling its own provider, and carries its agents' calls to the models of
+//! other runners it reaches through the hub (providers of type `runner`), which
 //! a loopback endpoint of its own serves them (`ensemble_link::loopback`).
 //! `ensemble-runner serve` keeps it when the runner names a hub and shares a
 //! model or reaches another runner there.
@@ -41,7 +41,7 @@ pub struct Relay {
     url: String,
     token: Token,
     offer: Offer,
-    /// The runner's own sources it shares models of, by name, each with the
+    /// The runner's own providers it shares models of, by name, each with the
     /// ids of those models.
     shared: BTreeMap<String, (LlmBackend, Vec<String>)>,
     /// What is sent on the socket now; none while it is down.
@@ -59,11 +59,11 @@ impl Relay {
     /// again with the new one when it is replaced.
     pub fn new(url: &str, token: Token, runner: &Runner) -> Relay {
         let mut shared = BTreeMap::new();
-        let mut sources = BTreeMap::new();
+        let mut providers = BTreeMap::new();
         for s in runner.llm.shared() {
             let ids: Vec<String> = s.models.iter().map(|m| m.id.clone()).collect();
-            sources.insert(
-                s.source.name.clone(),
+            providers.insert(
+                s.provider.name.clone(),
                 Shared {
                     max_concurrent: s.max_concurrent,
                     models: s
@@ -76,14 +76,14 @@ impl Relay {
                         .collect(),
                 },
             );
-            shared.insert(s.source.name.clone(), (s.source.clone(), ids));
+            shared.insert(s.provider.name.clone(), (s.provider.clone(), ids));
         }
         Relay {
             url: url.to_string(),
             token,
             offer: Offer {
                 name: runner.name.clone(),
-                sources,
+                providers,
             },
             shared,
             outbox: Mutex::new(None),
@@ -160,7 +160,9 @@ impl Relay {
             let names: Vec<String> = self
                 .shared
                 .iter()
-                .flat_map(|(source, (_, ids))| ids.iter().map(move |id| format!("{source}:{id}")))
+                .flat_map(|(provider, (_, ids))| {
+                    ids.iter().map(move |id| format!("{provider}:{id}"))
+                })
                 .collect();
             say(&format!(
                 "sharing {} through the hub as {}",
@@ -236,11 +238,14 @@ impl Relay {
         }
         match frame {
             Frame::Open { open, .. } => {
-                let Some((source, ids)) = self.shared.get(&open.source).cloned() else {
+                let Some((provider, ids)) = self.shared.get(&open.provider).cloned() else {
                     self.send(Frame::error(
                         call,
                         404,
-                        format!("this runner shares no model of a source '{}'", open.source),
+                        format!(
+                            "this runner shares no model of a provider '{}'",
+                            open.provider
+                        ),
                     ));
                     return;
                 };
@@ -258,7 +263,7 @@ impl Relay {
                 let (up, request) = unbounded_channel();
                 self.serving.lock().unwrap().insert(call, up);
                 let relay = self.clone();
-                tokio::spawn(async move { relay.serve(call, source, ids, open, request).await });
+                tokio::spawn(async move { relay.serve(call, provider, ids, open, request).await });
             }
             frame => {
                 let mut serving = self.serving.lock().unwrap();
@@ -273,8 +278,8 @@ impl Relay {
         }
     }
 
-    /// Serve call `call` with this runner's source `backend`, of which the models
-    /// `ids` are shared: read its request as it comes, ask the source for the
+    /// Serve call `call` with this runner's provider `backend`, of which the models
+    /// `ids` are shared: read its request as it comes, ask the provider for the
     /// one shared model it names, and send its answer back as it comes.
     async fn serve(
         self: Arc<Self>,
@@ -331,7 +336,7 @@ impl Relay {
             self.send(Frame::error(
                 call,
                 404,
-                "a runner shares models of OpenAI-compatible sources alone",
+                "a runner shares models of OpenAI-compatible providers alone",
             ));
             return;
         };
@@ -363,7 +368,7 @@ impl Relay {
                 self.send(Frame::error(
                     call,
                     502,
-                    format!("the source '{}' did not answer: {e}", backend.name),
+                    format!("the provider '{}' did not answer: {e}", backend.name),
                 ));
                 return;
             }
@@ -403,7 +408,10 @@ impl Relay {
                     self.send(Frame::error(
                         call,
                         502,
-                        format!("the answer of the source '{}' broke off: {e}", backend.name),
+                        format!(
+                            "the answer of the provider '{}' broke off: {e}",
+                            backend.name
+                        ),
                     ));
                     return;
                 }
@@ -436,8 +444,8 @@ impl Opener for RelayOpener {
     }
 }
 
-/// The models a runner shares, as the hub lists them, `[{source, id, kind}]`:
-/// each as that runner names it, `<source>:<id>`, and what it is.
+/// The models a runner shares, as the hub lists them, `[{provider, id, kind}]`:
+/// each as that runner names it, `<provider>:<id>`, and what it is.
 pub fn shared_models(listed: &Value) -> Vec<Found> {
     listed
         .as_array()
@@ -445,7 +453,7 @@ pub fn shared_models(listed: &Value) -> Vec<Found> {
         .flatten()
         .filter_map(|m| {
             Some(Found {
-                id: format!("{}:{}", m["source"].as_str()?, m["id"].as_str()?),
+                id: format!("{}:{}", m["provider"].as_str()?, m["id"].as_str()?),
                 kind: serde_json::from_value(m["kind"].clone()).unwrap_or(ModelKind::Unknown),
             })
         })

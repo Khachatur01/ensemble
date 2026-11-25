@@ -2,7 +2,7 @@
 //! enter ([`with`]), with the tables its schema makes: the hub has one for
 //! its core and one for each connector that keeps anything, a runner one
 //! for its core. What a hub's core and a runner's both keep, their settings'
-//! audit log, the ANN pool and the keys of its sources, sealed, is [`kept`].
+//! audit log, the ANN pool and the keys of its providers, sealed, is [`kept`].
 //! [`open`] opens another Turso file, such as the knowledge vault's cache of
 //! its notes' vectors.
 //!
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS secrets (
     name TEXT PRIMARY KEY,
     sealed TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS ann_sources (
+CREATE TABLE IF NOT EXISTS ann_providers (
     name TEXT PRIMARY KEY,
     type TEXT NOT NULL,
     base_url TEXT,
@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS ann_sources (
     runner TEXT
 );
 CREATE TABLE IF NOT EXISTS ann_models (
-    source TEXT NOT NULL,
+    provider TEXT NOT NULL,
     id TEXT NOT NULL,
     kind TEXT NOT NULL,
     tier TEXT,
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS ann_models (
     turned_on INTEGER NOT NULL,
     missing INTEGER NOT NULL,
     shared INTEGER NOT NULL,
-    PRIMARY KEY (source, id)
+    PRIMARY KEY (provider, id)
 );
 CREATE TABLE IF NOT EXISTS settings_audit (
     n INTEGER PRIMARY KEY,

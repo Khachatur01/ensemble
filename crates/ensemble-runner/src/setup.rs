@@ -243,7 +243,7 @@ pub fn health_finding(
                 )
             } else {
                 format!(
-                    "start the model server, or correct its address with `ensemble-runner source` and the model names in config.yaml, or drop the agents that use it: {remove}"
+                    "start the model server, or correct its address with `ensemble-runner provider` and the model names in config.yaml, or drop the agents that use it: {remove}"
                 )
             };
             Finding::bad(what, fix)
@@ -287,7 +287,7 @@ mod tests {
                     adapter,
                     prompt: Some("Does the work."),
                     model: None,
-                    source: None,
+                    provider: None,
                     writes,
                 },
             )

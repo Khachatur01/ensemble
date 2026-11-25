@@ -1,30 +1,30 @@
 //! The operations on the ANN pool a hub or a runner keeps in its settings,
-//! for every interface to reach: its sources, `source.list`, `source.add`,
-//! `source.remove`, `source.test`, `source.key` and `source.refresh`, and
+//! for every interface to reach: its providers, `provider.list`, `provider.add`,
+//! `provider.remove`, `provider.test`, `provider.key` and `provider.refresh`, and
 //! the models they serve, `model.list`, `model.on`, `model.off` and
 //! `model.set`, and, for a runner, `model.share` and `model.unshare`.
 //!
-//! A person gives what a source is and its key, never the name of a
+//! A person gives what a provider is and its key, never the name of a
 //! variable: the key is kept under a variable Ensemble names after the
-//! source ([`source_key_variable`](ensemble_config::source_key_variable)),
-//! and the source names that variable. Where it is kept is the context's
+//! provider ([`provider_key_variable`](ensemble_config::provider_key_variable)),
+//! and the provider names that variable. Where it is kept is the context's
 //! ([`WithPool::keep_key`]): sealed in its database. One who keeps the key
 //! elsewhere already, such as a secrets manager that sets a variable, names
 //! that variable instead (`key_env`).
 //!
-//! A source is asked which models it serves when it is added, on
-//! `source.refresh`, and when the process starts ([`refresh_all`]), so a
+//! A provider is asked which models it serves when it is added, on
+//! `provider.refresh`, and when the process starts ([`refresh_all`]), so a
 //! wrong address or key is said at once, and an answer that wants a key has
 //! an interface ask for it. A model it lists newly is kept off until a person
 //! turns it on; one it no longer lists is marked missing, never forgotten, so
 //! what was said of it comes back with it.
 
 use crate::models::{Found, discover, llm};
-use ensemble_config::ann::{RUNNER_SOURCE, split_name, valid_runner_id};
+use ensemble_config::ann::{RUNNER_PROVIDER, split_name, valid_runner_id};
 use ensemble_config::kept::Change;
 use ensemble_config::{
     ANTHROPIC_API, AnnPool, AnnPoolSetting, BackendSettings, LlmBackend, ModelKind,
-    OPENAI_COMPATIBLE_API, PoolModel, SourceSetting, Tier, source_key_variable,
+    OPENAI_COMPATIBLE_API, PoolModel, ProviderSetting, Tier, provider_key_variable,
 };
 use ensemble_ops::{Access, Caller, Code, Error, Field, Kind, Operation, Spec, operation};
 use serde::{Deserialize, Serialize};
@@ -52,7 +52,7 @@ pub trait WithPool {
     ) -> Result<Option<String>, Error>;
 
     /// Tell the running process its pool changed though the settings did
-    /// not, as when a key one of its sources names did; say what it did.
+    /// not, as when a key one of its providers names did; say what it did.
     fn pool_changed(&self) -> Option<String>;
 
     /// The pool as it is now, with its keys.
@@ -62,7 +62,7 @@ pub trait WithPool {
     fn variable(&self, name: &str) -> Option<String>;
 
     /// The models the runner `runner` shares, as the hub knows them now:
-    /// what a source that is that runner serves. Why they cannot be asked
+    /// what a provider that is that runner serves. Why they cannot be asked
     /// for now, if they cannot.
     fn shared_by(&self, runner: &str) -> Result<Vec<Found>, Error>;
 }
@@ -74,7 +74,7 @@ pub enum Side {
     Runner,
 }
 
-const TYPES: &[&str] = &[OPENAI_COMPATIBLE_API, ANTHROPIC_API, RUNNER_SOURCE];
+const TYPES: &[&str] = &[OPENAI_COMPATIBLE_API, ANTHROPIC_API, RUNNER_PROVIDER];
 /// Seconds one request may take, when an addition does not say.
 const TIMEOUT_SECONDS: u64 = 300;
 const YES_NO: &[&str] = &["yes", "no"];
@@ -90,17 +90,17 @@ impl Side {
 
 const NAME: Field = Field::text(
     "name",
-    "The source's name, as a model of it is named, <source>:<model>: letters, digits, '-' or '_'.",
+    "The provider's name, as a model of it is named, <provider>:<model>: letters, digits, '-' or '_'.",
 )
 .required()
 .positional();
 const MODEL: Field = Field::text(
     "model",
-    "The model, as <source>:<model>, such as local:qwen3.5:9b.",
+    "The model, as <provider>:<model>, such as local:qwen3.5:9b.",
 )
 .required()
 .positional();
-const KEY: Field = Field::secret("key", "The source's API key (empty for none)");
+const KEY: Field = Field::secret("key", "The provider's API key (empty for none)");
 const KEY_ENV: Field = Field::text(
     "key_env",
     "A variable that holds the key already, such as one a secrets manager sets, in place of a key Ensemble keeps.",
@@ -108,7 +108,7 @@ const KEY_ENV: Field = Field::text(
 const NO_CHECK: Field = Field::new(
     "no_check",
     Kind::Flag,
-    "Do not ask the source which models it serves first.",
+    "Do not ask the provider which models it serves first.",
 );
 const TIER: Field = Field::new(
     "tier",
@@ -128,15 +128,18 @@ const ADD: &[Field] = &[
 ];
 const NAMED: &[Field] = &[NAME];
 const SOME_SOURCE: &[Field] =
-    &[Field::text("name", "One source; every one when left out.").positional()];
+    &[Field::text("name", "One provider; every one when left out.").positional()];
 const KEY_FIELDS: &[Field] = &[
     NAME,
-    Field::secret("key", "The source's new API key (empty takes its key out)"),
+    Field::secret(
+        "key",
+        "The provider's new API key (empty takes its key out)",
+    ),
     KEY_ENV,
     NO_CHECK,
 ];
 const LIST_MODELS: &[Field] =
-    &[Field::text("source", "The models of this source alone.").positional()];
+    &[Field::text("provider", "The models of this provider alone.").positional()];
 const ON: &[Field] = &[MODEL, TIER];
 const ONE_MODEL: &[Field] = &[MODEL];
 const SET: &[Field] = &[
@@ -190,7 +193,7 @@ struct SetKey {
 
 #[derive(Deserialize)]
 struct ListModels {
-    source: Option<String>,
+    provider: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -241,48 +244,48 @@ pub fn operations<C: WithPool + 'static>(side: Side, access: Access) -> Vec<Oper
     let mut all = vec![
         operation(
             spec(
-                "source.list",
-                "List the sources of the ANN pool: what each is, where, whether it has a key, and its models.",
+                "provider.list",
+                "List the providers of the ANN pool: what each is, where, whether it has a key, and its models.",
                 &[],
             ),
             move |c: &C, _: &Caller, _: Nothing| list(c, side),
         ),
         changing(
             spec(
-                "source.add",
-                "Add a source of models, once it answers: its key is kept for you, never written in the settings. Its models are off until you turn them on.",
+                "provider.add",
+                "Add a provider of models, once it answers: its key is kept for you, never written in the settings. Its models are off until you turn them on.",
                 ADD,
             ),
             |c: &C, input: Add, change| add(c, input, change),
         ),
         changing(
             spec(
-                "source.remove",
-                "Take a source out, with its models and the key Ensemble kept for it; refused while something uses one of its models.",
+                "provider.remove",
+                "Take a provider out, with its models and the key Ensemble kept for it; refused while something uses one of its models.",
                 NAMED,
             ),
             |c: &C, input: Named, change| remove(c, &input.name, change),
         ),
         operation(
             spec(
-                "source.test",
-                "Ask the sources which models they serve.",
+                "provider.test",
+                "Ask the providers which models they serve.",
                 SOME_SOURCE,
             ),
             |c: &C, _: &Caller, input: SomeSource| test(c, input.name.as_deref()),
         ),
         changing(
             spec(
-                "source.key",
-                "Give a source a new API key, or take its key out.",
+                "provider.key",
+                "Give a provider a new API key, or take its key out.",
                 KEY_FIELDS,
             ),
             |c: &C, input: SetKey, change| set_key(c, input, change),
         ),
         changing(
             spec(
-                "source.refresh",
-                "Ask the sources again which models they serve: a new one is kept off, one no longer served is marked missing.",
+                "provider.refresh",
+                "Ask the providers again which models they serve: a new one is kept off, one no longer served is marked missing.",
                 SOME_SOURCE,
             ),
             |c: &C, input: SomeSource, change| refresh(c, input.name.as_deref(), change),
@@ -294,13 +297,13 @@ pub fn operations<C: WithPool + 'static>(side: Side, access: Access) -> Vec<Oper
                 LIST_MODELS,
             ),
             move |c: &C, _: &Caller, input: ListModels| {
-                list_models(c, side, input.source.as_deref())
+                list_models(c, side, input.provider.as_deref())
             },
         ),
         changing(
             spec(
                 "model.on",
-                "Turn a model on, so it may be used; one whose source did not say what it is is asked once.",
+                "Turn a model on, so it may be used; one whose provider did not say what it is is asked once.",
                 ON,
             ),
             |c: &C, input: On, change| turn_on(c, input, change),
@@ -343,24 +346,24 @@ pub fn operations<C: WithPool + 'static>(side: Side, access: Access) -> Vec<Oper
     all
 }
 
-/// Each source: what it is, where, whether it has a key, and its models.
+/// Each provider: what it is, where, whether it has a key, and its models.
 fn list<C: WithPool>(c: &C, side: Side) -> Result<Value, Error> {
     let pool = c.pool()?;
     let kept = c.kept_pool()?;
     let mut rows = Vec::new();
     let mut said = Vec::new();
-    for (name, s) in &kept.sources {
-        let models: Vec<&PoolModel> = kept.models.iter().filter(|m| m.source == *name).collect();
+    for (name, s) in &kept.providers {
+        let models: Vec<&PoolModel> = kept.models.iter().filter(|m| m.provider == *name).collect();
         let on = models.iter().filter(|m| m.on).count();
         let counted = format!("{} model(s), {on} on", models.len());
         match s {
-            SourceSetting::Runner { runner } => {
+            ProviderSetting::Runner { runner } => {
                 said.push(format!(
-                    "{name}  {RUNNER_SOURCE} {runner}, through the hub  ({counted})"
+                    "{name}  {RUNNER_PROVIDER} {runner}, through the hub  ({counted})"
                 ));
                 rows.push(json!({
                     "name": name,
-                    "type": RUNNER_SOURCE,
+                    "type": RUNNER_PROVIDER,
                     "runner": runner,
                     "models": models.len(),
                     "on": on,
@@ -374,22 +377,24 @@ fn list<C: WithPool>(c: &C, side: Side) -> Result<Value, Error> {
                     .and_then(|b| b.settings.api_key().map(String::from));
                 let key_said = match (&env, &key) {
                     (None, _) => "no key".to_string(),
-                    (Some(var), Some(_)) if *var == source_key_variable(name) => "key kept".into(),
+                    (Some(var), Some(_)) if *var == provider_key_variable(name) => {
+                        "key kept".into()
+                    }
                     (Some(var), Some(_)) => format!("key from ${var}"),
                     (Some(var), None) => format!("no key: ${var} is not set"),
                 };
                 let (url, most) = match s {
-                    SourceSetting::OpenAiCompatible {
+                    ProviderSetting::OpenAiCompatible {
                         base_url,
                         max_concurrent,
                         ..
                     }
-                    | SourceSetting::Anthropic {
+                    | ProviderSetting::Anthropic {
                         base_url,
                         max_concurrent,
                         ..
                     } => (base_url.as_str(), *max_concurrent),
-                    SourceSetting::Runner { .. } => ("", 0),
+                    ProviderSetting::Runner { .. } => ("", 0),
                 };
                 said.push(format!(
                     "{name}  {} at {url}  ({key_said}, {most} call(s) at once, {counted})",
@@ -410,28 +415,28 @@ fn list<C: WithPool>(c: &C, side: Side) -> Result<Value, Error> {
     }
     if said.is_empty() {
         said.push(format!(
-            "no sources yet; `{} source add` adds one",
+            "no providers yet; `{} provider add` adds one",
             side.program()
         ));
     }
-    Ok(json!({ "said": said.join("\n"), "sources": rows }))
+    Ok(json!({ "said": said.join("\n"), "providers": rows }))
 }
 
 fn add<C: WithPool>(c: &C, input: Add, change: Change) -> Result<Value, Error> {
     let name = input.name.trim().to_string();
     check_name(&name)?;
     let kept = c.kept_pool()?;
-    if kept.sources.contains_key(&name) {
+    if kept.providers.contains_key(&name) {
         return Err(Error::new(
             Code::Conflict,
-            format!("there is a source '{name}' already"),
+            format!("there is a provider '{name}' already"),
         )
         .on("name")
-        .hint("`source remove` it first, or choose another name"));
+        .hint("`provider remove` it first, or choose another name"));
     }
     if !TYPES.contains(&input.kind.as_str()) {
         return Err(Error::invalid(format!(
-            "'{}' is not a type of source: {}",
+            "'{}' is not a type of provider: {}",
             input.kind,
             TYPES.join(", ")
         ))
@@ -439,7 +444,7 @@ fn add<C: WithPool>(c: &C, input: Add, change: Change) -> Result<Value, Error> {
     }
     let mut found = None;
     let mut keep = None;
-    let setting = if input.kind == RUNNER_SOURCE {
+    let setting = if input.kind == RUNNER_PROVIDER {
         for (given, field) in [
             (input.url.is_some(), "url"),
             (input.key.is_some(), "key"),
@@ -449,7 +454,7 @@ fn add<C: WithPool>(c: &C, input: Add, change: Change) -> Result<Value, Error> {
         ] {
             if given {
                 return Err(Error::invalid(format!(
-                    "a source that is another runner takes no `{field}`: that runner keeps its own"
+                    "a provider that is another runner takes no `{field}`: that runner keeps its own"
                 ))
                 .on(field));
             }
@@ -467,13 +472,13 @@ fn add<C: WithPool>(c: &C, input: Add, change: Change) -> Result<Value, Error> {
         if !input.no_check {
             found = Some(c.shared_by(runner)?);
         }
-        SourceSetting::Runner {
+        ProviderSetting::Runner {
             runner: runner.to_string(),
         }
     } else {
         if input.runner.is_some() {
             return Err(
-                Error::invalid("`runner` is for a source that is another runner").on("runner"),
+                Error::invalid("`runner` is for a provider that is another runner").on("runner"),
             );
         }
         let url = input
@@ -482,7 +487,8 @@ fn add<C: WithPool>(c: &C, input: Add, change: Change) -> Result<Value, Error> {
             .map(|u| u.trim().trim_end_matches('/').to_string())
             .filter(|u| !u.is_empty())
             .ok_or_else(|| {
-                Error::invalid(format!("`url` is required for an {} source", input.kind)).on("url")
+                Error::invalid(format!("`url` is required for an {} provider", input.kind))
+                    .on("url")
             })?;
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Err(
@@ -511,35 +517,35 @@ fn add<C: WithPool>(c: &C, input: Add, change: Change) -> Result<Value, Error> {
             return Err(Error::invalid("`timeout` must be greater than 0").on("timeout"));
         }
         let key = given_key(c, input.key.as_deref(), input.key_env.as_deref())?;
-        // Where a key given would go, before the source is asked anything.
+        // Where a key given would go, before the provider is asked anything.
         if input.key.as_deref().is_some_and(|k| !k.is_empty()) {
             c.can_keep_keys()?;
         }
-        let source = source_of(&name, &input.kind, &url, timeout, key.clone());
+        let provider = source_of(&name, &input.kind, &url, timeout, key.clone());
         if input.kind == ANTHROPIC_API && key.is_none() && input.key.is_none() {
             return Err(Error::invalid("Anthropic's API wants an API key").on("key"));
         }
         if !input.no_check {
-            found = Some(ask(&source, key.is_none())?);
+            found = Some(ask(&provider, key.is_none())?);
         }
         let env = match (&input.key_env, &input.key) {
             (Some(var), _) => Some(var.trim().to_string()),
             (None, Some(k)) if !k.is_empty() => {
-                let var = source_key_variable(&name);
+                let var = provider_key_variable(&name);
                 keep = Some((var.clone(), k.clone()));
                 Some(var)
             }
             _ => None,
         };
         if input.kind == ANTHROPIC_API {
-            SourceSetting::Anthropic {
+            ProviderSetting::Anthropic {
                 base_url: url,
                 api_key_env: env,
                 timeout_seconds: timeout,
                 max_concurrent,
             }
         } else {
-            SourceSetting::OpenAiCompatible {
+            ProviderSetting::OpenAiCompatible {
                 base_url: url,
                 api_key_env: env,
                 timeout_seconds: timeout,
@@ -548,13 +554,13 @@ fn add<C: WithPool>(c: &C, input: Add, change: Change) -> Result<Value, Error> {
         }
     };
     // The key first, so that the running process finds it when it uses the
-    // source; taken out again when the source is not kept.
+    // provider; taken out again when the provider is not kept.
     if let Some((var, key)) = &keep {
         c.keep_key(var, Some(key))?;
     }
     let models = found.clone().unwrap_or_default();
     let kept = c.change_pool(change, &mut |p| {
-        p.sources.insert(name.clone(), setting.clone());
+        p.providers.insert(name.clone(), setting.clone());
         merge(p, &name, &models);
         Ok(())
     });
@@ -578,7 +584,7 @@ fn add<C: WithPool>(c: &C, input: Add, change: Change) -> Result<Value, Error> {
         None => String::new(),
     };
     Ok(json!({
-        "said": format!("added source {name}{serves}"),
+        "said": format!("added provider {name}{serves}"),
         "name": name,
         "models": names,
         "note": note,
@@ -586,14 +592,14 @@ fn add<C: WithPool>(c: &C, input: Add, change: Change) -> Result<Value, Error> {
 }
 
 fn remove<C: WithPool>(c: &C, name: &str, change: Change) -> Result<Value, Error> {
-    let Some(was) = c.kept_pool()?.sources.remove(name) else {
-        return Err(Error::not_found(format!("there is no source '{name}'")).on("name"));
+    let Some(was) = c.kept_pool()?.providers.remove(name) else {
+        return Err(Error::not_found(format!("there is no provider '{name}'")).on("name"));
     };
-    let ours = source_key_variable(name);
+    let ours = provider_key_variable(name);
     let kept = (was.api_key_env() == Some(ours.as_str())).then_some(ours);
     let note = c.change_pool(change, &mut |p| {
-        p.sources.remove(name);
-        p.models.retain(|m| m.source != name);
+        p.providers.remove(name);
+        p.models.retain(|m| m.provider != name);
         Ok(())
     })?;
     if let Some(var) = kept
@@ -601,7 +607,7 @@ fn remove<C: WithPool>(c: &C, name: &str, change: Change) -> Result<Value, Error
     {
         c.keep_key(&var, None)?;
     }
-    Ok(json!({ "said": format!("removed source {name}, with its models"), "note": note }))
+    Ok(json!({ "said": format!("removed provider {name}, with its models"), "note": note }))
 }
 
 fn test<C: WithPool>(c: &C, name: Option<&str>) -> Result<Value, Error> {
@@ -610,7 +616,7 @@ fn test<C: WithPool>(c: &C, name: Option<&str>) -> Result<Value, Error> {
         && !pool.direct.contains_key(name)
         && !pool.relayed.contains_key(name)
     {
-        return Err(Error::not_found(format!("there is no source '{name}'")).on("name"));
+        return Err(Error::not_found(format!("there is no provider '{name}'")).on("name"));
     }
     let mut said = Vec::new();
     let mut rows = Vec::new();
@@ -646,29 +652,29 @@ fn test<C: WithPool>(c: &C, name: Option<&str>) -> Result<Value, Error> {
         }
     }
     if said.is_empty() {
-        said.push("no sources yet".into());
+        said.push("no providers yet".into());
     }
-    Ok(json!({ "said": said.join("\n"), "sources": rows }))
+    Ok(json!({ "said": said.join("\n"), "providers": rows }))
 }
 
 fn set_key<C: WithPool>(c: &C, input: SetKey, change: Change) -> Result<Value, Error> {
     let name = input.name.as_str();
     let pool = c.pool()?;
-    let Some(source) = pool.direct.get(name) else {
+    let Some(provider) = pool.direct.get(name) else {
         let message = if pool.relayed.contains_key(name) {
             format!("'{name}' is another runner, which keeps its own keys")
         } else {
-            format!("there is no source '{name}'")
+            format!("there is no provider '{name}'")
         };
         return Err(Error::not_found(message).on("name"));
     };
     let now = c
         .kept_pool()?
-        .sources
+        .providers
         .get(name)
-        .and_then(SourceSetting::api_key_env)
+        .and_then(ProviderSetting::api_key_env)
         .map(String::from);
-    let ours = source_key_variable(name);
+    let ours = provider_key_variable(name);
     let (env, keep): (Option<String>, Option<String>) = match (&input.key_env, &input.key) {
         (Some(_), Some(_)) => {
             return Err(Error::invalid("give `key` or `key_env`, not both").on("key_env"));
@@ -680,7 +686,7 @@ fn set_key<C: WithPool>(c: &C, input: SetKey, change: Change) -> Result<Value, E
             return Err(Error::invalid("give the new key, or empty to take it out").on("key"));
         }
     };
-    // Whether the key can be kept, before the source is asked anything.
+    // Whether the key can be kept, before the provider is asked anything.
     if keep.is_some() {
         c.can_keep_keys()?;
     }
@@ -692,8 +698,8 @@ fn set_key<C: WithPool>(c: &C, input: SetKey, change: Change) -> Result<Value, E
     let mut models = None;
     if !input.no_check {
         let tried = LlmBackend {
-            settings: with_key(&source.settings, key.clone()),
-            ..source.clone()
+            settings: with_key(&provider.settings, key.clone()),
+            ..provider.clone()
         };
         let found = ask(&tried, false)?;
         models = Some(found.into_iter().map(|f| f.id).collect::<Vec<_>>());
@@ -703,12 +709,12 @@ fn set_key<C: WithPool>(c: &C, input: SetKey, change: Change) -> Result<Value, E
     }
     let note = if env != now {
         c.change_pool(change, &mut |p| {
-            match p.sources.get_mut(name) {
+            match p.providers.get_mut(name) {
                 Some(
-                    SourceSetting::OpenAiCompatible { api_key_env, .. }
-                    | SourceSetting::Anthropic { api_key_env, .. },
+                    ProviderSetting::OpenAiCompatible { api_key_env, .. }
+                    | ProviderSetting::Anthropic { api_key_env, .. },
                 ) => *api_key_env = env.clone(),
-                _ => return Err(Error::not_found(format!("there is no source '{name}'"))),
+                _ => return Err(Error::not_found(format!("there is no provider '{name}'"))),
             }
             Ok(())
         })?
@@ -733,27 +739,27 @@ fn set_key<C: WithPool>(c: &C, input: SetKey, change: Change) -> Result<Value, E
     Ok(json!({ "said": format!("{name} {what}{serves}"), "note": note }))
 }
 
-/// Ask the sources (`name` alone, or every one) which models they serve,
+/// Ask the providers (`name` alone, or every one) which models they serve,
 /// and keep what changed with `change`: a model listed newly, off; one no
 /// longer listed, missing.
 fn refresh<C: WithPool>(c: &C, name: Option<&str>, change: Change) -> Result<Value, Error> {
     let kept = c.kept_pool()?;
     if let Some(name) = name
-        && !kept.sources.contains_key(name)
+        && !kept.providers.contains_key(name)
     {
-        return Err(Error::not_found(format!("there is no source '{name}'")).on("name"));
+        return Err(Error::not_found(format!("there is no provider '{name}'")).on("name"));
     }
     let pool = c.pool()?;
     let mut said = Vec::new();
     let mut answers: Vec<(String, Vec<Found>)> = Vec::new();
-    for (n, s) in &kept.sources {
+    for (n, s) in &kept.providers {
         if name.is_some_and(|w| w != n) {
             continue;
         }
         let asked = match s {
-            SourceSetting::Runner { runner } => c.shared_by(runner),
+            ProviderSetting::Runner { runner } => c.shared_by(runner),
             _ => match pool.direct.get(n) {
-                Some(source) => ask(source, false),
+                Some(provider) => ask(provider, false),
                 None => Err(Error::new(Code::Unavailable, "it is not usable now")),
             },
         };
@@ -769,13 +775,13 @@ fn refresh<C: WithPool>(c: &C, name: Option<&str>, change: Change) -> Result<Val
         let new = now
             .models
             .iter()
-            .filter(|m| m.source == *n && before.model(n, &m.id).is_none())
+            .filter(|m| m.provider == *n && before.model(n, &m.id).is_none())
             .count();
         let gone = now
             .models
             .iter()
             .filter(|m| {
-                m.source == *n && m.missing && !before.model(n, &m.id).is_some_and(|b| b.missing)
+                m.provider == *n && m.missing && !before.model(n, &m.id).is_some_and(|b| b.missing)
             })
             .count();
         said.push(match (new, gone) {
@@ -790,7 +796,7 @@ fn refresh<C: WithPool>(c: &C, name: Option<&str>, change: Change) -> Result<Val
     let note = if now != kept {
         c.change_pool(change, &mut |p| {
             for (n, found) in &answers {
-                if p.sources.contains_key(n) {
+                if p.providers.contains_key(n) {
                     merge(p, n, found);
                 }
             }
@@ -800,27 +806,27 @@ fn refresh<C: WithPool>(c: &C, name: Option<&str>, change: Change) -> Result<Val
         None
     };
     if said.is_empty() {
-        said.push("no sources yet".into());
+        said.push("no providers yet".into());
     }
     Ok(json!({ "said": said.join("\n"), "note": note }))
 }
 
-/// Ask every source which models it serves, as the process starts, and keep
+/// Ask every provider which models it serves, as the process starts, and keep
 /// what changed; say what was found, or why nothing was asked.
 pub fn refresh_all<C: WithPool>(c: &C) -> String {
-    match refresh(c, None, Change::by_this_computer("source.refresh")) {
+    match refresh(c, None, Change::by_this_computer("provider.refresh")) {
         Ok(out) => out["said"].as_str().unwrap_or_default().to_string(),
         Err(e) => e.message,
     }
 }
 
-/// Keep in `pool` what `source` answered it serves now: a model new to it,
+/// Keep in `pool` what `provider` answered it serves now: a model new to it,
 /// off; one it serves again, no longer missing, and known now if it was not;
 /// one it no longer serves, missing. The models stay in the order of their
-/// sources and ids.
-fn merge(pool: &mut AnnPoolSetting, source: &str, found: &[Found]) {
+/// providers and ids.
+fn merge(pool: &mut AnnPoolSetting, provider: &str, found: &[Found]) {
     for f in found {
-        match pool.model_mut(source, &f.id) {
+        match pool.model_mut(provider, &f.id) {
             Some(m) => {
                 m.missing = false;
                 if m.kind == ModelKind::Unknown {
@@ -828,7 +834,7 @@ fn merge(pool: &mut AnnPoolSetting, source: &str, found: &[Found]) {
                 }
             }
             None => pool.models.push(PoolModel {
-                source: source.to_string(),
+                provider: provider.to_string(),
                 id: f.id.clone(),
                 kind: f.kind,
                 on: false,
@@ -837,29 +843,29 @@ fn merge(pool: &mut AnnPoolSetting, source: &str, found: &[Found]) {
             }),
         }
     }
-    for m in pool.models.iter_mut().filter(|m| m.source == source) {
+    for m in pool.models.iter_mut().filter(|m| m.provider == provider) {
         if !found.iter().any(|f| f.id == m.id) {
             m.missing = true;
         }
     }
     pool.models
-        .sort_by(|a, b| (&a.source, &a.id).cmp(&(&b.source, &b.id)));
+        .sort_by(|a, b| (&a.provider, &a.id).cmp(&(&b.provider, &b.id)));
 }
 
-/// Each model, or those of `source`: what it is, and whether it is on.
-fn list_models<C: WithPool>(c: &C, side: Side, source: Option<&str>) -> Result<Value, Error> {
+/// Each model, or those of `provider`: what it is, and whether it is on.
+fn list_models<C: WithPool>(c: &C, side: Side, provider: Option<&str>) -> Result<Value, Error> {
     let kept = c.kept_pool()?;
-    if let Some(s) = source
-        && !kept.sources.contains_key(s)
+    if let Some(s) = provider
+        && !kept.providers.contains_key(s)
     {
-        return Err(Error::not_found(format!("there is no source '{s}'")).on("source"));
+        return Err(Error::not_found(format!("there is no provider '{s}'")).on("provider"));
     }
     let mut said = Vec::new();
     let mut rows = Vec::new();
     for m in kept
         .models
         .iter()
-        .filter(|m| source.is_none_or(|s| m.source == s))
+        .filter(|m| provider.is_none_or(|s| m.provider == s))
     {
         let mut state = vec![if m.on { "on" } else { "off" }];
         if m.missing {
@@ -876,7 +882,7 @@ fn list_models<C: WithPool>(c: &C, side: Side, source: Option<&str>) -> Result<V
         ));
         let mut row = json!({
             "name": m.name(),
-            "source": m.source,
+            "provider": m.provider,
             "id": m.id,
             "type": m.kind.type_id(),
             "on": m.on,
@@ -899,10 +905,10 @@ fn list_models<C: WithPool>(c: &C, side: Side, source: Option<&str>) -> Result<V
         rows.push(row);
     }
     if said.is_empty() {
-        said.push(match source {
-            Some(s) => format!("{s} serves no models; `source refresh {s}` asks it again"),
+        said.push(match provider {
+            Some(s) => format!("{s} serves no models; `provider refresh {s}` asks it again"),
             None => format!(
-                "no models yet; `{} source add` adds a source, and its models with it",
+                "no models yet; `{} provider add` adds a provider, and its models with it",
                 side.program()
             ),
         });
@@ -910,18 +916,18 @@ fn list_models<C: WithPool>(c: &C, side: Side, source: Option<&str>) -> Result<V
     Ok(json!({ "said": said.join("\n"), "models": rows }))
 }
 
-/// The model `given` names, `<source>:<id>`, as kept.
+/// The model `given` names, `<provider>:<id>`, as kept.
 fn model_of<'a>(pool: &'a AnnPoolSetting, given: &str) -> Result<&'a PoolModel, Error> {
-    let (source, id) = split_name(given).ok_or_else(|| {
+    let (provider, id) = split_name(given).ok_or_else(|| {
         Error::invalid(format!(
-            "'{given}' must be <source>:<model>, such as local:qwen3.5:9b"
+            "'{given}' must be <provider>:<model>, such as local:qwen3.5:9b"
         ))
         .on("model")
     })?;
-    pool.model(source, id).ok_or_else(|| {
-        Error::not_found(format!("there is no model '{source}:{id}'"))
+    pool.model(provider, id).ok_or_else(|| {
+        Error::not_found(format!("there is no model '{provider}:{id}'"))
             .on("model")
-            .hint("`model list` lists them; `source refresh` asks the sources again")
+            .hint("`model list` lists them; `provider refresh` asks the providers again")
     })
 }
 
@@ -961,7 +967,7 @@ fn turn_on<C: WithPool>(c: &C, input: On, change: Change) -> Result<Value, Error
         return Ok(json!({ "said": format!("{} is on already", model.name()) }));
     }
     let note = c.change_pool(change, &mut |p| {
-        if let Some(m) = p.model_mut(&model.source, &model.id) {
+        if let Some(m) = p.model_mut(&model.provider, &model.id) {
             m.kind = kind;
             m.on = true;
         }
@@ -973,11 +979,11 @@ fn turn_on<C: WithPool>(c: &C, input: On, change: Change) -> Result<Value, Error
     }))
 }
 
-/// What `model`, whose source did not say, is: an embedding model when its
-/// source embeds a text with it, else an LLM.
+/// What `model`, whose provider did not say, is: an embedding model when its
+/// provider embeds a text with it, else an LLM.
 fn asked_kind<C: WithPool>(c: &C, model: &PoolModel) -> Result<ModelKind, Error> {
     let pool = c.pool()?;
-    let Some(source) = pool.direct.get(&model.source) else {
+    let Some(provider) = pool.direct.get(&model.provider) else {
         return Err(Error::new(
             Code::Unavailable,
             format!(
@@ -986,11 +992,11 @@ fn asked_kind<C: WithPool>(c: &C, model: &PoolModel) -> Result<ModelKind, Error>
             ),
         ));
     };
-    if matches!(source.settings, BackendSettings::Anthropic { .. }) {
+    if matches!(provider.settings, BackendSettings::Anthropic { .. }) {
         return Ok(llm(&model.id));
     }
     Ok(
-        match crate::embed::embed(source, &model.id, &["check".to_string()]) {
+        match crate::embed::embed(provider, &model.id, &["check".to_string()]) {
             Ok(vectors) => match vectors.first().map(Vec::len) {
                 Some(n) if n > 0 => ModelKind::Embedding {
                     dimensions: u32::try_from(n).unwrap_or(u32::MAX),
@@ -1009,7 +1015,7 @@ fn turn_off<C: WithPool>(c: &C, given: &str, change: Change) -> Result<Value, Er
         return Ok(json!({ "said": format!("{} is off already", model.name()) }));
     }
     let note = c.change_pool(change, &mut |p| {
-        if let Some(m) = p.model_mut(&model.source, &model.id) {
+        if let Some(m) = p.model_mut(&model.provider, &model.id) {
             m.on = false;
             m.shared = false;
         }
@@ -1054,7 +1060,7 @@ fn set<C: WithPool>(c: &C, input: Set, change: Change) -> Result<Value, Error> {
         return Ok(json!({ "said": format!("{} is as it was", model.name()) }));
     }
     let note = c.change_pool(change, &mut |p| {
-        if let Some(m) = p.model_mut(&model.source, &model.id) {
+        if let Some(m) = p.model_mut(&model.provider, &model.id) {
             m.kind = kind;
         }
         Ok(())
@@ -1086,18 +1092,18 @@ fn share<C: WithPool>(c: &C, given: &str, on: bool, change: Change) -> Result<Va
     }
     if on
         && !matches!(
-            kept.sources.get(&model.source),
-            Some(SourceSetting::OpenAiCompatible { .. })
+            kept.providers.get(&model.provider),
+            Some(ProviderSetting::OpenAiCompatible { .. })
         )
     {
         return Err(Error::invalid(format!(
-            "{} is not of an {OPENAI_COMPATIBLE_API} source of the runner's own, the one kind a runner shares",
+            "{} is not of an {OPENAI_COMPATIBLE_API} provider of the runner's own, the one kind a runner shares",
             model.name()
         ))
         .on("model"));
     }
     let note = c.change_pool(change, &mut |p| {
-        if let Some(m) = p.model_mut(&model.source, &model.id) {
+        if let Some(m) = p.model_mut(&model.provider, &model.id) {
             m.shared = on;
         }
         Ok(())
@@ -1126,7 +1132,7 @@ fn check_name(name: &str) -> Result<(), Error> {
     }
 }
 
-/// The key a source is tried with: the one given, or the value of the
+/// The key a provider is tried with: the one given, or the value of the
 /// variable named.
 fn given_key<C: WithPool>(
     c: &C,
@@ -1183,22 +1189,22 @@ fn with_key(settings: &BackendSettings, key: Option<String>) -> BackendSettings 
     }
 }
 
-/// The models `source` serves, each with what it is, or why it cannot be
+/// The models `provider` serves, each with what it is, or why it cannot be
 /// added: one that wants a key it was not given has an interface ask for it,
 /// when `may_ask`.
-fn ask(source: &LlmBackend, may_ask: bool) -> Result<Vec<Found>, Error> {
+fn ask(provider: &LlmBackend, may_ask: bool) -> Result<Vec<Found>, Error> {
     use ensemble_core::port::Error as Port;
-    discover(source).map_err(|e| match e {
+    discover(provider).map_err(|e| match e {
         Port::Api {
             status: 401 | 403, ..
         } if may_ask => {
-            Error::invalid(format!("{} wants an API key", source.settings.base_url())).on("key")
+            Error::invalid(format!("{} wants an API key", provider.settings.base_url())).on("key")
         }
         Port::Api {
             status: 401 | 403, ..
         } => Error::invalid(format!(
             "{} did not accept the key: {e}",
-            source.settings.base_url()
+            provider.settings.base_url()
         ))
         .on("key"),
         e => Error::new(

@@ -11,7 +11,7 @@ pub fn embed(backend: &LlmBackend, model: &str, texts: &[String]) -> Result<Vec<
     if !matches!(backend.settings, BackendSettings::OpenAiCompatible { .. }) {
         return Err(Error::Unsupported {
             backend: backend.name.clone(),
-            detail: "only an openai-compatible-api source serves embeddings".into(),
+            detail: "only an openai-compatible-api provider serves embeddings".into(),
         });
     }
     if texts.is_empty() {

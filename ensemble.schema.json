@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json",
   "title": "Ensemble helper team: config.yaml",
-  "description": "A helper team: the agents that work on tasks. They name the models they run on as `source` and model id, of the ANN pool each runner keeps in its settings (`ann_pool`). Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (an agent's `prompt`).",
+  "description": "A helper team: the agents that work on tasks. They name the models they run on as `provider` and model id, of the ANN pool each runner keeps in its settings (`ann_pool`). Nothing has a default value: every setting is written, except what may be left out because leaving it out means 'not used' (an agent's `prompt`).",
   "type": "object",
   "required": [
     "version",
@@ -380,16 +380,16 @@
       }
     },
     "when_none": {
-      "description": "What happens when none of the models in `try` can be used: no source answers, or none serves its model. fail: the task fails, saying what each source answered. wait: a task waits in the queue and is tried again later; a run someone waits for, such as `ensemble-runner agent run`, fails.",
+      "description": "What happens when none of the models in `try` can be used: no provider answers, or none serves its model. fail: the task fails, saying what each provider answered. wait: a task waits in the queue and is tried again later; a run someone waits for, such as `ensemble-runner agent run`, fails.",
       "enum": ["fail", "wait"]
     },
     "builtin_candidate": {
       "type": "object",
-      "required": ["source", "model", "context_window"],
+      "required": ["provider", "model", "context_window"],
       "additionalProperties": false,
       "properties": {
-        "source": {
-          "description": "The name of a source of the runner's ANN pool; the model must be an LLM of it that is on.",
+        "provider": {
+          "description": "The name of a provider of the runner's ANN pool; the model must be an LLM of it that is on.",
           "type": "string",
           "minLength": 1
         },
@@ -423,7 +423,7 @@
           "const": "builtin"
         },
         "try": {
-          "description": "The models it may run on, in order. Each run uses the first whose source answers and serves it; with one model, it is simply used.",
+          "description": "The models it may run on, in order. Each run uses the first whose provider answers and serves it; with one model, it is simply used.",
           "type": "array",
           "minItems": 1,
           "items": { "$ref": "#/definitions/builtin_candidate" }
@@ -451,11 +451,11 @@
     },
     "direct_candidate": {
       "type": "object",
-      "required": ["source", "model"],
+      "required": ["provider", "model"],
       "additionalProperties": false,
       "properties": {
-        "source": {
-          "description": "The name of a source of the runner's ANN pool; the model must be an LLM of it that is on.",
+        "provider": {
+          "description": "The name of a provider of the runner's ANN pool; the model must be an LLM of it that is on.",
           "type": "string",
           "minLength": 1
         },
@@ -481,7 +481,7 @@
           "const": "direct"
         },
         "try": {
-          "description": "The models it may run on, in order. Each run uses the first whose source answers and serves it; with one model, it is simply used.",
+          "description": "The models it may run on, in order. Each run uses the first whose provider answers and serves it; with one model, it is simply used.",
           "type": "array",
           "minItems": 1,
           "items": { "$ref": "#/definitions/direct_candidate" }
@@ -530,7 +530,7 @@
           "const": "ann_pool"
         },
         "try": {
-          "description": "The models it may run on, in order. Each run uses the first whose source answers and serves it; with one model, it is simply used.",
+          "description": "The models it may run on, in order. Each run uses the first whose provider answers and serves it; with one model, it is simply used.",
           "type": "array",
           "minItems": 1,
           "items": { "$ref": "#/definitions/opencode_ann_pool_candidate" }
@@ -541,14 +541,14 @@
     "opencode_ann_pool_candidate": {
       "type": "object",
       "required": [
-        "source",
+        "provider",
         "name",
         "context_window"
       ],
       "additionalProperties": false,
       "properties": {
-        "source": {
-          "description": "The name of a source of the runner's ANN pool; the model must be an LLM of it that is on.",
+        "provider": {
+          "description": "The name of a provider of the runner's ANN pool; the model must be an LLM of it that is on.",
           "type": "string",
           "minLength": 1
         },

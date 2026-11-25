@@ -1,18 +1,18 @@
 //! What a hub's core and a runner's both keep in their database, as a GitLab
 //! instance keeps its application settings: the ANN pool, the keys of its
-//! sources, sealed, and the audit log of every change of their settings, made
+//! providers, sealed, and the audit log of every change of their settings, made
 //! only through operations. The rest of their settings, typed tables of
 //! their own, the hub and the runner each keep themselves.
 //!
 //! A key is kept sealed, AES-256-GCM, by a master key, `master.key`, a file
 //! beside the database made the first time a key is kept: without the
-//! master key no key in it can be read. The sources name their keys by
+//! master key no key in it can be read. The providers name their keys by
 //! variable, and a variable is looked for in the environment, then among the
 //! keys kept.
 
 use crate::{DB_FILE, Value, keep_secret, optional, rows, secrets, text};
 use ensemble_config::kept::Change;
-use ensemble_config::{AnnPoolSetting, Env, ModelKind, PoolModel, SourceSetting};
+use ensemble_config::{AnnPoolSetting, Env, ModelKind, PoolModel, ProviderSetting};
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::BTreeMap;
@@ -84,18 +84,18 @@ pub fn audited(change: &Change) -> (&'static str, Vec<Value>) {
 /// The statements that keep `pool` in place of the ANN pool kept.
 pub fn pool_rows(pool: &AnnPoolSetting) -> Vec<(&'static str, Vec<Value>)> {
     let mut out = vec![
-        ("DELETE FROM ann_sources", vec![]),
+        ("DELETE FROM ann_providers", vec![]),
         ("DELETE FROM ann_models", vec![]),
     ];
-    for (name, s) in &pool.sources {
+    for (name, s) in &pool.providers {
         let row = match s {
-            SourceSetting::OpenAiCompatible {
+            ProviderSetting::OpenAiCompatible {
                 base_url,
                 api_key_env,
                 timeout_seconds,
                 max_concurrent,
             }
-            | SourceSetting::Anthropic {
+            | ProviderSetting::Anthropic {
                 base_url,
                 api_key_env,
                 timeout_seconds,
@@ -109,7 +109,7 @@ pub fn pool_rows(pool: &AnnPoolSetting) -> Vec<(&'static str, Vec<Value>)> {
                 int(*max_concurrent),
                 Value::Null,
             ],
-            SourceSetting::Runner { runner } => vec![
+            ProviderSetting::Runner { runner } => vec![
                 txt(name),
                 txt(s.type_id()),
                 Value::Null,
@@ -120,7 +120,7 @@ pub fn pool_rows(pool: &AnnPoolSetting) -> Vec<(&'static str, Vec<Value>)> {
             ],
         };
         out.push((
-            "INSERT INTO ann_sources (name, type, base_url, api_key_env, timeout_seconds, max_concurrent, runner) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO ann_providers (name, type, base_url, api_key_env, timeout_seconds, max_concurrent, runner) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             row,
         ));
     }
@@ -143,9 +143,9 @@ pub fn pool_rows(pool: &AnnPoolSetting) -> Vec<(&'static str, Vec<Value>)> {
             }
         };
         out.push((
-            "INSERT INTO ann_models (source, id, kind, tier, context_window, tools, dimensions, turned_on, missing, shared) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO ann_models (provider, id, kind, tier, context_window, tools, dimensions, turned_on, missing, shared) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             vec![
-                txt(&m.source),
+                txt(&m.provider),
                 txt(&m.id),
                 txt(m.kind.type_id()),
                 tier,
@@ -161,22 +161,22 @@ pub fn pool_rows(pool: &AnnPoolSetting) -> Vec<(&'static str, Vec<Value>)> {
     out
 }
 
-/// The ANN pool kept: its sources, and their models in the order of their
-/// sources and ids.
+/// The ANN pool kept: its providers, and their models in the order of their
+/// providers and ids.
 pub async fn read_pool(c: &turso::Connection) -> Result<AnnPoolSetting, String> {
     let mut pool = AnnPoolSetting::default();
     for r in rows(
         c,
-        "SELECT name, type, base_url, api_key_env, timeout_seconds, max_concurrent, runner FROM ann_sources ORDER BY name",
+        "SELECT name, type, base_url, api_key_env, timeout_seconds, max_concurrent, runner FROM ann_providers ORDER BY name",
         vec![],
     )
     .await?
     {
-        let name = some_text(&r[0], "ann_sources.name")?;
-        let at = format!("ann_sources.{name}");
+        let name = some_text(&r[0], "ann_providers.name")?;
+        let at = format!("ann_providers.{name}");
         let kind = some_text(&r[1], &at)?;
-        let s = if kind == ensemble_config::ann::RUNNER_SOURCE {
-            SourceSetting::Runner {
+        let s = if kind == ensemble_config::ann::RUNNER_PROVIDER {
+            ProviderSetting::Runner {
                 runner: some_text(&r[6], &format!("{at}.runner"))?,
             }
         } else {
@@ -185,13 +185,13 @@ pub async fn read_pool(c: &turso::Connection) -> Result<AnnPoolSetting, String> 
             let timeout_seconds = num(&r[4], &format!("{at}.timeout_seconds"))?;
             let max_concurrent = num(&r[5], &format!("{at}.max_concurrent"))?;
             match kind.as_str() {
-                ensemble_config::ANTHROPIC_API => SourceSetting::Anthropic {
+                ensemble_config::ANTHROPIC_API => ProviderSetting::Anthropic {
                     base_url,
                     api_key_env,
                     timeout_seconds,
                     max_concurrent,
                 },
-                ensemble_config::OPENAI_COMPATIBLE_API => SourceSetting::OpenAiCompatible {
+                ensemble_config::OPENAI_COMPATIBLE_API => ProviderSetting::OpenAiCompatible {
                     base_url,
                     api_key_env,
                     timeout_seconds,
@@ -200,18 +200,18 @@ pub async fn read_pool(c: &turso::Connection) -> Result<AnnPoolSetting, String> 
                 other => return Err(format!("{at}: the type '{other}' is unknown")),
             }
         };
-        pool.sources.insert(name, s);
+        pool.providers.insert(name, s);
     }
     for r in rows(
         c,
-        "SELECT source, id, kind, tier, context_window, tools, dimensions, turned_on, missing, shared FROM ann_models ORDER BY source, id",
+        "SELECT provider, id, kind, tier, context_window, tools, dimensions, turned_on, missing, shared FROM ann_models ORDER BY provider, id",
         vec![],
     )
     .await?
     {
-        let source = some_text(&r[0], "ann_models.source")?;
+        let provider = some_text(&r[0], "ann_models.provider")?;
         let id = some_text(&r[1], "ann_models.id")?;
-        let at = format!("ann_models.{source}:{id}");
+        let at = format!("ann_models.{provider}:{id}");
         let flag = |v: &Value, what: &str| num::<i64>(v, &format!("{at}.{what}")).map(|n| n != 0);
         let kind = match some_text(&r[2], &format!("{at}.kind"))?.as_str() {
             "unknown" => ModelKind::Unknown,
@@ -232,7 +232,7 @@ pub async fn read_pool(c: &turso::Connection) -> Result<AnnPoolSetting, String> 
             other => return Err(format!("{at}: the kind '{other}' is unknown")),
         };
         pool.models.push(PoolModel {
-            source,
+            provider,
             id,
             kind,
             on: flag(&r[7], "turned_on")?,
@@ -307,7 +307,7 @@ impl Env for Variables {
 /// The keys kept in the database in a folder, sealed by its master key.
 pub struct Keys {
     dir: PathBuf,
-    /// The command that keeps a source's key, `ensemble-hub` or
+    /// The command that keeps a provider's key, `ensemble-hub` or
     /// `ensemble-runner`, for what is said.
     program: &'static str,
 }
@@ -382,7 +382,7 @@ impl Keys {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && make => make_master(&path)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(format!(
-                    "the keys of {} are sealed by its master key, and {} is not there: put it back from where you keep it, or give each source its key again with `{} source key`",
+                    "the keys of {} are sealed by its master key, and {} is not there: put it back from where you keep it, or give each provider its key again with `{} provider key`",
                     self.dir.display(),
                     path.display(),
                     self.program
@@ -402,7 +402,7 @@ impl Keys {
     fn open(&self, master: &LessSafeKey, name: &str, sealed: &str) -> Result<String, String> {
         let wrong = || {
             format!(
-                "the key {name} cannot be opened with this master key: give the source its key again with `{} source key`",
+                "the key {name} cannot be opened with this master key: give the provider its key again with `{} provider key`",
                 self.program
             )
         };
@@ -478,29 +478,29 @@ mod tests {
         let keys = Keys::new(&dir, "ensemble-hub");
         assert!(keys.all().unwrap().is_empty());
         assert!(!dir.join(MASTER_KEY_FILE).exists(), "made only when needed");
-        keys.keep("ENSEMBLE_SOURCE_CENTRAL_KEY", Some("sk-1"))
+        keys.keep("ENSEMBLE_PROVIDER_CENTRAL_KEY", Some("sk-1"))
             .unwrap();
         let mode = std::fs::metadata(dir.join(MASTER_KEY_FILE))
             .unwrap()
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
-        assert_eq!(keys.all().unwrap()["ENSEMBLE_SOURCE_CENTRAL_KEY"], "sk-1");
+        assert_eq!(keys.all().unwrap()["ENSEMBLE_PROVIDER_CENTRAL_KEY"], "sk-1");
         let sealed = secrets(&dir).unwrap();
-        assert!(!sealed["ENSEMBLE_SOURCE_CENTRAL_KEY"].contains("sk-1"));
+        assert!(!sealed["ENSEMBLE_PROVIDER_CENTRAL_KEY"].contains("sk-1"));
         // Sealed for one name, it is no key of another.
         keep_secret(
             &dir,
-            "ENSEMBLE_SOURCE_OTHER_KEY",
-            Some(&sealed["ENSEMBLE_SOURCE_CENTRAL_KEY"]),
+            "ENSEMBLE_PROVIDER_OTHER_KEY",
+            Some(&sealed["ENSEMBLE_PROVIDER_CENTRAL_KEY"]),
         )
         .unwrap();
         assert!(keys.all().unwrap_err().contains("cannot be opened"));
-        keys.keep("ENSEMBLE_SOURCE_OTHER_KEY", None).unwrap();
+        keys.keep("ENSEMBLE_PROVIDER_OTHER_KEY", None).unwrap();
         // Without the master key, nothing kept can be read.
         std::fs::remove_file(dir.join(MASTER_KEY_FILE)).unwrap();
         let err = keys.all().unwrap_err();
-        assert!(err.contains("master key") && err.contains("`ensemble-hub source key`"));
+        assert!(err.contains("master key") && err.contains("`ensemble-hub provider key`"));
     }
 
     #[test]

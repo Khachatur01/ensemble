@@ -102,7 +102,7 @@ fn start(dir: &HubDir, owner: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     kept::settings(dir).write(&settings, &Change::by_this_computer("init"))?;
     println!(
-        "Made the hub {}: closed to sign-ups, with no source of models yet. Its settings are kept in {}.",
+        "Made the hub {}: closed to sign-ups, with no provider of models yet. Its settings are kept in {}.",
         hub.owner,
         dir.database().display()
     );
@@ -191,7 +191,7 @@ fn setup(
         }
     }
     println!(
-        "Next: give it a model server with `ensemble-hub source add <name> --type openai-compatible-api --url <url> --max-concurrent <n>`, turn the models you want on with `ensemble-hub model on <name>:<model>`, choose those that distill shares with `ensemble-hub knowledge models <name>:<model>`, and watch a tracker with `ensemble-hub tracker add`. `ensemble-hub settings show` shows every setting."
+        "Next: give it a model server with `ensemble-hub provider add <name> --type openai-compatible-api --url <url> --max-concurrent <n>`, turn the models you want on with `ensemble-hub model on <name>:<model>`, choose those that distill shares with `ensemble-hub knowledge models <name>:<model>`, and watch a tracker with `ensemble-hub tracker add`. `ensemble-hub settings show` shows every setting."
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -211,13 +211,13 @@ fn check(ctx: &Ctx) -> Result<ExitCode, String> {
         .fallback
         .candidates
         .iter()
-        .filter_map(|c| backends.get(&c.source).map(|b| (b, c.model.as_str())))
+        .filter_map(|c| backends.get(&c.provider).map(|b| (b, c.model.as_str())))
         .collect();
     let chosen = !knowledge.distill.fallback.candidates.is_empty();
     let distills = match ensemble_backends::resolve::Resolver::default().choose(&candidates) {
         _ if !chosen => {
             println!(
-                "distill: no model is chosen yet, so shares wait; `ensemble-hub knowledge models <source>:<model>` chooses them"
+                "distill: no model is chosen yet, so shares wait; `ensemble-hub knowledge models <provider>:<model>` chooses them"
             );
             true
         }
@@ -225,7 +225,7 @@ fn check(ctx: &Ctx) -> Result<ExitCode, String> {
             let c = &knowledge.distill.fallback.candidates[i];
             println!(
                 "distill: shares would be distilled by {}:{}",
-                c.source, c.model
+                c.provider, c.model
             );
             true
         }
@@ -242,27 +242,27 @@ fn check(ctx: &Ctx) -> Result<ExitCode, String> {
     match &knowledge.embed {
         None => println!("recall: by words"),
         Some(e) => {
-            let answered = match backends.get(&e.source) {
+            let answered = match backends.get(&e.provider) {
                 Some(backend) => {
                     ensemble_backends::embed::embed(backend, &e.model, &["check".to_string()])
                         .map(|_| ())
                         .map_err(|e| e.to_string())
                 }
-                None => Err(match hub.llm.relayed.get(&e.source) {
+                None => Err(match hub.llm.relayed.get(&e.provider) {
                     Some(runner) => format!(
                         "it is runner {runner}'s, which the hub reaches only while it serves"
                     ),
-                    None => format!("no source '{}'", e.source),
+                    None => format!("no provider '{}'", e.provider),
                 }),
             };
             match answered {
                 Ok(()) => println!(
                     "recall: by words and by meaning, with {}:{}",
-                    e.source, e.model
+                    e.provider, e.model
                 ),
                 Err(why) => println!(
                     "recall: by words alone for now: {}:{} cannot embed: {why}",
-                    e.source, e.model
+                    e.provider, e.model
                 ),
             }
         }
@@ -389,7 +389,7 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
                 .map(|o| {
                     serde_json::json!({
                         "runner": o.runner,
-                        "source": o.source,
+                        "provider": o.provider,
                         "max_concurrent": o.max_calls,
                         "models": o.models,
                     })
@@ -421,10 +421,10 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
         Some("The running hub uses it now.".into())
     });
     std::thread::scope(|scope| {
-        // What its sources serve now: a model new to one is kept off.
+        // What its providers serve now: a model new to one is kept off.
         scope.spawn(|| {
             let said = ensemble_backends::ops::refresh_all(server.operations().1);
-            say(&format!("the sources: {}", said.replace('\n', "; ")));
+            say(&format!("the providers: {}", said.replace('\n', "; ")));
         });
         scope.spawn(|| memory.work(&STOP, &say));
         for inbox in &inboxes {

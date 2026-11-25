@@ -137,7 +137,7 @@ pub struct HubContext {
     /// What the running hub does once its settings changed, and says of it:
     /// set by the hub ([`HubContext::when_changed`]); nothing otherwise.
     changed: Arc<OnceLock<Box<Changed>>>,
-    /// The models the connected runners share, by source, as the running hub
+    /// The models the connected runners share, by provider, as the running hub
     /// lists them ([`HubContext::when_serving`]); nothing otherwise.
     offered: OnceLock<Box<Offered>>,
     /// Where the running hub listens ([`HubContext::listening`]); nothing
@@ -256,7 +256,7 @@ impl HubContext {
     }
 
     /// Have `runner.models` list what `offered` returns: the models the
-    /// runners connected to the running hub share, `[{runner, source,
+    /// runners connected to the running hub share, `[{runner, provider,
     /// max_concurrent, models: [{id, kind}]}]`.
     pub fn when_serving(&self, offered: impl Fn() -> Value + Send + Sync + 'static) {
         let _ = self.offered.set(Box::new(offered));
@@ -330,28 +330,28 @@ impl WithPool for HubContext {
                 "only the running hub knows what the connected runners share; start it with `ensemble-hub serve`",
             )
         })?();
-        let sources: Vec<&Value> = offered
+        let providers: Vec<&Value> = offered
             .as_array()
             .into_iter()
             .flatten()
             .filter(|o| o["runner"] == runner)
             .collect();
-        if sources.is_empty() {
+        if providers.is_empty() {
             return Err(Error::new(
                 Code::Unavailable,
                 format!("{runner} is not connected now, or shares no model"),
             ));
         }
-        Ok(sources
+        Ok(providers
             .iter()
             .flat_map(|o| {
-                let source = o["source"].as_str().unwrap_or_default();
+                let provider = o["provider"].as_str().unwrap_or_default();
                 o["models"]
                     .as_array()
                     .into_iter()
                     .flatten()
                     .map(move |m| Found {
-                        id: format!("{source}:{}", m["id"].as_str().unwrap_or_default()),
+                        id: format!("{provider}:{}", m["id"].as_str().unwrap_or_default()),
                         kind: serde_json::from_value(m["kind"].clone())
                             .unwrap_or(ModelKind::Unknown),
                     })
@@ -1055,7 +1055,7 @@ fn runner_models() -> Operation<HubContext> {
     operation(
             Spec {
                 name: "runner.models",
-                summary: "The models the connected runners share, each as a source of type runner names it: what the hub's ANN pool may reach.",
+                summary: "The models the connected runners share, each as a provider of type runner names it: what the hub's ANN pool may reach.",
                 access: ADMIN,
                 input: &[],
             },
@@ -1074,7 +1074,7 @@ fn runner_models() -> Operation<HubContext> {
                 .flatten()
                 .flat_map(|s| {
                     let runner = s["runner"].as_str().unwrap_or_default().to_string();
-                    let source = s["source"].as_str().unwrap_or_default().to_string();
+                    let provider = s["provider"].as_str().unwrap_or_default().to_string();
                     let most = s["max_concurrent"].clone();
                     s["models"]
                         .as_array()
@@ -1086,7 +1086,7 @@ fn runner_models() -> Operation<HubContext> {
                                 .map(|k| k.describe())
                                 .unwrap_or_default();
                             format!(
-                                "{runner}  {source}:{}  {kind}  ({most} call(s) at once)",
+                                "{runner}  {provider}:{}  {kind}  ({most} call(s) at once)",
                                 m["id"].as_str().unwrap_or_default()
                             )
                         })

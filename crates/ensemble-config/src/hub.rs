@@ -4,7 +4,7 @@
 //! server (`ensemble-hub serve`), for a team or for one person on their own
 //! computer; where it listens is what `serve` is given, not a setting. Its
 //! core is its accounts, their roles and what each may do, and its ANN
-//! pool, the sources it calls and their models. Everything else
+//! pool, the providers it calls and their models. Everything else
 //! reaches it through a **connector**, each always on: the REST API, MCP, the
 //! runners' link, knowledge, tasks and sources.
 //!
@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 pub struct Hub {
     /// The hub's name, for its log and its listings.
     pub owner: String,
-    /// The hub's ANN pool: its own sources, and runners it reaches over
+    /// The hub's ANN pool: its own providers, and runners it reaches over
     /// their links.
     pub llm: AnnPool,
     pub accounts: Accounts,
@@ -176,8 +176,8 @@ pub struct Recall {
 /// their words.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Embed {
-    /// The source of an embedding model of the hub's ANN pool.
-    pub source: String,
+    /// The provider of an embedding model of the hub's ANN pool.
+    pub provider: String,
     pub model: String,
     /// How alike a note must be to the query to be found by its meaning, in
     /// thousandths of cosine similarity.
@@ -207,7 +207,7 @@ pub struct HubSettings {
     pub lockout_minutes: u32,
     /// What each role may do, by the role's name.
     pub roles: BTreeMap<String, Vec<Permission>>,
-    /// The sources the hub calls and the models they serve.
+    /// The providers the hub calls and the models they serve.
     pub ann_pool: AnnPoolSetting,
     /// The models that turn shares into notes. An empty `try` keeps shares
     /// waiting until one is chosen.
@@ -241,11 +241,11 @@ pub struct ModelsSetting {
     pub max_tokens: u32,
 }
 
-/// One model of the ANN pool, by the source that serves it and its id there.
+/// One model of the ANN pool, by the provider that serves it and its id there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSetting {
-    pub source: String,
+    pub provider: String,
     pub model: String,
 }
 
@@ -253,7 +253,7 @@ pub struct ModelSetting {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmbedSetting {
-    pub source: String,
+    pub provider: String,
     pub model: String,
     /// How alike a note must be to be found by its meaning: 0 to 1.
     pub min_similarity: f64,
@@ -283,7 +283,7 @@ pub struct SourceFilterSetting {
 
 impl HubSettings {
     /// The settings a new hub starts with: `owner`'s, on this computer
-    /// alone, closed to sign-ups, with no source, model or tracker yet.
+    /// alone, closed to sign-ups, with no provider, model or tracker yet.
     /// Shares wait until a model is chosen; recall finds notes by their words.
     pub fn starting(owner: &str) -> Self {
         let roles = [
@@ -383,7 +383,7 @@ impl HubSettings {
             } else {
                 check_model(
                     "embed",
-                    &e.source,
+                    &e.provider,
                     e.model.trim(),
                     Use::Embedding,
                     false,
@@ -395,7 +395,7 @@ impl HubSettings {
                 problems.push("embed.min_similarity: must be from 0 to 1, such as 0.5".into());
             }
             Embed {
-                source: e.source.clone(),
+                provider: e.provider.clone(),
                 model: e.model.trim().to_string(),
                 min_similarity_permille: (e.min_similarity.clamp(0.0, 1.0) * 1000.0).round() as u32,
             }
@@ -505,7 +505,7 @@ fn models(
             .candidates
             .iter()
             .map(|c| raw::RawDirectCandidate {
-                source: c.source.clone(),
+                provider: c.provider.clone(),
                 model: c.model.clone(),
             })
             .collect(),
@@ -524,7 +524,7 @@ fn models(
     for (i, c) in adapter.fallback.candidates.iter().enumerate() {
         check_model(
             &format!("{at}.try[{i}]"),
-            &c.source,
+            &c.provider,
             &c.model,
             Use::Llm,
             false,

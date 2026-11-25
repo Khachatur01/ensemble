@@ -26,7 +26,7 @@ fn claude(c: &Config, agent: &str) -> ClaudeCodeAdapter {
     }
 }
 
-/// OpenCode agents on two sources, and one Claude Code agent. Every
+/// OpenCode agents on two providers, and one Claude Code agent. Every
 /// setting is written, as it has to be.
 const REFERENCE: &str = r#"
 version: 1
@@ -44,7 +44,7 @@ agents:
       model:
         type: ann_pool
         try:
-          - { source: openai-local, name: qwen3-coder, context_window: 32768 }
+          - { provider: openai-local, name: qwen3-coder, context_window: 32768 }
         when_none: fail
       tools: [read, glob, grep, list]
       system_prompt: append
@@ -61,7 +61,7 @@ agents:
       model:
         type: ann_pool
         try:
-          - { source: openai-remote, name: qwen3-coder, context_window: 32768 }
+          - { provider: openai-remote, name: qwen3-coder, context_window: 32768 }
         when_none: fail
       tools: [read, edit, bash]
       system_prompt: append
@@ -82,7 +82,7 @@ agents:
       command: claude
 "#;
 
-/// The sources of the runner the teams of these tests run on: two
+/// The providers of the runner the teams of these tests run on: two
 /// OpenAI-compatible ones of REFERENCE's, two more and an Anthropic one of
 /// `with_fallback`'s, and Anthropic's API as `claude-api`.
 const RUNNER_BACKENDS: &str = r#"
@@ -94,17 +94,17 @@ const RUNNER_BACKENDS: &str = r#"
       claude-api: { type: anthropic-api, base_url: "https://api.anthropic.com/", api_key_env: ANTHROPIC_API_KEY, timeout_seconds: 90, max_concurrent: 1 }
 "#;
 
-/// A runner without a hub whose sources are `sources`, the lines of a YAML
+/// A runner without a hub whose providers are `providers`, the lines of a YAML
 /// mapping indented six spaces, or `{}`, its keys read from `env`.
-fn runner_on(sources: &str, env: &dyn Env) -> Result<Runner, ConfigError> {
-    let sources: BTreeMap<String, SourceSetting> =
-        serde_norway::from_str(sources).map_err(|e| ConfigError::Syntax {
+fn runner_on(providers: &str, env: &dyn Env) -> Result<Runner, ConfigError> {
+    let providers: BTreeMap<String, ProviderSetting> =
+        serde_norway::from_str(providers).map_err(|e| ConfigError::Syntax {
             path: PathBuf::from("database.db"),
             detail: e.to_string(),
         })?;
     RunnerSettings {
         ann_pool: AnnPoolSetting {
-            sources,
+            providers,
             models: Vec::new(),
         },
         ..RunnerSettings::starting("laptop", "/code")
@@ -137,14 +137,14 @@ fn refusal(doc: &str) -> String {
     }
 }
 
-/// The problems of the runner whose sources are `sources`.
-fn runner_problems(sources: &str) -> String {
-    problems_of(runner_on(sources, &env(&[])).unwrap_err()).join("\n")
+/// The problems of the runner whose providers are `providers`.
+fn runner_problems(providers: &str) -> String {
+    problems_of(runner_on(providers, &env(&[])).unwrap_err()).join("\n")
 }
 
-/// The message of the runner whose sources serde refuses.
-fn runner_refusal(sources: &str) -> String {
-    match runner_on(sources, &env(&[])).unwrap_err() {
+/// The message of the runner whose providers serde refuses.
+fn runner_refusal(providers: &str) -> String {
+    match runner_on(providers, &env(&[])).unwrap_err() {
         ConfigError::Syntax { detail, .. } => detail,
         other => panic!("expected Syntax, got: {other}"),
     }
@@ -153,19 +153,19 @@ fn runner_refusal(sources: &str) -> String {
 #[test]
 fn the_reference_config_loads() {
     let c = parse(REFERENCE, &p()).expect("reference config must load");
-    assert!(c.llm_backends.is_empty(), "a team defines no source");
+    assert!(c.llm_backends.is_empty(), "a team defines no provider");
     let c = team(REFERENCE).unwrap();
     assert_eq!(c.version, 1);
     assert_eq!(c.llm_backends.len(), 6, "the runner's, every one");
     assert_eq!(c.llm_backends["openai-remote"].timeout_seconds, 300);
     assert_eq!(c.agent_names(), vec!["coder", "planner", "reviewer"]);
     let coder = &c.agents["coder"];
-    assert_eq!(coder.source(), Some("openai-remote"));
+    assert_eq!(coder.provider(), Some("openai-remote"));
     assert_eq!(coder.runs_on(), "opencode on openai-remote");
     assert_eq!(coder.context_window(), Some(32768));
     assert_eq!(coder.max_seconds, 900);
     assert!(coder.can_change_files());
-    assert_eq!(c.agents["reviewer"].source(), None);
+    assert_eq!(c.agents["reviewer"].provider(), None);
     assert_eq!(c.agents["reviewer"].context_window(), None);
 }
 
@@ -187,7 +187,7 @@ fn a_missing_setting_is_refused_by_name_and_place() {
         ("      max_turns: 30\n", "agents.reviewer", "max_turns"),
         ("      command: claude\n", "agents.reviewer", "command"),
         (
-            "{ source: openai-remote, name: qwen3-coder, context_window: 32768 }",
+            "{ provider: openai-remote, name: qwen3-coder, context_window: 32768 }",
             "agents.coder",
             "context_window",
         ),
@@ -196,7 +196,7 @@ fn a_missing_setting_is_refused_by_name_and_place() {
         let kept = match key {
             "max_steps" => "      command: opencode\n  reviewer:",
             "system_prompt" => "      max_steps: 30\n      command: opencode\n  reviewer:",
-            "context_window" => "{ source: openai-remote, name: qwen3-coder }",
+            "context_window" => "{ provider: openai-remote, name: qwen3-coder }",
             _ => "",
         };
         let doc = REFERENCE.replacen(line, kept, 1);
@@ -216,14 +216,14 @@ fn a_config_without_its_agents_is_refused_and_one_defining_sources_too() {
     let detail = refusal("version: 1\nlimits: {}\nagents: {}\n");
     assert!(detail.contains("`gates` is required"), "{detail}");
     assert!(team("version: 1\nlimits: {}\ngates: {}\nagents: {}\n").is_ok());
-    // A team names sources; the runner keeps them.
+    // A team names providers; the runner keeps them.
     let detail = refusal("version: 1\nllm_backends: {}\nlimits: {}\ngates: {}\nagents: {}\n");
     assert!(detail.contains("unknown field `llm_backends`"), "{detail}");
 }
 
 #[test]
 fn a_source_missing_a_setting_is_refused_by_name_and_place() {
-    for (source, key) in [
+    for (provider, key) in [
         (
             "      x: { type: openai-compatible-api, base_url: \"http://127.0.0.1:1/v1\" }",
             "timeout_seconds",
@@ -233,7 +233,7 @@ fn a_source_missing_a_setting_is_refused_by_name_and_place() {
             "base_url",
         ),
     ] {
-        let detail = runner_refusal(source);
+        let detail = runner_refusal(provider);
         assert!(
             detail.contains(&format!("missing field `{key}`")),
             "{key}: {detail}"
@@ -274,7 +274,7 @@ fn an_opencode_model_is_a_provider_model_or_a_model_of_the_pool() {
     let c = team(&doc("{ type: provider, name: opencode/big-pickle }")).unwrap();
     let oc = opencode(&c, "x");
     assert_eq!(oc.model_id(), "opencode/big-pickle");
-    assert_eq!((oc.source(), oc.context_window()), (None, None));
+    assert_eq!((oc.provider(), oc.context_window()), (None, None));
 
     let detail = refusal(&doc("{ type: local }"));
     assert!(
@@ -287,7 +287,7 @@ fn an_opencode_model_is_a_provider_model_or_a_model_of_the_pool() {
     assert!(detail.contains("agents.x"), "{detail}");
 }
 
-/// Two openai-compatible sources and an Anthropic one, and one agent of each
+/// Two openai-compatible providers and an Anthropic one, and one agent of each
 /// kind that runs on the pool, with `try` and `when_none` as given.
 fn with_fallback(opencode_try: &str, direct_try: &str, when_none: &str) -> String {
     format!(
@@ -298,8 +298,8 @@ fn with_fallback(opencode_try: &str, direct_try: &str, when_none: &str) -> Strin
 #[test]
 fn an_agent_lists_its_models_in_order_and_says_what_happens_when_none_works() {
     let doc = with_fallback(
-        "[{ source: home, name: small, context_window: 8 }, { source: central, name: big, context_window: 64 }]",
-        "[{ source: home, model: small }, { source: claude, model: haiku }]",
+        "[{ provider: home, name: small, context_window: 8 }, { provider: central, name: big, context_window: 64 }]",
+        "[{ provider: home, model: small }, { provider: claude, model: haiku }]",
         "wait",
     );
     let c = team(&doc).unwrap();
@@ -307,13 +307,13 @@ fn an_agent_lists_its_models_in_order_and_says_what_happens_when_none_works() {
     assert_eq!(coder.pool_models(), [("home", "small"), ("central", "big")]);
     assert_eq!(coder.fallback().unwrap().when_none, WhenNone::Wait);
     assert_eq!(
-        (coder.source(), coder.model(), coder.context_window()),
+        (coder.provider(), coder.model(), coder.context_window()),
         (Some("home"), "small", Some(8)),
         "what it says it runs on is its first model"
     );
     let bound = coder.bound_to(1);
     assert_eq!(
-        (bound.source(), bound.model(), bound.context_window()),
+        (bound.provider(), bound.model(), bound.context_window()),
         (Some("central"), "big", Some(64))
     );
     assert_eq!(bound.pool_models().len(), 1);
@@ -329,7 +329,7 @@ fn an_agent_lists_its_models_in_order_and_says_what_happens_when_none_works() {
 fn every_model_in_a_try_list_is_checked() {
     let joined = joined_problems(&with_fallback(
         "[]",
-        "[{ source: home, model: small }, { source: nowhere, model: \"\" }]",
+        "[{ provider: home, model: small }, { provider: nowhere, model: \"\" }]",
         "fail",
     ));
     assert!(
@@ -340,21 +340,21 @@ fn every_model_in_a_try_list_is_checked() {
         joined.contains("agents.summariser.adapter.try[1]: `model` is empty"),
         "{joined}"
     );
-    // Its sources are checked against the runner's once the team is valid.
+    // Its providers are checked against the runner's once the team is valid.
     let joined = joined_problems(&with_fallback(
-        "[{ source: home, name: small, context_window: 8 }, { source: claude, name: haiku, context_window: 8 }]",
-        "[{ source: home, model: small }, { source: nowhere, model: big }]",
+        "[{ provider: home, name: small, context_window: 8 }, { provider: claude, name: haiku, context_window: 8 }]",
+        "[{ provider: home, model: small }, { provider: nowhere, model: big }]",
         "fail",
     ));
     for wanted in [
-        "agents.summariser.adapter.try[1]: there is no source 'nowhere'",
-        "agents.coder.adapter.model.try[1]: the source 'claude' is of type 'anthropic-api'",
+        "agents.summariser.adapter.try[1]: there is no provider 'nowhere'",
+        "agents.coder.adapter.model.try[1]: the provider 'claude' is of type 'anthropic-api'",
     ] {
         assert!(joined.contains(wanted), "{wanted}: {joined}");
     }
     let joined = joined_problems(&with_fallback(
-        "[{ source: home, name: small, context_window: 8 }, { source: claude, name: haiku, context_window: 0 }]",
-        "[{ source: home, model: small }]",
+        "[{ provider: home, name: small, context_window: 8 }, { provider: claude, name: haiku, context_window: 0 }]",
+        "[{ provider: home, model: small }]",
         "fail",
     ));
     assert!(
@@ -363,8 +363,8 @@ fn every_model_in_a_try_list_is_checked() {
         "{joined}"
     );
     let detail = refusal(&with_fallback(
-        "[{ source: home, name: small, context_window: 8 }]",
-        "[{ source: home, model: small }]",
+        "[{ provider: home, name: small, context_window: 8 }]",
+        "[{ provider: home, model: small }]",
         "retry",
     ));
     assert!(
@@ -404,10 +404,10 @@ fn the_window_of_a_model_of_the_pool_must_be_positive() {
 
 #[test]
 fn an_agent_naming_an_undefined_source_is_fatal_and_lists_the_real_ones() {
-    let doc = REFERENCE.replace("source: openai-remote", "source: opanai-remote");
+    let doc = REFERENCE.replace("provider: openai-remote", "provider: opanai-remote");
     let joined = joined_problems(&doc);
     assert!(
-        joined.contains("there is no source 'opanai-remote'")
+        joined.contains("there is no provider 'opanai-remote'")
             && joined.contains("openai-local, openai-remote"),
         "{joined}"
     );
@@ -415,7 +415,7 @@ fn an_agent_naming_an_undefined_source_is_fatal_and_lists_the_real_ones() {
 
 #[test]
 fn a_source_no_agent_uses_is_not_an_error() {
-    let doc = REFERENCE.replace("source: openai-remote", "source: openai-local");
+    let doc = REFERENCE.replace("provider: openai-remote", "provider: openai-local");
     assert!(team(&doc).is_ok());
 }
 
@@ -603,7 +603,7 @@ fn a_team_reads_no_keys_even_from_a_dotenv_beside_it() {
     assert!(c.llm_backends.is_empty());
 }
 
-/// The sample team on a runner with the sources it names.
+/// The sample team on a runner with the providers it names.
 fn sample_team() -> Config {
     let runner = runner_on(
         "local: { type: openai-compatible-api, base_url: \"http://127.0.0.1:11434/v1\", timeout_seconds: 600, max_concurrent: 1 }\ncentral: { type: openai-compatible-api, base_url: \"https://llm.example.com/v1\", timeout_seconds: 600, max_concurrent: 1 }",
@@ -632,13 +632,13 @@ fn the_sample_loads_and_sets_every_setting_the_schema_has() {
         );
     }
     assert!(
-        c.agents.values().any(|a| a.source().is_some()),
+        c.agents.values().any(|a| a.provider().is_some()),
         "the sample has no agent on the ANN pool"
     );
     assert!(
         c.agents
             .values()
-            .any(|a| a.kind() == OPENCODE_AGENT && a.source().is_none()),
+            .any(|a| a.kind() == OPENCODE_AGENT && a.provider().is_none()),
         "the sample has no agent on a provider"
     );
 
@@ -889,19 +889,19 @@ fn a_budget_is_unlimited_or_a_number_of_runs_per_hour() {
 #[test]
 fn an_llm_agent_is_one_request_to_a_defined_source() {
     let doc = format!(
-        "{REFERENCE}  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: direct\n      try: [{{ source: openai-local, model: small }}]\n      when_none: fail\n      max_tokens: 400\n"
+        "{REFERENCE}  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: direct\n      try: [{{ provider: openai-local, model: small }}]\n      when_none: fail\n      max_tokens: 400\n"
     );
     let c = team(&doc).unwrap();
     let a = &c.agents["summariser"];
     assert_eq!(
-        (a.kind(), a.model(), a.source()),
+        (a.kind(), a.model(), a.provider()),
         (DIRECT_AGENT, "small", Some("openai-local"))
     );
     assert_eq!(a.runs_on(), "direct on openai-local");
     assert!(!a.has_tools() && !a.can_change_files());
     let bad = doc.replace(
-        "try: [{ source: openai-local, model: small }]\n      when_none: fail\n      max_tokens: 400",
-        "try: [{ source: openai-local, model: small }]\n      when_none: fail\n      max_tokens: 0",
+        "try: [{ provider: openai-local, model: small }]\n      when_none: fail\n      max_tokens: 400",
+        "try: [{ provider: openai-local, model: small }]\n      when_none: fail\n      max_tokens: 0",
     );
     let joined = joined_problems(&bad);
     assert!(
@@ -909,11 +909,14 @@ fn an_llm_agent_is_one_request_to_a_defined_source() {
         "{joined}"
     );
     let nowhere = doc.replace(
-        "source: openai-local, model: small",
-        "source: nowhere, model: small",
+        "provider: openai-local, model: small",
+        "provider: nowhere, model: small",
     );
     let joined = joined_problems(&nowhere);
-    assert!(joined.contains("there is no source 'nowhere'"), "{joined}");
+    assert!(
+        joined.contains("there is no provider 'nowhere'"),
+        "{joined}"
+    );
     let tools = doc.replace(
         "      max_tokens: 400\n",
         "      max_tokens: 400\n      tools: [read]\n",
@@ -962,7 +965,7 @@ fn api_keys_are_read_from_the_environment_never_the_file() {
     );
     // And an unset one is simply absent, not an empty bearer token.
     assert_eq!(r.llm.direct["openai-remote"].settings.api_key(), None);
-    // A source may name no key at all.
+    // A provider may name no key at all.
     assert_eq!(r.llm.direct["home"].settings.api_key(), None);
 }
 
@@ -1013,8 +1016,8 @@ fn a_base_url_without_a_scheme_or_a_zero_timeout_is_refused() {
         "      x: { type: openai-compatible-api, base_url: \"127.0.0.1:8000/v1\", timeout_seconds: 0, max_concurrent: 1 }",
     );
     for wanted in [
-        "ann_pool.sources.x: `base_url` '127.0.0.1:8000/v1' must start with http://",
-        "ann_pool.sources.x: `timeout_seconds` must be greater than 0",
+        "ann_pool.providers.x: `base_url` '127.0.0.1:8000/v1' must start with http://",
+        "ann_pool.providers.x: `timeout_seconds` must be greater than 0",
     ] {
         assert!(said.contains(wanted), "{wanted}: {said}");
     }
@@ -1061,7 +1064,7 @@ agents:
       type: unlimited
     adapter:
       type: opencode
-      model: { type: ann_pool, try: [{ source: missing, name: "", context_window: 0 }], when_none: fail }
+      model: { type: ann_pool, try: [{ provider: missing, name: "", context_window: 0 }], when_none: fail }
       tools: []
       system_prompt: append
       max_steps: 1
@@ -1231,16 +1234,16 @@ fn an_anthropic_source_loads_and_only_an_llm_agent_may_run_on_it() {
 
     // An llm agent may name it.
     let llm = REFERENCE.replace(
-        "      type: opencode\n      model:\n        type: ann_pool\n        try:\n          - { source: openai-remote, name: qwen3-coder, context_window: 32768 }\n        when_none: fail\n      tools: [read, edit, bash]\n      system_prompt: append\n      max_steps: 30\n      command: opencode",
-        "      type: direct\n      try: [{ source: claude-api, model: claude-haiku-4-5 }]\n      when_none: fail\n      max_tokens: 500",
+        "      type: opencode\n      model:\n        type: ann_pool\n        try:\n          - { provider: openai-remote, name: qwen3-coder, context_window: 32768 }\n        when_none: fail\n      tools: [read, edit, bash]\n      system_prompt: append\n      max_steps: 30\n      command: opencode",
+        "      type: direct\n      try: [{ provider: claude-api, model: claude-haiku-4-5 }]\n      when_none: fail\n      max_tokens: 500",
     );
     let c = team(&llm).unwrap();
-    assert_eq!(c.agents["coder"].source(), Some("claude-api"));
+    assert_eq!(c.agents["coder"].provider(), Some("claude-api"));
 
     // An OpenCode agent may not: it needs an openai-compatible one.
     let oc = REFERENCE.replace(
-        "{ source: openai-remote, name: qwen3-coder,",
-        "{ source: claude-api, name: claude-haiku-4-5,",
+        "{ provider: openai-remote, name: qwen3-coder,",
+        "{ provider: claude-api, name: claude-haiku-4-5,",
     );
     let joined = joined_problems(&oc);
     assert!(
@@ -1262,9 +1265,9 @@ fn llm() -> ModelKind {
     }
 }
 
-/// An OpenAI-compatible server on loopback, as a source.
-fn server(port: u16) -> SourceSetting {
-    SourceSetting::OpenAiCompatible {
+/// An OpenAI-compatible server on loopback, as a provider.
+fn server(port: u16) -> ProviderSetting {
+    ProviderSetting::OpenAiCompatible {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         api_key_env: None,
         timeout_seconds: 5,
@@ -1272,14 +1275,14 @@ fn server(port: u16) -> SourceSetting {
     }
 }
 
-/// A hub of Ana's with one source, `local`, which serves `small`, an LLM
+/// A hub of Ana's with one provider, `local`, which serves `small`, an LLM
 /// that is on and distills.
 fn hub_settings() -> HubSettings {
     let mut hub = HubSettings::starting("Ana");
-    hub.ann_pool.sources.insert("local".into(), server(1));
+    hub.ann_pool.providers.insert("local".into(), server(1));
     hub.ann_pool.turn_on("local", "small", llm());
     hub.distill.candidates = vec![ModelSetting {
-        source: "local".into(),
+        provider: "local".into(),
         model: "small".into(),
     }];
     hub
@@ -1322,7 +1325,7 @@ fn a_hub_names_every_problem_of_its_settings() {
     hub.session_hours = 0;
     hub.roles
         .insert("two words".into(), vec![Permission::Recall]);
-    hub.distill.candidates[0].source = "nowhere".into();
+    hub.distill.candidates[0].provider = "nowhere".into();
     hub.recall_max_notes = 0;
     let said = hub_problems(&hub);
     for wanted in [
@@ -1330,7 +1333,7 @@ fn a_hub_names_every_problem_of_its_settings() {
         "registration: `max_pending` must be greater than 0",
         "session_hours: must be greater than 0",
         "the role name 'two words' must be one word",
-        "distill.try[0]: there is no source 'nowhere' in the ANN pool",
+        "distill.try[0]: there is no provider 'nowhere' in the ANN pool",
         "recall: the most notes",
     ] {
         assert!(said.contains(wanted), "{wanted}: {said}");
@@ -1343,7 +1346,7 @@ fn a_hub_uses_only_a_model_of_its_pool_that_is_on_and_of_the_kind_it_needs() {
     hub.ann_pool
         .turn_on("local", "nomic", ModelKind::Embedding { dimensions: 8 });
     hub.embed = Some(EmbedSetting {
-        source: "local".into(),
+        provider: "local".into(),
         model: "nomic".into(),
         min_similarity: 0.5,
     });
@@ -1360,16 +1363,16 @@ fn a_hub_uses_only_a_model_of_its_pool_that_is_on_and_of_the_kind_it_needs() {
         500
     );
     hub.embed = Some(EmbedSetting {
-        source: "local".into(),
+        provider: "local".into(),
         model: "small".into(),
         min_similarity: 1.5,
     });
     hub.distill.candidates.push(ModelSetting {
-        source: "local".into(),
+        provider: "local".into(),
         model: "nomic".into(),
     });
     hub.ann_pool.models.push(PoolModel {
-        source: "local".into(),
+        provider: "local".into(),
         id: "new".into(),
         kind: ModelKind::Unknown,
         on: false,
@@ -1377,7 +1380,7 @@ fn a_hub_uses_only_a_model_of_its_pool_that_is_on_and_of_the_kind_it_needs() {
         shared: false,
     });
     hub.distill.candidates.push(ModelSetting {
-        source: "local".into(),
+        provider: "local".into(),
         model: "new".into(),
     });
     let said = hub_problems(&hub);
@@ -1394,17 +1397,17 @@ fn a_hub_uses_only_a_model_of_its_pool_that_is_on_and_of_the_kind_it_needs() {
 #[test]
 fn a_model_of_the_pool_is_known_on_and_of_one_of_its_sources_once() {
     let mut hub = hub_settings();
-    hub.ann_pool.sources.insert(
+    hub.ann_pool.providers.insert(
         "busy".into(),
-        SourceSetting::OpenAiCompatible {
+        ProviderSetting::OpenAiCompatible {
             base_url: "http://127.0.0.1:2/v1".into(),
             api_key_env: None,
             timeout_seconds: 5,
             max_concurrent: 0,
         },
     );
-    let unknown = |source: &str, id: &str, on| PoolModel {
-        source: source.into(),
+    let unknown = |provider: &str, id: &str, on| PoolModel {
+        provider: provider.into(),
         id: id.into(),
         kind: ModelKind::Unknown,
         on,
@@ -1419,9 +1422,9 @@ fn a_model_of_the_pool_is_known_on_and_of_one_of_its_sources_once() {
     });
     let said = hub_problems(&hub);
     for wanted in [
-        "ann_pool.sources.busy: `max_concurrent` must be greater than 0",
+        "ann_pool.providers.busy: `max_concurrent` must be greater than 0",
         "ann_pool.models.local:odd: is on, and what it is is not known",
-        "ann_pool.models.gone:x: there is no source 'gone'",
+        "ann_pool.models.gone:x: there is no provider 'gone'",
         "ann_pool.models.local:small: is listed twice",
         "ann_pool.models.local:small: a hub shares no model",
     ] {
@@ -1494,15 +1497,15 @@ fn a_hub_inbox_names_its_tracker_and_label_and_each_tracker_its_own_folder() {
 #[test]
 fn a_hub_reaches_the_models_a_runner_shares_as_that_runner_names_them() {
     let mut hub = hub_settings();
-    hub.ann_pool.sources.insert(
+    hub.ann_pool.providers.insert(
         "gpu".into(),
-        SourceSetting::Runner {
+        ProviderSetting::Runner {
             runner: "ana/gpu-box".into(),
         },
     );
     hub.ann_pool.turn_on("gpu", "local:big", llm());
     hub.distill.candidates.push(ModelSetting {
-        source: "gpu".into(),
+        provider: "gpu".into(),
         model: "local:big".into(),
     });
     let resolved = hub
@@ -1520,13 +1523,15 @@ fn a_hub_reaches_the_models_a_runner_shares_as_that_runner_names_them() {
             .base_url(),
         "http://127.0.0.1:9/gpu"
     );
-    hub.ann_pool.sources.insert(
+    hub.ann_pool.providers.insert(
         "bad".into(),
-        SourceSetting::Runner {
+        ProviderSetting::Runner {
             runner: "gpu-box".into(),
         },
     );
-    assert!(hub_problems(&hub).contains("ann_pool.sources.bad.runner: 'gpu-box' must be a runner"));
+    assert!(
+        hub_problems(&hub).contains("ann_pool.providers.bad.runner: 'gpu-box' must be a runner")
+    );
 }
 
 #[test]
@@ -1538,13 +1543,13 @@ fn settings_are_written_as_json_and_an_unknown_one_is_refused() {
         serde_json::json!({ "type": "closed" })
     );
     assert_eq!(
-        json["ann_pool"]["sources"]["local"]["type"],
+        json["ann_pool"]["providers"]["local"]["type"],
         "openai-compatible-api"
     );
     assert_eq!(
         json["ann_pool"]["models"][0],
         serde_json::json!({
-            "source": "local",
+            "provider": "local",
             "id": "small",
             "kind": { "type": "llm", "tier": "medium", "context_window": null, "tools": null },
             "on": true,
@@ -1602,19 +1607,19 @@ fn a_new_runner_works_in_its_workspace_and_loads() {
 
 #[test]
 fn a_runner_shares_models_of_its_openai_compatible_servers_and_reaches_others_through_its_hub() {
-    let claude = SourceSetting::Anthropic {
+    let claude = ProviderSetting::Anthropic {
         base_url: "https://api.anthropic.com".into(),
         api_key_env: None,
         timeout_seconds: 5,
         max_concurrent: 2,
     };
-    let gpu = SourceSetting::Runner {
+    let gpu = ProviderSetting::Runner {
         runner: "kim/gpu-box".into(),
     };
     let pool = |r: &mut RunnerSettings| {
-        r.ann_pool.sources.insert("local".into(), server(1));
-        r.ann_pool.sources.insert("claude".into(), claude.clone());
-        r.ann_pool.sources.insert("gpu".into(), gpu.clone());
+        r.ann_pool.providers.insert("local".into(), server(1));
+        r.ann_pool.providers.insert("claude".into(), claude.clone());
+        r.ann_pool.providers.insert("gpu".into(), gpu.clone());
         r.ann_pool.turn_on("local", "small", llm());
         r.ann_pool.turn_on("local", "other", llm());
         r.ann_pool.turn_on("claude", "haiku", llm());
@@ -1627,7 +1632,7 @@ fn a_runner_shares_models_of_its_openai_compatible_servers_and_reaches_others_th
     .unwrap();
     let shared = r.llm.shared();
     assert_eq!(shared.len(), 1);
-    assert_eq!(shared[0].source.name, "local");
+    assert_eq!(shared[0].provider.name, "local");
     assert_eq!(shared[0].max_concurrent, 1);
     assert_eq!(
         shared[0]
@@ -1652,10 +1657,10 @@ fn a_runner_shares_models_of_its_openai_compatible_servers_and_reaches_others_th
     .unwrap_err()
     .to_string();
     for wanted in [
-        "ann_pool.models.claude:haiku: is shared, and only a model of an openai-compatible-api source of the runner's own may be",
+        "ann_pool.models.claude:haiku: is shared, and only a model of an openai-compatible-api provider of the runner's own may be",
         "ann_pool.models.local:other: is shared, and off",
         "ann_pool: a runner shares its models through a hub, and it names no hub",
-        "ann_pool: a source that is another runner is reached through a hub",
+        "ann_pool: a provider that is another runner is reached through a hub",
     ] {
         assert!(said.contains(wanted), "{wanted}: {said}");
     }
@@ -1664,7 +1669,7 @@ fn a_runner_shares_models_of_its_openai_compatible_servers_and_reaches_others_th
 #[test]
 fn a_team_on_a_runners_pool_names_llms_of_it_that_are_on() {
     let r = runner_with(|r| {
-        r.ann_pool.sources.insert("home".into(), server(1));
+        r.ann_pool.providers.insert("home".into(), server(1));
         r.ann_pool.turn_on("home", "small", llm());
         r.ann_pool
             .turn_on("home", "e", ModelKind::Embedding { dimensions: 4 });
@@ -1672,7 +1677,7 @@ fn a_team_on_a_runners_pool_names_llms_of_it_that_are_on() {
     .unwrap();
     let doc = |model: &str| {
         format!(
-            "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  s:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: direct, try: [{{ source: home, model: {model} }}], when_none: fail, max_tokens: 10 }}\n"
+            "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  s:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: direct, try: [{{ provider: home, model: {model} }}], when_none: fail, max_tokens: 10 }}\n"
         )
     };
     let team = parse(&doc("small"), &p())
@@ -1703,12 +1708,12 @@ fn a_team_on_a_runners_pool_names_llms_of_it_that_are_on() {
 #[test]
 fn a_builtin_agent_runs_on_the_pool_with_tools_it_has() {
     let doc = format!(
-        "{REFERENCE}  fixer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: builtin\n      try:\n        - source: openai-local\n          model: small\n          context_window: 32768\n      when_none: fail\n      tools: [read, grep]\n      max_steps: 10\n      max_tokens: 400\n"
+        "{REFERENCE}  fixer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: builtin\n      try:\n        - provider: openai-local\n          model: small\n          context_window: 32768\n      when_none: fail\n      tools: [read, grep]\n      max_steps: 10\n      max_tokens: 400\n"
     );
     let c = team(&doc).unwrap();
     let a = &c.agents["fixer"];
     assert_eq!(
-        (a.kind(), a.model(), a.source()),
+        (a.kind(), a.model(), a.provider()),
         (BUILTIN_AGENT, "small", Some("openai-local"))
     );
     assert_eq!(a.runs_on(), "builtin on openai-local");
@@ -1735,8 +1740,8 @@ fn a_builtin_agent_runs_on_the_pool_with_tools_it_has() {
 #[test]
 fn a_sources_key_is_named_for_it() {
     assert_eq!(
-        source_key_variable("team-gpu.2"),
-        "ENSEMBLE_SOURCE_TEAM_GPU_2_KEY"
+        provider_key_variable("team-gpu.2"),
+        "ENSEMBLE_PROVIDER_TEAM_GPU_2_KEY"
     );
 }
 

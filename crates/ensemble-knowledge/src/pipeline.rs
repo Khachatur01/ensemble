@@ -363,7 +363,7 @@ impl Memory {
             .fallback
             .candidates
             .iter()
-            .filter_map(|c| backends.get(&c.source).map(|b| (b, c.model.as_str())))
+            .filter_map(|c| backends.get(&c.provider).map(|b| (b, c.model.as_str())))
             .collect();
         let index = self
             .resolver()

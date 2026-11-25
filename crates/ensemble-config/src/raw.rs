@@ -155,8 +155,8 @@ pub(crate) struct RawBuiltinAdapter {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawBuiltinCandidate {
-    /// Which source of the runner's ANN pool serves the model.
-    pub(crate) source: String,
+    /// Which provider of the runner's ANN pool serves the model.
+    pub(crate) provider: String,
     /// The id the endpoint serves the model under.
     pub(crate) model: String,
     /// Tokens of context the server runs the model with: the loop compacts
@@ -167,9 +167,9 @@ pub(crate) struct RawBuiltinCandidate {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawDirectCandidate {
-    /// Which source serves the model: one of the runner's ANN pool, or of the
+    /// Which provider serves the model: one of the runner's ANN pool, or of the
     /// hub's for its distiller.
-    pub(crate) source: String,
+    pub(crate) provider: String,
     /// The id the endpoint serves the model under.
     pub(crate) model: String,
 }
@@ -240,9 +240,9 @@ pub(crate) struct RawBackendModel {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawBackendCandidate {
-    /// Which source of the runner's ANN pool serves the model. Ensemble gives
+    /// Which provider of the runner's ANN pool serves the model. Ensemble gives
     /// OpenCode the endpoint and key for the run.
-    pub(crate) source: String,
+    pub(crate) provider: String,
     /// The id the endpoint serves the model under, as its /models lists it.
     pub(crate) name: String,
     /// Tokens of context the server really runs the model with. OpenCode

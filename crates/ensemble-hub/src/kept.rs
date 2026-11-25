@@ -1,4 +1,4 @@
-//! Where the hub keeps its settings and the keys of its sources: in typed
+//! Where the hub keeps its settings and the keys of its providers: in typed
 //! tables of its core's database (`<config-dir>/hub/core/database.db`), as a
 //! GitLab instance keeps its application settings, so that the operations,
 //! the REST API and a web UI change them, and a deployment, such as the
@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 pub use ensemble_store::kept::MASTER_KEY_FILE;
 
-/// What keeps a source's key, for what is said.
+/// What keeps a provider's key, for what is said.
 const PROGRAM: &str = "ensemble-hub";
 
 /// What the hub's settings are called in what is said.
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS hub_settings (
     distill_max_tokens INTEGER NOT NULL,
     recall_max_notes INTEGER NOT NULL,
     recall_max_chars INTEGER NOT NULL,
-    embed_source TEXT,
+    embed_provider TEXT,
     embed_model TEXT,
     embed_min_similarity REAL,
     filter_when_none TEXT,
@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS roles (
 CREATE TABLE IF NOT EXISTS models (
     purpose TEXT NOT NULL,
     position INTEGER NOT NULL,
-    source TEXT NOT NULL,
+    provider TEXT NOT NULL,
     model TEXT NOT NULL,
     PRIMARY KEY (purpose, position)
 );
@@ -160,7 +160,7 @@ impl Keep<HubSettings> for HubStore {
         core(&self.dir, async |c| {
             let found = rows(
                 c,
-                "SELECT owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_source, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt FROM hub_settings WHERE id = 1",
+                "SELECT owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_provider, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt FROM hub_settings WHERE id = 1",
                 vec![],
             )
             .await?;
@@ -178,7 +178,7 @@ impl Keep<HubSettings> for HubStore {
             let mut models: BTreeMap<String, Vec<ModelSetting>> = BTreeMap::new();
             for m in rows(
                 c,
-                "SELECT purpose, source, model FROM models ORDER BY purpose, position",
+                "SELECT purpose, provider, model FROM models ORDER BY purpose, position",
                 vec![],
             )
             .await?
@@ -187,7 +187,7 @@ impl Keep<HubSettings> for HubStore {
                     .entry(some_text(&m[0], "models.purpose")?)
                     .or_default()
                     .push(ModelSetting {
-                        source: some_text(&m[1], "models.source")?,
+                        provider: some_text(&m[1], "models.provider")?,
                         model: some_text(&m[2], "models.model")?,
                     });
             }
@@ -222,8 +222,8 @@ impl Keep<HubSettings> for HubStore {
                 other => return Err(format!("registration: '{other}' is unknown")),
             };
             let embed = match text(&r[10]) {
-                Some(source) => Some(EmbedSetting {
-                    source,
+                Some(provider) => Some(EmbedSetting {
+                    provider,
                     model: some_text(&r[11], "embed.model")?,
                     min_similarity: match &r[12] {
                         Value::Real(x) => *x,
@@ -271,8 +271,12 @@ impl Keep<HubSettings> for HubStore {
             RegistrationSetting::Closed => ("closed", Value::Null),
             RegistrationSetting::Approval { max_pending } => ("approval", int(max_pending)),
         };
-        let (embed_source, embed_model, embed_min) = match &s.embed {
-            Some(e) => (txt(&e.source), txt(&e.model), Value::Real(e.min_similarity)),
+        let (embed_provider, embed_model, embed_min) = match &s.embed {
+            Some(e) => (
+                txt(&e.provider),
+                txt(&e.model),
+                Value::Real(e.min_similarity),
+            ),
             None => (Value::Null, Value::Null, Value::Null),
         };
         let (filter_when_none, filter_max_tokens, filter_prompt) = match &s.source_filter {
@@ -286,7 +290,7 @@ impl Keep<HubSettings> for HubStore {
         let mut statements = vec![
             ("DELETE FROM hub_settings", vec![]),
             (
-                "INSERT INTO hub_settings (id, owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_source, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                "INSERT INTO hub_settings (id, owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_provider, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 vec![
                     txt(&s.owner),
                     txt(registration),
@@ -298,7 +302,7 @@ impl Keep<HubSettings> for HubStore {
                     int(s.distill.max_tokens),
                     int(s.recall_max_notes),
                     int(s.recall_max_chars),
-                    embed_source,
+                    embed_provider,
                     embed_model,
                     embed_min,
                     filter_when_none,
@@ -321,8 +325,8 @@ impl Keep<HubSettings> for HubStore {
         for (purpose, models) in std::iter::once((DISTILL, &s.distill)).chain(filter) {
             for (i, m) in models.candidates.iter().enumerate() {
                 statements.push((
-                    "INSERT INTO models (purpose, position, source, model) VALUES (?1, ?2, ?3, ?4)",
-                    vec![txt(purpose), int(i as i64), txt(&m.source), txt(&m.model)],
+                    "INSERT INTO models (purpose, position, provider, model) VALUES (?1, ?2, ?3, ?4)",
+                    vec![txt(purpose), int(i as i64), txt(&m.provider), txt(&m.model)],
                 ));
             }
         }
@@ -352,7 +356,7 @@ impl Keep<HubSettings> for HubStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ensemble_config::{ModelKind, SourceSetting, Tier};
+    use ensemble_config::{ModelKind, ProviderSetting, Tier};
     use ensemble_core::workspace::testing::TempDir;
     use ensemble_store::kept::{audit, is_new};
 
@@ -370,27 +374,27 @@ mod tests {
         assert_eq!(store.read().unwrap().as_ref(), Some(&hub), "as it starts");
         hub.registration = RegistrationSetting::Approval { max_pending: 3 };
         let pool = &mut hub.ann_pool;
-        pool.sources.insert(
+        pool.providers.insert(
             "local".into(),
-            SourceSetting::OpenAiCompatible {
+            ProviderSetting::OpenAiCompatible {
                 base_url: "http://127.0.0.1:1/v1".into(),
-                api_key_env: Some("ENSEMBLE_SOURCE_LOCAL_KEY".into()),
+                api_key_env: Some("ENSEMBLE_PROVIDER_LOCAL_KEY".into()),
                 timeout_seconds: 5,
                 max_concurrent: 2,
             },
         );
-        pool.sources.insert(
+        pool.providers.insert(
             "claude".into(),
-            SourceSetting::Anthropic {
+            ProviderSetting::Anthropic {
                 base_url: "https://api.anthropic.com".into(),
                 api_key_env: None,
                 timeout_seconds: 9,
                 max_concurrent: 4,
             },
         );
-        pool.sources.insert(
+        pool.providers.insert(
             "gpu".into(),
-            SourceSetting::Runner {
+            ProviderSetting::Runner {
                 runner: "kim/box".into(),
             },
         );
@@ -404,23 +408,23 @@ mod tests {
         pool.turn_on("gpu", "local:big", llm(Tier::Strong));
         pool.turn_on("claude", "haiku", llm(Tier::Medium));
         pool.models.push(ensemble_config::PoolModel {
-            source: "local".into(),
+            provider: "local".into(),
             id: "unasked".into(),
             kind: ModelKind::Unknown,
             on: false,
             missing: true,
             shared: false,
         });
-        // Kept in the order of their sources and ids.
+        // Kept in the order of their providers and ids.
         pool.models
-            .sort_by(|a, b| (&a.source, &a.id).cmp(&(&b.source, &b.id)));
-        let model = |source: &str, model: &str| ModelSetting {
-            source: source.into(),
+            .sort_by(|a, b| (&a.provider, &a.id).cmp(&(&b.provider, &b.id)));
+        let model = |provider: &str, model: &str| ModelSetting {
+            provider: provider.into(),
             model: model.into(),
         };
         hub.distill.candidates = vec![model("local", "small"), model("gpu", "local:big")];
         hub.embed = Some(EmbedSetting {
-            source: "local".into(),
+            provider: "local".into(),
             model: "nomic".into(),
             min_similarity: 0.45,
         });
@@ -449,7 +453,7 @@ mod tests {
         };
         const KEY: &[ensemble_ops::Field] = &[ensemble_ops::Field::secret("key", "")];
         let spec = ensemble_ops::Spec {
-            name: "source.key",
+            name: "provider.key",
             summary: "",
             access: ensemble_ops::Access::Local,
             input: KEY,

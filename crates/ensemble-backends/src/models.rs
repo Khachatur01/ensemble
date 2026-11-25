@@ -1,4 +1,4 @@
-//! Asking a source of the ANN pool which models it serves, and what each is.
+//! Asking a provider of the ANN pool which models it serves, and what each is.
 //!
 //! An agent's harness calls its model; only a light `direct` agent is a request
 //! Ensemble makes itself, through `chat`. This is only the health check:
@@ -49,7 +49,7 @@ pub fn models(backend: &LlmBackend) -> Result<Vec<String>, Error> {
     parse(&backend.name, status, &body)
 }
 
-/// A model a source lists, with what it is as far as the source says.
+/// A model a provider lists, with what it is as far as the provider says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
     pub id: String,
@@ -90,7 +90,7 @@ pub fn discover(backend: &LlmBackend) -> Result<Vec<Found>, Error> {
         .collect())
 }
 
-/// An LLM `id` whose source did not say what it is, as Ensemble takes it.
+/// An LLM `id` whose provider did not say what it is, as Ensemble takes it.
 pub fn llm(id: &str) -> ModelKind {
     ModelKind::Llm {
         tier: catalog::tier(id).unwrap_or(Tier::Medium),

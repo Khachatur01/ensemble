@@ -14,7 +14,7 @@
 //! The runner runs every team that is ready at once, as one [`Config`]: each
 //! name of a team (its agents, limits and gates) becomes `<team>/<name>`, so
 //! agents are named `web/coder`. A team names the models its agents run
-//! on by their source in the runner's ANN pool and their id there, so a team runs on any
+//! on by their provider in the runner's ANN pool and their id there, so a team runs on any
 //! runner that has the models it names on.
 
 use super::*;
@@ -171,10 +171,10 @@ pub fn create_pending(dir: &Path, name: &str, text: &str, by: &str) -> Result<Pa
     Ok(path)
 }
 
-/// The teams `(name, config)` as one helper team on `backends`, the sources
+/// The teams `(name, config)` as one helper team on `backends`, the providers
 /// of the runner's ANN pool, which each team was checked against
 /// ([`Config::with_pool`]): every name of a team becomes `<team>/<name>`,
-/// but for the sources, which are the runner's. `source` is where they were
+/// but for the providers, which are the runner's. `source` is where they were
 /// read from.
 pub fn combine(
     teams: Vec<(String, Config)>,
@@ -217,13 +217,13 @@ mod tests {
     use super::*;
     use ensemble_core::workspace::testing::TempDir;
 
-    const TEAM: &str = "version: 1\nlimits:\n  box: { max_concurrent: 1, budget: { type: unlimited } }\ngates:\n  test: { command: \"true\", timeout_seconds: 5 }\nagents:\n  coder:\n    prompt: Codes.\n    max_seconds: 60\n    limit: box\n    isolation: shared\n    adapter: { type: direct, try: [{ source: local, model: small }], when_none: fail, max_tokens: 100 }\n";
+    const TEAM: &str = "version: 1\nlimits:\n  box: { max_concurrent: 1, budget: { type: unlimited } }\ngates:\n  test: { command: \"true\", timeout_seconds: 5 }\nagents:\n  coder:\n    prompt: Codes.\n    max_seconds: 60\n    limit: box\n    isolation: shared\n    adapter: { type: direct, try: [{ provider: local, model: small }], when_none: fail, max_tokens: 100 }\n";
 
     fn loads(text: &str) -> Config {
         parse(text, Path::new("config.yaml")).unwrap()
     }
 
-    /// The runner's sources: `local`, and `claude`, on Anthropic's API.
+    /// The runner's providers: `local`, and `claude`, on Anthropic's API.
     fn backends() -> BTreeMap<String, LlmBackend> {
         let backend = |name: &str, settings| LlmBackend {
             name: name.into(),
@@ -269,8 +269,8 @@ mod tests {
             panic!("a direct agent")
         };
         assert_eq!(
-            direct.fallback.candidates[0].source, "local",
-            "a source is the runner's, named alone"
+            direct.fallback.candidates[0].provider, "local",
+            "a provider is the runner's, named alone"
         );
         assert_eq!(both.llm_backends["local"].name, "local");
         assert!(both.limits.contains_key("pcb/box") && both.gates.contains_key("pcb/test"));
@@ -287,19 +287,19 @@ mod tests {
         assert!(team.llm_backends.is_empty(), "a team defines none");
         let on = team.clone().with_backends(backends()).unwrap();
         assert_eq!(on.llm_backends.len(), 2);
-        let elsewhere = TEAM.replace("source: local", "source: gpu");
+        let elsewhere = TEAM.replace("provider: local", "provider: gpu");
         let err = loads(&elsewhere).with_backends(backends()).unwrap_err();
         assert!(
             err.to_string().contains(
-                "agents.coder.adapter.try[0]: there is no source 'gpu'. Its sources: claude, local."
+                "agents.coder.adapter.try[0]: there is no provider 'gpu'. Its providers: claude, local."
             ),
             "{err}"
         );
-        let opencode = "version: 1\nlimits: {}\ngates: {}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: opencode\n      model: { type: ann_pool, try: [{ source: claude, name: haiku, context_window: 8 }], when_none: fail }\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n";
+        let opencode = "version: 1\nlimits: {}\ngates: {}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: opencode\n      model: { type: ann_pool, try: [{ provider: claude, name: haiku, context_window: 8 }], when_none: fail }\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n";
         let err = loads(opencode).with_backends(backends()).unwrap_err();
         assert!(
             err.to_string().contains(
-                "agents.coder.adapter.model.try[0]: the source 'claude' is of type 'anthropic-api'"
+                "agents.coder.adapter.model.try[0]: the provider 'claude' is of type 'anthropic-api'"
             ),
             "{err}"
         );

@@ -42,13 +42,13 @@ const PERMISSIONS: &[&str] = Permission::NAMES;
 const NO_CHECK: Field = Field::new(
     "no_check",
     Kind::Flag,
-    "Do not ask the sources whether they serve the models now.",
+    "Do not ask the providers whether they serve the models now.",
 );
 const DISTILL: &[Field] = &[
     Field::new(
         "models",
         Kind::List,
-        "The models that turn shares into notes, in order, each <source>:<model>, an LLM of the hub's ANN pool that is on, such as central:qwen3.5-72b.",
+        "The models that turn shares into notes, in order, each <provider>:<model>, an LLM of the hub's ANN pool that is on, such as central:qwen3.5-72b.",
     )
     .required()
     .positional(),
@@ -67,7 +67,7 @@ const DISTILL: &[Field] = &[
 const EMBED: &[Field] = &[
     Field::text(
         "model",
-        "The embedding model, <source>:<model>, an embedding model of the hub's ANN pool that is on, such as central:nomic-embed-text.",
+        "The embedding model, <provider>:<model>, an embedding model of the hub's ANN pool that is on, such as central:nomic-embed-text.",
     )
     .positional(),
     Field::text(
@@ -133,7 +133,7 @@ const SOURCE_FILTER: &[Field] = &[
     Field::new(
         "models",
         Kind::List,
-        "The models that collect and filter, in order, each <source>:<model>, an LLM of the hub's ANN pool that is on; unchanged when left out.",
+        "The models that collect and filter, in order, each <provider>:<model>, an LLM of the hub's ANN pool that is on; unchanged when left out.",
     )
     .positional(),
     Field::text(
@@ -533,9 +533,9 @@ fn distill(c: &HubContext, input: Distill, change: Change) -> Result<Value, Erro
     }
     let mut candidates = Vec::new();
     for given in &input.models {
-        let (source, model) = model_of(c, given, "models", Use::Llm, input.no_check)?;
+        let (provider, model) = model_of(c, given, "models", Use::Llm, input.no_check)?;
         candidates.push(ModelSetting {
-            source: source.to_string(),
+            provider: provider.to_string(),
             model: model.to_string(),
         });
     }
@@ -568,9 +568,9 @@ fn source_filter(c: &HubContext, input: SourceFilter, change: Change) -> Result<
     }
     let mut candidates = Vec::new();
     for given in &input.models {
-        let (source, model) = model_of(c, given, "models", Use::Llm, input.no_check)?;
+        let (provider, model) = model_of(c, given, "models", Use::Llm, input.no_check)?;
         candidates.push(ModelSetting {
-            source: source.to_string(),
+            provider: provider.to_string(),
             model: model.to_string(),
         });
     }
@@ -681,9 +681,9 @@ fn embed(c: &HubContext, input: Embed, change: Change) -> Result<Value, Error> {
         );
     }
     let given = input.model.as_deref().ok_or_else(|| {
-        Error::invalid("name the model, <source>:<model>, or say `off`").on("model")
+        Error::invalid("name the model, <provider>:<model>, or say `off`").on("model")
     })?;
-    let (source, model) = model_of(c, given, "model", Use::Embedding, true)?;
+    let (provider, model) = model_of(c, given, "model", Use::Embedding, true)?;
     let now = c.kept()?.read()?.embed.map(|e| e.min_similarity);
     let min = match &input.min_similarity {
         Some(m) => m
@@ -698,21 +698,21 @@ fn embed(c: &HubContext, input: Embed, change: Change) -> Result<Value, Error> {
         None => now.unwrap_or(0.5),
     };
     if !input.no_check
-        && let Some(b) = c.pool()?.direct.get(source)
+        && let Some(b) = c.pool()?.direct.get(provider)
     {
         ensemble_backends::embed::embed(b, model, &["check".to_string()]).map_err(|e| {
             Error::new(
                 Code::Unavailable,
-                format!("{source}:{model} did not embed: {e}"),
+                format!("{provider}:{model} did not embed: {e}"),
             )
             .on("model")
             .hint("check the model's name, or go on without asking with `no_check`")
         })?;
     }
-    let said = format!("notes are found by their meaning too, with {source}:{model}");
+    let said = format!("notes are found by their meaning too, with {provider}:{model}");
     edit(c, change, said, |s| {
         s.embed = Some(EmbedSetting {
-            source: source.to_string(),
+            provider: provider.to_string(),
             model: model.to_string(),
             min_similarity: min,
         });
@@ -985,8 +985,8 @@ fn import(c: &HubContext, text: &str, change: Change) -> Result<Value, Error> {
     Ok(json!({ "said": "the hub's settings are those imported", "note": note }))
 }
 
-/// `given`, `<source>:<model>`, as a model of the hub's ANN pool that is on
-/// and of `use_`, and, unless not asked to check, one its source serves now;
+/// `given`, `<provider>:<model>`, as a model of the hub's ANN pool that is on
+/// and of `use_`, and, unless not asked to check, one its provider serves now;
 /// a model of a runner only the running hub reaches.
 fn model_of<'g>(
     c: &HubContext,
@@ -995,18 +995,18 @@ fn model_of<'g>(
     use_: Use,
     no_check: bool,
 ) -> Result<(&'g str, &'g str), Error> {
-    let (source, model) = split(given, field)?;
+    let (provider, model) = split(given, field)?;
     let pool = c.kept_pool()?;
-    let Some(found) = pool.model(source, model) else {
+    let Some(found) = pool.model(provider, model) else {
         return Err(Error::not_found(format!(
-            "there is no model '{source}:{model}' in the hub's ANN pool"
+            "there is no model '{provider}:{model}' in the hub's ANN pool"
         ))
         .on(field)
-        .hint("`model list` lists them; `source add` adds a source and `source refresh` asks the sources again"));
+        .hint("`model list` lists them; `provider add` adds a provider and `provider refresh` asks the providers again"));
     };
     if !found.on {
         return Err(Error::invalid(format!(
-            "{source}:{model} is off; turn it on first with `model on {source}:{model}`"
+            "{provider}:{model} is off; turn it on first with `model on {provider}:{model}`"
         ))
         .on(field));
     }
@@ -1020,22 +1020,25 @@ fn model_of<'g>(
             Use::Embedding => "an embedding model",
         };
         return Err(Error::invalid(format!(
-            "{source}:{model} is not {wanted}: it is {}",
+            "{provider}:{model} is not {wanted}: it is {}",
             found.kind.describe()
         ))
         .on(field));
     }
-    if !no_check && let Some(b) = c.pool()?.direct.get(source) {
+    if !no_check && let Some(b) = c.pool()?.direct.get(provider) {
         serves(b, model, field)?;
     }
-    Ok((source, model))
+    Ok((provider, model))
 }
 
-fn serves(source: &LlmBackend, model: &str, field: &str) -> Result<(), Error> {
-    let models = ensemble_backends::models::models(source).map_err(|e| {
+fn serves(provider: &LlmBackend, model: &str, field: &str) -> Result<(), Error> {
+    let models = ensemble_backends::models::models(provider).map_err(|e| {
         Error::new(
             Code::Unavailable,
-            format!("could not ask {} which models it serves: {e}", source.name),
+            format!(
+                "could not ask {} which models it serves: {e}",
+                provider.name
+            ),
         )
         .on(field)
         .hint("go on without asking with `no_check`")
@@ -1045,7 +1048,7 @@ fn serves(source: &LlmBackend, model: &str, field: &str) -> Result<(), Error> {
     }
     Err(Error::invalid(format!(
         "{} does not serve '{model}' now; it serves {}",
-        source.name,
+        provider.name,
         if models.is_empty() {
             "none".to_string()
         } else {
@@ -1055,7 +1058,7 @@ fn serves(source: &LlmBackend, model: &str, field: &str) -> Result<(), Error> {
     .on(field))
 }
 
-/// `<source>:<model>`: the source's name has no ':', the model's may.
+/// `<provider>:<model>`: the provider's name has no ':', the model's may.
 fn split<'g>(given: &'g str, field: &str) -> Result<(&'g str, &'g str), Error> {
     given
         .trim()
@@ -1064,7 +1067,7 @@ fn split<'g>(given: &'g str, field: &str) -> Result<(&'g str, &'g str), Error> {
         .filter(|(s, m)| !s.is_empty() && !m.is_empty())
         .ok_or_else(|| {
             Error::invalid(format!(
-                "'{given}' must be <source>:<model>, such as central:qwen3.5-72b"
+                "'{given}' must be <provider>:<model>, such as central:qwen3.5-72b"
             ))
             .on(field)
         })

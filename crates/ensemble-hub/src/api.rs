@@ -28,12 +28,12 @@
 //! | `DELETE /api/v1/users/{name}/tokens` | `user.revoke` |
 //! | `DELETE /api/v1/users/{name}` | `user.remove` |
 //! | `GET /api/v1/ops` | the operations the token may run, each with the JSON Schema of its input and its fields in order, for a UI to make its forms from |
-//! | `POST /api/v1/ops/{name}` `{…its input}` | any operation, such as `source.add` or `knowledge.models` |
+//! | `POST /api/v1/ops/{name}` `{…its input}` | any operation, such as `provider.add` or `knowledge.models` |
 //! | `GET /api/v1/openapi.json` | this API as an OpenAPI 3.1 document ([`openapi`](crate::openapi)), for anyone |
 //!
 //! The routes above are the accounts' own; every operation, theirs too, is
 //! also reached by its name under `/api/v1/ops/`, so an interface needs no
-//! route of its own for what it shows. A secret field, such as a source's
+//! route of its own for what it shows. A secret field, such as a provider's
 //! key, is given in the body and never answered back.
 //!
 //! A request signs in with its bearer token, or, from a browser, with the
@@ -839,8 +839,8 @@ mod tests {
         let ops = listed["operations"].as_array().unwrap();
         let add = ops
             .iter()
-            .find(|o| o["name"] == "source.add")
-            .expect("source.add is listed");
+            .find(|o| o["name"] == "provider.add")
+            .expect("provider.add is listed");
         assert_eq!(
             add["input"]["properties"]["key"]["writeOnly"], true,
             "{add}"
@@ -865,11 +865,11 @@ mod tests {
             .iter()
             .map(|o| o["name"].as_str().unwrap())
             .collect();
-        assert!(!names.contains(&"source.add"), "{names:?}");
+        assert!(!names.contains(&"provider.add"), "{names:?}");
         let (status, _) = call(
             &hub.url,
             "POST",
-            "/api/v1/ops/source.list",
+            "/api/v1/ops/provider.list",
             Some(&hub.rex),
             Some(json!({})),
         );
@@ -893,7 +893,7 @@ mod tests {
         assert_eq!(status, 200, "{doc}");
         assert_eq!(doc["openapi"], "3.1.0");
         let paths = doc["paths"].as_object().unwrap();
-        let add = &paths["/api/v1/ops/source.add"]["post"];
+        let add = &paths["/api/v1/ops/provider.add"]["post"];
         assert_eq!(add["security"], json!([{ "bearer": [] }]));
         let key = &add["requestBody"]["content"]["application/json"]["schema"]["properties"]["key"];
         assert_eq!(key["writeOnly"], true, "{add}");

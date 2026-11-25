@@ -13,8 +13,8 @@ pub struct NewAgent<'a> {
     /// A model: a provider's `provider/model` for `opencode`, the model's name
     /// for `claude-code` and for an agent on the ANN pool.
     pub model: Option<&'a str>,
-    /// The source a `direct` agent, or an `opencode` agent with one, runs on.
-    pub source: Option<&'a str>,
+    /// The provider a `direct` agent, or an `opencode` agent with one, runs on.
+    pub provider: Option<&'a str>,
     /// Whether it may change files.
     pub writes: bool,
 }
@@ -49,12 +49,12 @@ pub fn agent_block(name: &str, a: &NewAgent<'_>) -> Result<String, String> {
             } else {
                 "[read, glob, grep, list]"
             };
-            let model = match (a.source, a.model) {
-                (Some(source), Some(model)) => format!(
-                    "      model:\n        type: {ANN_POOL_MODEL}\n        try:\n          - source: {source}\n            name: {model}\n            context_window: 32768\n        when_none: fail\n"
+            let model = match (a.provider, a.model) {
+                (Some(provider), Some(model)) => format!(
+                    "      model:\n        type: {ANN_POOL_MODEL}\n        try:\n          - provider: {provider}\n            name: {model}\n            context_window: 32768\n        when_none: fail\n"
                 ),
                 (Some(_), None) => {
-                    return Err("an opencode agent on the ANN pool needs --model, the id the source serves it under".into());
+                    return Err("an opencode agent on the ANN pool needs --model, the id the provider serves it under".into());
                 }
                 (None, model) => format!(
                     "      model:\n        type: {PROVIDER_MODEL}\n        name: {}\n",
@@ -77,14 +77,14 @@ pub fn agent_block(name: &str, a: &NewAgent<'_>) -> Result<String, String> {
             ));
         }
         DIRECT_AGENT => {
-            let source = a.source.ok_or(
-                "a direct agent needs --source, one of the sources of its runner's ANN pool",
+            let provider = a.provider.ok_or(
+                "a direct agent needs --provider, one of the providers of its runner's ANN pool",
             )?;
             let model = a
                 .model
                 .ok_or("a direct agent needs --model, the name the server serves it under")?;
             out.push_str(&format!(
-                "      type: {DIRECT_AGENT}\n      try:\n        - source: {source}\n          model: {model}\n      when_none: fail\n      max_tokens: 1000\n"
+                "      type: {DIRECT_AGENT}\n      try:\n        - provider: {provider}\n          model: {model}\n      when_none: fail\n      max_tokens: 1000\n"
             ));
         }
         other => {
@@ -214,7 +214,7 @@ mod tests {
                 adapter: CLAUDE_CODE_AGENT,
                 prompt: Some("Reviews: carefully."),
                 model: None,
-                source: None,
+                provider: None,
                 writes: false,
             },
         )
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn every_adapter_writes_every_setting() {
-        for (adapter, source, model) in [
+        for (adapter, provider, model) in [
             (CLAUDE_CODE_AGENT, None, None),
             (CODEX_AGENT, None, None),
             (OPENCODE_AGENT, None, None),
@@ -282,7 +282,7 @@ mod tests {
                     adapter,
                     prompt: None,
                     model,
-                    source,
+                    provider,
                     writes: true,
                 },
             )
@@ -297,7 +297,7 @@ mod tests {
                     adapter: DIRECT_AGENT,
                     prompt: None,
                     model: None,
-                    source: None,
+                    provider: None,
                     writes: false
                 }
             )
@@ -310,7 +310,7 @@ mod tests {
                     adapter: "carrier",
                     prompt: None,
                     model: None,
-                    source: None,
+                    provider: None,
                     writes: false
                 }
             )

@@ -6,7 +6,7 @@
 //! A runner says where it works (its workspace, a folder of git
 //! repositories, each a project named for its folder, where it clones the
 //! repository of a task whose project it has no copy of), and its ANN pool:
-//! the sources its teams' agents run on, its own and other runners it
+//! the providers its teams' agents run on, its own and other runners it
 //! reaches through the hub, the models they serve, and which of its own it
 //! shares through the hub. Its teams are the folders of its teams directory
 //! (`teams`).
@@ -28,7 +28,7 @@ pub struct Runner {
     /// The hub server it connects to, `ws://` or `wss://`, signed in to with
     /// `ensemble-runner login`. None: it uses no hub.
     pub hub: Option<String>,
-    /// Its ANN pool: the sources its agents run on, and the models it shares.
+    /// Its ANN pool: the providers its agents run on, and the models it shares.
     pub llm: AnnPool,
     pub source: PathBuf,
 }
@@ -46,13 +46,13 @@ pub struct RunnerSettings {
     pub workspace: String,
     /// The hub it connects to, `ws://` or `wss://`. None: no hub.
     pub hub: Option<String>,
-    /// The sources its teams' agents run on and the models they serve.
+    /// The providers its teams' agents run on and the models they serve.
     pub ann_pool: AnnPoolSetting,
 }
 
 impl RunnerSettings {
     /// The settings a new runner starts with: `name`, working in `workspace`,
-    /// with no hub and no source.
+    /// with no hub and no provider.
     pub fn starting(name: &str, workspace: &str) -> Self {
         RunnerSettings {
             name: name.to_string(),
@@ -93,7 +93,7 @@ impl RunnerSettings {
         }
         if hub.is_none() && !llm.relayed.is_empty() {
             problems.push(
-                "ann_pool: a source that is another runner is reached through a hub, and it names no hub"
+                "ann_pool: a provider that is another runner is reached through a hub, and it names no hub"
                     .into(),
             );
         }

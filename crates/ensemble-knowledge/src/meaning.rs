@@ -187,11 +187,11 @@ impl Memory {
     fn vectors(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
         let knowledge = self.knowledge();
         let e = knowledge.embed.as_ref().ok_or("no embedding model")?;
-        let sources = self.backends();
-        let source = sources
-            .get(&e.source)
-            .ok_or_else(|| format!("no source '{}'", e.source))?;
-        embed(source, &e.model, texts).map_err(|e| e.to_string())
+        let providers = self.backends();
+        let provider = providers
+            .get(&e.provider)
+            .ok_or_else(|| format!("no provider '{}'", e.provider))?;
+        embed(provider, &e.model, texts).map_err(|e| e.to_string())
     }
 
     /// Run `work` on the cache of the notes' vectors.
@@ -279,7 +279,7 @@ mod tests {
             ensemble_config::ModelKind::Embedding { dimensions: 2 },
         );
         settings.embed = Some(ensemble_config::EmbedSetting {
-            source: "local".into(),
+            provider: "local".into(),
             model: "e".into(),
             min_similarity: 0.5,
         });

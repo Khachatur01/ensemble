@@ -357,9 +357,9 @@ impl<'a> Server<'a> {
             }
         };
         let shared: Vec<String> = offer
-            .sources
+            .providers
             .iter()
-            .flat_map(|(source, s)| s.models.iter().map(move |m| format!("{source}:{}", m.id)))
+            .flat_map(|(provider, s)| s.models.iter().map(move |m| format!("{provider}:{}", m.id)))
             .collect();
         say(&format!(
             "{runner} relays, sharing {}",
@@ -550,7 +550,7 @@ impl<'a> Server<'a> {
 
 impl Server<'_> {
     /// `listed`, the account's runners, each with the models it shares now,
-    /// `[{source, id, kind}]`, as its relay socket offered them.
+    /// `[{provider, id, kind}]`, as its relay socket offered them.
     fn with_shared(&self, mut listed: Value) -> Value {
         let offered = self.calls.offered();
         for r in listed["runners"].as_array_mut().into_iter().flatten() {
@@ -560,7 +560,7 @@ impl Server<'_> {
                 .flat_map(|o| {
                     o.models
                         .iter()
-                        .map(|m| json!({ "source": o.source, "id": m.id, "kind": m.kind }))
+                        .map(|m| json!({ "provider": o.provider, "id": m.id, "kind": m.kind }))
                 })
                 .collect();
             r["models"] = Value::Array(models);
@@ -675,9 +675,9 @@ pub mod testing {
         let tmp = TempDir::new();
         use ensemble_config::Permission::*;
         let mut s = ensemble_config::HubSettings::starting("Acme");
-        s.ann_pool.sources.insert(
+        s.ann_pool.providers.insert(
             "local".into(),
-            ensemble_config::SourceSetting::OpenAiCompatible {
+            ensemble_config::ProviderSetting::OpenAiCompatible {
                 base_url: "http://127.0.0.1:1/v1".into(),
                 api_key_env: None,
                 timeout_seconds: 5,
@@ -706,7 +706,7 @@ pub mod testing {
         .map(|(name, can)| (name.to_string(), can))
         .collect();
         s.distill.candidates = vec![ensemble_config::ModelSetting {
-            source: "local".into(),
+            provider: "local".into(),
             model: "small".into(),
         }];
         s.distill.max_tokens = 100;

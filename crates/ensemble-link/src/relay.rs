@@ -1,7 +1,7 @@
 //! Model calls relayed through the hub: the frames of a runner's second
 //! WebSocket, at [`PATH`], beside its link. A call to a model another runner
 //! shares goes from the caller to the hub, from the hub to the runner that
-//! serves it, which calls its own source, and its answer streams back the
+//! serves it, which calls its own provider, and its answer streams back the
 //! same way. The hub calls runners' models on this path too, from its side.
 //!
 //! The runner says what it shares first ([`Offer`]), and the hub answers with
@@ -43,11 +43,11 @@ pub const UNAVAILABLE: u16 = 503;
 pub struct Offer {
     /// Its name, which the hub knows it by as `<owner>/<name>`.
     pub name: String,
-    /// The sources of its own it shares models of, by name.
-    pub sources: std::collections::BTreeMap<String, Shared>,
+    /// The providers of its own it shares models of, by name.
+    pub providers: std::collections::BTreeMap<String, Shared>,
 }
 
-/// One source a runner shares models of.
+/// One provider a runner shares models of.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Shared {
     /// The most calls to it at once, the runner's own and others' together;
@@ -65,16 +65,16 @@ pub struct SharedModel {
     pub kind: Value,
 }
 
-/// What a call asks for: a request to the model of `source` of `runner`
-/// the request's body names, at `path` of the source's base URL. With no
-/// source, it asks the runner which models it shares: `GET /models`, which
+/// What a call asks for: a request to the model of `provider` of `runner`
+/// the request's body names, at `path` of the provider's base URL. With no
+/// provider, it asks the runner which models it shares: `GET /models`, which
 /// the hub answers itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Open {
     /// `<owner>/<name>`, as the hub knows the runner.
     pub runner: String,
     #[serde(default)]
-    pub source: String,
+    pub provider: String,
     pub method: String,
     /// Such as `/chat/completions`.
     pub path: String,
@@ -265,23 +265,23 @@ pub fn body_frames(call: u64, body: &[u8]) -> Vec<Frame> {
         .collect()
 }
 
-/// The source of the model a request's `body` names as the runner that
-/// shares it names it, `<source>:<id>`, and the body naming it `<id>`, as
-/// that source serves it; none for a body that names no model so.
+/// The provider of the model a request's `body` names as the runner that
+/// shares it names it, `<provider>:<id>`, and the body naming it `<id>`, as
+/// that provider serves it; none for a body that names no model so.
 pub fn routed(body: &[u8]) -> Option<(String, Vec<u8>)> {
     let mut json: Value = serde_json::from_slice(body).ok()?;
     let named = json.get("model")?.as_str()?;
-    let (source, id) = named.split_once(':')?;
-    if source.is_empty() || id.is_empty() {
+    let (provider, id) = named.split_once(':')?;
+    if provider.is_empty() || id.is_empty() {
         return None;
     }
-    let source = source.to_string();
+    let provider = provider.to_string();
     json["model"] = Value::String(id.to_string());
-    Some((source, serde_json::to_vec(&json).ok()?))
+    Some((provider, serde_json::to_vec(&json).ok()?))
 }
 
 /// What `GET /models` of a runner answers: the models it shares, each named
-/// `<source>:<id>`, as an OpenAI-compatible list.
+/// `<provider>:<id>`, as an OpenAI-compatible list.
 pub fn models_answer(names: &[String]) -> Vec<u8> {
     let data: Vec<Value> = names
         .iter()
@@ -300,7 +300,7 @@ mod tests {
     fn every_frame_comes_back_as_it_went() {
         let open = Open {
             runner: "ana/gpu-box".into(),
-            source: "local".into(),
+            provider: "local".into(),
             method: "POST".into(),
             path: "/chat/completions".into(),
         };
@@ -339,8 +339,8 @@ mod tests {
 
     #[test]
     fn a_model_is_routed_to_its_source_as_the_runner_that_shares_it_names_it() {
-        let (source, body) = routed(br#"{"model":"ollama:qwen3.5:9b","stream":true}"#).unwrap();
-        assert_eq!(source, "ollama");
+        let (provider, body) = routed(br#"{"model":"ollama:qwen3.5:9b","stream":true}"#).unwrap();
+        assert_eq!(provider, "ollama");
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["model"], "qwen3.5:9b");
         assert_eq!(body["stream"], true);

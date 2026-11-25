@@ -317,7 +317,7 @@ mod tests {
         let ba = BuiltinAdapter {
             fallback: Fallback {
                 candidates: vec![Candidate {
-                    source: "local".into(),
+                    provider: "local".into(),
                     model: "small".into(),
                     context_window: Some(32768),
                 }],

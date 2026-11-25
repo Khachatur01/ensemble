@@ -15,7 +15,7 @@ models through it. "The hub's core and its
 connectors" (decided 2026-11-19) is built: the hub's settings are the core
 (accounts, the port, its ANN pool) and the connectors, every one always
 on. "Settings in the database" (decided 2026-11-20) is built: the hub keeps
-its settings, and its sources' keys sealed by a master key, in its database,
+its settings, and its providers' keys sealed by a master key, in its database,
 as a GitLab instance does, and a NixOS module only runs it. "Models and
 harnesses" (decided 2026-11-25) is being built: nobody makes a team, a runner
 offers its ANN pool and its harnesses, and a picker chooses what works on
@@ -34,7 +34,7 @@ the center, which everything else reaches through its connectors, and
 executables, `ensemble-hub` and `ensemble-runner`, in these roles:
 
 - **The hub**: its core is the accounts, their roles and what each may do, the
-  port it listens on and its ANN pool: the sources of models it calls and
+  port it listens on and its ANN pool: the providers of models it calls and
   the models they serve. Everything else is a
   **connector**, each always on: the REST API, MCP over HTTP for client
   agents, the link for runners, knowledge, tasks (and the trackers whose
@@ -47,7 +47,7 @@ executables, `ensemble-hub` and `ensemble-runner`, in these roles:
   helper teams, runs their agents (agent CLIs, Ensemble's own loop) on the
   tasks the hub keeps for its owner, like a member of a team handed work: in
   the project's git repository in its workspace, cloned there when it has
-  none. It keeps an ANN pool, the sources of models its teams run on and
+  none. It keeps an ANN pool, the providers of models its teams run on and
   the models they serve, off until a person turns them on, and may share
   some of its models through the hub. It takes its owner's tasks alone. It serves no client. It is its own process too, `ensemble-runner
   serve`, one per computer, and its executable holds nothing of the hub's.
@@ -81,7 +81,7 @@ executables, `ensemble-hub` and `ensemble-runner`, in these roles:
   direct                                       one chat request
         │
         ▼
-  model servers (the sources of the runner's ANN pool), or the CLI's own login
+  model servers (the providers of the runner's ANN pool), or the CLI's own login
 ```
 
 What a runner and the hub keep open between them:
@@ -104,7 +104,7 @@ Each process is one of the two executables. What runs in each:
 
 | command | what it runs | ends |
 | --- | --- | --- |
-| `ensemble-runner serve` | the runner, one per computer: a worker per git repository directly inside its workspace, each running the tasks the hub keeps for the repository's project; every 30 seconds, the workspace looked at again and the hub asked for the tasks of its agents in projects it has no folder for, whose repositories it clones, asks about or gives back; a socket for the operations `ensemble-runner …` asks of it and for reloading its teams; and with the hub its settings name, a link that says it is connected, with its agents (`Worker`), and, when it shares models or reaches other runners', a relay socket for model calls (`Relay`); and once it starts, its sources asked which models they serve now | on SIGINT or SIGTERM; a change to its settings has it start again in the same process |
+| `ensemble-runner serve` | the runner, one per computer: a worker per git repository directly inside its workspace, each running the tasks the hub keeps for the repository's project; every 30 seconds, the workspace looked at again and the hub asked for the tasks of its agents in projects it has no folder for, whose repositories it clones, asks about or gives back; a socket for the operations `ensemble-runner …` asks of it and for reloading its teams; and with the hub its settings name, a link that says it is connected, with its agents (`Worker`), and, when it shares models or reaches other runners', a relay socket for model calls (`Relay`); and once it starts, its providers asked which models they serve now | on SIGINT or SIGTERM; a change to its settings has it start again in the same process |
 | `ensemble-hub serve` | the hub, from `hub/` in `--config-dir` (`~/.local/state/ensemble/hub/`), made the first time when there is none: one port (`--http-host`, `--http-port`) for the runners' link at `/link` and their relay sockets at `/relay`, the REST API under `/api/v1/` and MCP for client agents at `/mcp`; a socket for the operations `ensemble-hub …` asks of it; the tasks; the vault's distiller; the tracker inbox | on SIGINT or SIGTERM; a change to its settings it cannot use as it runs has it start again in the same process |
 | everything else | one command: read the config and the state, or ask the running process over its socket, do one thing, print | at once |
 
@@ -126,15 +126,15 @@ and the runner on none of the hub's alone: `ensemble-knowledge` and
 | --- | --- | --- |
 | `ensemble-core` | what everything shares | the error vocabulary (`port.rs`); the per-user state, cache and config directories (`state.rs`); the working folder, a `repo` inside it and what a run changed (`workspace.rs`); the record of runs behind `ensemble-runner agent stats` (`records.rs`); the one-worker lock (`lock.rs`); dates in UTC (`time.rs`); the async runtime and its bridges to code that blocks (`runtime.rs`) |
 | `ensemble-ops` | operations, defined once for every interface, and what both command lines share | the operation, its spec (name, summary, who may run it, input fields), errors as data, the caller, and the registry that checks both before it runs one (`lib.rs`); the commands made from the operations, each with `--json`, editing a team's file in $EDITOR, and asking at the terminal (`cli.rs`); an output as plain lines (`lines`, `lib.rs`); operations run by the running process over its socket, or here, and stopping or starting again on a signal or a change (`local.rs`) |
-| `ensemble-config` | the settings: a team's file, the hub's and the runner's | `config.yaml`: the document as written (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), adding and removing an agent as text, comments kept (`edit.rs`); one setting of a team's file read or set as text (`settings.rs`), and its `config.*` operations (`settings_file.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); the hub's settings as kept, `HubSettings`, and resolved (`hub.rs`); the runner's, `RunnerSettings` (`runner.rs`); their ANN pool, its sources and the models they serve, as kept and resolved, and a model named in a setting or a team checked to be one of it that is on and of the right kind (`ann.rs`); kept settings as operations change them, each change checked and kept with who made it (`kept.rs`) |
-| `ensemble-backends` | talking to the sources of the ANN pool | one chat request in the server's own format (`chat.rs`); which models a source serves, and what each is, as Ollama says or Ensemble knows (`models.rs`), from a catalog of known families and sizes (`catalog.rs`); the operations on the pool, `source.*` and `model.*`, for the hub and the runner (`ops.rs`); the first usable model of a `try` list (`resolve.rs`); texts as vectors (`embed.rs`); a stand-in server for tests (`testing.rs`) |
-| `ensemble-store` | Turso files | the hub's `database.db`, opened for each read or change, with the tables of `ensemble-hub`, and any other Turso file, such as the vault's cache of vectors (`lib.rs`); the settings of a hub or a runner as typed rows (a row of settings; the ANN pool's sources and models, roles, the models used and trackers), the audit log of their changes, and the keys sealed by `master.key`, the runner's in a `database.db` of its own with only its tables (`kept.rs`) |
+| `ensemble-config` | the settings: a team's file, the hub's and the runner's | `config.yaml`: the document as written (`raw.rs`), the environment (`env.rs`), validation (`validate.rs`), the resolved types (`lib.rs`), adding and removing an agent as text, comments kept (`edit.rs`); one setting of a team's file read or set as text (`settings.rs`), and its `config.*` operations (`settings_file.rs`); the teams directory and teams combined as `<team>/<agent>` (`teams.rs`); the hub's settings as kept, `HubSettings`, and resolved (`hub.rs`); the runner's, `RunnerSettings` (`runner.rs`); their ANN pool, its providers and the models they serve, as kept and resolved, and a model named in a setting or a team checked to be one of it that is on and of the right kind (`ann.rs`); kept settings as operations change them, each change checked and kept with who made it (`kept.rs`) |
+| `ensemble-backends` | talking to the providers of the ANN pool | one chat request in the server's own format (`chat.rs`); which models a provider serves, and what each is, as Ollama says or Ensemble knows (`models.rs`), from a catalog of known families and sizes (`catalog.rs`); the operations on the pool, `provider.*` and `model.*`, for the hub and the runner (`ops.rs`); the first usable model of a `try` list (`resolve.rs`); texts as vectors (`embed.rs`); a stand-in server for tests (`testing.rs`) |
+| `ensemble-store` | Turso files | the hub's `database.db`, opened for each read or change, with the tables of `ensemble-hub`, and any other Turso file, such as the vault's cache of vectors (`lib.rs`); the settings of a hub or a runner as typed rows (a row of settings; the ANN pool's providers and models, roles, the models used and trackers), the audit log of their changes, and the keys sealed by `master.key`, the runner's in a `database.db` of its own with only its tables (`kept.rs`) |
 | `ensemble-knowledge` | the hub's knowledge, the hub's alone | the vault, a git repository (`vault.rs`); the secret check (`secrets.rs`); shares into notes (`pipeline.rs`); BM25 search (`search.rs`); notes by meaning, with their vectors in `.ensemble/embeddings.db` (`meaning.rs`); `Memory`, the `share` and `recall` tools, the background distiller, and the `KnowledgeAccess` trait (`lib.rs`) |
 | `ensemble-link` | what the runner and the hub share of the link | the frames of the link (`protocol.rs`); bytes as text, for a model's answer (`base64.rs`); the runner's side, `Connection` and `Link`, one reconnecting, which says who its token is, and signing in without a token, for one (`client.rs`); the token file (`tokens.rs`) |
 | `ensemble-agents` | running one agent once | the adapters (`external/`): `claude_code.rs`, `opencode.rs`, `codex.rs`, `builtin.rs`, `direct.rs`, the subprocess runner (`process.rs`) and gates (`gate.rs`); a git worktree per task (`worktree.rs`); the router: agents to adapters, models, records, `health` (`router.rs`) |
 | `ensemble-tasks` | the work of the helper teams, as a runner does it | tickets and tasks as the hub has them (`tasks.rs`); how they are leased and given back: the `Board` trait, a runner's `RemoteBoard`, over the link, for its account, and the tasks waiting for its agents in every project (`board.rs`); what a runner keeps of its runs (`runs.rs`); the worker that runs a repository's tasks within slots and budgets (`queue.rs`); one run of an agent and what it came to (`delegation.rs`) |
 | `ensemble-runner` | the runner, and its executable | `main` and the global options (`lib.rs`); where it keeps its settings and keys (`kept.rs`); the command line, parsed with clap (`cli.rs`), and what each group of commands does (`cmd/`: `runner`, `team`, `agent`, a team's `config`); the runner's workers, the repositories it clones for tasks, what it asks and gives back, its socket and reload (`daemon.rs`); `Worker`: the link that says the runner is connected, with its agents (`worker.rs`); `Relay`: its relay socket, serving others' calls to the models it shares and carrying its agents' calls to other runners' (`relay.rs`); what `setup` and `doctor` find and check (`setup.rs`); the runner's teams, loaded, made, linked, pulled and approved (`teams.rs`), over git repositories pinned and trusted per commit (`remote.rs`) |
-| `ensemble-hub` | the hub, and its executable | `main` and the global options (`lib.rs`); the command line (`cli.rs`) and what its commands do (`cmd.rs`); MCP over HTTP for client agents (`mcp.rs`); the hub's operations, its accounts, tokens, join codes, sessions and settings (`accounts.rs`); its settings and its sources' keys in its database, sealed by `master.key` (`kept.rs`); accounts, and hashed tokens and join codes (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API, each route one of the operations (`api.rs`), the operations only the running hub answers, an account's tasks, runners and knowledge (`served.rs`), and its OpenAPI document (`openapi.rs`), over a small HTTP reader (`http.rs`); the hub's side of the link, a task per connection (`server.rs`); connected runners (`runners.rs`); runners' relay sockets, the models each shares, and the model calls between them and from the hub, who may make them and how many at once to each source (`calls.rs`); the tasks it keeps and leases, offered to the account's runners, given back and blocked, with the notes recalled into each, `DbBoard`, and the `Service` that answers the link (`board.rs`), and a runner's worker run against them (`tests/queue.rs`); the tracker inbox (`inbox/`): the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`), an issue made a task and what the task reports (`work.rs`), the hub's inbox, one for each tracker (`relay.rs`) |
+| `ensemble-hub` | the hub, and its executable | `main` and the global options (`lib.rs`); the command line (`cli.rs`) and what its commands do (`cmd.rs`); MCP over HTTP for client agents (`mcp.rs`); the hub's operations, its accounts, tokens, join codes, sessions and settings (`accounts.rs`); its settings and its providers' keys in its database, sealed by `master.key` (`kept.rs`); accounts, and hashed tokens and join codes (`users.rs`), kept with the tasks and the inbox's deliveries in `database.db` (`ensemble-store`); the REST API, each route one of the operations (`api.rs`), the operations only the running hub answers, an account's tasks, runners and knowledge (`served.rs`), and its OpenAPI document (`openapi.rs`), over a small HTTP reader (`http.rs`); the hub's side of the link, a task per connection (`server.rs`); connected runners (`runners.rs`); runners' relay sockets, the models each shares, and the model calls between them and from the hub, who may make them and how many at once to each provider (`calls.rs`); the tasks it keeps and leases, offered to the account's runners, given back and blocked, with the notes recalled into each, `DbBoard`, and the `Service` that answers the link (`board.rs`), and a runner's worker run against them (`tests/queue.rs`); the tracker inbox (`inbox/`): the `IssueTracker` trait (`tracker.rs`) and markdown issues (`local_markdown.rs`), an issue made a task and what the task reports (`work.rs`), the hub's inbox, one for each tracker (`relay.rs`) |
 | `ensemble` (the root) | the two executables, and the tests of the whole | `src/bin/ensemble-hub.rs` and `src/bin/ensemble-runner.rs`, each its crate's `main`; the end-to-end suite, which runs both (`tests/end_to_end.rs`); the checks against the real agent CLIs (`tests/real_cli.rs`); the layering of the crates (`tests/workspace.rs`) |
 | `ensemble-ui-app` (`ui/app`, in the UI's own workspace) | the web UI's app, for WebAssembly | the pages and routes (`main.rs`), the REST API as the page calls it (`api.rs`), the form made from an operation (`form.rs`), the pages (`pages.rs`); `ui/build.sh` builds `ui/dist` |
 | `ensemble-ui` (`ui/server`, in the UI's own workspace) | the web UI's executable, apart from the hub | the app's files, embedded or from `--dist`, and the calls to `/api/` passed on to the hub as from its own origin, only from a page of the UI (`main.rs`) |
@@ -153,8 +153,8 @@ operation):
 | file | where | holds |
 | --- | --- | --- |
 | `config.yaml` | a helper team's folder in the runner's teams directory (`runner/teams/<name>/`), a folder linked there, or a pulled repository's clone | `limits`, `gates`, `tracker`, `agents` |
-| the hub's settings | typed rows of its core's database, `hub/core/database.db`, on the computer that runs the hub | the core: `owner`, its `ann_pool` (its sources and their models), how people join and sign in, the `roles`; and its connectors' settings: the `distill` and `embed` models, `recall`, the `trackers` and the `source_filter` |
-| the runner's settings | typed rows of its core's database, `runner/core/database.db`, one per computer | `name`, `workspace`, `hub`, and its `ann_pool`: the sources its teams run on, each with the most calls it takes at once, and their models, each on or off, and shared or not |
+| the hub's settings | typed rows of its core's database, `hub/core/database.db`, on the computer that runs the hub | the core: `owner`, its `ann_pool` (its providers and their models), how people join and sign in, the `roles`; and its connectors' settings: the `distill` and `embed` models, `recall`, the `trackers` and the `source_filter` |
+| the runner's settings | typed rows of its core's database, `runner/core/database.db`, one per computer | `name`, `workspace`, `hub`, and its `ann_pool`: the providers its teams run on, each with the most calls it takes at once, and their models, each on or off, and shared or not |
 
 No setting has a default: a new hub or runner starts with every one written
 (`HubSettings::starting`, `RunnerSettings::starting`), and a missing one is
@@ -183,12 +183,12 @@ the other's (`ensemble_core::state`'s `HubDir` and `RunnerDir`):
 
 | path | holds |
 | --- | --- |
-| `hub/core/` | the hub's `database.db` (settings, audit log, the ANN pool and its sources' sealed keys, accounts and tokens) and the `master.key` that seals the keys, mode 0600; without it, no key there can be read |
+| `hub/core/` | the hub's `database.db` (settings, audit log, the ANN pool and its providers' sealed keys, accounts and tokens) and the `master.key` that seals the keys, mode 0600; without it, no key there can be read |
 | `hub/knowledge/` | the knowledge vault, `vault/`, a git repository of Markdown files, and `embeddings.db`, the notes' vectors, a cache |
 | `hub/tasks/` | the `database.db` of the tasks the hub keeps |
 | `hub/trackers/` | the `database.db` of which issue became which task; a local tracker's folder when it names a relative one |
 | `hub/worker.lock` | the running hub's lock |
-| `runner/core/` | the runner's `database.db` (settings, audit log, the ANN pool and its sources' sealed keys, hub tokens, sealed) and its `master.key` |
+| `runner/core/` | the runner's `database.db` (settings, audit log, the ANN pool and its providers' sealed keys, hub tokens, sealed) and its `master.key` |
 | `runner/teams/` | the runner's helper teams: a folder per team, its `config.yaml`, a link to a folder elsewhere, or `pulled.json` (repository and commit); `pending` beside a team that waits for approval |
 | `runner/workdirs/<folder>-<hash>/` | a repository's `runs/`, `worktrees/` and `worker.lock` |
 | `runner/orgs/teams-<hash>/` | the teams' `usage.json` (budgets) and `records.jsonl` (`ensemble-runner agent stats`), by `<team>/<agent>`, shared by every repository |
@@ -284,8 +284,8 @@ A worker runs an agent on a task (`delegation::run_delegation`, in
 1. The worker has taken a **slot** of the agent (`max_concurrent`, or its
    shared `limit`) and counted the run against its **budget**.
 2. The **router** (`ensemble-agents`) picks the adapter, and for an agent on
-   the ANN pool resolves the first model of its `try` list whose source
-   answers and serves it (`ensemble-backends`; what a source serves is
+   the ANN pool resolves the first model of its `try` list whose provider
+   answers and serves it (`ensemble-backends`; what a provider serves is
    remembered for a minute).
 3. The **adapter** runs it. A CLI adapter starts the CLI in the repository (or
    the task's worktree) in its own process group, with the agent's prompt,
@@ -470,7 +470,7 @@ projects it has no folder for, one that says it is connected, one per project wh
 without a token to sign in, and a short one for `hello` when it signs in or
 says its status; and, when it shares models or reaches other runners', a
 relay socket at `/relay` for model calls, whose frames `ensemble_link::relay`
-describes. This is version 8 of the protocol. It makes no HTTP request
+describes. This is version 9 of the protocol. It makes no HTTP request
 to the hub.
 
 | for | the runner asks | the hub sends |
@@ -479,7 +479,7 @@ to the hub.
 | who it is | `hello` (who am I, which permissions) | |
 | tasks | each with its `project`: `tasks`, `task`, `task_claim`, `task_renew`, `task_release`, `task_finish`, `task_give_back` (with why); and across projects, `tasks_waiting` (the account's tasks for these agents that this runner has not given back) | |
 | runners | `runner` (I am a runner: name, every agent), `runners` (mine, each with the models it shares) | |
-| model calls, on the relay socket | the models it shares, by source, and how many calls each source takes at once, then calls to other runners' models: `open` (the runner and the source), the request's body in chunks, `end`, or `cancel` | the answers to its calls, and calls to the models it shares, which it answers: `head`, the body in chunks, `done`, or `error` |
+| model calls, on the relay socket | the models it shares, by provider, and how many calls each provider takes at once, then calls to other runners' models: `open` (the runner and the provider), the request's body in chunks, `end`, or `cancel` | the answers to its calls, and calls to the models it shares, which it answers: `head`, the body in chunks, `done`, or `error` |
 
 `login` and `join` are the hub's operations `token.login` and `token.join`,
 run for anyone and for any client, a runner being one: `login` checks the
@@ -520,7 +520,7 @@ work, and is written to be read by the person or the model that will see it.
   before it, so it cannot be an option of git's, and with no prompt for a
   password. A remote helper team is pinned to a commit and trusted per commit.
 - **Secrets** are never in a file Ensemble reads as config, and are passed to a
-  CLI only as the provider key of the source it runs on.
+  CLI only as the provider key of the provider it runs on.
 - **Subscriptions stay with their owner.** Claude Code runs only through its
   official CLI on its owner's login, on its owner's runner.
 - **Shared text is data.** The distilling model has no tools; recalled notes
@@ -609,7 +609,7 @@ what is built, and is rewritten as this is built.)
 
 The hub's core is its accounts, their roles and what each may do; the one
 port every connector over HTTP is served on (`listen`); and its ANN pool,
-the sources of models it calls. Everything else is a **connector**, always on, some
+the providers of models it calls. Everything else is a **connector**, always on, some
 holding **adapters** the admin picks:
 
 - **`rest`**, the REST API at `/api/v1/`, for apps, and a web UI later,
@@ -688,37 +688,37 @@ and its snapshots are gone. (Built with step 19.)
 ### Sharing models
 
 A hub may run on a small machine and need a strong model, and so may a
-runner. A runner may share models of its own sources; the hub relays calls
+runner. A runner may share models of its own providers; the hub relays calls
 to them, so the hub and the owner's other runners use them. Runners never
 reach each other.
 
 The runner's owner shares a model; the hub's admin adds that runner as a
-source of `type: runner`, turns the model on, and names it where it is used
+provider of `type: runner`, turns the model on, and names it where it is used
 (the distiller, the embedding model, the source filter), as any model:
 
 ```console
 $ ensemble-runner model share local:qwen3.5:72b                # on ana's workstation
-$ ensemble-hub source add gpu-box --type runner --runner ana/workstation
+$ ensemble-hub provider add gpu-box --type runner --runner ana/workstation
 $ ensemble-hub model on gpu-box:local:qwen3.5:72b
 $ ensemble-hub knowledge models gpu-box:local:qwen3.5:72b
 ```
 
-- A source's name is unique in a pool, and a model of another runner is
-  named as that runner names it, `<its source>:<id>`, so a model is named
-  `<source>:<id>` everywhere: `gpu-box:local:qwen3.5:72b`.
+- A provider's name is unique in a pool, and a model of another runner is
+  named as that runner names it, `<its provider>:<id>`, so a model is named
+  `<provider>:<id>` everywhere: `gpu-box:local:qwen3.5:72b`.
 - Choosing a runner's model is the admin's trust decision: whoever runs the
   serving machine sees what is sent to it. `runner.models` (`ensemble-hub
   runner models`) lists what the connected runners share, each model with
   what it is, as the runner's settings say, so an admin picks from a list.
-- The hub never learns the address or key of a runner's source; the runner
+- The hub never learns the address or key of a runner's provider; the runner
   calls its own.
-- Only models of a runner's own OpenAI-compatible sources are shared, never
+- Only models of a runner's own OpenAI-compatible providers are shared, never
   an agent CLI, and a shared model is asked only for chats, completions and
   embeddings; the runner refuses a call to a model of it that is not shared.
   Which models a runner shares the hub answers itself. The hub may use any;
   a runner's owner's other runners may.
 - When the serving runner is offline or busy, the `try` list's next entry is
-  used. Each source says how many calls it takes at once (`max_concurrent`),
+  used. Each provider says how many calls it takes at once (`max_concurrent`),
   the runner's own and others' together; the hub keeps a call to a shared
   one waiting for a free place for up to 10 seconds, then answers that it is
   busy.
@@ -731,10 +731,10 @@ $ ensemble-hub knowledge models gpu-box:local:qwen3.5:72b
   runner) took about 2 ms longer to its first token and 3 ms longer in all
   than one made directly, for a short prompt and a 100 KB one alike.
 - The hub and a runner that reaches other runners serve them on loopback,
-  `http://127.0.0.1:<port>/<source>`, with a key made when the process starts
+  `http://127.0.0.1:<port>/<provider>`, with a key made when the process starts
   (`ensemble_link::loopback`), so the distiller and the agents call them like
   any OpenAI-compatible server; a request there names the model as the
-  serving runner does, and goes to that source of it. A command that runs
+  serving runner does, and goes to that provider of it. A command that runs
   outside `ensemble-runner serve` has no such endpoint: a team's model reached
   through the hub is named there, and a run tries its next model.
 
@@ -787,7 +787,7 @@ behind a VPN; nothing in Ensemble assumes either. (Decided 2026-11-10.)
   through the hub (tasks they work on, models they share); none shares
   tools, files or subscriptions, and runners never reach each other.
 - An organization may run a central LLM server on its own GPUs. It is an
-  OpenAI-compatible source like any other, in the pools of the hub and the runners
+  OpenAI-compatible provider like any other, in the pools of the hub and the runners
   that use it; through the hub it will also get quotas per user and a usage
   log.
 - Delegated scope: an agent acts with its owner's access or less, never more.
@@ -832,15 +832,15 @@ never says "AI".
 **The ANN pool** (`ann_pool`) holds the neural networks a runner may call, in
 two layers:
 
-- A **source** is where models come from: a model server (an
+- A **provider** is where models come from: a model server (an
   OpenAI-compatible one, Ollama, llama.cpp's server), a vendor's API with its
   key, a decision model's service or file, or the models another runner of
   the same account shares through the hub. A person adds it, or setup finds
   it. It holds what all its models share: the address, the key, how long a
   call may take and how many calls it takes at once.
-- A **model** is what a source serves, found by asking the source: its list
-  of models, what Ollama says each can do, and one test call where the source
-  says nothing. A model is of one type:
+- A **model** is what a provider serves, found by asking the provider: its
+  list of models, what Ollama says each can do, and one test call where the
+  provider says nothing. A model is of one type:
   - an **LLM**: messages in, text out, with tool calls when it can make them;
   - an **embedding model**: text in, a vector out;
   - a **decision model**: a state and typed questions in, typed answers with
@@ -850,7 +850,7 @@ two layers:
   Each model has a profile (an LLM its tier, small, medium or strong, its
   context window and whether it calls tools; an embedding model its
   dimensions), limits of its own, and a switch that shares it through the hub.
-  A model a source newly lists is off until a person turns it on. Its tier
+  A model a provider newly lists is off until a person turns it on. Its tier
   comes from a catalog of known models Ensemble ships, or is medium for one
   the catalog does not know, and the person who turns it on may change it.
 
@@ -881,7 +881,7 @@ in the tracker writes its issues. A task reassigned to another person runs its
 gate only once that person confirms it, since someone else wrote the command.
 
 The hub has an ANN pool too, for its own work: the distiller, the embedding
-model and the source filter, on its own sources and on the models runners
+model and the source filter, on its own providers and on the models runners
 share with it. A model alone is called, with no harness, only there: until
 tasks say what they need (an open question), every task goes to a harness.
 
@@ -1020,7 +1020,7 @@ duplicating. Text from a user's machine passes a privacy gate first: secret
 check, off-topic filter, exclusions, a pause switch. (Built: the secret check.)
 
 The pipeline runs in the hub role and distills with a model the hub's config
-names; a single user's own hub uses that user's own sources or API key.
+names; a single user's own hub uses that user's own providers or API key.
 (Decided 2026-11-10.)
 
 ### Prompt injection
@@ -1049,7 +1049,7 @@ it says `hub`, for every account that may recall. Rather than merging sources
 of two audiences into the strictest, a note is made only from shares of one
 audience: the distiller offers an item only the notes of its share's
 audience, to merge into or link to, so private text never flows into a note
-others see. (Decided 2026-11-18.) Not built: a prompt goes only to a source
+others see. (Decided 2026-11-18.) Not built: a prompt goes only to a provider
 whose operator may see it.
 
 General know-how gained at a workplace may be exported to the person's home hub
@@ -1116,7 +1116,7 @@ the REST API lists them. Some administration may stay with the CLI.
 Everything a person can do to a hub or a runner is an **operation**, defined
 once, in the core:
 
-- a name, such as `source.add`, `knowledge.models`, `user.join-code`,
+- a name, such as `provider.add`, `knowledge.models`, `user.join-code`,
   `settings.owner`;
 - its input and output, as Rust types with JSON Schemas made from them; a
   field that takes some of a fixed list of texts (a role's permissions, a
@@ -1130,13 +1130,13 @@ once, in the core:
 - for long work (a rebuild, testing a model), the events it goes through.
 
 There are two kinds. **Goal operations** do what a person means: add a
-source, which is asked which models it serves first, its key kept
-under a variable Ensemble names after it (`ENSEMBLE_SOURCE_<NAME>_KEY`),
+provider, which is asked which models it serves first, its key kept
+under a variable Ensemble names after it (`ENSEMBLE_PROVIDER_<NAME>_KEY`),
 and turn its models on
 so nobody needs to know a variable's name; choose the distiller's and the
 embedding models, each checked; add a tracker; set a role; invite someone;
 let a computer join; add a team from a template; rebuild the knowledge.
-(Built: `source.*` and `model.*` on the hub and the runner, in `ensemble-backends`'
+(Built: `provider.*` and `model.*` on the hub and the runner, in `ensemble-backends`'
 `ops.rs`; `knowledge.models`, `knowledge.embedding`, `knowledge.recall`,
 `tracker.*`, `role.set`, `role.remove`, `registration.set` in
 `ensemble-hub`'s `goals.rs`.) **Settings operations** reach every other
@@ -1451,13 +1451,13 @@ crate holds it today.
 31. Models and harnesses in place of teams, as "Models and harnesses"
     describes. (Done: runners that work for the hub removed, so a runner
     takes its own account's tasks alone; the ANN pool of the runner and
-    the hub in place of the backends: sources, each with the most calls it
-    takes at once, and their models, found by asking the source when it is
-    added, on `source.refresh` and as the process starts, off until turned
+    the hub in place of the backends: providers, each with the most calls it
+    takes at once, and their models, found by asking the provider when it is
+    added, on `provider.refresh` and as the process starts, off until turned
     on, of a tier from a catalog of known families and sizes, or Ollama's,
-    else medium, each named `<source>:<id>` and checked to be on and of the
-    kind its use needs; a runner sharing models, not whole sources, the
-    hub queueing calls for each source; `source.*`, `model.*` and
+    else medium, each named `<provider>:<id>` and checked to be on and of the
+    kind its use needs; a runner sharing models, not whole providers, the
+    hub queueing calls for each provider; `provider.*`, `model.*` and
     `runner.models`, and the web UI's Models section; link protocol 8. Not
     yet: decision models in the pool; the harnesses; gates as a task's; teams, their `config.yaml`
     and agents' names on tasks removed, with the picker choosing a harness

@@ -38,7 +38,7 @@ pub const SAMPLE: &str = include_str!("sample.yaml");
 pub const SCHEMA_URL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/Khachatur01/ensemble/master/ensemble.schema.json";
 pub const SUPPORTED_VERSION: u32 = 1;
 
-/// The source types that ship. Adding one is adding an adapter and a
+/// The provider types that ship. Adding one is adding an adapter and a
 /// variant.
 pub const OPENAI_COMPATIBLE_API: &str = "openai-compatible-api";
 /// Anthropic's own Messages API.
@@ -97,8 +97,8 @@ impl BackendSettings {
     }
 }
 
-/// A source of the ANN pool the process calls itself, resolved: where it is
-/// and its key. It is named for the source.
+/// A provider of the ANN pool the process calls itself, resolved: where it is
+/// and its key. It is named for the provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmBackend {
     pub name: String,
@@ -107,7 +107,7 @@ pub struct LlmBackend {
 }
 
 impl LlmBackend {
-    /// An OpenAI-compatible source called `name` at `base_url`, without a
+    /// An OpenAI-compatible provider called `name` at `base_url`, without a
     /// key.
     pub fn openai(name: &str, base_url: &str, timeout_seconds: u64) -> LlmBackend {
         LlmBackend {
@@ -251,9 +251,9 @@ pub struct DirectAdapter {
 }
 
 impl DirectAdapter {
-    /// The source of its first model.
-    pub fn source(&self) -> &str {
-        self.fallback.first().map_or("", |c| c.source.as_str())
+    /// The provider of its first model.
+    pub fn provider(&self) -> &str {
+        self.fallback.first().map_or("", |c| c.provider.as_str())
     }
 
     /// The id its first model is served under.
@@ -279,9 +279,9 @@ pub struct BuiltinAdapter {
 }
 
 impl BuiltinAdapter {
-    /// The source of its first model.
-    pub fn source(&self) -> &str {
-        self.fallback.first().map_or("", |c| c.source.as_str())
+    /// The provider of its first model.
+    pub fn provider(&self) -> &str {
+        self.fallback.first().map_or("", |c| c.provider.as_str())
     }
 
     /// The id its first model is served under.
@@ -295,21 +295,21 @@ pub fn builtin_tool_writes(tool: &str) -> bool {
     matches!(tool, "write" | "edit" | "shell")
 }
 /// What an agent does when none of the models in its `try` list can be used:
-/// no source answers, or none serves the model.
+/// no provider answers, or none serves the model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WhenNone {
-    /// The delegation or task fails, saying what each source answered.
+    /// The delegation or task fails, saying what each provider answered.
     Fail,
     /// A task waits in the queue and is tried again later. A delegation, which
     /// someone is waiting for, fails.
     Wait,
 }
 
-/// One model an agent may run on: the source that serves it, and its id there.
+/// One model an agent may run on: the provider that serves it, and its id there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
-    pub source: String,
+    pub provider: String,
     /// The id the endpoint serves the model under.
     pub model: String,
     /// Tokens of context the server runs it with, for an OpenCode agent.
@@ -351,7 +351,7 @@ pub enum OpenCodeModel {
 }
 
 impl OpenCodeAdapter {
-    /// The model: `provider/model`, or the id a source serves its first
+    /// The model: `provider/model`, or the id a provider serves its first
     /// model under.
     pub fn model_id(&self) -> &str {
         match &self.model {
@@ -360,11 +360,11 @@ impl OpenCodeAdapter {
         }
     }
 
-    /// The source its first model runs on, when it runs on one.
-    pub fn source(&self) -> Option<&str> {
+    /// The provider its first model runs on, when it runs on one.
+    pub fn provider(&self) -> Option<&str> {
         match &self.model {
             OpenCodeModel::Provider { .. } => None,
-            OpenCodeModel::Pool(f) => f.first().map(|c| c.source.as_str()),
+            OpenCodeModel::Pool(f) => f.first().map(|c| c.provider.as_str()),
         }
     }
 
@@ -399,13 +399,13 @@ impl AgentConfig {
         }
     }
 
-    /// The source its first model runs on, when it runs on one.
-    pub fn source(&self) -> Option<&str> {
+    /// The provider its first model runs on, when it runs on one.
+    pub fn provider(&self) -> Option<&str> {
         match &self.adapter {
             Adapter::ClaudeCode(_) | Adapter::Codex(_) => None,
-            Adapter::OpenCode(o) => o.source(),
-            Adapter::Direct(d) => Some(d.source()),
-            Adapter::Builtin(b) => Some(b.source()),
+            Adapter::OpenCode(o) => o.provider(),
+            Adapter::Direct(d) => Some(d.provider()),
+            Adapter::Builtin(b) => Some(b.provider()),
         }
     }
 
@@ -422,12 +422,12 @@ impl AgentConfig {
         }
     }
 
-    /// Every source it may run on, with the model it would ask there.
+    /// Every provider it may run on, with the model it would ask there.
     pub fn pool_models(&self) -> Vec<(&str, &str)> {
         self.fallback().map_or_else(Vec::new, |f| {
             f.candidates
                 .iter()
-                .map(|c| (c.source.as_str(), c.model.as_str()))
+                .map(|c| (c.provider.as_str(), c.model.as_str()))
                 .collect()
         })
     }
@@ -457,10 +457,10 @@ impl AgentConfig {
             _ => None,
         }
     }
-    /// Where it runs: the adapter type, and the source when there is one.
+    /// Where it runs: the adapter type, and the provider when there is one.
     pub fn runs_on(&self) -> String {
-        match self.source() {
-            Some(source) => format!("{} on {source}", self.kind()),
+        match self.provider() {
+            Some(provider) => format!("{} on {provider}", self.kind()),
             None => self.kind().to_string(),
         }
     }
@@ -513,7 +513,7 @@ pub fn claude_tool_writes(tool: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub version: u32,
-    /// The sources its agents may run on: those of the runner that runs
+    /// The providers its agents may run on: those of the runner that runs
     /// it, from the runner's ANN pool ([`Config::with_pool`]); none as the
     /// team is read.
     pub llm_backends: BTreeMap<String, LlmBackend>,
@@ -631,7 +631,7 @@ pub mod teams;
 mod validate;
 
 pub use ann::{
-    AnnPool, AnnPoolSetting, ModelKind, PoolModel, RelayAt, SourceSetting, Tier, split_name,
+    AnnPool, AnnPoolSetting, ModelKind, PoolModel, ProviderSetting, RelayAt, Tier, split_name,
 };
 pub use env::*;
 pub use hub::{

@@ -218,7 +218,7 @@ pub(super) fn direct_adapter(
 ) -> DirectAdapter {
     if ad.candidates.is_empty() {
         problems.push(format!(
-            "{at}: `try` is empty; name at least one model, as {{ source, model }}"
+            "{at}: `try` is empty; name at least one model, as {{ provider, model }}"
         ));
     }
     let mut candidates = Vec::new();
@@ -228,7 +228,7 @@ pub(super) fn direct_adapter(
             problems.push(format!("{here}: `model` is empty"));
         }
         candidates.push(Candidate {
-            source: c.source.clone(),
+            provider: c.provider.clone(),
             model: c.model.clone(),
             context_window: None,
         });
@@ -252,7 +252,7 @@ pub(super) fn builtin_adapter(
 ) -> BuiltinAdapter {
     if ad.candidates.is_empty() {
         problems.push(format!(
-            "{at}: `try` is empty; name at least one model, as {{ source, model, context_window }}"
+            "{at}: `try` is empty; name at least one model, as {{ provider, model, context_window }}"
         ));
     }
     let mut candidates = Vec::new();
@@ -265,7 +265,7 @@ pub(super) fn builtin_adapter(
             problems.push(format!("{here}: `context_window` must be greater than 0"));
         }
         candidates.push(Candidate {
-            source: c.source.clone(),
+            provider: c.provider.clone(),
             model: c.model.clone(),
             context_window: Some(c.context_window),
         });
@@ -298,7 +298,7 @@ pub(super) fn builtin_adapter(
         max_tokens: ad.max_tokens,
     }
 }
-/// Check that each model of `candidates`, at `at`, names a source of `kinds`
+/// Check that each model of `candidates`, at `at`, names a provider of `kinds`
 /// (each name with its type), and, for OpenCode, an OpenAI-compatible one.
 fn check_candidates(
     at: &str,
@@ -308,22 +308,22 @@ fn check_candidates(
     problems: &mut Vec<String>,
 ) {
     for c in candidates {
-        match kinds.get(&c.source) {
-            None => problems.push(undefined_source(at, &c.source, kinds)),
+        match kinds.get(&c.provider) {
+            None => problems.push(undefined_provider(at, &c.provider, kinds)),
             Some(&ANTHROPIC_API) if opencode => problems.push(format!(
-                "{at}: the source '{}' is of type '{ANTHROPIC_API}', which OpenCode cannot use: it needs an '{OPENAI_COMPATIBLE_API}' one. Use a model of type '{PROVIDER_MODEL}', a `claude-code` agent, or a `direct` agent",
-                c.source
+                "{at}: the provider '{}' is of type '{ANTHROPIC_API}', which OpenCode cannot use: it needs an '{OPENAI_COMPATIBLE_API}' one. Use a model of type '{PROVIDER_MODEL}', a `claude-code` agent, or a `direct` agent",
+                c.provider
             )),
             Some(_) => {}
         }
     }
 }
 
-/// A model names a source `kinds` does not have.
-fn undefined_source(at: &str, source: &str, kinds: &BTreeMap<String, &str>) -> String {
+/// A model names a provider `kinds` does not have.
+fn undefined_provider(at: &str, provider: &str, kinds: &BTreeMap<String, &str>) -> String {
     let known: Vec<&str> = kinds.keys().map(String::as_str).collect();
     format!(
-        "{at}: there is no source '{source}'. Its sources: {}.",
+        "{at}: there is no provider '{provider}'. Its providers: {}.",
         if known.is_empty() {
             "(none)".to_string()
         } else {
@@ -378,13 +378,13 @@ pub(super) fn opencode_adapter(
         RawOpenCodeModel::Pool(m) => {
             if m.candidates.is_empty() {
                 problems.push(format!(
-                    "{at}: `model.try` is empty; name at least one model, as {{ source, name, context_window }}"
+                    "{at}: `model.try` is empty; name at least one model, as {{ provider, name, context_window }}"
                 ));
             }
             let mut candidates = Vec::new();
             for (i, b) in m.candidates.iter().enumerate() {
                 let here = format!("{at}.model.try[{i}]");
-                // In the pool the model is the id the source serves; Ensemble
+                // In the pool the model is the id the provider serves; Ensemble
                 // names the provider.
                 if b.name.trim().is_empty() {
                     problems.push(format!("{here}: `name` is empty"));
@@ -393,7 +393,7 @@ pub(super) fn opencode_adapter(
                     problems.push(format!("{here}: `context_window` must be greater than 0"));
                 }
                 candidates.push(Candidate {
-                    source: b.source.clone(),
+                    provider: b.provider.clone(),
                     model: b.name.clone(),
                     context_window: Some(b.context_window),
                 });
@@ -476,29 +476,29 @@ pub(super) fn codex_adapter(
     }
 }
 
-/// A source the process calls itself, checked, with its key from `env`: a
+/// A provider the process calls itself, checked, with its key from `env`: a
 /// URL, a timeout and an optional key. Not another runner.
-pub(super) fn resolve_source(
+pub(super) fn resolve_provider(
     at: &str,
     name: &str,
-    kept: &crate::ann::SourceSetting,
+    kept: &crate::ann::ProviderSetting,
     env: &dyn Env,
 ) -> Result<LlmBackend, Vec<String>> {
-    use crate::ann::SourceSetting;
+    use crate::ann::ProviderSetting;
     let (anthropic, base_url, api_key_env, timeout_seconds) = match kept {
-        SourceSetting::OpenAiCompatible {
+        ProviderSetting::OpenAiCompatible {
             base_url,
             api_key_env,
             timeout_seconds,
             ..
         } => (false, base_url, api_key_env, *timeout_seconds),
-        SourceSetting::Anthropic {
+        ProviderSetting::Anthropic {
             base_url,
             api_key_env,
             timeout_seconds,
             ..
         } => (true, base_url, api_key_env, *timeout_seconds),
-        SourceSetting::Runner { .. } => {
+        ProviderSetting::Runner { .. } => {
             return Err(vec![format!(
                 "{at}: is another runner, reached through the hub"
             )]);
@@ -550,8 +550,8 @@ pub(super) fn resolve_source(
 }
 
 impl Config {
-    /// This team on `backends`, sources it is given alone, as a team run
-    /// apart from a runner is: every source its agents name is one of them.
+    /// This team on `backends`, providers it is given alone, as a team run
+    /// apart from a runner is: every provider its agents name is one of them.
     pub fn with_backends(
         mut self,
         backends: BTreeMap<String, LlmBackend>,
@@ -568,7 +568,7 @@ impl Config {
     }
 
     /// This team on the ANN pool of the runner that runs it, once every
-    /// model its agents name is an LLM of it that is on: its own sources,
+    /// model its agents name is an LLM of it that is on: its own providers,
     /// and the runners it reaches through the hub when it serves them at
     /// `relay`. Without a relay those are named but not there, and a run
     /// tries the next model.
@@ -581,7 +581,7 @@ impl Config {
         self.check_models(|at, c, opencode, problems| {
             crate::ann::check_model(
                 at,
-                &c.source,
+                &c.provider,
                 &c.model,
                 crate::ann::Use::Llm,
                 opencode,

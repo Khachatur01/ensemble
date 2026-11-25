@@ -84,7 +84,7 @@ pub fn projects(asked: &Asked) -> Vec<String> {
 }
 
 /// The models of the ANN pool that are on and of `kind`, `llm` or
-/// `embedding`, as `<source>:<model>`, each with what it is (`model.list`).
+/// `embedding`, as `<provider>:<model>`, each with what it is (`model.list`).
 pub fn pool_models(asked: &Asked, kind: &str) -> Vec<(String, String)> {
     match &*asked.read() {
         Some(Ok(out)) => out["models"]

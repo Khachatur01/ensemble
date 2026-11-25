@@ -1,4 +1,4 @@
-//! Where the runner keeps its settings, the keys of its sources and its hub
+//! Where the runner keeps its settings, the keys of its providers and its hub
 //! tokens: in typed tables of its core's database,
 //! `<config-dir>/runner/core/database.db`, so that its operations change
 //! them, and where it runs, such as the NixOS module, only runs it. The
@@ -17,7 +17,7 @@ use ensemble_store::{optional, rows, text, transaction};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// What keeps a source's key, for what is said.
+/// What keeps a provider's key, for what is said.
 const PROGRAM: &str = "ensemble-runner";
 
 /// What the runner's settings are called in what is said.
@@ -198,7 +198,7 @@ impl Tokens {
     }
 }
 
-/// What the token of the hub at `url` is sealed as: no key of a source's.
+/// What the token of the hub at `url` is sealed as: no key of a provider's.
 fn sealed_as(url: &str) -> String {
     format!("hub token {url}")
 }
@@ -206,7 +206,7 @@ fn sealed_as(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ensemble_config::{ModelKind, SourceSetting};
+    use ensemble_config::{ModelKind, ProviderSetting};
     use ensemble_core::workspace::testing::TempDir;
 
     #[test]
@@ -217,9 +217,9 @@ mod tests {
         assert_eq!(store.read().unwrap(), None);
         let mut runner = RunnerSettings::starting("laptop", "~/ensemble");
         runner.hub = Some("ws://127.0.0.1:7700".into());
-        runner.ann_pool.sources.insert(
+        runner.ann_pool.providers.insert(
             "local".into(),
-            SourceSetting::OpenAiCompatible {
+            ProviderSetting::OpenAiCompatible {
                 base_url: "http://127.0.0.1:1/v1".into(),
                 api_key_env: None,
                 timeout_seconds: 5,
@@ -240,7 +240,7 @@ mod tests {
             .turn_on("local", "e", ModelKind::Embedding { dimensions: 8 });
         runner.ann_pool.model_mut("local", "small").unwrap().shared = true;
         runner.ann_pool.models.push(ensemble_config::PoolModel {
-            source: "local".into(),
+            provider: "local".into(),
             id: "z".into(),
             kind: ModelKind::Unknown,
             on: false,

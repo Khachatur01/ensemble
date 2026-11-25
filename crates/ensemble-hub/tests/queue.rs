@@ -681,7 +681,7 @@ fn a_task_whose_agent_has_no_usable_model_waits_and_says_why() {
     let tmp = TempDir::new();
     std::fs::create_dir_all(project(&tmp)).unwrap();
     let down = |n: u16| format!("http://127.0.0.1:{n}/v1");
-    let yaml = "version: 1\nlimits: {}\ngates: {}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: direct\n      try:\n        - { source: home, model: small }\n        - { source: central, model: big }\n      when_none: wait\n      max_tokens: 10\n";
+    let yaml = "version: 1\nlimits: {}\ngates: {}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: direct\n      try:\n        - { provider: home, model: small }\n        - { provider: central, model: big }\n      when_none: wait\n      max_tokens: 10\n";
     let cfg = config::parse(yaml, Path::new("config.yaml"))
         .and_then(|c| {
             c.with_backends(std::collections::BTreeMap::from([

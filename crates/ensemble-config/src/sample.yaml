@@ -4,10 +4,10 @@
 # It lives in a folder of its own (often its own git repo), apart from any
 # project; the repository a task names is where the team works. It can be yours
 # alone, or one your company shares and you pull. It names the models its
-# agents run on as the sources of the runner's ANN pool serve them: each runner
-# keeps its sources, with their endpoints and keys (`ensemble-runner source add`),
+# agents run on as the providers of the runner's ANN pool serve them: each runner
+# keeps its providers, with their endpoints and keys (`ensemble-runner provider add`),
 # and turns their models on, so the team runs on any runner that has the models it
-# names on. This one names the sources `local` and `central`.
+# names on. This one names the providers `local` and `central`.
 #
 # Nothing has a default value: every setting is written here, and one that is
 # missing is refused by name. Only a few may be left out, because leaving them
@@ -91,19 +91,19 @@ agents:
       model:
         type: ann_pool
         # The models it may run on, in order. Each run uses the first whose
-        # source answers and serves it, so the agent keeps working when your
+        # provider answers and serves it, so the agent keeps working when your
         # own server is off. With one model, it is simply used.
         try:
-          - source: local
-            # The id the source serves the model under, as its /models lists it.
+          - provider: local
+            # The id the provider serves the model under, as its /models lists it.
             name: qwen3.5:9b
             # Tokens of context the server really runs the model with, so
             # OpenCode knows when to compact (Ollama: OLLAMA_CONTEXT_LENGTH).
             context_window: 32768
-          - source: central
+          - provider: central
             name: qwen3.5:72b
             context_window: 131072
-        # When none of them can be used: `fail` (say what each source
+        # When none of them can be used: `fail` (say what each provider
         # answered) or `wait` (a task waits in the queue and is tried again).
         when_none: wait
       # OpenCode permissions, such as read, edit, bash or bash(git *);
@@ -155,8 +155,8 @@ agents:
       type: direct
       # The models it may run on, in order, as for `coder` above.
       try:
-        - source: local
-          # The id the source serves the model under, as its /models lists it.
+        - provider: local
+          # The id the provider serves the model under, as its /models lists it.
           model: qwen3.5:9b
       when_none: fail
       # Most tokens of answer; an answer cut off there is marked unfinished.
@@ -179,7 +179,7 @@ agents:
       type: builtin
       # The models it may run on, in order, as for `coder` above.
       try:
-        - source: local
+        - provider: local
           model: qwen3-coder:30b
           # Tokens of context the server runs the model with; the loop
           # compacts the conversation before it outgrows them.

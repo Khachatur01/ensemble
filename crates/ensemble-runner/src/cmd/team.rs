@@ -82,7 +82,7 @@ fn new(name: Option<String>, stdout: bool) -> Result<ExitCode, String> {
     let name = name.as_deref().ok_or("team new: needs the team's name")?;
     let dir = teams::make(name, config::SAMPLE).map_err(|e| format!("team new: {e}"))?;
     println!(
-        "wrote {}: the team '{name}', a sample with every setting. Edit its agents, then check it with `ensemble-runner team check`. API keys are kept with `ensemble-runner source key`, or come from the environment; never in this directory.",
+        "wrote {}: the team '{name}', a sample with every setting. Edit its agents, then check it with `ensemble-runner team check`. API keys are kept with `ensemble-runner provider key`, or come from the environment; never in this directory.",
         config::config_path(&dir).display()
     );
     reload_runner();
@@ -232,7 +232,7 @@ fn check(runner: Option<&config::Runner>, config: Config) -> Result<ExitCode, St
         println!("{}: ok ({})", team.name, team.describe());
     }
     println!();
-    println!("sources of the ANN pool:");
+    println!("providers of the ANN pool:");
     for (name, b) in &config.llm_backends {
         let detail = format!(
             "{}{}",
@@ -349,7 +349,7 @@ fn check(runner: Option<&config::Runner>, config: Config) -> Result<ExitCode, St
 
     println!();
     println!(
-        "ready. `ensemble-runner agent health` checks the agent CLIs and the sources of their models."
+        "ready. `ensemble-runner agent health` checks the agent CLIs and the providers of their models."
     );
     Ok(if bad.is_empty() {
         ExitCode::SUCCESS

@@ -1,5 +1,5 @@
 //! The hub's settings, a section each, with what each is now: the hub and
-//! its logins and sign-ups, the roles, the ANN pool (its sources and their
+//! its logins and sign-ups, the roles, the ANN pool (its providers and their
 //! models), the models of the knowledge vault, the source filter, the trackers, and who changed what.
 //! Each change is an operation's form, filled in with the setting as it is.
 //! An operation of the settings no section shows has a page of its own, so a
@@ -36,12 +36,12 @@ const SHOWN: &[&str] = &[
     "role.list",
     "role.set",
     "role.remove",
-    "source.list",
-    "source.add",
-    "source.remove",
-    "source.test",
-    "source.key",
-    "source.refresh",
+    "provider.list",
+    "provider.add",
+    "provider.remove",
+    "provider.test",
+    "provider.key",
+    "provider.refresh",
     "model.list",
     "model.on",
     "model.off",
@@ -68,6 +68,7 @@ const GROUPS: &[&str] = &[
     "model",
     "runner",
     "knowledge",
+    "provider",
     "source",
     "tracker",
 ];
@@ -143,14 +144,14 @@ fn waiting(shown: &Shown) -> Element {
     }
 }
 
-/// Models as a list of `<source>:<model>`, one per line, from the settings'
-/// `[{source, model}]`.
+/// Models as a list of `<provider>:<model>`, one per line, from the settings'
+/// `[{provider, model}]`.
 fn model_lines(tried: &Value) -> String {
     tried
         .as_array()
         .into_iter()
         .flatten()
-        .map(|m| format!("{}:{}", text(m, "source"), text(m, "model")))
+        .map(|m| format!("{}:{}", text(m, "provider"), text(m, "model")))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -398,7 +399,7 @@ fn RoleRow(
     }
 }
 
-/// What each type of source is, as a person reads it.
+/// What each type of provider is, as a person reads it.
 const SOURCE_TYPES: &[(&str, &str)] = &[
     ("openai-compatible-api", "OpenAI-compatible server"),
     ("anthropic-api", "Anthropic's API"),
@@ -417,12 +418,12 @@ const TIERS: &[(&str, &str)] = &[
 
 #[component]
 fn Models() -> Element {
-    let mut sources = use_op("source.list");
+    let mut providers = use_op("provider.list");
     let mut models = use_op("model.list");
     let offered = use_op("runner.models");
     let (mut shown, _) = settings();
     let mut changed = move || {
-        sources.restart();
+        providers.restart();
         models.restart();
         shown.restart();
     };
@@ -442,21 +443,21 @@ fn Models() -> Element {
     let api_types = ["openai-compatible-api", "anthropic-api"];
     rsx! {
         p { class: "muted",
-            "The hub's ANN pool: the sources of models it calls, and the models each serves. A model a source newly lists is off until you turn it on. Keys are kept sealed, never in the settings."
+            "The hub's ANN pool: the providers of models it calls, and the models each serves. A model a provider newly lists is off until you turn it on. Keys are kept sealed, never in the settings."
         }
-        {loaded(&sources.read(), |out| {
-            let list = out["sources"].as_array().cloned().unwrap_or_default();
+        {loaded(&providers.read(), |out| {
+            let list = out["providers"].as_array().cloned().unwrap_or_default();
             rsx! {
                 if list.is_empty() {
-                    p { class: "muted", "No source yet: add one below." }
+                    p { class: "muted", "No provider yet: add one below." }
                 } else {
                     for s in list {
-                        SourceCard {
+                        ProviderCard {
                             key: "{text(&s, \"name\")}",
-                            source: s.clone(),
+                            provider: s.clone(),
                             models: all_models
                                 .iter()
-                                .filter(|m| m["source"] == s["name"])
+                                .filter(|m| m["provider"] == s["name"])
                                 .cloned()
                                 .collect::<Vec<_>>(),
                             on_changed: move |_| changed(),
@@ -474,14 +475,14 @@ fn Models() -> Element {
                         thead { tr { th { "Runner" } th { "Models" } th { "Calls at once" } } }
                         tbody {
                             for o in list {
-                                tr { key: "{text(&o, \"runner\")}/{text(&o, \"source\")}",
+                                tr { key: "{text(&o, \"runner\")}/{text(&o, \"provider\")}",
                                     td { "{text(&o, \"runner\")}" }
                                     td {
                                         {o["models"]
                                             .as_array()
                                             .into_iter()
                                             .flatten()
-                                            .map(|m| format!("{}:{}", text(&o, "source"), text(m, "id")))
+                                            .map(|m| format!("{}:{}", text(&o, "provider"), text(m, "id")))
                                             .collect::<Vec<_>>()
                                             .join(", ")}
                                     }
@@ -494,9 +495,9 @@ fn Models() -> Element {
             }
         })}
         section { class: "panel",
-            h3 { "Add a source" }
+            h3 { "Add a provider" }
             OpForm {
-                op: "source.add",
+                op: "provider.add",
                 picks: vec![
                     Pick::named("type", SOURCE_TYPES),
                     Pick::suggest("runner", runners),
@@ -518,7 +519,7 @@ fn Models() -> Element {
                     label("timeout", "timeout, in seconds"),
                     label("no_check", "do not ask it which models it serves first"),
                 ],
-                submit: "Add the source",
+                submit: "Add the provider",
                 clear: true,
                 on_done: move |_| changed(),
             }
@@ -526,24 +527,24 @@ fn Models() -> Element {
     }
 }
 
-/// A source: what it is, where, its key, and its models; tested, asked again
+/// A provider: what it is, where, its key, and its models; tested, asked again
 /// which models it serves, given a key, or taken out.
 #[component]
-fn SourceCard(source: Value, models: Vec<Value>, on_changed: EventHandler<()>) -> Element {
-    let name = text(&source, "name");
+fn ProviderCard(provider: Value, models: Vec<Value>, on_changed: EventHandler<()>) -> Element {
+    let name = text(&provider, "name");
     let mut tested = use_signal(|| None::<Result<Value, Failure>>);
     let mut keying = use_signal(|| false);
-    let kind = text(&source, "type");
+    let kind = text(&provider, "type");
     let shown_kind = SOURCE_TYPES
         .iter()
         .find(|(t, _)| *t == kind)
         .map(|(_, l)| l.to_string())
         .unwrap_or(kind.clone());
-    let place = match text(&source, "url") {
+    let place = match text(&provider, "url") {
         u if !u.is_empty() => u,
-        _ => text(&source, "runner"),
+        _ => text(&provider, "runner"),
     };
-    let key = match (source["key"] == true, text(&source, "key_env")) {
+    let key = match (provider["key"] == true, text(&provider, "key_env")) {
         (_, env) if !env.is_empty() => format!("from ${env}"),
         (true, _) => "kept sealed".into(),
         (false, _) => "none".into(),
@@ -554,7 +555,7 @@ fn SourceCard(source: Value, models: Vec<Value>, on_changed: EventHandler<()>) -
             let name = name.clone();
             spawn(async move {
                 tested.set(None);
-                let out = api::op("source.test", json!({ "name": name })).await;
+                let out = api::op("provider.test", json!({ "name": name })).await;
                 tested.set(Some(out));
             });
         }
@@ -562,7 +563,7 @@ fn SourceCard(source: Value, models: Vec<Value>, on_changed: EventHandler<()>) -
     let named = vec![("name".to_string(), json!(name))];
     let direct = kind != "runner";
     rsx! {
-        section { class: "panel source",
+        section { class: "panel provider",
             div { class: "head",
                 h3 { "{name}" }
                 span { class: "muted", "{shown_kind}, {place}" }
@@ -570,7 +571,7 @@ fn SourceCard(source: Value, models: Vec<Value>, on_changed: EventHandler<()>) -
             dl { class: "facts",
                 if direct {
                     dt { "Key" } dd { "{key}" }
-                    dt { "Calls at once" } dd { "{text(&source, \"max_concurrent\")}" }
+                    dt { "Calls at once" } dd { "{text(&provider, \"max_concurrent\")}" }
                 }
             }
             if models.is_empty() {
@@ -593,7 +594,7 @@ fn SourceCard(source: Value, models: Vec<Value>, on_changed: EventHandler<()>) -
             }
             match &*tested.read() {
                 Some(Ok(out)) => {
-                    let row = out["sources"].get(0).cloned().unwrap_or(Value::Null);
+                    let row = out["providers"].get(0).cloned().unwrap_or(Value::Null);
                     match row["ok"].as_bool() {
                         Some(true) => rsx! { p { class: "ok", "Answers; serves {lookup::strings(&row[\"models\"]).join(\", \")}" } },
                         Some(false) => rsx! { p { class: "error", "{text(&row, \"error\")}" } },
@@ -605,7 +606,7 @@ fn SourceCard(source: Value, models: Vec<Value>, on_changed: EventHandler<()>) -
             }
             if keying() {
                 OpForm {
-                    op: "source.key",
+                    op: "provider.key",
                     fixed: named.clone(),
                     labels: vec![label("key", "new API key (empty takes it out)"), label("key_env", "key from a variable")],
                     more: vec!["key_env".to_string()],
@@ -616,14 +617,14 @@ fn SourceCard(source: Value, models: Vec<Value>, on_changed: EventHandler<()>) -
                 }
             }
             OpForm {
-                op: "source.refresh",
+                op: "provider.refresh",
                 fixed: named.clone(),
                 submit: "Ask it again which models it serves",
                 saved: true,
                 on_done: move |_| on_changed.call(()),
             }
             OpForm {
-                op: "source.remove",
+                op: "provider.remove",
                 fixed: named.clone(),
                 submit: "Remove",
                 danger: true,
@@ -635,7 +636,7 @@ fn SourceCard(source: Value, models: Vec<Value>, on_changed: EventHandler<()>) -
     }
 }
 
-/// A model of a source: what it is, whether it is on; turned on, off, or
+/// A model of a provider: what it is, whether it is on; turned on, off, or
 /// said how strong it is.
 #[component]
 fn ModelRow(model: Value, on_changed: EventHandler<()>) -> Element {
@@ -660,7 +661,7 @@ fn ModelRow(model: Value, on_changed: EventHandler<()>) -> Element {
         _ => "not known yet: asked when it is turned on".to_string(),
     };
     if model["missing"] == true {
-        what.push_str("; its source no longer lists it");
+        what.push_str("; its provider no longer lists it");
     }
     rsx! {
         tr {
@@ -723,7 +724,7 @@ fn KnowledgeModels() -> Element {
     let embed_model = if embed.is_null() {
         String::new()
     } else {
-        format!("{}:{}", text(embed, "source"), text(embed, "model"))
+        format!("{}:{}", text(embed, "provider"), text(embed, "model"))
     };
     let pick = |field: &str, options: &Vec<(String, String)>| Pick {
         field: field.into(),

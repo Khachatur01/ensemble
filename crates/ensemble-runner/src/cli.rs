@@ -9,16 +9,16 @@ use std::path::PathBuf;
 
 const AFTER_HELP: &str = "\
 Files, in --config-dir (by default ~/.local/state/ensemble):
-  runner/core/      database.db (its settings, the keys of its sources and
+  runner/core/      database.db (its settings, the keys of its providers and
                     its hub tokens, sealed), master.key
   runner/teams/     its helper teams, one folder each
   runner/workdirs/  run logs and worktrees, per repository
 
 Its settings are kept in its core's database, and changed with `settings`,
-`source`, `model` and `login`; `settings show` shows them, `settings history`
-who changed what. A key given to `source add` or `source key` is kept there,
+`provider`, `model` and `login`; `settings show` shows them, `settings history`
+who changed what. A key given to `provider add` or `provider key` is kept there,
 sealed by master.key: back up both. A key a secrets manager keeps is read from
-the environment, and named with `source key --key-env`.";
+the environment, and named with `provider key --key-env`.";
 
 /// This computer's Ensemble runner: it runs the tasks of your hub with your
 /// helper teams.
@@ -46,8 +46,8 @@ pub fn command<R>(runner: &Registry<R>) -> clap::Command {
             "The runner's settings, kept in its database: every one, who changed them, and each of them.",
         ),
         (
-            "source",
-            "The sources of the runner's ANN pool, which its teams run on, and their keys.",
+            "provider",
+            "The providers of the runner's ANN pool, which its teams run on, and their keys.",
         ),
         (
             "model",
@@ -210,9 +210,9 @@ pub enum AgentCommand {
         adapter: String,
         #[arg(long)]
         model: Option<String>,
-        /// The source of the ANN pool it runs on, for opencode, builtin and direct.
+        /// The provider of the ANN pool it runs on, for opencode, builtin and direct.
         #[arg(long)]
-        source: Option<String>,
+        provider: Option<String>,
         /// What it is for.
         #[arg(long)]
         prompt: Option<String>,

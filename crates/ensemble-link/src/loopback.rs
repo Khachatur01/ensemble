@@ -1,8 +1,8 @@
-//! Where a process serves the sources it reaches through the hub, each
+//! Where a process serves the providers it reaches through the hub, each
 //! another runner: an OpenAI-compatible endpoint on loopback,
-//! `http://127.0.0.1:<port>/<name>` for each source by its name, with a key
+//! `http://127.0.0.1:<port>/<name>` for each provider by its name, with a key
 //! made when it starts. A model there is named as the runner that shares it
-//! names it, `<its source>:<id>`. The agents
+//! names it, `<its provider>:<id>`. The agents
 //! and the distiller call it like any server; each request becomes a call
 //! that an [`Opener`] carries (the runner's relay socket, or the hub itself),
 //! and the answer is written back as it comes.
@@ -31,12 +31,12 @@ pub trait Opener: Send + Sync {
     fn open(&self, open: Open, body: Vec<u8>) -> UnboundedReceiver<Frame>;
 }
 
-/// Each source's name here, with the runner it is, as `<owner>/<name>`.
+/// Each provider's name here, with the runner it is, as `<owner>/<name>`.
 pub type Names = BTreeMap<String, String>;
 
 /// A loopback endpoint, served until it is dropped.
 pub struct Loopback {
-    /// `http://127.0.0.1:<port>`; a source is at `<base_url>/<name>`.
+    /// `http://127.0.0.1:<port>`; a provider is at `<base_url>/<name>`.
     pub base_url: String,
     /// What a request must send as its API key.
     pub key: String,
@@ -134,7 +134,7 @@ impl Serving {
                 .cloned()
                 .collect();
             let why = format!(
-                "no source '{name}' is reached through the hub here; those that are: {}",
+                "no provider '{name}' is reached through the hub here; those that are: {}",
                 if known.is_empty() {
                     "(none)".to_string()
                 } else {
@@ -143,17 +143,17 @@ impl Serving {
             );
             return refuse(&mut stream, 404, &why).await;
         };
-        // A request that names a model goes to the source the runner names
-        // it after, as that source serves it; one that names none asks the
+        // A request that names a model goes to the provider the runner names
+        // it after, as that provider serves it; one that names none asks the
         // runner which models it shares.
-        let (source, body) = if request.body.is_empty() {
+        let (provider, body) = if request.body.is_empty() {
             (String::new(), request.body)
         } else {
             match routed(&request.body) {
                 Some(routed) => routed,
                 None => {
                     let why = format!(
-                        "name a model of {runner} as it names it, <source>:<model>, such as ollama:qwen3.5:9b"
+                        "name a model of {runner} as it names it, <provider>:<model>, such as ollama:qwen3.5:9b"
                     );
                     return refuse(&mut stream, 404, &why).await;
                 }
@@ -161,7 +161,7 @@ impl Serving {
         };
         let open = Open {
             runner,
-            source,
+            provider,
             method: request.method,
             path: format!("/{rest}"),
         };
@@ -377,14 +377,14 @@ mod tests {
             open,
             Open {
                 runner: "ana/gpu-box".into(),
-                source: "local".into(),
+                provider: "local".into(),
                 method: "POST".into(),
                 path: "/chat/completions".into(),
             }
         );
         assert_eq!(
             sent, b"{\"model\":\"qwen\"}",
-            "named as its source serves it"
+            "named as its provider serves it"
         );
 
         let (status, _, body) = ask("/full/chat/completions", &key);
