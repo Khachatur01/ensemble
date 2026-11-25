@@ -626,7 +626,7 @@ fn the_runner_works_on_the_tasks_of_each_repository_in_its_workspace_and_stops_o
         &token,
         "submit",
         serde_json::json!({
-            "project": "shop", "title": "Rename foo", "task": "rename foo to bar",
+            "project": "shop", "title": "Rename foo", "task": "rename foo to bar", "definition_of_done": "It is done.",
         }),
     );
     assert!(said.contains("0001-rename-foo"), "{said}");
@@ -1195,6 +1195,7 @@ fn add_task(scratch: &Scratch, project: &str, title: &str, text: &str) -> String
         .add(&ensemble_tasks::tasks::Ticket {
             title: title.into(),
             text: text.into(),
+            definition_of_done: "It is done.".into(),
             ..Default::default()
         })
         .unwrap()
@@ -1667,7 +1668,7 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_runner_and_reported_back() 
     let issue = hub.join("trackers/issues/7.md");
     std::fs::write(
         &issue,
-        format!("---\ntitle: Rename foo\nassignee: ana.p\nlabels: [ensemble]\nproject: {project}\nstatus: open\n---\nRename foo to bar in a.txt.\n"),
+        format!("---\ntitle: Rename foo\nassignee: ana.p\nlabels: [ensemble]\nproject: {project}\nstatus: open\n---\nRename foo to bar in a.txt.\n\n## Definition of done\n\na.txt says bar.\n"),
     )
     .unwrap();
     assert!(
@@ -1837,7 +1838,7 @@ fn a_model_one_runner_shares_serves_another_runners_harness_and_the_hub_through_
         &ana,
         "submit",
         serde_json::json!({
-            "project": "shop", "title": "Sum it", "task": "sum it up", "repository": origin.to_string_lossy(),
+            "project": "shop", "title": "Sum it", "task": "sum it up", "definition_of_done": "It is done.", "repository": origin.to_string_lossy(),
         }),
     );
     assert!(said.contains("0001-sum-it"), "{said}");
@@ -2071,7 +2072,7 @@ fn a_repository_added_after_the_runner_started_gets_a_worker_and_a_task_brings_i
         &token,
         "submit",
         serde_json::json!({
-            "project": "shop", "title": "Deploy the shop", "task": "deploy the shop",
+            "project": "shop", "title": "Deploy the shop", "task": "deploy the shop", "definition_of_done": "It is done.",
         }),
     );
     assert!(said.contains("0001-deploy-the-shop"), "{said}");
@@ -2111,7 +2112,7 @@ fn a_runner_with_no_copy_of_a_project_clones_the_repository_its_task_names() {
         &token,
         "submit",
         serde_json::json!({
-            "project": "shop", "title": "Bar it", "task": "write bar into a.txt", "repository": origin.to_string_lossy(),
+            "project": "shop", "title": "Bar it", "task": "write bar into a.txt", "definition_of_done": "It is done.", "repository": origin.to_string_lossy(),
         }),
     );
     assert!(said.contains("0001-bar-it"), "{said}");
@@ -2152,7 +2153,7 @@ fn a_runner_asks_where_a_project_is_and_clones_what_it_is_told() {
         &token,
         "submit",
         serde_json::json!({
-            "project": "shop", "title": "Bar it", "task": "write bar into a.txt",
+            "project": "shop", "title": "Bar it", "task": "write bar into a.txt", "definition_of_done": "It is done.",
         }),
     );
     assert!(
@@ -2207,7 +2208,7 @@ fn a_task_whose_repository_its_only_runner_cannot_clone_is_given_back_and_blocke
         &token,
         "submit",
         serde_json::json!({
-            "project": "shop", "title": "Bar it", "task": "write bar into a.txt", "repository": nowhere.to_string_lossy(),
+            "project": "shop", "title": "Bar it", "task": "write bar into a.txt", "definition_of_done": "It is done.", "repository": nowhere.to_string_lossy(),
         }),
     );
     let shown = || {

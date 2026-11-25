@@ -911,7 +911,10 @@ Two kinds of work (decided 2026-11-17):
   the person, who stays accountable. Ensemble is never the source of truth
   for issues.
 - A **task** is for a harness: one goal, one check, such as "the camera
-  calibration module in `calib/`; `cargo test` passes". Tasks are kept on the
+  calibration module in `calib/`; `cargo test` passes". Whoever makes it
+  gives its title, what to do and its definition of done, what must be true
+  when it is done, never how hard it is: what works on it is decided from
+  them. (Decided 2026-11-25.) Tasks are kept on the
   hub, per account and project, so that a task outlives the runner that works
   on it: runners **lease** them (see "A task" in part one), and when a runner
   stops or dies another runner of the account takes the task up. Runners work
@@ -935,7 +938,8 @@ An issue carries an explicit signal that agents may take it: a label, such as
 (Decided 2026-11-10.) The flow:
 
 1. The inbox sees an issue assigned to me with the signal and makes it a task
-   of mine, or puts it in my backlog.
+   of mine: its text the task, its `## Definition of done` section the
+   task's. An issue without one is blocked, saying so.
 2. A runner of mine takes it, with the vault's notes about it, which the hub
    puts into the task, and the picker chooses what works on it.
 3. If it is unclear, the agent asks; the question goes to a tracker comment and

@@ -483,8 +483,8 @@ mod tests {
             &hub.ana,
             "task.create",
             json!({
-                "project": "shop", "title": "Fix the cart", "task": "The cart loses items.",
-                "done_when": ["cargo test passes"], "gate": "cargo test",
+                "project": "shop", "title": "Fix the cart", "task": "The cart loses items.", "definition_of_done": "It is done.",
+                "definition_of_done": "cargo test passes", "gate": "cargo test",
                 "gate_timeout_seconds": 600, "gate_attempts": 2,
             }),
         );
@@ -537,7 +537,7 @@ mod tests {
             &hub.ana,
             "task.create",
             json!({
-                "project": "shop", "title": "Ship", "task": "Ship it.", "gate": "make check",
+                "project": "shop", "title": "Ship", "task": "Ship it.", "definition_of_done": "It is done.", "gate": "make check",
                 "gate_timeout_seconds": 60, "gate_attempts": 1,
             }),
         );

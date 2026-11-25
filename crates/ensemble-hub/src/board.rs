@@ -356,6 +356,7 @@ impl DbBoard {
                 id: id.clone(),
                 title: ticket.title.trim().to_string(),
                 text: ticket.text.trim().to_string(),
+                definition_of_done: ticket.definition_of_done.trim().to_string(),
                 ..ticket.clone()
             },
             created: utc(SystemTime::now()),
@@ -976,9 +977,10 @@ pub fn learned(project: &str, task: &Detail) -> Option<(String, String)> {
     if let Some(context) = &t.context {
         text.push_str(&format!("Context: {context}\n"));
     }
-    for check in &t.done_when {
-        text.push_str(&format!("Done when: {check}\n"));
-    }
+    text.push_str(&format!(
+        "Definition of done: {}\n",
+        t.definition_of_done.trim()
+    ));
     if let Some((asked, _)) = &task.conversation {
         text.push_str(&format!(
             "\nAsked and answered on the way:\n{}\n",
@@ -1140,6 +1142,7 @@ mod tests {
         Ticket {
             title: title.into(),
             text: text.into(),
+            definition_of_done: "It is done.".into(),
             ..Ticket::default()
         }
     }
@@ -1168,7 +1171,7 @@ mod tests {
             goal: Some("Requests survive a flaky network.".into()),
             constraints: vec!["No new dependency".into()],
             files: vec!["src/fetch.rs".into()],
-            done_when: vec!["cargo test passes".into()],
+            definition_of_done: "cargo test passes".into(),
             gate: Some(Gate {
                 command: "cargo test".into(),
                 timeout_seconds: 600,

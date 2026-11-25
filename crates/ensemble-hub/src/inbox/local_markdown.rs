@@ -10,6 +10,10 @@
 //! ---
 //! What is wrong and what is wanted.
 //!
+//! ## Definition of done
+//!
+//! What must be true when it is done.
+//!
 //! ## Comment by ensemble at 2026-11-10T12:00:00Z
 //!
 //! Picked up as task 3.

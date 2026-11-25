@@ -200,7 +200,18 @@ fn add_task(tmp: &TempDir, id: &str, ticket: Ticket) {
     } else {
         ticket.title.clone()
     };
-    let made = board(tmp).add(&Ticket { title, ..ticket }).unwrap();
+    let definition_of_done = if ticket.definition_of_done.is_empty() {
+        "It is done.".to_string()
+    } else {
+        ticket.definition_of_done.clone()
+    };
+    let made = board(tmp)
+        .add(&Ticket {
+            title,
+            definition_of_done,
+            ..ticket
+        })
+        .unwrap();
     assert_eq!(made, id);
 }
 

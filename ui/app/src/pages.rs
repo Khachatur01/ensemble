@@ -190,7 +190,7 @@ fn task_more() -> Vec<String> {
 fn task_labels() -> Vec<(String, String)> {
     vec![
         label("task", "what to do"),
-        label("done_when", "done when"),
+        label("definition_of_done", "definition of done"),
         label("gate", "gate: a command its work must pass"),
         label("gate_timeout_seconds", "gate time limit, in seconds"),
         label("gate_attempts", "gate attempts"),

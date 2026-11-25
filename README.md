@@ -547,7 +547,7 @@ The tools are what the token may do:
 | `share` | keep something in the hub's vault, private or for the hub (needs `share`; see [Knowledge](#knowledge)) |
 | `recall` | the notes about a topic (needs `recall`) |
 | `runners` | your runners connected now, each with the harnesses and models it runs tasks on |
-| `submit` | make a task, kept on the hub; its id comes back at once. Its arguments are the ticket's, below in [Tasks](#tasks): `project`, `title`, `task`, and optionally `repository`, `goal`, `context`, `constraints`, `files`, `done_when`, `after`, `repo` and `gate` |
+| `submit` | make a task, kept on the hub; its id comes back at once. Its arguments are the ticket's, below in [Tasks](#tasks): `project`, `title`, `task`, `definition_of_done`, and optionally `repository`, `goal`, `context`, `constraints`, `files`, `after`, `repo` and `gate` |
 | `tasks` | a project's tasks: each one's ticket and state, `blocked` and who gave it back why among it |
 | `task` | one task: its ticket, state, questions and result |
 | `answer` | answer the question a task stopped to ask, so that it goes on |
@@ -735,13 +735,21 @@ An issue is a markdown file anyone can write:
 ---
 title: Fix the login redirect
 assignee: ana
-labels: [ensemble, ensemble:web/coder]
+labels: [ensemble]
 project: shop
 status: open
 ---
 After logging in, it redirects to /home instead of back to where you were.
+
+## Definition of done
+
+After logging in, you are back on the page you came from.
 ```
 
+- **What is done.** The issue's `## Definition of done` section, any heading
+  level, is the task's definition of done, and the rest of the text is the
+  task. An issue without one, or with an empty one, is blocked, saying so:
+  Ensemble does not make one up.
 - **Who is who.** An issue goes to the account whose tracker name is its
   assignee: the account's `tracker_user` when set (`PUT /api/v1/me`, an admin's
   `PUT /api/v1/users/{name}`, or `ensemble-hub user tracker ana ana.petrosyan`),
@@ -1107,7 +1115,7 @@ When it ends, everything it changed is committed on its branch
 The repository, or the task's `repo`, must be a git repository with at least
 one commit.
 
-A task's fields; only `project`, `title` and `task` are needed:
+A task's fields; only `project`, `title`, `task` and `definition_of_done` are needed:
 
 | field | |
 | --- | --- |
@@ -1115,17 +1123,17 @@ A task's fields; only `project`, `title` and `task` are needed:
 | `repository` | where the project lives: a git URL or path, such as `git@github.com:acme/shop.git`, that a runner with no copy clones it from. Without one, such a runner asks |
 | `title` | required. A short name; it makes the task's id (`0002-add-retry-to-the-fetcher`) |
 | `task` | required. What to do. The run cannot see your conversation, so it says everything needed |
+| `definition_of_done` | required. What must be true when it is done, in your words. The run is told to check its work against it; nothing runs it (that is what `gate` is for) |
 | `context` | background the run needs, sent with the task |
 | `goal` | the outcome wanted, in a sentence, as opposed to the steps |
 | `constraints` | what the run must not do or must keep |
 | `files` | where to look or work |
-| `done_when` | conditions that mean it is finished. The run is told to check its work against them; nothing runs them (that is what `gate` is for) |
 | `after` | ids of tasks that must end `done` first; each must exist already |
 | `repo` | a folder inside the repository to work in, such as one repository of several |
 | `gate` | a check its work must pass: `command`, a shell command (`sh -c`) run in the task's worktree, passing on exit status 0, its output (stdout and stderr together) what the next run is shown; `timeout_seconds`, how long it may run before it is stopped and counts as failed; `attempts`, how many runs the task gets in all, the first included, so `1` means no retry. `gate` (or `task.gate`) changes it, or takes it away, while the task neither runs nor has ended |
 
-The run is sent the text, then the goal, constraints, files and `done_when` as
-sections it can check its work against, then the task's notes. A task with
+The run is sent the text, then the goal, constraints and files, then the
+definition of done it checks its work against, then the task's notes. A task with
 `after` waits until every task it names has ended `done`. If one of them
 failed or was cancelled, it stays blocked until it is submitted again.
 

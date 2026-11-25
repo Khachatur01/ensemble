@@ -74,6 +74,11 @@ const CREATE: &[Field] = &[
     )
     .required(),
     Field::text(
+        "definition_of_done",
+        "What must be true when it is done: the run checks its work against it.",
+    )
+    .required(),
+    Field::text(
         "repository",
         "The URL or path its repository is cloned from.",
     ),
@@ -81,7 +86,6 @@ const CREATE: &[Field] = &[
     Field::text("goal", "Why it matters."),
     Field::new("constraints", Kind::List, "What the run must keep to."),
     Field::new("files", Kind::List, "The files it is about."),
-    Field::new("done_when", Kind::List, "How the run knows it is done."),
     Field::new("after", Kind::List, "The ids of the tasks it waits for."),
     GATE_COMMAND,
     GATE_TIMEOUT,
@@ -128,6 +132,7 @@ struct Create {
     project: String,
     title: String,
     task: String,
+    definition_of_done: String,
     repository: Option<String>,
     context: Option<String>,
     goal: Option<String>,
@@ -135,8 +140,6 @@ struct Create {
     constraints: Vec<String>,
     #[serde(default)]
     files: Vec<String>,
-    #[serde(default)]
-    done_when: Vec<String>,
     #[serde(default)]
     after: Vec<String>,
     gate: Option<String>,
@@ -259,12 +262,12 @@ pub(crate) fn operations() -> Vec<Operation<HubContext>> {
                     "project": input.project,
                     "title": input.title,
                     "task": input.task,
+                    "definition_of_done": input.definition_of_done,
                     "repository": input.repository,
                     "context": input.context,
                     "goal": input.goal,
                     "constraints": input.constraints,
                     "files": input.files,
-                    "done_when": input.done_when,
                     "after": input.after,
                     "gate": gate,
                 });

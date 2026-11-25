@@ -288,7 +288,19 @@ impl ServerInbox {
         };
         d.account = account.clone();
         d.project = project.to_string();
-        let mut ticket = work::ticket_for(issue);
+        let Some(mut ticket) = work::ticket_for(issue) else {
+            self.say(
+                issue,
+                &format!(
+                    "Ensemble cannot take this issue: it has no `## {}` section saying what must be true when its work is done. Add one, then set the status back to open.",
+                    work::DEFINITION_OF_DONE
+                ),
+                Status::Blocked,
+                &mut d,
+            )?;
+            said.push(format!("issue {}: no definition of done", issue.id));
+            return Ok(d);
+        };
         ticket.notes = self
             .notes
             .as_ref()
@@ -451,7 +463,7 @@ mod tests {
         fn issue(&self, id: &str, assignee: &str, project: &str) {
             std::fs::write(
                 self.tmp.0.join("issues").join(format!("{id}.md")),
-                format!("---\ntitle: Fix the login redirect\nassignee: {assignee}\nlabels: [ensemble]\nproject: {project}\nstatus: open\n---\nIt redirects to /home.\n"),
+                format!("---\ntitle: Fix the login redirect\nassignee: {assignee}\nlabels: [ensemble]\nproject: {project}\nstatus: open\n---\nIt redirects to /home.\n\n## Definition of done\n\nIt redirects to the page it came from.\n"),
             )
             .unwrap();
         }
@@ -577,11 +589,17 @@ mod tests {
     }
 
     #[test]
-    fn nobody_or_no_project_is_said_once_and_a_closed_issue_cancels_its_task() {
+    fn nobody_no_project_or_no_definition_of_done_is_said_once_and_a_closed_issue_cancels_its_task()
+    {
         let w = world();
         w.issue("1", "someone.else", "shop");
         w.issue("2", "rex", "shop");
         w.issue("3", "ana.p", "a/b");
+        std::fs::write(
+            w.tmp.0.join("issues").join("5.md"),
+            "---\ntitle: Tidy\nassignee: ana.p\nlabels: [ensemble]\nproject: shop\nstatus: open\n---\nTidy it.\n",
+        )
+        .unwrap();
         w.inbox.pass().unwrap();
         assert_eq!(w.status("1"), Status::Blocked);
         assert!(
@@ -590,6 +608,11 @@ mod tests {
         );
         assert_eq!(w.status("2"), Status::Blocked, "rex may not receive tasks");
         assert!(w.last_comment("3").contains("names no project"));
+        assert_eq!(w.status("5"), Status::Blocked);
+        assert!(
+            w.last_comment("5")
+                .contains("no `## Definition of done` section")
+        );
         assert!(w.inbox.pass().unwrap().is_empty(), "said once");
         assert!(w.board().list().unwrap().is_empty());
 
@@ -630,7 +653,7 @@ mod tests {
         w.issue("1", "ana.p", "shop");
         std::fs::write(
             w.tmp.0.join("work").join("1.md"),
-            "---\ntitle: Add a page\nassignee: ana.p\nlabels: [ensemble]\nproject: shop\nstatus: open\n---\nAbout us.\n",
+            "---\ntitle: Add a page\nassignee: ana.p\nlabels: [ensemble]\nproject: shop\nstatus: open\n---\nAbout us.\n\n## Definition of done\n\nThe page is there.\n",
         )
         .unwrap();
         w.inbox.pass().unwrap();

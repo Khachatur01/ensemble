@@ -417,10 +417,10 @@ pub(crate) fn ticket(args: &Value, what: &str) -> Result<Value, String> {
             .map(str::trim)
             .unwrap_or("")
     };
-    let (title, task) = (text("title"), text("task"));
-    if title.is_empty() || task.is_empty() || text("project").is_empty() {
+    let (title, task, done) = (text("title"), text("task"), text("definition_of_done"));
+    if title.is_empty() || task.is_empty() || done.is_empty() || text("project").is_empty() {
         return Err(format!(
-            "{what}: `project`, `title` and `task` are required"
+            "{what}: `project`, `title`, `task` and `definition_of_done` are required"
         ));
     }
     if title.contains('\n') {
@@ -428,7 +428,7 @@ pub(crate) fn ticket(args: &Value, what: &str) -> Result<Value, String> {
     }
     let optional = |key: &str| Some(text(key)).filter(|t| !t.is_empty());
     let mut lists = Map::new();
-    for key in ["constraints", "files", "done_when", "after"] {
+    for key in ["constraints", "files", "after"] {
         let list = match args.get(key) {
             None | Some(Value::Null) => Vec::new(),
             Some(Value::Array(items)) => items
@@ -448,6 +448,7 @@ pub(crate) fn ticket(args: &Value, what: &str) -> Result<Value, String> {
     let mut ticket = json!({
         "id": "",
         "title": title,
+        "definition_of_done": done,
         "context": optional("context"),
         "goal": optional("goal"),
         "repository": repository,
@@ -533,17 +534,17 @@ fn task_tools() -> Vec<Value> {
                 "project": project,
                 "title": { "type": "string", "description": "The task in a few words, one line." },
                 "task": { "type": "string", "description": "What to do, self-contained: the run cannot see this conversation." },
+                "definition_of_done": { "type": "string", "description": "What must be true when it is done, which the run checks its work against, such as `the cart keeps its items across a reload; cargo test passes`." },
                 "goal": { "type": "string", "description": "The outcome wanted, in a sentence." },
                 "context": { "type": "string", "description": "Background the run needs." },
                 "constraints": list("What the run must not do or change."),
                 "files": list("Where the work is."),
-                "done_when": list("How to tell it is done, such as `cargo test passes`."),
                 "after": list("Ids of tasks that must be done first."),
                 "repository": { "type": "string", "description": "Where the project lives: the git URL or path a runner clones it from when it has no copy, such as `git@github.com:acme/shop.git`." },
                 "repo": { "type": "string", "description": "A folder inside the project, when it holds several repositories." },
                 "gate": gate.clone(),
             }),
-            &["project", "title", "task"],
+            &["project", "title", "task", "definition_of_done"],
         ),
         tool(
             LIST,
@@ -838,14 +839,17 @@ mod tests {
             "submit",
             json!({"project": "shop", "title": "Fix"}),
         );
-        assert!(failed && text.contains("`task` are required"), "{text}");
+        assert!(
+            failed && text.contains("`definition_of_done` are required"),
+            "{text}"
+        );
         let (text, failed) = tool(
             &hub,
             &hub.ana,
             "submit",
             json!({
-                "project": "shop", "title": "Fix the cart", "task": "The cart loses items.",
-                "done_when": ["cargo test passes"],
+                "project": "shop", "title": "Fix the cart", "task": "The cart loses items.", "definition_of_done": "It is done.",
+                "definition_of_done": "cargo test passes",
             }),
         );
         assert!(!failed, "{text}");
@@ -855,7 +859,7 @@ mod tests {
         assert_eq!(params["project"], "shop");
         let ticket = &params["ticket"];
         assert_eq!(ticket["text"], "The cart loses items.");
-        assert_eq!(ticket["done_when"], json!(["cargo test passes"]));
+        assert_eq!(ticket["definition_of_done"], "cargo test passes");
         assert_eq!(ticket["constraints"], json!([]));
         assert_eq!(ticket["goal"], Value::Null);
         assert_eq!(ticket["gate"], Value::Null);
@@ -867,7 +871,7 @@ mod tests {
             &hub.ana,
             "submit",
             json!({
-                "project": "shop", "title": "Fix the cart", "task": "The cart loses items.",
+                "project": "shop", "title": "Fix the cart", "task": "The cart loses items.", "definition_of_done": "It is done.",
                 "repository": "git@example.com:acme/shop.git",
                 "gate": {"command": "cargo test", "timeout_seconds": 600, "attempts": 3},
                 "notes": "mine",
@@ -893,7 +897,7 @@ mod tests {
                 &hub,
                 &hub.ana,
                 "submit",
-                json!({"project": "shop", "title": "Fix", "task": "t", "gate": gate}),
+                json!({"project": "shop", "title": "Fix", "task": "t", "definition_of_done": "It is done.", "gate": gate}),
             );
             assert!(failed && text.contains(said), "{gate}: {text}");
         }
@@ -901,7 +905,7 @@ mod tests {
             &hub,
             &hub.ana,
             "submit",
-            json!({"project": "shop", "title": "Fix", "task": "t", "repository": "--upload-pack=x"}),
+            json!({"project": "shop", "title": "Fix", "task": "t", "definition_of_done": "It is done.", "repository": "--upload-pack=x"}),
         );
         assert!(failed && text.contains("not a git URL"), "{text}");
         assert_eq!(
