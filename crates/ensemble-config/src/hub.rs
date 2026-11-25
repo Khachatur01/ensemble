@@ -13,6 +13,7 @@
 //! holds them.
 
 use super::ann::{AnnPoolSetting, Use, check_model};
+use super::picker::TaskPickerSetting;
 use super::*;
 use ensemble_core::state::HubDir;
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,9 @@ pub struct Hub {
     pub llm: AnnPool,
     pub accounts: Accounts,
     pub connectors: Connectors,
+    /// Who works on each task, as the decision models choose; none: no task
+    /// is given to a runner.
+    pub task_picker: Option<TaskPickerSetting>,
     /// Where it was loaded from, for error messages.
     pub source: PathBuf,
 }
@@ -218,6 +222,9 @@ pub struct HubSettings {
     pub trackers: BTreeMap<String, TrackerSetting>,
     /// None: no source may be connected.
     pub source_filter: Option<SourceFilterSetting>,
+    /// The decision models that choose who works on each task, and what they
+    /// are asked. None: the hub gives no task to a runner.
+    pub task_picker: Option<TaskPickerSetting>,
 }
 
 /// How people join, as kept.
@@ -321,6 +328,7 @@ impl HubSettings {
             recall_max_chars: 6000,
             trackers: BTreeMap::new(),
             source_filter: None,
+            task_picker: None,
         }
     }
 
@@ -468,6 +476,9 @@ impl HubSettings {
                 }
             }),
         };
+        if let Some(picker) = &self.task_picker {
+            picker.check(&self.ann_pool.known(), &mut problems);
+        }
         match problems.is_empty() {
             true => Ok(Hub {
                 owner: self.owner.trim().to_string(),
@@ -478,6 +489,7 @@ impl HubSettings {
                     tasks,
                     sources,
                 },
+                task_picker: self.task_picker.clone(),
                 source: source.to_path_buf(),
             }),
             _ => Err(ConfigError::Invalid {

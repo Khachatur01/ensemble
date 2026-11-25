@@ -914,7 +914,7 @@ const IMPORT_SPEC: Spec = Spec {
 
 /// Make `edit` to the hub's settings and keep them with `change`, once they
 /// load; say `said`, and what the running hub did with them.
-fn edit(
+pub(crate) fn edit(
     c: &HubContext,
     change: Change,
     said: String,
@@ -988,7 +988,7 @@ fn import(c: &HubContext, text: &str, change: Change) -> Result<Value, Error> {
 /// `given`, `<provider>:<model>`, as a model of the hub's ANN pool that is on
 /// and of `use_`, and, unless not asked to check, one its provider serves now;
 /// a model of a runner only the running hub reaches.
-fn model_of<'g>(
+pub(crate) fn model_of<'g>(
     c: &HubContext,
     given: &'g str,
     field: &str,
@@ -1009,11 +1009,13 @@ fn model_of<'g>(
     let fits = match use_ {
         Use::Llm => found.usable_llm(),
         Use::Embedding => found.usable_embedding(),
+        Use::Decision => found.usable_decision(),
     };
     if !fits {
         let wanted = match use_ {
             Use::Llm => "an LLM",
             Use::Embedding => "an embedding model",
+            Use::Decision => "a decision model",
         };
         return Err(Error::invalid(format!(
             "{provider}:{model} is not {wanted}: it is {}",

@@ -20,7 +20,15 @@ pub type Catalog = Resource<Result<Value, Failure>>;
 
 /// Fields whose text may run to lines.
 const LONG: &[&str] = &[
-    "task", "text", "context", "goal", "body", "prompt", "settings",
+    "task",
+    "text",
+    "context",
+    "goal",
+    "body",
+    "prompt",
+    "settings",
+    "instructions",
+    "answers",
 ];
 
 /// Fields seldom needed, folded away on every form.

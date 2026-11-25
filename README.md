@@ -1250,6 +1250,11 @@ $ ensemble-hub role set auditor recall,share                              # role
 $ ensemble-hub registration set approval --max-pending 20                 # or closed
 $ ensemble-hub source filter central:qwen3.5-72b --prompt "Salaries; clients' names."  # or --off
 $ ensemble-hub source try "Bob: deploys go out on Tuesdays now"
+$ ensemble-hub picker set laya:laya --min-confidence 0.6      # the task picker; picker show, or --off
+$ ensemble-hub picker template basic                         # how hard, and whether it runs tools
+$ ensemble-hub picker question kind --type choice --instructions "What does the task change?" \
+    --min-confidence 0.5 --answers $'code: It changes the code.\ndocs: The documentation alone.' \
+    --effects code:min_tier=medium,docs:prefer=opencode       # picker remove-question
 $ ensemble-runner provider add local --type openai-compatible-api --url http://127.0.0.1:11434/v1 --max-concurrent 1
 $ ensemble-runner model share local:qwen3.5:9b      # model unshare
 $ ensemble-runner harness add builtin --max-seconds 1800 --max-steps 50 --max-concurrent 1 --max-tokens 4000   # harness remove | set | refresh | add-model | remove-model
@@ -1269,6 +1274,17 @@ $ ensemble-runner harness add builtin --max-seconds 1800 --max-steps 50 --max-co
   answers it as a service, and so sees what it is asked. What such a provider
   serves are decision models, and `provider test` asks one a yes or no. A
   runner keeps none: the hub decides.
+- **The task picker is the hub's, one for the hub.** `picker set` names the
+  decision models of the hub's pool asked, in order, the next when one fails,
+  and the least probability the worker chosen must have. `picker question`
+  adds a question they are asked of each task first: a `choice`, a `score`
+  (its answers lowest first) or a `noul` (yes or no), each answer `name: what
+  it means`, its least confidence, and what each answer means for the worker,
+  from a fixed list: `min_tier=<small|medium|strong>`, `min_context=<tokens>`,
+  `needs_tools`, `prefer=<harness or model>`, `avoid=<harness or model>`.
+  `picker template basic` replaces the questions with a start to change; no
+  template is ever used unless chosen. A decision model the picker uses is not
+  removed.
 - **Nothing is in the pool until it is added.** `provider models` lists what
   a provider serves now, and keeps none of it; `model add` adds one, once the
   provider lists it. What it is, an LLM or an embedding model, is what Ollama

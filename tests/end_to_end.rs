@@ -2748,6 +2748,93 @@ fn an_admin_adds_providers_and_their_keys_without_naming_a_variable_and_adds_mod
     let tested = stdout_of(&hub_with_stdin(&s, &["provider", "test", "laya"], ""));
     assert!(tested.contains("laya: answers, serves laya"), "{tested}");
 
+    // The task picker: decision models alone, how sure of the worker they
+    // must be, and the questions they are asked first.
+    let shown = stdout_of(&hub_with_stdin(&s, &["picker", "show"], ""));
+    assert!(shown.contains("There is no task picker"), "{shown}");
+    let out = hub_with_stdin(&s, &["picker", "set", "central:qwen3.5-72b"], "");
+    assert!(
+        stderr_of(&out).contains("is not a decision model"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = hub_with_stdin(&s, &["picker", "set", "laya:laya"], "");
+    assert!(
+        stderr_of(&out).contains("how sure of the worker"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = hub_with_stdin(
+        &s,
+        &["picker", "set", "laya:laya", "--min-confidence", "0.6"],
+        "",
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let out = hub_with_stdin(&s, &["picker", "template", "basic"], "");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let out = hub_with_stdin(
+        &s,
+        &[
+            "picker",
+            "question",
+            "kind",
+            "--type",
+            "choice",
+            "--instructions",
+            "What does the task change?",
+            "--min-confidence",
+            "0.5",
+            "--answers",
+            "code: It changes the code.\ndocs: It changes the documentation alone.",
+            "--effects",
+            "code:min_tier=medium,docs:prefer=opencode,docs:avoid=claude-code",
+        ],
+        "",
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let out = hub_with_stdin(
+        &s,
+        &[
+            "picker",
+            "question",
+            "kind2",
+            "--type",
+            "choice",
+            "--instructions",
+            "?",
+            "--min-confidence",
+            "1.5",
+        ],
+        "",
+    );
+    assert!(
+        stderr_of(&out).contains("must be from 0 to 1"),
+        "{}",
+        stderr_of(&out)
+    );
+    let shown = stdout_of(&hub_with_stdin(&s, &["picker", "show"], ""));
+    assert!(
+        shown.contains("Decision models, in order: laya:laya")
+            && shown.contains("difficulty (score")
+            && shown.contains("hard: ")
+            && shown.contains("=> min_tier=strong")
+            && shown.contains(
+                "docs: It changes the documentation alone.  => prefer=opencode, avoid=claude-code"
+            ),
+        "{shown}"
+    );
+    let picker = &yaml()["task_picker"];
+    assert_eq!(picker["worker_min_confidence"], json!(0.6));
+    assert_eq!(picker["questions"].as_array().unwrap().len(), 3);
+    let out = hub_with_stdin(&s, &["picker", "remove-question", "tools"], "");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(
+        yaml()["task_picker"]["questions"].as_array().unwrap().len(),
+        2
+    );
+    let out = hub_with_stdin(&s, &["model", "remove", "laya:laya"], "");
+    assert!(!out.status.success(), "the task picker uses it");
+
     // A provider something uses stays; another goes, with its models and the
     // key kept for it.
     let out = hub_with_stdin(&s, &["provider", "remove", "central"], "");

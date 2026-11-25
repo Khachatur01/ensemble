@@ -463,6 +463,7 @@ pub(crate) fn pool(
 pub enum Use {
     Llm,
     Embedding,
+    Decision,
 }
 
 /// What a pool is checked against: each provider's name, and the models.
@@ -516,11 +517,13 @@ pub(crate) fn check_model(
     let fits = match use_ {
         Use::Llm => model.usable_llm(),
         Use::Embedding => model.usable_embedding(),
+        Use::Decision => model.usable_decision(),
     };
     if !fits {
         let wanted = match use_ {
             Use::Llm => "an LLM",
             Use::Embedding => "an embedding model",
+            Use::Decision => "a decision model",
         };
         problems.push(format!(
             "{at}: {name} is not {wanted}: it is {}",

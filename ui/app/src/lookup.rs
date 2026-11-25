@@ -75,9 +75,10 @@ pub fn pool_models(asked: &Asked, kind: &str) -> Vec<(String, String)> {
             .filter(|m| m["type"] == kind)
             .filter_map(|m| {
                 let name = m["name"].as_str()?.to_string();
-                let about = match m["tier"].as_str() {
-                    Some(tier) => format!("{tier} LLM"),
-                    None => "embedding model".to_string(),
+                let about = match (m["tier"].as_str(), kind) {
+                    (Some(tier), _) => format!("{tier} LLM"),
+                    (None, "decision") => "decision model".to_string(),
+                    (None, _) => "embedding model".to_string(),
                 };
                 Some((name, about))
             })

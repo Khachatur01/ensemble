@@ -1505,9 +1505,10 @@ crate holds it today.
     abilities description a person writes on each LLM of a pool and each
     model of Claude Code's and Codex's; the runners telling the hub their
     workers, what each model is and its abilities, and how busy each harness
-    and provider is, link protocol 13. Not yet: `task_picker` in the hub's settings,
+    and provider is, link protocol 13; `task_picker` in the hub's settings,
     its decision models to try, its questions, what each answer does and
-    how sure it must be; the hub choosing, a task waiting for a person to
+    how sure it must be, and a starting template (`picker set`, `picker
+    question`, `picker template`, the web UI's Task picker). Not yet: the hub choosing, a task waiting for a person to
     choose when it is not sure, and the rules on the runner gone; a task
     that only needs an answer run on a model alone; learning from what
     people chose.)

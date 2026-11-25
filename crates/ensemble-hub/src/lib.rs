@@ -45,6 +45,7 @@ mod openapi;
 mod runners;
 mod served;
 pub mod server;
+mod task_picker;
 pub mod users;
 
 use accounts::HubContext;

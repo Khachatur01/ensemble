@@ -1,6 +1,6 @@
 //! The hub's settings, a section each, with what each is now: the hub and
 //! its logins and sign-ups, the roles, the ANN pool (its providers and their
-//! models), the models of the knowledge vault, the source filter, the trackers, and who changed what.
+//! models), the models of the knowledge vault, the source filter, the trackers, the task picker, and who changed what.
 //! Each change is an operation's form, filled in with the setting as it is.
 //! An operation of the settings no section shows has a page of its own, so a
 //! new one is reached before a section shows it.
@@ -21,6 +21,7 @@ const SECTIONS: &[(&str, &str)] = &[
     ("knowledge", "Knowledge"),
     ("sources", "Sources"),
     ("trackers", "Trackers"),
+    ("picker", "Task picker"),
     ("history", "History"),
     ("other", "Other operations"),
 ];
@@ -59,6 +60,11 @@ const SHOWN: &[&str] = &[
     "tracker.list",
     "tracker.add",
     "tracker.remove",
+    "picker.show",
+    "picker.set",
+    "picker.question",
+    "picker.remove-question",
+    "picker.template",
 ];
 
 /// The groups of operations that are settings.
@@ -72,6 +78,7 @@ const GROUPS: &[&str] = &[
     "provider",
     "source",
     "tracker",
+    "picker",
 ];
 
 /// The hub's settings, as `settings.show` says, for every section: a type of
@@ -117,6 +124,7 @@ pub fn SettingsPage(section: String) -> Element {
                     "knowledge" => rsx! { KnowledgeModels {} },
                     "sources" => rsx! { Sources {} },
                     "trackers" => rsx! { Trackers {} },
+                    "picker" => rsx! { Picker {} },
                     "history" => rsx! { History {} },
                     "other" => rsx! { Other {} },
                     _ => rsx! { p { "There is no such section." } },
@@ -935,6 +943,200 @@ fn Trackers() -> Element {
                 submit: "Add the tracker",
                 clear: true,
                 on_done: move |_| changed(),
+            }
+        }
+    }
+}
+
+/// The kinds of question, as a person reads them.
+const QUESTION_TYPES: &[(&str, &str)] = &[
+    ("choice", "One of its answers"),
+    ("score", "One of its answers, ordered lowest first"),
+    ("noul", "Yes or no"),
+];
+
+/// The starting templates, as a person reads them.
+const TEMPLATES: &[(&str, &str)] = &[(
+    "basic",
+    "How hard the task is, and whether it needs to run tools",
+)];
+
+/// A question's answers as `picker.question` takes them: one per line,
+/// `name: what it means`; none for a noul.
+fn answer_lines(q: &Value) -> String {
+    if text(q, "type") == "noul" {
+        return String::new();
+    }
+    q["answers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|a| format!("{}: {}", text(a, "name"), text(a, "description")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// An effect as it is written: `min_tier=strong`, `needs_tools`.
+fn effect(e: &Value) -> String {
+    match text(e, "type").as_str() {
+        "min_tier" => format!("min_tier={}", text(e, "tier")),
+        "min_context" => format!("min_context={}", text(e, "tokens")),
+        "prefer" | "avoid" => format!("{}={}", text(e, "type"), text(e, "name")),
+        other => other.to_string(),
+    }
+}
+
+/// A question's effects as `picker.question` takes them: `answer:effect`.
+fn effect_lines(q: &Value) -> String {
+    q["answers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|a| {
+            let name = text(a, "name");
+            a["effects"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(move |e| format!("{name}:{}", effect(&e)))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[component]
+fn Picker() -> Element {
+    let (mut shown, now) = settings();
+    let pool = use_op("model.list");
+    let Some(now) = now else {
+        return waiting(&shown);
+    };
+    let decision = lookup::pool_models(&pool, "decision");
+    let picker = now["task_picker"].clone();
+    let questions = picker["questions"].as_array().cloned().unwrap_or_default();
+    rsx! {
+        p { class: "muted",
+            "A decision model chooses who works on each task: which runner, harness and model, from what the task says and what each model is good at. Without one, the hub gives no task to a runner. The hub sends each task's title, text and definition of done to the decision model's provider."
+        }
+        section { class: "panel",
+            h3 { "Decision models" }
+            OpForm {
+                op: "picker.set",
+                values: vec![
+                    value("off", picker.is_null()),
+                    value("models", model_lines(&picker["decision_models"])),
+                    value("min_confidence", text(&picker, "worker_min_confidence")),
+                ],
+                picks: vec![Pick { field: "models".into(), options: decision.clone(), strict: false }],
+                when: vec![When::new("models", "off", &[""]), When::new("min_confidence", "off", &[""])],
+                labels: vec![
+                    label("off", "no task picker: no task is given to a runner"),
+                    label("models", "decision models, tried in order"),
+                    label("min_confidence", "least probability of the worker chosen, 0 to 1"),
+                ],
+                submit: "Save",
+                saved: true,
+                on_done: move |_| shown.restart(),
+            }
+        }
+        if !picker.is_null() {
+            section { class: "panel",
+                h3 { "Questions" }
+                p { class: "muted",
+                    "Asked of each task before its worker is chosen. Each answer may narrow the workers: the least tier or context of the model, tool calls, a harness or model preferred or avoided. An answer less likely than its question's least confidence leaves the choice to a person."
+                }
+                if questions.is_empty() {
+                    p { class: "muted", "No question: the worker is chosen from the task alone." }
+                } else {
+                    table {
+                        thead { tr { th { "Name" } th { "Question" } th { "Answers" } th { "Least confidence" } th {} } }
+                        tbody {
+                            for q in questions {
+                                tr { key: "{text(&q, \"name\")}",
+                                    td { strong { "{text(&q, \"name\")}" } div { class: "muted small", "{text(&q, \"type\")}" } }
+                                    td { "{text(&q, \"instructions\")}" }
+                                    td {
+                                        ul { class: "list",
+                                            for a in q["answers"].as_array().cloned().unwrap_or_default() {
+                                                li { key: "{text(&a, \"name\")}",
+                                                    strong { "{text(&a, \"name\")}" }
+                                                    if !text(&a, "description").is_empty() {
+                                                        " {text(&a, \"description\")}"
+                                                    }
+                                                    for e in a["effects"].as_array().cloned().unwrap_or_default() {
+                                                        " "
+                                                        code { "{effect(&e)}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    td { "{text(&q, \"min_confidence\")}" }
+                                    td { class: "end",
+                                        OpForm {
+                                            op: "picker.remove-question",
+                                            fixed: vec![("name".to_string(), json!(text(&q, "name")))],
+                                            submit: "Remove",
+                                            danger: true,
+                                            confirm: "Stop asking {text(&q, \"name\")}?",
+                                            quiet: true,
+                                            on_done: move |_| shown.restart(),
+                                        }
+                                        details {
+                                            summary { "Change" }
+                                            OpForm {
+                                                op: "picker.question",
+                                                values: vec![
+                                                    value("name", text(&q, "name")),
+                                                    value("type", text(&q, "type")),
+                                                    value("instructions", text(&q, "instructions")),
+                                                    value("min_confidence", text(&q, "min_confidence")),
+                                                    value("answers", answer_lines(&q)),
+                                                    value("effects", effect_lines(&q)),
+                                                ],
+                                                picks: vec![Pick::named("type", QUESTION_TYPES)],
+                                                when: vec![When::new("answers", "type", &["choice", "score"])],
+                                                submit: "Save",
+                                                saved: true,
+                                                on_done: move |_| shown.restart(),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            section { class: "panel",
+                h3 { "Add a question" }
+                OpForm {
+                    op: "picker.question",
+                    values: vec![value("type", "choice")],
+                    picks: vec![Pick::named("type", QUESTION_TYPES)],
+                    when: vec![When::new("answers", "type", &["choice", "score"])],
+                    labels: vec![
+                        label("instructions", "question"),
+                        label("min_confidence", "least probability of its answer, 0 to 1"),
+                        label("answers", "answers, one per line: name: what it means"),
+                        label("effects", "effects, each answer:effect, such as hard:min_tier=strong"),
+                    ],
+                    submit: "Add the question",
+                    clear: true,
+                    on_done: move |_| shown.restart(),
+                }
+            }
+            section { class: "panel",
+                h3 { "Start from a template" }
+                OpForm {
+                    op: "picker.template",
+                    values: vec![value("name", "basic")],
+                    picks: vec![Pick::named("name", TEMPLATES)],
+                    submit: "Use the template",
+                    confirm: "Replace every question with the template's?",
+                    on_done: move |_| shown.restart(),
+                }
             }
         }
     }

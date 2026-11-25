@@ -10,8 +10,8 @@
 
 use ensemble_config::kept::{Change, Keep};
 use ensemble_config::{
-    EmbedSetting, Hub, HubSettings, ModelSetting, ModelsSetting, Permission, RegistrationSetting,
-    SourceFilterSetting, TrackerSetting, WhenNone,
+    EmbedSetting, Hub, HubSettings, ModelSetting, ModelsSetting, Permission, PickerQuestion,
+    RegistrationSetting, SourceFilterSetting, TaskPickerSetting, TrackerSetting, WhenNone,
 };
 use ensemble_core::state::HubDir;
 use ensemble_store::kept::{
@@ -72,7 +72,8 @@ CREATE TABLE IF NOT EXISTS hub_settings (
     embed_min_similarity REAL,
     filter_when_none TEXT,
     filter_max_tokens INTEGER,
-    filter_prompt TEXT
+    filter_prompt TEXT,
+    picker_min_confidence REAL
 );
 CREATE TABLE IF NOT EXISTS roles (
     name TEXT PRIMARY KEY,
@@ -84,6 +85,14 @@ CREATE TABLE IF NOT EXISTS models (
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
     PRIMARY KEY (purpose, position)
+);
+CREATE TABLE IF NOT EXISTS picker_questions (
+    position INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL,
+    instructions TEXT NOT NULL,
+    min_confidence REAL NOT NULL,
+    answers TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS trackers (
     name TEXT PRIMARY KEY,
@@ -97,6 +106,8 @@ CREATE TABLE IF NOT EXISTS trackers (
 /// What the distiller's models are kept as, and the source filter's.
 const DISTILL: &str = "distill";
 const FILTER: &str = "source_filter";
+/// What the task picker's decision models are kept as.
+const PICKER: &str = "task_picker";
 
 /// Open the database of the hub's core in `dir`, with its tables, and run
 /// `work` on it: its settings, its accounts and their tokens, and what a
@@ -142,6 +153,15 @@ pub fn load(dir: &HubDir) -> Result<Hub, String> {
     settings.resolve(dir, &env).map_err(|e| e.to_string())
 }
 
+/// A number kept as a real, or a whole one.
+fn real(value: &Value, what: &str) -> Result<f64, String> {
+    match value {
+        Value::Real(x) => Ok(*x),
+        Value::Integer(n) => Ok(*n as f64),
+        _ => Err(format!("{what}: is not a number")),
+    }
+}
+
 /// The settings of the hub in a folder, in its database.
 pub struct HubStore {
     dir: PathBuf,
@@ -160,7 +180,7 @@ impl Keep<HubSettings> for HubStore {
         core(&self.dir, async |c| {
             let found = rows(
                 c,
-                "SELECT owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_provider, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt FROM hub_settings WHERE id = 1",
+                "SELECT owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_provider, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt, picker_min_confidence FROM hub_settings WHERE id = 1",
                 vec![],
             )
             .await?;
@@ -225,11 +245,7 @@ impl Keep<HubSettings> for HubStore {
                 Some(provider) => Some(EmbedSetting {
                     provider,
                     model: some_text(&r[11], "embed.model")?,
-                    min_similarity: match &r[12] {
-                        Value::Real(x) => *x,
-                        Value::Integer(n) => *n as f64,
-                        _ => return Err("embed.min_similarity: is not a number".into()),
-                    },
+                    min_similarity: real(&r[12], "embed.min_similarity")?,
                 }),
                 None => None,
             };
@@ -243,6 +259,35 @@ impl Keep<HubSettings> for HubStore {
                     prompt: some_text(&r[15], "source_filter.prompt")?,
                 }),
                 None => None,
+            };
+            let task_picker = match &r[16] {
+                Value::Null => None,
+                min => {
+                    let mut questions = Vec::new();
+                    for q in rows(
+                        c,
+                        "SELECT name, type, instructions, min_confidence, answers FROM picker_questions ORDER BY position",
+                        vec![],
+                    )
+                    .await?
+                    {
+                        let name = some_text(&q[0], "picker_questions.name")?;
+                        let at = format!("task_picker.questions.{name}");
+                        questions.push(PickerQuestion {
+                            kind: named(&q[1], &at)?,
+                            instructions: some_text(&q[2], &at)?,
+                            min_confidence: real(&q[3], &at)?,
+                            answers: serde_json::from_str(&some_text(&q[4], &at)?)
+                                .map_err(|e| format!("{at}.answers: {e}"))?,
+                            name,
+                        });
+                    }
+                    Some(TaskPickerSetting {
+                        decision_models: models.remove(PICKER).unwrap_or_default(),
+                        worker_min_confidence: real(min, "task_picker.worker_min_confidence")?,
+                        questions,
+                    })
+                }
             };
             Ok(Some(HubSettings {
                 owner: some_text(&r[0], "owner")?,
@@ -262,6 +307,7 @@ impl Keep<HubSettings> for HubStore {
                 recall_max_chars: num(&r[9], "recall_max_chars")?,
                 trackers,
                 source_filter,
+                task_picker,
             }))
         })
     }
@@ -290,7 +336,7 @@ impl Keep<HubSettings> for HubStore {
         let mut statements = vec![
             ("DELETE FROM hub_settings", vec![]),
             (
-                "INSERT INTO hub_settings (id, owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_provider, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                "INSERT INTO hub_settings (id, owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_provider, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt, picker_min_confidence) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 vec![
                     txt(&s.owner),
                     txt(registration),
@@ -308,11 +354,15 @@ impl Keep<HubSettings> for HubStore {
                     filter_when_none,
                     filter_max_tokens,
                     filter_prompt,
+                    s.task_picker
+                        .as_ref()
+                        .map_or(Value::Null, |p| Value::Real(p.worker_min_confidence)),
                 ],
             ),
             ("DELETE FROM roles", vec![]),
             ("DELETE FROM models", vec![]),
             ("DELETE FROM trackers", vec![]),
+            ("DELETE FROM picker_questions", vec![]),
         ];
         for (name, permissions) in &s.roles {
             let permissions = serde_json::to_string(permissions).map_err(|e| e.to_string())?;
@@ -321,9 +371,14 @@ impl Keep<HubSettings> for HubStore {
                 vec![txt(name), txt(&permissions)],
             ));
         }
-        let filter = s.source_filter.iter().map(|f| (FILTER, &f.models));
-        for (purpose, models) in std::iter::once((DISTILL, &s.distill)).chain(filter) {
-            for (i, m) in models.candidates.iter().enumerate() {
+        let filter = s
+            .source_filter
+            .iter()
+            .map(|f| (FILTER, &f.models.candidates));
+        let picker = s.task_picker.iter().map(|p| (PICKER, &p.decision_models));
+        let distill = std::iter::once((DISTILL, &s.distill.candidates));
+        for (purpose, models) in distill.chain(filter).chain(picker) {
+            for (i, m) in models.iter().enumerate() {
                 statements.push((
                     "INSERT INTO models (purpose, position, provider, model) VALUES (?1, ?2, ?3, ?4)",
                     vec![txt(purpose), int(i as i64), txt(&m.provider), txt(&m.model)],
@@ -344,6 +399,21 @@ impl Keep<HubSettings> for HubStore {
                     txt(dir),
                     txt(label),
                     int(*poll_seconds),
+                ],
+            ));
+        }
+        let questions = s.task_picker.iter().flat_map(|p| &p.questions);
+        for (i, q) in questions.enumerate() {
+            let answers = serde_json::to_string(&q.answers).map_err(|e| e.to_string())?;
+            statements.push((
+                "INSERT INTO picker_questions (position, name, type, instructions, min_confidence, answers) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                vec![
+                    int(i as i64),
+                    txt(&q.name),
+                    txt(q.kind.as_str()),
+                    txt(&q.instructions),
+                    Value::Real(q.min_confidence),
+                    txt(&answers),
                 ],
             ));
         }
@@ -428,6 +498,11 @@ mod tests {
                 max_tokens: 200,
             },
             prompt: "Salaries.".into(),
+        });
+        hub.task_picker = Some(TaskPickerSetting {
+            decision_models: vec![model("claude", "laya"), model("local", "jev")],
+            worker_min_confidence: 0.55,
+            questions: ensemble_config::picker::template("basic").unwrap(),
         });
         hub.trackers.insert(
             "issues".into(),

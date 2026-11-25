@@ -204,6 +204,7 @@ mod env;
 mod harness;
 pub mod hub;
 pub mod kept;
+pub mod picker;
 pub mod runner;
 
 pub use ann::{
@@ -218,6 +219,7 @@ pub use hub::{
     Knowledge, ModelSetting, ModelsSetting, Permission, Recall, Registration, RegistrationSetting,
     SourceFilter, SourceFilterSetting, Sources, Tasks, Tracker, TrackerSetting,
 };
+pub use picker::{Effect, PickerAnswer, PickerQuestion, QuestionKind, TaskPickerSetting};
 pub use runner::{Runner, RunnerSettings};
 
 #[cfg(test)]
