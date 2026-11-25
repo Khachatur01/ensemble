@@ -321,7 +321,6 @@ version: 1
 limits: {{}}
 
 
-gates: {{}}
 
 agents:
   reviewer:
@@ -486,7 +485,6 @@ fn check_reports_several_problems_at_once() {
         r#"
 version: 9
 limits: {}
-gates: {}
 agents:
   r:
     max_seconds: 0
@@ -828,21 +826,18 @@ fn team_new_writes_a_sample_helper_team_that_checks_and_never_overwrites_by_acci
 }
 
 #[test]
-fn check_says_which_tasks_on_the_hub_this_runner_cannot_run() {
+fn check_says_which_tasks_on_the_hub_this_runner_leaves_to_another() {
     let s = Scratch::new("check-tasks");
     let _hub = with_hub(&s);
     s.repo("shop");
-    let gated = config_yaml("opencode").replace(
-        "gates: {}",
-        "gates:\n  test: { command: \"true\", timeout_seconds: 5 }",
-    );
-    s.write("@team/config.yaml", &gated);
+    s.write("@team/config.yaml", &config_yaml("opencode"));
     tasks_of(&s, "shop")
         .add(&ensemble_tasks::tasks::Ticket {
             title: "Ok".into(),
             agent: "team/coder".into(),
-            gate: Some(ensemble_tasks::tasks::GateRef {
-                name: "test".into(),
+            gate: Some(ensemble_tasks::tasks::Gate {
+                command: "true".into(),
+                timeout_seconds: 5,
                 attempts: 1,
             }),
             text: "do it".into(),
@@ -859,18 +854,15 @@ fn check_says_which_tasks_on_the_hub_this_runner_cannot_run() {
         stdout_of(&out)
     );
 
-    // The gate is gone, and the reviewer is another runner's now.
+    // The reviewer is another runner's now.
     s.write(
         "@team/config.yaml",
         &config_yaml("opencode").replace("  reviewer:", "  critic:"),
     );
     let out = ensemble_runner(&s, &["team", "check"]);
-    assert!(!out.status.success());
+    assert!(out.status.success(), "{}", stderr_of(&out));
     let text = stdout_of(&out);
-    assert!(
-        text.contains("0001-ok: gate 'test' is not configured"),
-        "{text}"
-    );
+    assert!(!text.contains("0001-ok"), "{text}");
     assert!(
         text.contains("0002-look: agent 'team/reviewer' is not one of this runner's"),
         "{text}"
@@ -960,7 +952,7 @@ fn setup_writes_the_runner_and_checks_its_teams() {
     let s = Scratch::new("setup");
     s.write(
         "@team/config.yaml",
-        "version: 1\nlimits: {}\ngates: {}\nagents:\n  reviewer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter: { type: claude-code, model: sonnet, tools: [Read], permission_mode: dontAsk, max_turns: 5, command: claude }\n",
+        "version: 1\nlimits: {}\nagents:\n  reviewer:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter: { type: claude-code, model: sonnet, tools: [Read], permission_mode: dontAsk, max_turns: 5, command: claude }\n",
     );
     let bin = stub_clis(&s, &["claude", "opencode"]);
     let out = with_path(&s, &bin)
@@ -1625,7 +1617,7 @@ fn show_lists_an_agents_models_in_order_and_probe_says_which_a_run_would_use() {
     ));
     s.write(
         "@team/config.yaml",
-        "version: 1\nlimits: {}\ngates: {}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: direct\n      try:\n        - { provider: home, model: small }\n        - { provider: central, model: big }\n      when_none: wait\n      max_tokens: 10\n",
+        "version: 1\nlimits: {}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: direct\n      try:\n        - { provider: home, model: small }\n        - { provider: central, model: big }\n      when_none: wait\n      max_tokens: 10\n",
     );
     let out = ensemble_runner(&s, &["agent", "show", "team/summariser"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2154,12 +2146,12 @@ fn a_hub_server_refuses_another_protocol_or_a_bad_token_and_stops_on_sigterm() {
     assert!(status.contains("426"), "no protocol named: {status}");
     let status = upgrade(
         "/link",
-        "Ensemble-Protocol: 9\r\nAuthorization: Bearer ens_wrong\r\n",
+        "Ensemble-Protocol: 10\r\nAuthorization: Bearer ens_wrong\r\n",
     );
     assert!(status.contains("401"), "{status}");
-    let status = upgrade("/", "Ensemble-Protocol: 9\r\n");
+    let status = upgrade("/", "Ensemble-Protocol: 10\r\n");
     assert!(status.contains("404"), "the link is at /link: {status}");
-    let status = upgrade("/link", "Ensemble-Protocol: 9\r\n");
+    let status = upgrade("/link", "Ensemble-Protocol: 10\r\n");
     assert!(
         status.contains("101"),
         "no token: signing in only: {status}"
@@ -2686,7 +2678,7 @@ fn a_model_one_runner_shares_serves_another_runners_agent_and_the_hub_through_th
         &s,
         "laptop",
         "team",
-        "version: 1\nlimits: {}\ngates: {}\nagents:\n  summariser:\n    prompt: You summarise.\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: direct\n      try: [{ provider: gpu-local, model: local:small }]\n      when_none: fail\n      max_tokens: 100\n",
+        "version: 1\nlimits: {}\nagents:\n  summariser:\n    prompt: You summarise.\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: direct\n      try: [{ provider: gpu-local, model: local:small }]\n      when_none: fail\n      max_tokens: 100\n",
     );
     let _laptop = serve_runner(&s, &url, "laptop", &laptop);
     let said = mcp_tool(
@@ -3176,13 +3168,13 @@ fn settings_are_changed_from_the_command_line_and_each_change_is_in_the_history(
             "config",
             "web",
             "set",
-            "gates.test.timeout_seconds",
-            "60",
+            "limits.box.max_concurrent",
+            "2",
         ],
     );
     assert!(
         !out.status.success(),
-        "a gate needs its command: {}",
+        "a limit needs its budget: {}",
         stdout_of(&out)
     );
     let out = ensemble_runner(&s, &["team", "config", "web", "get", "version"]);

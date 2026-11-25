@@ -20,7 +20,7 @@ use ensemble_core::runtime::blocking;
 use ensemble_knowledge::Visibility;
 use ensemble_link::protocol::{
     RECALL, RUNNERS, Request, SHARE, TASK, TASK_ANSWER, TASK_ASSIGN, TASK_CANCEL, TASK_CREATE,
-    TASKS,
+    TASK_GATE, TASKS,
 };
 use serde_json::{Map, Value, json};
 use tokio::net::TcpStream;
@@ -41,6 +41,7 @@ const LIST: &str = "tasks";
 const SHOW: &str = "task";
 const ANSWER: &str = "answer";
 const ASSIGN: &str = "assign";
+const GATE: &str = "gate";
 const CANCEL: &str = "cancel";
 
 impl Server<'_> {
@@ -316,6 +317,19 @@ impl Server<'_> {
                 ask(TASK_ASSIGN, pass(&["project", "id", "agent"]))?;
                 Ok(format!("Gave task {} to {}.", field("id"), field("agent")))
             }
+            GATE => {
+                tasks()?;
+                let gate = gate(args, GATE)?;
+                let what = match gate["command"].as_str() {
+                    Some(command) => format!("Task {} must now pass `{command}`.", field("id")),
+                    None => format!("Task {} has no gate now.", field("id")),
+                };
+                ask(
+                    TASK_GATE,
+                    json!({ "project": field("project"), "id": field("id"), "gate": gate }),
+                )?;
+                Ok(what)
+            }
             CANCEL => {
                 tasks()?;
                 let cancelled = ask(TASK_CANCEL, pass(&["project", "id"]))?;
@@ -398,24 +412,7 @@ pub(crate) fn ticket(args: &Value, what: &str) -> Result<Value, String> {
         };
         lists.insert(key.into(), json!(list));
     }
-    // Which gates a team has is the runner's to know: it checks the name when
-    // it runs the task. Here only the shape.
-    let gate = match args.get("gate") {
-        None | Some(Value::Null) => Value::Null,
-        Some(gate) => {
-            let name = gate["name"].as_str().map(str::trim).unwrap_or("");
-            let attempts = gate["attempts"].as_u64().unwrap_or(0);
-            let known = gate
-                .as_object()
-                .is_some_and(|g| g.keys().all(|k| k == "name" || k == "attempts"));
-            if name.is_empty() || attempts == 0 || attempts > u64::from(u32::MAX) || !known {
-                return Err(format!(
-                    "{what}: `gate` is {{name, attempts}}: a gate of the agent's team, and how many runs of the agent it gets to pass it, at least 1"
-                ));
-            }
-            json!({ "name": name, "attempts": attempts })
-        }
-    };
+    let gate = gate(args, what)?;
     let repository = optional("repository");
     if let Some(repository) = repository {
         ensemble_tasks::tasks::check_repository(repository).map_err(|e| format!("{what}: {e}"))?;
@@ -436,6 +433,36 @@ pub(crate) fn ticket(args: &Value, what: &str) -> Result<Value, String> {
     Ok(ticket)
 }
 
+/// The gate in `args`, as `what` takes it: null when there is none, refused,
+/// named after `what`, when it cannot be one. The command is the account's
+/// own, run only on its runners.
+pub(crate) fn gate(args: &Value, what: &str) -> Result<Value, String> {
+    let gate = match args.get("gate") {
+        None | Some(Value::Null) => return Ok(Value::Null),
+        Some(gate) => gate,
+    };
+    let command = gate["command"].as_str().map(str::trim).unwrap_or("");
+    let number = |key: &str| {
+        gate[key]
+            .as_u64()
+            .filter(|n| (1..=u64::from(u32::MAX)).contains(n))
+    };
+    let known = gate.as_object().is_some_and(|g| {
+        g.keys()
+            .all(|k| ["command", "timeout_seconds", "attempts"].contains(&k.as_str()))
+    });
+    match (number("timeout_seconds"), number("attempts")) {
+        (Some(timeout_seconds), Some(attempts)) if !command.is_empty() && known => Ok(json!({
+            "command": command,
+            "timeout_seconds": timeout_seconds,
+            "attempts": attempts,
+        })),
+        _ => Err(format!(
+            "{what}: `gate` is {{command, timeout_seconds, attempts}}: the shell command the work must pass, the seconds it may run, and how many runs of the agent it gets to pass it, each at least 1"
+        )),
+    }
+}
+
 /// The tools of tasks, in MCP's form.
 fn task_tools() -> Vec<Value> {
     let project = json!({
@@ -444,6 +471,16 @@ fn task_tools() -> Vec<Value> {
     });
     let id = json!({ "type": "string", "description": "The task's id." });
     let list = |about: &str| json!({ "type": "array", "items": { "type": "string" }, "description": about });
+    let gate = json!({
+        "type": "object",
+        "description": "A check the work must pass: a shell command, run in the task's working directory after the agent is done (exit status 0 passes), how long it may run, and how many runs of the agent the task gets to pass it.",
+        "properties": {
+            "command": { "type": "string", "description": "The command, run with `sh -c`, such as `cargo test`." },
+            "timeout_seconds": { "type": "integer", "minimum": 1, "description": "Seconds it may run before it is stopped and counts as failed." },
+            "attempts": { "type": "integer", "minimum": 1, "description": "Runs of the agent in all, the first included." },
+        },
+        "required": ["command", "timeout_seconds", "attempts"],
+    });
     let tool = |name: &str, description: &str, properties: Value, required: &[&str]| {
         json!({
             "name": name,
@@ -479,15 +516,7 @@ fn task_tools() -> Vec<Value> {
                 "after": list("Ids of tasks that must be done first."),
                 "repository": { "type": "string", "description": "Where the project lives: the git URL or path a runner clones it from when it has no copy, such as `git@github.com:acme/shop.git`." },
                 "repo": { "type": "string", "description": "A folder inside the project, when it holds several repositories." },
-                "gate": {
-                    "type": "object",
-                    "description": "A check the work must pass: a gate of the agent's team, by name, and how many runs of the agent it gets to pass it.",
-                    "properties": {
-                        "name": { "type": "string", "description": "The gate, as the team's config names it, such as `test`." },
-                        "attempts": { "type": "integer", "minimum": 1, "description": "Runs of the agent in all, the first included." },
-                    },
-                    "required": ["name", "attempts"],
-                },
+                "gate": gate.clone(),
             }),
             &["project", "title", "task"],
         ),
@@ -514,6 +543,13 @@ fn task_tools() -> Vec<Value> {
             "Give a task to an agent, such as one waiting in the backlog.",
             json!({ "project": project, "id": id, "agent": { "type": "string", "description": "The agent, `<team>/<agent>`." } }),
             &["project", "id", "agent"],
+        ),
+        tool(
+            GATE,
+            "Give a task that is not running the check its work must pass, or, without `gate`, \
+             take its check away.",
+            json!({ "project": project, "id": id, "gate": gate }),
+            &["project", "id"],
         ),
         tool(
             CANCEL,
@@ -742,7 +778,7 @@ mod tests {
         assert_eq!(
             tool_names(&hub, &hub.ana),
             [
-                "share", "recall", "agents", "submit", "tasks", "task", "answer", "assign",
+                "share", "recall", "agents", "submit", "tasks", "task", "answer", "assign", "gate",
                 "cancel"
             ]
         );
@@ -782,7 +818,7 @@ mod tests {
         assert_eq!(ticket["gate"], Value::Null);
         assert_eq!(ticket["repository"], Value::Null);
 
-        // Where the project lives, and a gate, the runner checks by name.
+        // Where the project lives, and the gate its work must pass.
         let (text, failed) = tool(
             &hub,
             &hub.ana,
@@ -790,26 +826,25 @@ mod tests {
             json!({
                 "project": "shop", "title": "Fix the cart", "task": "The cart loses items.",
                 "agent": "web/coder", "repository": "git@example.com:acme/shop.git",
-                "gate": {"name": "test", "attempts": 3}, "notes": "mine",
+                "gate": {"command": "cargo test", "timeout_seconds": 600, "attempts": 3},
+                "notes": "mine",
             }),
         );
         assert!(!failed, "{text}");
         let ticket = tasks.asked.lock().unwrap()[1].2["ticket"].clone();
         assert_eq!(ticket["repository"], "git@example.com:acme/shop.git");
-        assert_eq!(ticket["gate"], json!({"name": "test", "attempts": 3}));
+        assert_eq!(
+            ticket["gate"],
+            json!({"command": "cargo test", "timeout_seconds": 600, "attempts": 3})
+        );
         assert_eq!(ticket["notes"], Value::Null, "the hub's to set");
-        for (gate, said) in [
-            (json!({"name": "test"}), "`gate` is {name, attempts}"),
-            (
-                json!({"name": "", "attempts": 2}),
-                "`gate` is {name, attempts}",
-            ),
-            (json!({"name": "test", "attempts": 0}), "at least 1"),
-            (json!("test"), "`gate` is {name, attempts}"),
-            (
-                json!({"name": "test", "attempts": 1, "command": "rm -rf /"}),
-                "`gate` is",
-            ),
+        let said = "`gate` is {command, timeout_seconds, attempts}";
+        for gate in [
+            json!({"command": "cargo test", "attempts": 2}),
+            json!({"command": " ", "timeout_seconds": 60, "attempts": 2}),
+            json!({"command": "cargo test", "timeout_seconds": 60, "attempts": 0}),
+            json!("cargo test"),
+            json!({"command": "make", "timeout_seconds": 60, "attempts": 1, "name": "test"}),
         ] {
             let (text, failed) = tool(
                 &hub,
@@ -848,6 +883,31 @@ mod tests {
             json!({"project": "shop", "id": "t-1"}),
         );
         assert_eq!(text, "Cancelled task t-1 before it started.");
+        let gate = json!({"command": "make test", "timeout_seconds": 60, "attempts": 2});
+        let (text, failed) = tool(
+            &hub,
+            &hub.ana,
+            "gate",
+            json!({"project": "shop", "id": "t-1", "gate": gate}),
+        );
+        assert_eq!(
+            (text.as_str(), failed),
+            ("Task t-1 must now pass `make test`.", false)
+        );
+        let (text, _) = tool(
+            &hub,
+            &hub.ana,
+            "gate",
+            json!({"project": "shop", "id": "t-1"}),
+        );
+        assert_eq!(text, "Task t-1 has no gate now.");
+        let asked = tasks.asked.lock().unwrap().clone();
+        let gated: Vec<&Value> = asked
+            .iter()
+            .filter(|(_, method, _)| method == "task_gate")
+            .map(|(_, _, params)| &params["gate"])
+            .collect();
+        assert_eq!(gated, [&gate, &Value::Null]);
         let (text, _) = tool(&hub, &hub.ana, "agents", json!({}));
         assert!(text.starts_with("No runner that works for you"), "{text}");
     }

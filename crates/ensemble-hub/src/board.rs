@@ -12,12 +12,12 @@
 use async_trait::async_trait;
 use ensemble_core::runtime::blocking;
 use ensemble_link::protocol::{
-    TASK, TASK_ANSWER, TASK_ASSIGN, TASK_CANCEL, TASK_CLAIM, TASK_CREATE, TASK_FINISH,
+    TASK, TASK_ANSWER, TASK_ASSIGN, TASK_CANCEL, TASK_CLAIM, TASK_CREATE, TASK_FINISH, TASK_GATE,
     TASK_GIVE_BACK, TASK_PROJECTS, TASK_RELEASE, TASK_RENEW, TASKS, TASKS_WAITING,
 };
 use ensemble_store::{self as store, Value as Sql};
 use ensemble_tasks::board::{Board, Cancelled, Claim, End, LEASE, Progress, Renewal, Waiting};
-use ensemble_tasks::tasks::{Detail, GivenBack, Outcome, Status, Task, Ticket, utc};
+use ensemble_tasks::tasks::{Detail, Gate, GivenBack, Outcome, Status, Task, Ticket, utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -629,6 +629,24 @@ impl DbBoard {
         })
     }
 
+    /// Give task `id` the gate its work must pass, or none; not one that
+    /// runs or has ended.
+    pub fn set_gate(&self, id: &str, gate: Option<Gate>) -> Result<(), String> {
+        if let Some(gate) = &gate {
+            gate.check()?;
+        }
+        self.change(id, |r, now| {
+            if r.result.is_some() {
+                return Err(format!("{id} has ended; its gate cannot change."));
+            }
+            if r.holder(now).is_some() {
+                return Err(format!("{id} is running; change its gate when it stops."));
+            }
+            r.ticket.gate = gate;
+            Ok(())
+        })
+    }
+
     /// Cancel task `id`: at once when it has not started, by its runner when it
     /// runs.
     pub fn stop(&self, id: &str) -> Result<Cancelled, String> {
@@ -986,6 +1004,18 @@ impl TaskService for Service {
                 board.give(text("id")?, text("agent")?)?;
                 Ok(json!({ "assigned": true }))
             }
+            TASK_GATE => {
+                let gate: Option<Gate> = serde_json::from_value(
+                    params.get("gate").cloned().unwrap_or(Value::Null),
+                )
+                .map_err(|e| {
+                    format!(
+                        "{method}: `gate` is {{command, timeout_seconds, attempts}} or null: {e}"
+                    )
+                })?;
+                board.set_gate(text("id")?, gate)?;
+                Ok(json!({ "gate": true }))
+            }
             TASK_CANCEL => Ok(json!({ "cancel": board.stop(text("id")?)? })),
             TASK_GIVE_BACK => {
                 let blocked = board.give_back(text("id")?, text("runner")?, text("why")?)?;
@@ -1000,7 +1030,6 @@ impl TaskService for Service {
 mod tests {
     use super::*;
     use ensemble_core::workspace::testing::TempDir;
-    use ensemble_tasks::tasks::GateRef;
 
     /// A ticket with only what every ticket has.
     fn draft(title: &str, agent: &str, text: &str) -> Ticket {
@@ -1036,8 +1065,9 @@ mod tests {
             constraints: vec!["No new dependency".into()],
             files: vec!["src/fetch.rs".into()],
             done_when: vec!["cargo test passes".into()],
-            gate: Some(GateRef {
-                name: "test".into(),
+            gate: Some(Gate {
+                command: "cargo test".into(),
+                timeout_seconds: 600,
                 attempts: 3,
             }),
             ..draft(
@@ -1215,6 +1245,40 @@ mod tests {
         b.end(&moving, "laptop", result("done"), Some(done.clone()))
             .unwrap();
         assert_eq!(b.detail(&moving).unwrap().unwrap().progress, Some(done));
+    }
+
+    #[test]
+    fn a_tasks_gate_is_set_or_cleared_only_while_it_neither_runs_nor_has_ended() {
+        let tmp = TempDir::new();
+        let b = board(&tmp);
+        let id = b.add(&draft("Fix", "web/coder", "t")).unwrap();
+        let gate = Gate {
+            command: "make test".into(),
+            timeout_seconds: 60,
+            attempts: 2,
+        };
+        b.set_gate(&id, Some(gate.clone())).unwrap();
+        assert_eq!(
+            b.detail(&id).unwrap().unwrap().task.ticket.gate,
+            Some(gate.clone())
+        );
+        let empty = Gate {
+            command: " ".into(),
+            ..gate.clone()
+        };
+        let err = b.set_gate(&id, Some(empty)).unwrap_err();
+        assert!(err.contains("`gate.command` is empty"), "{err}");
+
+        b.take(&id, "laptop", 60, true).unwrap();
+        let err = b.set_gate(&id, None).unwrap_err();
+        assert!(err.contains("is running"), "{err}");
+        b.put_back(&id, "laptop", None).unwrap();
+        b.set_gate(&id, None).unwrap();
+        assert_eq!(b.detail(&id).unwrap().unwrap().task.ticket.gate, None);
+
+        b.stop(&id).unwrap();
+        let err = b.set_gate(&id, Some(gate)).unwrap_err();
+        assert!(err.contains("has ended"), "{err}");
     }
 
     #[test]

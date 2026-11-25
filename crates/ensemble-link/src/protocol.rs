@@ -14,7 +14,7 @@ use serde_json::Value;
 /// The version of what is said here. The runner sends it as the
 /// [`VERSION_HEADER`] of every link it opens, and a hub refuses one of
 /// another version, or of none, before anything else.
-pub const VERSION: u32 = 9;
+pub const VERSION: u32 = 10;
 /// The path of a runner's link on the hub's port.
 pub const PATH: &str = "/link";
 /// The header of the upgrade that carries the runner's [`VERSION`].
@@ -79,6 +79,10 @@ pub const TASK_FINISH: &str = "task_finish";
 pub const TASK_ANSWER: &str = "task_answer";
 /// Give a task to an agent: `{project, id, agent}`.
 pub const TASK_ASSIGN: &str = "task_assign";
+/// Give a task the gate its work must pass, or none: `{project, id, gate}`,
+/// the gate `{command, timeout_seconds, attempts}` or null; not one that
+/// runs or has ended.
+pub const TASK_GATE: &str = "task_gate";
 /// Cancel a task: `{project, id}`, answered with `{cancel}`: `before` it
 /// started, `running` (its runner stops it) or `ended` already.
 pub const TASK_CANCEL: &str = "task_cancel";
@@ -95,7 +99,7 @@ pub const TASK_GIVE_BACK: &str = "task_give_back";
 /// [{project, tasks}]}`, each with how many tasks it has.
 pub const TASK_PROJECTS: &str = "task_projects";
 /// Every task method, for the server to pass on.
-pub const TASK_METHODS: [&str; 13] = [
+pub const TASK_METHODS: [&str; 14] = [
     TASKS,
     TASK,
     TASK_CREATE,
@@ -105,6 +109,7 @@ pub const TASK_METHODS: [&str; 13] = [
     TASK_FINISH,
     TASK_ANSWER,
     TASK_ASSIGN,
+    TASK_GATE,
     TASK_CANCEL,
     TASKS_WAITING,
     TASK_GIVE_BACK,

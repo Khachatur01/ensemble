@@ -203,9 +203,9 @@ fn join(lines: Vec<String>, original: &str) -> String {
 mod tests {
     use super::*;
 
-    const TEAM: &str = "version: 1\nlimits: {}\ngates: {}\n# the agents\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model:\n        type: provider\n        name: opencode/m\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n  # keep this comment with the next agent\n";
+    const TEAM: &str = "version: 1\nlimits: {}\n# the agents\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model:\n        type: provider\n        name: opencode/m\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n  # keep this comment with the next agent\n";
 
-    const EMPTY: &str = "version: 1\nlimits: {}\ngates: {}\nagents: {}\n";
+    const EMPTY: &str = "version: 1\nlimits: {}\nagents: {}\n";
 
     fn reviewer() -> String {
         agent_block(
@@ -287,7 +287,7 @@ mod tests {
                 },
             )
             .unwrap();
-            let text = format!("version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n{block}");
+            let text = format!("version: 1\nlimits: {{}}\nagents:\n{block}");
             loads(&text);
         }
         assert!(

@@ -179,6 +179,7 @@ fn task_more() -> Vec<String> {
         "files",
         "after",
         "gate",
+        "gate_timeout_seconds",
         "gate_attempts",
     ]
     .map(String::from)
@@ -191,7 +192,18 @@ fn task_labels() -> Vec<(String, String)> {
         label("task", "what to do"),
         label("agent", "agent (empty: the backlog)"),
         label("done_when", "done when"),
+        label("gate", "gate: a command its work must pass"),
+        label("gate_timeout_seconds", "gate time limit, in seconds"),
         label("gate_attempts", "gate attempts"),
+    ]
+}
+
+/// The words the form of a task's gate shows for its fields.
+fn gate_labels() -> Vec<(String, String)> {
+    vec![
+        label("gate", "command, such as cargo test (empty: no gate)"),
+        label("gate_timeout_seconds", "time limit, in seconds"),
+        label("gate_attempts", "runs of the agent to pass it"),
     ]
 }
 
@@ -346,6 +358,10 @@ pub fn TaskPage(project: String, id: String) -> Element {
             };
             let question = text(shown, "question");
             let over = finished(shown);
+            let gate_said = match ticket["gate"]["command"].as_str() {
+                Some(command) => format!("Its work must pass `{command}`."),
+                None => "None: its work is done when the agent says so.".into(),
+            };
             rsx! {
                 h1 { "{text(ticket, \"title\")}" }
                 p { class: "muted",
@@ -375,6 +391,22 @@ pub fn TaskPage(project: String, id: String) -> Element {
                                 picks: vec![agent_pick(&agents)],
                                 values: vec![value("agent", text(ticket, "agent"))],
                                 submit: "Assign",
+                                on_done: move |_| task.restart(),
+                            }
+                        }
+                        section { class: "panel",
+                            h2 { "Its gate" }
+                            p { class: "muted", "{gate_said}" }
+                            OpForm {
+                                op: "task.gate",
+                                fixed: on_task.clone(),
+                                labels: gate_labels(),
+                                values: vec![
+                                    value("gate", text(&ticket["gate"], "command")),
+                                    value("gate_timeout_seconds", text(&ticket["gate"], "timeout_seconds")),
+                                    value("gate_attempts", text(&ticket["gate"], "attempts")),
+                                ],
+                                submit: "Save the gate",
                                 on_done: move |_| task.restart(),
                             }
                         }

@@ -1,8 +1,7 @@
-//! A task's gate: a command from `config.yaml` that its work must pass,
-//! run in the task's working directory after the agent is done.
+//! A task's gate: the command the task names that its work must pass, run
+//! in the task's working directory after the agent is done.
 
 use super::process;
-use ensemble_config::Gate;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -19,14 +18,14 @@ pub struct Verdict {
     pub output: String,
 }
 
-/// Run `gate` in `dir` until it exits, reaches its time limit, or `cancel` is
-/// set.
-pub async fn run(gate: &Gate, dir: &Path, cancel: &AtomicBool) -> Verdict {
+/// Run `command` with `sh -c` in `dir` until it exits, reaches its time limit
+/// of `timeout_seconds`, or `cancel` is set.
+pub async fn run(command: &str, timeout_seconds: u32, dir: &Path, cancel: &AtomicBool) -> Verdict {
     let program = [
         "sh".to_string(),
         "-c".to_string(),
         // One stream, in the order it was written.
-        format!("exec 2>&1\n{}", gate.command),
+        format!("exec 2>&1\n{command}"),
     ];
     let mut lines: Vec<String> = Vec::new();
     let run = process::Run {
@@ -35,7 +34,7 @@ pub async fn run(gate: &Gate, dir: &Path, cancel: &AtomicBool) -> Verdict {
         args: Vec::new(),
         env: Vec::new(),
         workdir: dir,
-        max_seconds: gate.timeout_seconds,
+        max_seconds: timeout_seconds,
         cancel,
     }
     .stream(&mut |line| lines.push(line.to_string()))
@@ -67,28 +66,25 @@ pub async fn run(gate: &Gate, dir: &Path, cancel: &AtomicBool) -> Verdict {
 mod tests {
     use super::*;
 
-    fn run(gate: &Gate, dir: &Path, cancel: &AtomicBool) -> Verdict {
-        crate::runtime::block_on(super::run(gate, dir, cancel))
+    fn run((command, timeout_seconds): (&str, u32), dir: &Path, cancel: &AtomicBool) -> Verdict {
+        crate::runtime::block_on(super::run(command, timeout_seconds, dir, cancel))
     }
     use ensemble_core::workspace::testing::TempDir;
 
-    fn gate(command: &str, timeout_seconds: u32) -> Gate {
-        Gate {
-            command: command.into(),
-            timeout_seconds,
-        }
+    fn gate(command: &str, timeout_seconds: u32) -> (&str, u32) {
+        (command, timeout_seconds)
     }
 
     #[test]
     fn exit_status_zero_passes_and_anything_else_fails_with_its_output() {
         let tmp = TempDir::new();
         let no = AtomicBool::new(false);
-        let ok = run(&gate("echo fine", 10), &tmp.0, &no);
+        let ok = run(gate("echo fine", 10), &tmp.0, &no);
         assert_eq!(
             (ok.passed, ok.ended.as_str(), ok.output.as_str()),
             (true, "exit 0", "fine")
         );
-        let bad = run(&gate("echo out; echo err >&2; exit 3", 10), &tmp.0, &no);
+        let bad = run(gate("echo out; echo err >&2; exit 3", 10), &tmp.0, &no);
         assert!(!bad.passed);
         assert_eq!(bad.ended, "exit 3");
         assert_eq!(bad.output, "out\nerr");
@@ -99,8 +95,8 @@ mod tests {
         let tmp = TempDir::new();
         std::fs::write(tmp.0.join("here"), "").unwrap();
         let no = AtomicBool::new(false);
-        assert!(run(&gate("test -e here", 10), &tmp.0, &no).passed);
-        let slow = run(&gate("sleep 30", 1), &tmp.0, &no);
+        assert!(run(gate("test -e here", 10), &tmp.0, &no).passed);
+        let slow = run(gate("sleep 30", 1), &tmp.0, &no);
         assert!(
             !slow.passed && slow.ended.contains("time limit"),
             "{slow:?}"
@@ -110,11 +106,7 @@ mod tests {
     #[test]
     fn only_the_last_lines_are_kept() {
         let tmp = TempDir::new();
-        let v = run(
-            &gate("seq 100; exit 1", 10),
-            &tmp.0,
-            &AtomicBool::new(false),
-        );
+        let v = run(gate("seq 100; exit 1", 10), &tmp.0, &AtomicBool::new(false));
         assert!(
             v.output.starts_with("(40 earlier line(s) not shown)\n41\n"),
             "{}",

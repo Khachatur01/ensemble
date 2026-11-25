@@ -519,20 +519,11 @@ pub struct Config {
     pub llm_backends: BTreeMap<String, LlmBackend>,
     /// Shared limits, by name.
     pub limits: BTreeMap<String, Limit>,
-    /// The team's gates, by name.
-    pub gates: BTreeMap<String, Gate>,
     /// The helper team: every agent, by name. There is no leader in the file:
     /// the agent that calls Ensemble is it.
     pub agents: BTreeMap<String, AgentConfig>,
     /// Where it was loaded from, for error messages.
     pub source: PathBuf,
-}
-
-/// A command a task's work must pass.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Gate {
-    pub command: String,
-    pub timeout_seconds: u32,
 }
 
 impl Config {
@@ -544,24 +535,6 @@ impl Config {
     /// The agents' names.
     pub fn agent_names(&self) -> Vec<&str> {
         self.agents.keys().map(String::as_str).collect()
-    }
-
-    /// The gate called `name`.
-    pub fn gate(&self, name: &str) -> Option<&Gate> {
-        self.gates.get(name)
-    }
-
-    /// The gate a task of `agent` names `name`: of the agent's own team when
-    /// the helper team is several combined (`web/coder` names `web/test`), or
-    /// the one `name` names as `<team>/<gate>`.
-    pub fn gate_for(&self, agent: &str, name: &str) -> Option<&Gate> {
-        if name.contains('/') {
-            return self.gates.get(name);
-        }
-        match teams::team_of(agent) {
-            Some(team) => self.gates.get(&format!("{team}/{name}")),
-            None => self.gates.get(name),
-        }
     }
 }
 

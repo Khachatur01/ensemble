@@ -484,7 +484,8 @@ mod tests {
             "task.create",
             json!({
                 "project": "shop", "title": "Fix the cart", "task": "The cart loses items.",
-                "done_when": ["cargo test passes"], "gate": "test", "gate_attempts": 2,
+                "done_when": ["cargo test passes"], "gate": "cargo test",
+                "gate_timeout_seconds": 600, "gate_attempts": 2,
             }),
         );
         assert_eq!(status, 200, "{made}");
@@ -495,7 +496,7 @@ mod tests {
         assert_eq!(out["tasks"][0]["ticket"]["id"], id.as_str(), "{out}");
         assert_eq!(
             out["tasks"][0]["ticket"]["gate"],
-            json!({"name": "test", "attempts": 2})
+            json!({"command": "cargo test", "timeout_seconds": 600, "attempts": 2})
         );
         let (status, shown) = op(&hub.ana, "task.show", json!({"project": "shop", "id": id}));
         assert_eq!(status, 200, "{shown}");
@@ -512,6 +513,19 @@ mod tests {
             json!({"project": "shop", "id": id, "agent": "web/coder"}),
         );
         assert_eq!(status, 200, "{out}");
+        let (status, out) = op(
+            &hub.ana,
+            "task.gate",
+            json!({"project": "shop", "id": id, "gate": "make test"}),
+        );
+        assert_eq!(
+            status, 400,
+            "a gate needs its time limit and attempts: {out}"
+        );
+        let (status, out) = op(&hub.ana, "task.gate", json!({"project": "shop", "id": id}));
+        assert_eq!(status, 200, "{out}");
+        let (_, out) = op(&hub.ana, "task.list", json!({"project": "shop"}));
+        assert_eq!(out["tasks"][0]["ticket"]["gate"], Value::Null, "taken away");
         let (status, out) = op(
             &hub.ana,
             "task.cancel",

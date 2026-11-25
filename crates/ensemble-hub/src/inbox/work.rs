@@ -27,7 +27,9 @@ pub enum Update {
 }
 
 /// The task `issue` becomes: for the agent its first `<label>:<team>/<agent>`
-/// label names, else in the backlog, for the helper team to assign.
+/// label names, else in the backlog, for the helper team to assign. It has no
+/// gate: anyone who may write in the tracker writes its issues, so only the
+/// task's account gives it one.
 pub fn ticket_for(issue: &Issue, label: &str) -> Ticket {
     let prefix = format!("{label}:");
     let agent = issue
@@ -100,6 +102,7 @@ mod tests {
             (t.agent.as_str(), t.text.as_str()),
             ("web/coder", "It loops.")
         );
+        assert_eq!(t.gate, None, "only the task's account gives one");
         assert!(
             t.context
                 .unwrap()

@@ -8,14 +8,14 @@
 //! |---|---|---|
 //! | `task.projects` | `task_projects` | `tasks` |
 //! | `task.list`, `task.show`, `task.create` | `tasks`, `task`, `task_create` | `tasks` |
-//! | `task.answer`, `task.assign`, `task.cancel` | `task_answer`, `task_assign`, `task_cancel` | `tasks` |
+//! | `task.answer`, `task.assign`, `task.gate`, `task.cancel` | `task_answer`, `task_assign`, `task_gate`, `task_cancel` | `tasks` |
 //! | `runner.list` | `runners` | `tasks` |
 //! | `knowledge.share` | `share` | `share` |
 //! | `knowledge.find` | `recall` | `recall` |
 
 use crate::accounts::HubContext;
 use ensemble_link::protocol::{
-    RECALL, RUNNERS, SHARE, TASK, TASK_ANSWER, TASK_ASSIGN, TASK_CANCEL, TASK_CREATE,
+    RECALL, RUNNERS, SHARE, TASK, TASK_ANSWER, TASK_ASSIGN, TASK_CANCEL, TASK_CREATE, TASK_GATE,
     TASK_PROJECTS, TASKS,
 };
 use ensemble_ops::{Access, Caller, Error, Field, Kind, Operation, Spec, operation};
@@ -44,6 +44,22 @@ const ASSIGN: &[Field] = &[
     ID,
     Field::text("agent", "The agent that does it, as <team>/<agent>.").required(),
 ];
+/// A task's gate, as three fields a form shows: no command for none.
+const GATE_COMMAND: Field = Field::text(
+    "gate",
+    "A shell command its work must pass, run in its working directory after the agent is done; exit status 0 passes.",
+);
+const GATE_TIMEOUT: Field = Field::new(
+    "gate_timeout_seconds",
+    Kind::Number,
+    "Seconds the gate may run before it counts as failed, at least 1.",
+);
+const GATE_ATTEMPTS: Field = Field::new(
+    "gate_attempts",
+    Kind::Number,
+    "How many runs of the agent it gets to pass the gate, at least 1.",
+);
+const SET_GATE: &[Field] = &[PROJECT, ID, GATE_COMMAND, GATE_TIMEOUT, GATE_ATTEMPTS];
 const CREATE: &[Field] = &[
     PROJECT,
     Field::text("title", "What it is, in one line.").required(),
@@ -66,12 +82,9 @@ const CREATE: &[Field] = &[
     Field::new("files", Kind::List, "The files it is about."),
     Field::new("done_when", Kind::List, "How the agent knows it is done."),
     Field::new("after", Kind::List, "The ids of the tasks it waits for."),
-    Field::text("gate", "A gate of the agent's team its work must pass."),
-    Field::new(
-        "gate_attempts",
-        Kind::Number,
-        "How many runs of the agent it gets to pass the gate, at least 1.",
-    ),
+    GATE_COMMAND,
+    GATE_TIMEOUT,
+    GATE_ATTEMPTS,
 ];
 const SHARE_FIELDS: &[Field] = &[
     Field::text("title", "What it is about, in a few words.").required(),
@@ -134,7 +147,44 @@ struct Create {
     #[serde(default)]
     after: Vec<String>,
     gate: Option<String>,
+    gate_timeout_seconds: Option<u64>,
     gate_attempts: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct SetGate {
+    project: String,
+    id: String,
+    gate: Option<String>,
+    gate_timeout_seconds: Option<u64>,
+    gate_attempts: Option<u64>,
+}
+
+/// The gate its three fields say: null without a command, which a form
+/// leaves empty for none, else the command with both numbers.
+fn gate_of(
+    command: Option<&str>,
+    timeout_seconds: Option<u64>,
+    attempts: Option<u64>,
+) -> Result<Value, Error> {
+    match (
+        command.map(str::trim).filter(|c| !c.is_empty()),
+        timeout_seconds,
+        attempts,
+    ) {
+        (None, ..) => Ok(Value::Null),
+        (Some(command), Some(timeout_seconds), Some(attempts)) => Ok(json!({
+            "command": command,
+            "timeout_seconds": timeout_seconds,
+            "attempts": attempts,
+        })),
+        (_, None, _) => {
+            Err(Error::invalid("a gate needs the seconds it may run").on("gate_timeout_seconds"))
+        }
+        (.., None) => Err(
+            Error::invalid("a gate needs how many runs of the agent it gets").on("gate_attempts"),
+        ),
+    }
 }
 
 #[derive(Deserialize)]
@@ -202,17 +252,11 @@ pub(crate) fn operations() -> Vec<Operation<HubContext>> {
                 input: CREATE,
             },
             |c: &HubContext, caller: &Caller, input: Create| {
-                let gate = match (&input.gate, input.gate_attempts) {
-                    (Some(name), attempts) => {
-                        json!({ "name": name, "attempts": attempts.unwrap_or(1) })
-                    }
-                    (None, Some(_)) => {
-                        return Err(
-                            Error::invalid("`gate_attempts` needs a `gate`").on("gate_attempts")
-                        );
-                    }
-                    (None, None) => Value::Null,
-                };
+                let gate = gate_of(
+                    input.gate.as_deref(),
+                    input.gate_timeout_seconds,
+                    input.gate_attempts,
+                )?;
                 let args = json!({
                     "project": input.project,
                     "title": input.title,
@@ -262,6 +306,28 @@ pub(crate) fn operations() -> Vec<Operation<HubContext>> {
                     caller,
                     TASK_ASSIGN,
                     json!({ "project": input.project, "id": input.id, "agent": input.agent }),
+                )
+            },
+        ),
+        operation(
+            Spec {
+                name: "task.gate",
+                summary: "Give one of your tasks that is not running the gate its work must pass, or, with none, take it away.",
+                access: SIGNED,
+                input: SET_GATE,
+            },
+            |c: &HubContext, caller: &Caller, input: SetGate| {
+                let gate = gate_of(
+                    input.gate.as_deref(),
+                    input.gate_timeout_seconds,
+                    input.gate_attempts,
+                )?;
+                let gate = crate::mcp::gate(&json!({ "gate": gate }), "task.gate")
+                    .map_err(Error::invalid)?;
+                c.ask(
+                    caller,
+                    TASK_GATE,
+                    json!({ "project": input.project, "id": input.id, "gate": gate }),
                 )
             },
         ),

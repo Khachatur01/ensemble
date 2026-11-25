@@ -91,32 +91,6 @@ pub(super) fn validate(raw: RawConfig, path: &Path) -> Result<Config, ConfigErro
         );
     }
 
-    // --- gates ---
-    let mut gates = BTreeMap::new();
-    for (name, g) in &raw.gates {
-        if name.trim().is_empty() || name.contains('/') {
-            problems.push(format!(
-                "gates: the gate name '{name}' must not be empty or contain '/'"
-            ));
-            continue;
-        }
-        if g.command.trim().is_empty() {
-            problems.push(format!("gates.{name}: `command` is empty"));
-        }
-        if g.timeout_seconds == 0 {
-            problems.push(format!(
-                "gates.{name}: `timeout_seconds` must be greater than 0"
-            ));
-        }
-        gates.insert(
-            name.clone(),
-            Gate {
-                command: g.command.clone(),
-                timeout_seconds: g.timeout_seconds,
-            },
-        );
-    }
-
     // --- agents ---
     let mut agents: BTreeMap<String, AgentConfig> = BTreeMap::new();
     for (name, ra) in &raw.agents {
@@ -199,7 +173,6 @@ pub(super) fn validate(raw: RawConfig, path: &Path) -> Result<Config, ConfigErro
             version: raw.version,
             llm_backends: BTreeMap::new(),
             limits,
-            gates,
             agents,
             source: path.to_path_buf(),
         })

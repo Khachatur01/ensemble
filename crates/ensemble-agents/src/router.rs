@@ -631,7 +631,6 @@ mod tests {
             r#"
 version: 1
 limits: {{}}
-gates: {{}}
 agents:
   looker:
     max_seconds: 1800
@@ -700,7 +699,7 @@ agents:
     /// A `direct` agent that tries `home`, then `central`, in a fresh folder.
     fn with_fallback(home: &str, central: &str, when_none: &str) -> (Ensemble, TempDir) {
         let yaml = format!(
-            "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ provider: home, model: small }}\n        - {{ provider: central, model: big }}\n      when_none: {when_none}\n      max_tokens: 10\n"
+            "version: 1\nlimits: {{}}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try:\n        - {{ provider: home, model: small }}\n        - {{ provider: central, model: big }}\n      when_none: {when_none}\n      max_tokens: 10\n"
         );
         let cfg = config::parse(&yaml, std::path::Path::new("config.yaml"))
             .and_then(|c| {

@@ -12,7 +12,7 @@
 //!   clone in the cache, checked and trusted per commit.
 //!
 //! The runner runs every team that is ready at once, as one [`Config`]: each
-//! name of a team (its agents, limits and gates) becomes `<team>/<name>`, so
+//! name of a team (its agents and limits) becomes `<team>/<name>`, so
 //! agents are named `web/coder`. A team names the models its agents run
 //! on by their provider in the runner's ANN pool and their id there, so a team runs on any
 //! runner that has the models it names on.
@@ -185,7 +185,6 @@ pub fn combine(
         version: SUPPORTED_VERSION,
         llm_backends: backends,
         limits: BTreeMap::new(),
-        gates: BTreeMap::new(),
         agents: BTreeMap::new(),
         source,
     };
@@ -193,9 +192,6 @@ pub fn combine(
         let named = |name: &str| format!("{team}/{name}");
         for (name, limit) in config.limits {
             out.limits.insert(named(&name), limit);
-        }
-        for (name, gate) in config.gates {
-            out.gates.insert(named(&name), gate);
         }
         for (name, mut agent) in config.agents {
             agent.name = named(&name);
@@ -217,7 +213,7 @@ mod tests {
     use super::*;
     use ensemble_core::workspace::testing::TempDir;
 
-    const TEAM: &str = "version: 1\nlimits:\n  box: { max_concurrent: 1, budget: { type: unlimited } }\ngates:\n  test: { command: \"true\", timeout_seconds: 5 }\nagents:\n  coder:\n    prompt: Codes.\n    max_seconds: 60\n    limit: box\n    isolation: shared\n    adapter: { type: direct, try: [{ provider: local, model: small }], when_none: fail, max_tokens: 100 }\n";
+    const TEAM: &str = "version: 1\nlimits:\n  box: { max_concurrent: 1, budget: { type: unlimited } }\nagents:\n  coder:\n    prompt: Codes.\n    max_seconds: 60\n    limit: box\n    isolation: shared\n    adapter: { type: direct, try: [{ provider: local, model: small }], when_none: fail, max_tokens: 100 }\n";
 
     fn loads(text: &str) -> Config {
         parse(text, Path::new("config.yaml")).unwrap()
@@ -273,12 +269,8 @@ mod tests {
             "a provider is the runner's, named alone"
         );
         assert_eq!(both.llm_backends["local"].name, "local");
-        assert!(both.limits.contains_key("pcb/box") && both.gates.contains_key("pcb/test"));
+        assert!(both.limits.contains_key("pcb/box"));
         assert_eq!(team_of("web/coder"), Some("web"));
-        assert_eq!(
-            both.gate_for("web/coder", "test"),
-            both.gates.get("web/test")
-        );
     }
 
     #[test]
@@ -295,7 +287,7 @@ mod tests {
             ),
             "{err}"
         );
-        let opencode = "version: 1\nlimits: {}\ngates: {}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: opencode\n      model: { type: ann_pool, try: [{ provider: claude, name: haiku, context_window: 8 }], when_none: fail }\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n";
+        let opencode = "version: 1\nlimits: {}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: opencode\n      model: { type: ann_pool, try: [{ provider: claude, name: haiku, context_window: 8 }], when_none: fail }\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n";
         let err = loads(opencode).with_backends(backends()).unwrap_err();
         assert!(
             err.to_string().contains(

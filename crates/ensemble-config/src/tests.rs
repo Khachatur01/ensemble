@@ -31,7 +31,6 @@ fn claude(c: &Config, agent: &str) -> ClaudeCodeAdapter {
 const REFERENCE: &str = r#"
 version: 1
 limits: {}
-gates: {}
 agents:
   planner:
     max_seconds: 1800
@@ -211,13 +210,11 @@ fn a_missing_setting_is_refused_by_name_and_place() {
 
 #[test]
 fn a_config_without_its_agents_is_refused_and_one_defining_sources_too() {
-    let detail = refusal("version: 1\nlimits: {}\ngates: {}\n");
+    let detail = refusal("version: 1\nlimits: {}\n");
     assert!(detail.contains("`agents` is required"), "{detail}");
-    let detail = refusal("version: 1\nlimits: {}\nagents: {}\n");
-    assert!(detail.contains("`gates` is required"), "{detail}");
-    assert!(team("version: 1\nlimits: {}\ngates: {}\nagents: {}\n").is_ok());
+    assert!(team("version: 1\nlimits: {}\nagents: {}\n").is_ok());
     // A team names providers; the runner keeps them.
-    let detail = refusal("version: 1\nllm_backends: {}\nlimits: {}\ngates: {}\nagents: {}\n");
+    let detail = refusal("version: 1\nllm_backends: {}\nlimits: {}\nagents: {}\n");
     assert!(detail.contains("unknown field `llm_backends`"), "{detail}");
 }
 
@@ -259,7 +256,7 @@ fn a_setting_of_another_adapter_type_is_unknown_and_so_is_a_stray_context_window
 
     let provider = "model:\n        type: provider\n        name: opencode/big-pickle\n        context_window: 1\n";
     let doc = format!(
-        "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      {provider}      tools: []\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n"
+        "version: 1\nlimits: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      {provider}      tools: []\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n"
     );
     assert!(refusal(&doc).contains("context_window"));
 }
@@ -268,7 +265,7 @@ fn a_setting_of_another_adapter_type_is_unknown_and_so_is_a_stray_context_window
 fn an_opencode_model_is_a_provider_model_or_a_model_of_the_pool() {
     let doc = |model: &str| {
         format!(
-            "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n"
+            "version: 1\nlimits: {{}}\nagents:\n  x:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: {model}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n"
         )
     };
     let c = team(&doc("{ type: provider, name: opencode/big-pickle }")).unwrap();
@@ -291,7 +288,7 @@ fn an_opencode_model_is_a_provider_model_or_a_model_of_the_pool() {
 /// kind that runs on the pool, with `try` and `when_none` as given.
 fn with_fallback(opencode_try: &str, direct_try: &str, when_none: &str) -> String {
     format!(
-        "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: opencode\n      model:\n        type: ann_pool\n        try: {opencode_try}\n        when_none: {when_none}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try: {direct_try}\n      when_none: {when_none}\n      max_tokens: 10\n"
+        "version: 1\nlimits: {{}}\nagents:\n  coder:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: opencode\n      model:\n        type: ann_pool\n        try: {opencode_try}\n        when_none: {when_none}\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n  summariser:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter:\n      type: direct\n      try: {direct_try}\n      when_none: {when_none}\n      max_tokens: 10\n"
     )
 }
 
@@ -483,7 +480,6 @@ fn the_schema_names_exactly_the_keys_the_config_accepts() {
             "per_hour_tokens budget",
         ),
         ("agent", accepted_keys::<RawAgent>(), "agents"),
-        ("gate", accepted_keys::<RawGate>(), "gates"),
         (
             "budget_per_hour",
             accepted_keys::<RawPerHour>(),
@@ -562,7 +558,6 @@ fn the_schema_requires_every_key_but_the_optional_two() {
         ("agent", vec!["prompt", "max_concurrent", "budget", "limit"]),
         ("limit", vec![]),
         ("budget_per_hour_tokens", vec![]),
-        ("gate", vec![]),
         ("budget_unlimited", vec![]),
         ("budget_per_hour", vec![]),
         ("claude_code_adapter", vec![]),
@@ -765,7 +760,6 @@ fn an_opencode_agent_checks_its_fields() {
     let doc = r#"
 version: 1
 limits: {}
-gates: {}
 agents:
   doer:
     max_seconds: 600
@@ -791,7 +785,6 @@ agents:
     let bad = r#"
 version: 1
 limits: {}
-gates: {}
 agents:
   x:
     max_seconds: 60
@@ -1038,7 +1031,7 @@ fn trailing_slashes_are_normalised_away() {
 
 #[test]
 fn an_unsupported_version_is_refused() {
-    let yaml = "version: 9\nlimits: {}\ngates: {}\nagents: {}\n";
+    let yaml = "version: 9\nlimits: {}\nagents: {}\n";
     assert!(joined_problems(yaml).contains("version"));
 }
 
@@ -1054,7 +1047,6 @@ fn every_independent_problem_is_reported_in_one_pass() {
     let yaml = r#"
 version: 9
 limits: {}
-gates: {}
 agents:
   r:
     max_seconds: 0
@@ -1094,31 +1086,25 @@ fn a_prompt_is_optional_and_absent_means_none() {
     assert_eq!(c.agents["coder"].prompt.as_deref(), Some("Writes code."));
 }
 
-/// A helper team of a `coder` and a `planner`, with one gate.
+/// A helper team of a `coder` and a `planner`.
 fn flat_team() -> String {
     let agent = "    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n      type: opencode\n      model: { type: provider, name: opencode/m }\n      tools: [read]\n      system_prompt: append\n      max_steps: 3\n      command: opencode\n";
-    format!(
-        "version: 1\nlimits: {{}}\ngates:\n  test: {{ command: make test, timeout_seconds: 5 }}\nagents:\n  coder:\n{agent}  planner:\n{agent}"
-    )
+    format!("version: 1\nlimits: {{}}\nagents:\n  coder:\n{agent}  planner:\n{agent}")
 }
 
 #[test]
-fn agents_and_gates_are_found_by_their_plain_names() {
+fn agents_are_found_by_their_plain_names() {
     let c = team(&flat_team()).unwrap();
     assert_eq!(c.agent_names(), vec!["coder", "planner"]);
     assert_eq!(c.agent("planner").unwrap().name, "planner");
     assert!(c.agent("software/planner").is_none());
-    assert!(c.gate("test").is_some() && c.gate("drc").is_none());
 }
 
 #[test]
-fn agent_and_gate_names_must_not_contain_a_slash() {
+fn agent_names_must_not_contain_a_slash() {
     let doc = flat_team().replacen("  coder:\n", "  co/der:\n", 1);
     let joined = joined_problems(&doc);
     assert!(joined.contains("co/der"), "{joined}");
-    let doc = flat_team().replacen("  test:", "  te/st:", 1);
-    let joined = joined_problems(&doc);
-    assert!(joined.contains("te/st"), "{joined}");
 }
 
 #[test]
@@ -1132,7 +1118,7 @@ fn another_version_is_refused() {
 fn with_limits(agent_a: &str, agent_b: &str) -> String {
     let adapter = "    isolation: shared\n    adapter: { type: opencode, model: { type: provider, name: opencode/m }, tools: [read], system_prompt: append, max_steps: 3, command: opencode }\n";
     format!(
-        "version: 1\nlimits:\n  server:\n    max_concurrent: 1\n    budget: {{ type: per_hour_tokens, tokens: 5000 }}\ngates: {{}}\nagents:\n  a:\n    max_seconds: 60\n{agent_a}{adapter}  b:\n    max_seconds: 60\n{agent_b}{adapter}"
+        "version: 1\nlimits:\n  server:\n    max_concurrent: 1\n    budget: {{ type: per_hour_tokens, tokens: 5000 }}\nagents:\n  a:\n    max_seconds: 60\n{agent_a}{adapter}  b:\n    max_seconds: 60\n{agent_b}{adapter}"
     )
 }
 
@@ -1714,7 +1700,7 @@ fn a_team_on_a_runners_pool_names_llms_of_it_that_are_on() {
     .unwrap();
     let doc = |model: &str| {
         format!(
-            "version: 1\nlimits: {{}}\ngates: {{}}\nagents:\n  s:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: direct, try: [{{ provider: home, model: {model} }}], when_none: fail, max_tokens: 10 }}\n"
+            "version: 1\nlimits: {{}}\nagents:\n  s:\n    max_seconds: 60\n    max_concurrent: 1\n    isolation: shared\n    budget: {{ type: unlimited }}\n    adapter: {{ type: direct, try: [{{ provider: home, model: {model} }}], when_none: fail, max_tokens: 10 }}\n"
         )
     };
     let team = parse(&doc("small"), &p())

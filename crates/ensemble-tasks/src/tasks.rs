@@ -9,7 +9,8 @@
 //! backlog), the task itself, and optionally its `context`, `goal`,
 //! `constraints`, `files`, `done_when`, the tasks it comes `after`, the
 //! `repository` its project is cloned from, the `repo` folder of it it works
-//! in and the `gate` its work must pass. The hub adds the `notes` its
+//! in and the `gate` its work must pass: a command of its own, which only the
+//! task's account gives it. The hub adds the `notes` its
 //! knowledge holds about it.
 //!
 //! An agent that cannot go on without a decision ends its reply with
@@ -27,12 +28,17 @@ pub const ASK_MARKER: &str = "NEEDS INPUT:";
 /// the agent and what remains.
 pub const HANDOFF_MARKER: &str = "HAND OFF:";
 
-/// A task's gate: which of the config's `gates` its work must pass, and how
-/// many runs of the agent it gets to pass it.
+/// A task's gate: the command its work must pass, how long it may run, and
+/// how many runs of the agent the task gets to pass it. Only the task's
+/// account gives a task one, and it runs only on that account's runners.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct GateRef {
-    pub name: String,
+pub struct Gate {
+    /// A shell command, run with `sh -c` in the task's working directory
+    /// after the agent is done; exit status 0 passes.
+    pub command: String,
+    /// Seconds it may run before it is stopped and counts as failed.
+    pub timeout_seconds: u32,
     /// Runs of the agent in all, the first included.
     pub attempts: u32,
 }
@@ -65,7 +71,7 @@ pub struct Ticket {
     /// A path inside the working directory where the task works, when that
     /// holds several repositories.
     pub repo: Option<String>,
-    pub gate: Option<GateRef>,
+    pub gate: Option<Gate>,
     pub text: String,
     /// The notes of the hub's knowledge related to the task, as its account
     /// may see them, marked as reference data: set by the hub when it keeps
@@ -123,12 +129,23 @@ impl Ticket {
             check_repository(repository)?;
         }
         if let Some(gate) = &self.gate {
-            if gate.name.trim().is_empty() {
-                return Err("`gate.name` is empty".into());
-            }
-            if gate.attempts == 0 {
-                return Err("`gate.attempts` must be at least 1".into());
-            }
+            gate.check()?;
+        }
+        Ok(())
+    }
+}
+
+impl Gate {
+    /// What is wrong with it, if anything.
+    pub fn check(&self) -> Result<(), String> {
+        if self.command.trim().is_empty() {
+            return Err("`gate.command` is empty".into());
+        }
+        if self.timeout_seconds == 0 {
+            return Err("`gate.timeout_seconds` must be at least 1".into());
+        }
+        if self.attempts == 0 {
+            return Err("`gate.attempts` must be at least 1".into());
         }
         Ok(())
     }
@@ -415,13 +432,25 @@ mod tests {
             ),
             (
                 Ticket {
-                    gate: Some(GateRef {
-                        name: "test".into(),
+                    gate: Some(Gate {
+                        command: "make test".into(),
+                        timeout_seconds: 60,
                         attempts: 0,
                     }),
                     ..draft("Look", "scout", "t")
                 },
                 "at least 1",
+            ),
+            (
+                Ticket {
+                    gate: Some(Gate {
+                        command: " ".into(),
+                        timeout_seconds: 60,
+                        attempts: 1,
+                    }),
+                    ..draft("Look", "scout", "t")
+                },
+                "`gate.command` is empty",
             ),
             (
                 Ticket {

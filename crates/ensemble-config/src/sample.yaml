@@ -42,24 +42,6 @@ limits:
       tokens: 2000000
 
 # ---------------------------------------------------------------------------
-# Gates: checks a task's work must pass. None here; `{}` says there are none.
-# To add one, give it a name and a command:
-#
-#   gates:
-#     test:
-#       # Run with sh -c in the task's working directory; exit status 0 passes.
-#       command: make test
-#       # Seconds it may run before it is stopped and counts as failed.
-#       timeout_seconds: 900
-#
-# A task then names it with `gate: { name: test, attempts: 3 }`; when the
-# command fails, the same agent tries again with its output, up to `attempts`
-# runs in all. Commands live here, not in tasks, so a task cannot bring a
-# command of its own.
-# ---------------------------------------------------------------------------
-gates: {}
-
-# ---------------------------------------------------------------------------
 # Agents: the helper team, one professional each. The names are yours; a task
 # names its agent, and the first line of each `prompt` says what it is for.
 # Each runs an agent CLI you have installed, headless in the task's repository,

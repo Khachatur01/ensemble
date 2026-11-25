@@ -255,17 +255,6 @@ fn check(runner: Option<&config::Runner>, config: Config) -> Result<ExitCode, St
         );
     }
     println!();
-    println!("gates:");
-    for (name, g) in &config.gates {
-        println!(
-            "  {name}  ->  {}  (timeout {}s)",
-            g.command, g.timeout_seconds
-        );
-    }
-    if config.gates.is_empty() {
-        println!("  (none)");
-    }
-    println!();
     println!("agents:");
     for role in config.agent_names() {
         let a = config
@@ -295,31 +284,19 @@ fn check(runner: Option<&config::Runner>, config: Config) -> Result<ExitCode, St
         }
     }
 
-    // A task this runner would run fails only when it starts; say so now.
-    let mut bad = Vec::new();
+    // The tasks of each project, and those another of your runners runs.
     for (project, board) in boards("check").unwrap_or_default() {
         match ensemble_core::runtime::block_on(board.scan()) {
             Ok(all) => {
                 let unfinished: Vec<&tasks::Task> =
                     all.iter().filter(|t| t.status.is_none()).collect();
                 let mut elsewhere = Vec::new();
-                let mut failing = Vec::new();
                 for t in &unfinished {
                     let t = &t.ticket;
-                    if t.agent.is_empty() {
-                        continue;
-                    }
-                    if config.agent(&t.agent).is_none() {
+                    if !t.agent.is_empty() && config.agent(&t.agent).is_none() {
                         elsewhere.push(format!(
                             "{}: agent '{}' is not one of this runner's; another of your runners runs it",
                             t.id, t.agent
-                        ));
-                    } else if let Some(gate) = &t.gate
-                        && config.gate_for(&t.agent, &gate.name).is_none()
-                    {
-                        failing.push(format!(
-                            "{}: gate '{}' is not configured under `gates`; it would fail at once",
-                            t.id, gate.name
                         ));
                     }
                 }
@@ -331,11 +308,10 @@ fn check(runner: Option<&config::Runner>, config: Config) -> Result<ExitCode, St
                         board.place(),
                         unfinished.len()
                     );
-                    for line in failing.iter().chain(&elsewhere) {
+                    for line in &elsewhere {
                         println!("  {line}");
                     }
                 }
-                bad.extend(failing);
             }
             Err(e) => {
                 println!();
@@ -351,9 +327,5 @@ fn check(runner: Option<&config::Runner>, config: Config) -> Result<ExitCode, St
     println!(
         "ready. `ensemble-runner agent health` checks the agent CLIs and the providers of their models."
     );
-    Ok(if bad.is_empty() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+    Ok(ExitCode::SUCCESS)
 }

@@ -152,7 +152,7 @@ operation):
 
 | file | where | holds |
 | --- | --- | --- |
-| `config.yaml` | a helper team's folder in the runner's teams directory (`runner/teams/<name>/`), a folder linked there, or a pulled repository's clone | `limits`, `gates`, `tracker`, `agents` |
+| `config.yaml` | a helper team's folder in the runner's teams directory (`runner/teams/<name>/`), a folder linked there, or a pulled repository's clone | `limits`, `tracker`, `agents` |
 | the hub's settings | typed rows of its core's database, `hub/core/database.db`, on the computer that runs the hub | the core: `owner`, its `ann_pool` (its providers and their models), how people join and sign in, the `roles`; and its connectors' settings: the `distill` and `embed` models, `recall`, the `trackers` and the `source_filter` |
 | the runner's settings | typed rows of its core's database, `runner/core/database.db`, one per computer | `name`, `workspace`, `hub`, and its `ann_pool`: the providers its teams run on, each with the most calls it takes at once, and their models, each on or off, and shared or not; and its `harnesses`, one of each kind (`claude-code`, `codex`, `opencode`, `builtin`), each on or off, found or missing, with its command and how long and how many steps a run may take |
 
@@ -246,13 +246,12 @@ a folder elsewhere, or a pulled repository, whose clone in the cache is checked
 against its pinned commit and must be trusted. A team marked `pending` is
 skipped, with a line saying it waits for approval; a team that cannot be loaded
 stops the runner, naming it. The teams are then combined into one helper team
-(`ensemble_config::teams::combine`): each name of a team, its agents, limits
-and gates, becomes `<team>/<name>`, and every reference inside it (an agent's
+(`ensemble_config::teams::combine`): each name of a team, its agents and
+limits, becomes `<team>/<name>`, and every reference inside it (an agent's
 `limit`) is renamed with it; the models its agents name are the runner's, each
 an LLM of its ANN pool that is on, or the team is not loaded. So the router,
 the workers, budgets, records and tasks work as with one team, with agents named
-`web/coder`; a task's `gate: { name: test }` means the gate `test` of its
-agent's team.
+`web/coder`.
 
 - **Made**: `ensemble-runner team new` writes the sample; `ensemble-runner
   agent add` and `ensemble-runner agent remove` edit it as text, comments
@@ -328,9 +327,10 @@ breaks), and:
 4. for `isolation: worktree`, makes or reuses a git worktree on the branch
    `ensemble/<id>`, from where its work was last pushed when it has been;
 5. runs the agent (see "A run"), asked the ticket's sections and then its
-   notes, marked as reference data, then the task's **gate** if it names one
-   (a gate its team has not got fails the task), running the agent again with
-   the gate's output until it passes or `attempts` are used, all the while
+   notes, marked as reference data, then the task's **gate** if it has one
+   (its command, run with `sh -c` in the task's working directory, passing
+   on exit status 0 within its `timeout_seconds`), running the agent again
+   with the gate's output until it passes or `attempts` are used, all the while
    renewing the claim every 15 seconds (`task_renew`), which also says when
    someone cancelled the task;
 6. says how the run ended (`task_finish`): `NEEDS INPUT: <question>` keeps the
@@ -470,14 +470,14 @@ projects it has no folder for, one that says it is connected, one per project wh
 without a token to sign in, and a short one for `hello` when it signs in or
 says its status; and, when it shares models or reaches other runners', a
 relay socket at `/relay` for model calls, whose frames `ensemble_link::relay`
-describes. This is version 9 of the protocol. It makes no HTTP request
+describes. This is version 10 of the protocol. It makes no HTTP request
 to the hub.
 
 | for | the runner asks | the hub sends |
 | --- | --- | --- |
 | a token, on a link without one | `login` (a name, a password and the client's name, `runner <name>`) or `join` (a join code and the client's name), each answered with a new access token of the client's own, named after it | |
 | who it is | `hello` (who am I, which permissions) | |
-| tasks | each with its `project`: `tasks`, `task`, `task_claim`, `task_renew`, `task_release`, `task_finish`, `task_give_back` (with why); and across projects, `tasks_waiting` (the account's tasks for these agents that this runner has not given back) | |
+| tasks | each with its `project`: `tasks`, `task`, `task_claim`, `task_renew`, `task_release`, `task_finish`, `task_give_back` (with why), and `task_gate` (a task's gate, or none, while it neither runs nor has ended); and across projects, `tasks_waiting` (the account's tasks for these agents that this runner has not given back) | |
 | runners | `runner` (I am a runner: name, every agent), `runners` (mine, each with the models it shares) | |
 | model calls, on the relay socket | the models it shares, by provider, and how many calls each provider takes at once, then calls to other runners' models: `open` (the runner and the provider), the request's body in chunks, `end`, or `cancel` | the answers to its calls, and calls to the models it shares, which it answers: `head`, the body in chunks, `done`, or `error` |
 
@@ -490,8 +490,8 @@ or the account for itself with a session, `me.join-code`
 (`POST /api/v1/me/join-codes`). A code is shown once, kept as a hash with the
 tokens, signs in as no one, and is good once within 24 hours; a client
 without the link spends it with `POST /api/v1/join`. The hub's MCP runs its tools as the same requests (`share`, `recall`, and
-`task_create`, `task_answer`, `task_assign`, `task_cancel` with the reading
-ones, and `runners` for `agents`), so the link and MCP cannot differ. Every request is checked against the
+`task_create`, `task_answer`, `task_assign`, `task_gate`, `task_cancel` with
+the reading ones, and `runners` for `agents`), so the link and MCP cannot differ. Every request is checked against the
 token's permissions (its role, narrowed by its scopes), read again from the
 hub's state, so a revoked token stops at once. The permissions are `share`,
 `recall`, `tasks` and `admin`. The same port serves the
@@ -515,8 +515,12 @@ work, and is written to be read by the person or the model that will see it.
   `builtin`'s file tools cannot leave the working folder; its `shell` can.
   `ensemble-runner team check` and `ensemble-runner doctor` warn about agents
   that can change files in place.
-- **What runs is what the config says.** A task cannot bring a command; gates
-  are defined in `config.yaml`. A task's `repository` is cloned with `--`
+- **A task's gate is its account's command.** A task may bring the command
+  its work must pass, run with `sh -c` in its working directory, as the
+  agent's own shell could; only the task's account gives it one (MCP's
+  `submit` and `gate`, `task.create` and `task.gate`), never the tracker
+  inbox, whose issues anyone who may write in the tracker writes, and a
+  task runs only on its account's runners. A task's `repository` is cloned with `--`
   before it, so it cannot be an option of git's, and with no prompt for a
   password. A remote helper team is pinned to a commit and trusted per commit.
 - **Secrets** are never in a file Ensemble reads as config, and are passed to a
@@ -791,8 +795,8 @@ behind a VPN; nothing in Ensemble assumes either. (Decided 2026-11-10.)
   that use it; through the hub it will also get quotas per user and a usage
   log.
 - Delegated scope: an agent acts with its owner's access or less, never more.
-- Static config, dynamic state. Agent definitions, policy, gates and the ANN
-  pool live in reviewed config. Membership, presence and the model bound
+- Static config, dynamic state. Agent definitions, policy and the ANN pool
+  live in reviewed config; a task brings its own gate. Membership, presence and the model bound
   to an agent for a run live in state.
 - Secrets are never in any repository.
 - Subscriptions are used only by the real CLI on its owner's machine. A Claude
@@ -1464,10 +1468,15 @@ crate holds it today.
     runner is made, as it starts and on `harness.refresh`, off until turned
     on, each with its command and a run's most seconds and steps, Claude
     Code's and Codex's own models named from the catalog, and
-    `harness.list|on|off|set|refresh`. Not yet: decision models in the pool;
-    gates as a task's; teams, their `config.yaml` and agents' names on tasks
+    `harness.list|on|off|set|refresh`; a gate as a task's own, its command,
+    time limit and attempts, given only by the task's account when it makes
+    the task (MCP's `submit`, `task.create`, the web UI) or with `task.gate`
+    (MCP's `gate`, `task_gate` on the link) while the task neither runs nor
+    has ended, never by the tracker inbox, the team's `gates` gone; link
+    protocol 10. Not yet: decision models in the pool; teams, their `config.yaml` and agents' names on tasks
     removed, with the picker choosing a harness and an LLM; reassigning a
-    task to another person.)
+    task to another person, whose runners run its gate only once that
+    person confirms it.)
 32. Later: Jira and other trackers; source adapters (Microsoft 365 for mail
     and Teams, Telegram); a runner's operations from the hub, for its own
     account; the remaining goal operations (people, computers); chat.

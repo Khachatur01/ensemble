@@ -59,7 +59,7 @@ impl Drop for Project {
 
 fn config(agent: &str, adapter: &str) -> String {
     format!(
-        "version: 1\nllm_backends: {{}}\nlimits: {{}}\ngates: {{}}\nagents:\n  {agent}:\n    prompt: Reply as briefly as you can.\n    max_seconds: 300\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n{adapter}"
+        "version: 1\nllm_backends: {{}}\nlimits: {{}}\nagents:\n  {agent}:\n    prompt: Reply as briefly as you can.\n    max_seconds: 300\n    max_concurrent: 1\n    isolation: shared\n    budget:\n      type: unlimited\n    adapter:\n{adapter}"
     )
 }
 

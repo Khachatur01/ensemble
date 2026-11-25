@@ -761,24 +761,14 @@ impl<'e> Queue<'e> {
         let Some(gate) = &ticket.gate else {
             return (delegate(&base).await, Vec::new());
         };
-        let config = self.ensemble.config();
-        let Some(check) = config.gate_for(&ticket.agent, &gate.name) else {
-            return (
-                RunResult::err(format!(
-                    "gate '{}' is not defined under `gates` in config.yaml, so the task did not run.",
-                    gate.name
-                )),
-                Vec::new(),
-            );
-        };
         let attempts = gate.attempts.max(1);
-        let name = serde_json::to_string(&gate.name).expect("a string serializes");
+        let command = serde_json::to_string(&gate.command).expect("a string serializes");
         let mut prompt = base.clone();
         let mut attempt = 1;
         loop {
             let reported = |verdict: &str| {
                 vec![
-                    ("gate", name.clone()),
+                    ("gate", command.clone()),
                     ("gate_result", verdict.to_string()),
                     ("attempts", attempt.to_string()),
                 ]
@@ -790,37 +780,37 @@ impl<'e> Queue<'e> {
             {
                 return (result, reported("not run"));
             }
-            note(&format!("gate {}: running `{}`", gate.name, check.command));
-            let verdict = gate::run(check, dir, cancel).await;
+            note(&format!("gate: running `{}`", gate.command));
+            let verdict = gate::run(&gate.command, gate.timeout_seconds, dir, cancel).await;
             if verdict.passed {
                 let text = format!(
-                    "{}\n\n[gate {}: passed on attempt {attempt} of {attempts}]",
-                    result.text, gate.name
+                    "{}\n\n[gate: passed on attempt {attempt} of {attempts}]",
+                    result.text
                 );
                 return (RunResult::ok(text), reported("passed"));
             }
             note(&format!(
-                "gate {}: failed ({}) on attempt {attempt} of {attempts}",
-                gate.name, verdict.ended
+                "gate: failed ({}) on attempt {attempt} of {attempts}",
+                verdict.ended
             ));
             if attempt >= attempts || cancel.load(Ordering::Relaxed) {
                 let text = format!(
-                    "{}\n\n[gate {}: failed ({}) on attempt {attempt} of {attempts}]\n```\n{}\n```",
-                    result.text, gate.name, verdict.ended, verdict.output
+                    "{}\n\n[gate: failed ({}) on attempt {attempt} of {attempts}]\n```\n{}\n```",
+                    result.text, verdict.ended, verdict.output
                 );
                 return (RunResult::err(text), reported("failed"));
             }
             if let Err(refused) = self.spend(&ticket.agent) {
                 let text = format!(
-                    "{}\n\n[gate {}: failed ({}) on attempt {attempt} of {attempts}; no retry: {refused}]\n```\n{}\n```",
-                    result.text, gate.name, verdict.ended, verdict.output
+                    "{}\n\n[gate: failed ({}) on attempt {attempt} of {attempts}; no retry: {refused}]\n```\n{}\n```",
+                    result.text, verdict.ended, verdict.output
                 );
                 return (RunResult::err(text), reported("failed"));
             }
             attempt += 1;
             prompt = format!(
                 "{}\n\nYour previous attempt did not pass the check `{}` ({}). Its output:\n```\n{}\n```\n\nYour previous reply was:\n{}\n\nFix what the check reports.",
-                base, check.command, verdict.ended, verdict.output, result.text
+                base, gate.command, verdict.ended, verdict.output, result.text
             );
         }
     }

@@ -348,7 +348,7 @@ mod tests {
     /// A team of a coder on OpenCode and a reviewer on Claude Code.
     fn team() -> String {
         use ensemble_config::edit::{NewAgent, add_agent, agent_block};
-        let mut text = String::from("version: 1\nlimits: {}\ngates: {}\nagents: {}\n");
+        let mut text = String::from("version: 1\nlimits: {}\nagents: {}\n");
         for (name, adapter, writes) in [
             ("coder", OPENCODE_AGENT, true),
             ("reviewer", CLAUDE_CODE_AGENT, false),

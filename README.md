@@ -449,7 +449,7 @@ actually run is what `GET /api/v1/ops` lists for it.
 An account's own work is operations too, which only the running hub answers,
 each as the runners' link and MCP do, the permission it needs checked:
 `task.projects`, `task.list`, `task.show`, `task.create`, `task.answer`,
-`task.assign` and `task.cancel` (`tasks`), `runner.list`, the runners that
+`task.assign`, `task.gate` and `task.cancel` (`tasks`), `runner.list`, the runners that
 work for you with their agents (`tasks`), `knowledge.share` (`share`) and
 `knowledge.find` (`recall`).
 
@@ -558,6 +558,7 @@ The tools are what the token may do:
 | `task` | one task: its ticket, state, questions, hand-offs and result |
 | `answer` | answer the question a task stopped to ask, so that it goes on |
 | `assign` | give a task to an agent, such as one waiting in the backlog |
+| `gate` | give a task that is not running the check its work must pass, `{command, timeout_seconds, attempts}`, or, without one, take it away |
 | `cancel` | cancel a task; a runner working on it stops |
 
 The task tools need the `tasks` permission, and each names the
@@ -947,8 +948,8 @@ $ ensemble-hub model on gpu:local:qwen3.5:72b
 A helper team is one directory with one file in it: `config.yaml`, its
 agents and the models they run on. Commit it; it holds no secrets. The runner runs every
 team in its teams directory (`~/.local/state/ensemble/runner/teams/`, see
-[Teams](#teams)) as one helper team: each name of a team, its agents, model
-servers, limits and gates, is `<team>/<name>`, so two teams may both have a
+[Teams](#teams)) as one helper team: each name of a team, its agents and
+limits, is `<team>/<name>`, so two teams may both have a
 `coder`. Commands that change one agent name it so, `web/coder`; every other
 one reads all the teams. Nothing else is searched for, and there is no
 user-level config. `ensemble-runner team new <name>` writes a sample with every
@@ -972,11 +973,6 @@ repository:
 version: 1
 
 limits: {}
-
-gates:
-  test:
-    command: cargo test
-    timeout_seconds: 900
 
 agents:
   coder:
@@ -1097,27 +1093,7 @@ central (fallback 2 of 2)`), and `ensemble-runner agent show <agent> --probe`
 says which model a run would use now.
 Claude Code and Codex use your own login and have no `try` list.
 
-A **gate** is a check a task's work must pass, so an agent that says "done"
-too early gets sent back instead of being believed. You define each gate once,
-under `gates`, with a name of your choice:
-
-```yaml
-gates:
-  test:
-    command: cargo test
-    timeout_seconds: 900
-```
-
-| key | |
-| --- | --- |
-| `command` | what to run: a shell command (`sh -c`), in the task's working directory (its worktree, if the agent has `isolation: worktree`). Exit status 0 passes; anything else fails, and its output (stdout and stderr together) is what the agent is shown |
-| `timeout_seconds` | how long it may run. At the limit it is stopped and counts as failed |
-
-Nothing runs a gate until a task asks for it: a task names one with `gate:
-{ name: test, attempts: 3 }` (see [Tasks](#tasks)).
-A task cannot bring a command of its own, so what runs on your machine is
-what this file says. `gates: {}` says there are none, which is fine: tasks
-then simply have no check.
+A team has no gates: a task brings its own (see [Tasks](#tasks)).
 
 There is no leader in the file: your agent, with you, decides who does what.
 
@@ -1469,16 +1445,17 @@ A task's fields; only `project`, `title` and `task` are needed:
 | `done_when` | conditions that mean it is finished. The agent is told to check its work against them. They are advice to the agent; nothing runs them (that is what `gate` is for) |
 | `after` | ids of tasks that must end `done` first; each must exist already |
 | `repo` | a folder inside the repository to work in, such as one repository of several |
-| `gate` | `name`: a check defined under `gates` in `config.yaml`. `attempts`: how many runs the agent gets in all, the first included, so `1` means no retry. The hub keeps it and the runner checks the name when it runs the task, against the gates of the agent's team; `submit` refuses only a gate of the wrong shape |
+| `gate` | a check its work must pass: `command`, a shell command (`sh -c`) run in the task's working directory (its worktree, if the agent has `isolation: worktree`), passing on exit status 0, its output (stdout and stderr together) what the agent is shown; `timeout_seconds`, how long it may run before it is stopped and counts as failed; `attempts`, how many runs the agent gets in all, the first included, so `1` means no retry. `gate` (or `task.gate`) changes it, or takes it away, while the task neither runs nor has ended |
 
 The agent is sent the text, then the goal, constraints, files and
 `done_when` as sections it can check its work against, then the task's notes. A task with `after`
 waits until every task it names has ended `done`. If one of them failed or was
 cancelled, it stays blocked until it is submitted again.
 
-**Using a gate.** `done_when` tells the agent what finished means; `gate`
-makes Ensemble check it. With `gate`, the named command from `config.yaml`
-runs once the agent is done:
+**Using a gate.** A gate is a check a task's work must pass, so an agent that
+says "done" too early gets sent back instead of being believed. `done_when`
+tells the agent what finished means; `gate` makes Ensemble check it. With
+`gate`, its command runs once the agent is done:
 
 1. It passes: the task is `done`.
 2. It fails: the same agent runs again, told the command, how it ended, the
@@ -1488,16 +1465,20 @@ runs once the agent is done:
 
 Each retry takes a run from the agent's `budget`; over it, no retry is made. The
 result records `gate`, `gate_result` (`passed`, `failed`, or `not run` when the
-agent itself failed) and `attempts`. A gate that is not defined in `config.yaml`
-fails the task at once, and `ensemble-runner team check` reports it before that.
+agent itself failed) and `attempts`.
+
+A gate is a command that runs on your runner, as the agent's own shell could,
+so only you give your task one: when you make it (`submit`, `task.create`, the
+web UI's form) or with `gate` (`task.gate`, the task's page). A task made from
+a tracker's issue has none, since anyone who may write in the tracker writes
+its issues; give it one yourself. Your tasks run only on your own runners.
 
 A result starts with `status` (`done`, `failed` or `cancelled`), `agent`,
 `started` and `ended`, then the agent's reply. A task with a result is over;
 submit it again to run it again. What a run does as it goes, its activity
 log, is in `runs/<id>/` in the repository's state directory on the computer
 that ran it. `ensemble-runner team check` reports, for each project of the
-workspace, the tasks on the hub this runner cannot run as they are: a gate it
-has not got, or an agent that is another runner's.
+workspace, the tasks on the hub whose agent is another runner's.
 
 A task's agent may stop to ask. It is told that, when it cannot finish without
 a decision only the person who asked can make, it should end its reply with a
@@ -1587,7 +1568,7 @@ $ ensemble-runner team list                                    # each team, wher
 
 and the fourth: a team someone else wrote, marked pending (a `pending` file in
 its folder), waits for you. `ensemble-runner team approve <name>` shows every
-agent command, gate command, tool list and permission mode it would run on your
+agent command, tool list and permission mode it would run on your
 machine, with a warning for each risk, and lets it run only once you say yes.
 `ensemble-runner team remove <name>` takes a team out; a linked folder and a
 pulled clone are left where they are. A running runner uses a change at once:
@@ -2052,7 +2033,7 @@ $ ensemble-runner team pull <url>[@ref] [--name N]    # a team from git, pinned 
 $ ensemble-runner team update <name> [--ref R]        # a pulled team moved to a new commit, once you trust it
 $ ensemble-runner team approve <name>                 # read a team someone else wrote, and let it run
 $ ensemble-runner team remove <name>
-$ ensemble-runner team check                # validate every team, print the gates and agents, and the tasks on the hub it cannot run
+$ ensemble-runner team check                # validate every team, print the agents, and the tasks on the hub another runner runs
 $ ensemble-runner team schema               # the JSON Schema of config.yaml
 $ ensemble-runner team config <name> get|set|unset|edit|path   # a team's config.yaml
 
@@ -2162,7 +2143,7 @@ scripts stand in for the CLIs.
 | `crates/ensemble-agents/src/router.rs`, `crates/ensemble-backends/` | routing, `health` and its model check, the chat request in both formats; what a provider lists, as Ollama says or the catalog knows; a model new to a provider kept off, and one gone marked missing |
 | `crates/ensemble-knowledge/` | shares kept as they arrived, notes and the log, commits by the lock holder, the secret check; the pipeline against a stub model: new notes, merges, chatter skipped, unusable answers to review, waiting for a model, rebuild |
 | `ui/server/` | the app's files served with its pages and nothing outside them, a call to the API passed on as from the hub's origin only from a page of the UI, the hub's cookies Secure behind TLS |
-| `crates/ensemble-hub/` | sign-up, approval and the REST API's codes, a browser's session in a cookie no page of another origin may use, an account's tasks, runners and knowledge as operations, tokens kept as hashes and revoked at once, join codes spent once and before they expire, a runner signing in over the link with a password (and the lockout) or a code, a link without a token refused all else, a runner of another protocol version refused with what to update, roles checked per request, shares under the signed-in name; the hub's MCP: a token needed, the tools a token allows, share and recall as its account, tasks made and followed, with a `repository` and a `gate`; every connected runner listed to its owner alone with all its agents, model calls streamed from a runner; tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the runner holding the lease, questions, hand-offs, cancelling, tasks given back and blocked until a runner that has not connects or they are assigned again, the answer to where a project is kept as its repository, the tasks waiting for a runner's agents in every project, the notes recalled into a new task, over the link as the signed-in account; the inbox: markdown issues read and written with only the status line changed, issues to tasks of the account matched by tracker name, questions and answers through comments, results posted once, a closed issue cancelling its task |
+| `crates/ensemble-hub/` | sign-up, approval and the REST API's codes, a browser's session in a cookie no page of another origin may use, an account's tasks, runners and knowledge as operations, tokens kept as hashes and revoked at once, join codes spent once and before they expire, a runner signing in over the link with a password (and the lockout) or a code, a link without a token refused all else, a runner of another protocol version refused with what to update, roles checked per request, shares under the signed-in name; the hub's MCP: a token needed, the tools a token allows, share and recall as its account, tasks made and followed, with a `repository` and a `gate`, a gate changed or taken away; every connected runner listed to its owner alone with all its agents, model calls streamed from a runner; tasks on the hub: ids, leases taken, renewed, run out and taken over, results said once and only by the runner holding the lease, questions, hand-offs, cancelling, tasks given back and blocked until a runner that has not connects or they are assigned again, the answer to where a project is kept as its repository, the tasks waiting for a runner's agents in every project, the notes recalled into a new task, over the link as the signed-in account; the inbox: markdown issues read and written with only the status line changed, issues to tasks of the account matched by tracker name, questions and answers through comments, results posted once, a closed issue cancelling its task |
 | `crates/ensemble-link/` | the token file 0600, the link opened again when it breaks, a hub of another protocol version named with what to update |
 | `crates/ensemble-core/` | the state directories and their hashes, the worker lock, run records |
 | `crates/ensemble-tasks/` | tickets, questions and hand-offs in a reply, run logs |
@@ -2204,9 +2185,6 @@ scripts stand in for the CLIs.
   push.
 - **A task of an agent the runner has not got** fails when it starts, as does
   one whose agent's team was removed.
-- **The hub does not know the teams' gates.** `submit` takes a `gate` by name,
-  and the runner refuses one its agent's team has not got when it runs the
-  task; a tracker's issue names none.
 - **Your agent sees a task only when it asks.** The hub's MCP sends nothing
   unasked: no progress, and no word when a task ends, until your agent calls
   `tasks` or `task`.

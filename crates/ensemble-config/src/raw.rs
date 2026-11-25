@@ -15,20 +15,8 @@ pub(crate) struct RawConfig {
     /// Named limits that agents share, such as one model server's concurrency
     /// or one subscription's budget. `{}` when there are none.
     pub(crate) limits: BTreeMap<String, RawLimit>,
-    /// Commands a task's work must pass. Defined here, by a person, so a task
-    /// names a gate and cannot bring a command of its own.
-    pub(crate) gates: BTreeMap<String, RawGate>,
     /// The helper team: its agents, by name.
     pub(crate) agents: BTreeMap<String, RawAgent>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawGate {
-    /// A shell command run in the project; exit status 0 passes.
-    pub(crate) command: String,
-    /// Seconds it may run before it is stopped and counted as failed.
-    pub(crate) timeout_seconds: u32,
 }
 
 #[derive(Debug, Deserialize)]

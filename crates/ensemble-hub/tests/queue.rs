@@ -9,7 +9,7 @@ use ensemble_hub::board::DbBoard;
 use ensemble_tasks::board::End;
 use ensemble_tasks::queue::Queue;
 use ensemble_tasks::runs::Runs;
-use ensemble_tasks::tasks::{GateRef, Outcome, Status, Task, Ticket};
+use ensemble_tasks::tasks::{Gate, Outcome, Status, Task, Ticket};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -85,9 +85,7 @@ fn team_with(
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("a.txt"), "hello").unwrap();
-    let mut yaml = String::from(
-        "version: 1\nlimits: {}\ngates:\n  done-file: { command: \"test -e done.txt\", timeout_seconds: 10 }\nagents:\n",
-    );
+    let mut yaml = String::from("version: 1\nlimits: {}\nagents:\n");
     for (name, tools, body) in scripts {
         let command = cli(&bin, name, body);
         yaml.push_str(&format!(
@@ -377,8 +375,9 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
             id,
             Ticket {
                 agent: "coder".into(),
-                gate: Some(GateRef {
-                    name: "done-file".into(),
+                gate: Some(Gate {
+                    command: "test -e done.txt".into(),
+                    timeout_seconds: 10,
                     attempts,
                 }),
                 text: "Make done.txt.".into(),
@@ -391,11 +390,11 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
         let r = ended(&tmp, "0001-once").text;
         assert!(r.starts_with("---\nstatus: failed\n"), "{r}");
         assert!(
-            r.contains("gate: \"done-file\"\ngate_result: failed\nattempts: 1\n"),
+            r.contains("gate: \"test -e done.txt\"\ngate_result: failed\nattempts: 1\n"),
             "{r}"
         );
         assert!(
-            r.contains("[gate done-file: failed (exit 1) on attempt 1 of 1]"),
+            r.contains("[gate: failed (exit 1) on attempt 1 of 1]"),
             "{r}"
         );
     });
@@ -406,7 +405,7 @@ printf '{"type":"text","part":{"text":"%s"}}\n' "$t"
         assert!(r.starts_with("---\nstatus: done\n"), "{r}");
         assert!(r.contains("gate_result: passed\nattempts: 2\n"), "{r}");
         assert!(
-            r.contains("fixed") && r.contains("[gate done-file: passed on attempt 2 of 2]"),
+            r.contains("fixed") && r.contains("[gate: passed on attempt 2 of 2]"),
             "{r}"
         );
     });
@@ -436,8 +435,9 @@ printf '{"type":"text","part":{"text":"edited"}}\n'
         Ticket {
             title: "Edit".into(),
             agent: "coder".into(),
-            gate: Some(GateRef {
-                name: "done-file".into(),
+            gate: Some(Gate {
+                command: "test -e done.txt".into(),
+                timeout_seconds: 10,
                 attempts: 1,
             }),
             text: "Edit.".into(),
@@ -681,7 +681,7 @@ fn a_task_whose_agent_has_no_usable_model_waits_and_says_why() {
     let tmp = TempDir::new();
     std::fs::create_dir_all(project(&tmp)).unwrap();
     let down = |n: u16| format!("http://127.0.0.1:{n}/v1");
-    let yaml = "version: 1\nlimits: {}\ngates: {}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: direct\n      try:\n        - { provider: home, model: small }\n        - { provider: central, model: big }\n      when_none: wait\n      max_tokens: 10\n";
+    let yaml = "version: 1\nlimits: {}\nagents:\n  summariser:\n    max_seconds: 30\n    max_concurrent: 1\n    isolation: shared\n    budget: { type: unlimited }\n    adapter:\n      type: direct\n      try:\n        - { provider: home, model: small }\n        - { provider: central, model: big }\n      when_none: wait\n      max_tokens: 10\n";
     let cfg = config::parse(yaml, Path::new("config.yaml"))
         .and_then(|c| {
             c.with_backends(std::collections::BTreeMap::from([
