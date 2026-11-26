@@ -616,9 +616,11 @@ work, and is written to be read by the person or the model that will see it.
 
 ## What it is
 
-An agentic development system: a hub of services and runners of computing
-power, with work spread across them; MCP is one way in. (Decided 2026-11-17:
-Ensemble is described as this, not as an MCP server.) It serves two kinds of
+An agentic development system and an organization's knowledge base, on one
+hub: a hub of services and runners of computing power, with work spread across
+them; MCP is one way in. (Decided 2026-11-17: Ensemble is described as this,
+not as an MCP server. Decided 2026-11-26: it is both, with the boundary in
+"Responsibilities".) It serves two kinds of
 user: a single developer who wants agents to work on
 tasks and save tokens by sending cheap work to cheap models, and an organization
 whose people and agents share knowledge. The same two executables serve both.
@@ -634,6 +636,47 @@ the config rules allow.
 
 A runner always needs a hub, and knowledge always belongs to one: one person
 on their own runs both on their computer. (Decided 2026-11-19.)
+
+## Responsibilities
+
+Everything Ensemble does belongs to one of these responsibilities, and each
+has one owner. A feature that fits none is left out, or this map changes
+first. (Decided 2026-11-26.)
+
+| Responsibility | What it covers | Owner | Development system | Knowledge base |
+|---|---|---|---|---|
+| People and access | persons, signing in with the hub's own name and password, roles, tokens; which outside accounts are a person's | the hub's core | yes | yes |
+| Models | the ANN pools: providers, models, sharing between runners | the hub's core, each runner | yes | yes |
+| Work | tasks, choosing who works on each, running them, trackers | `tasks`, the task picker, runners | yes | |
+| Knowledge | taking it in, distilling it into notes, recalling it | `knowledge` | yes | yes |
+| Reaching people | telling a person what they should know without being asked: reminders, notices | not designed yet | | yes |
+
+The boundary between the two sides:
+
+- They share people and access, and models.
+- Work and knowledge meet at two points only: the hub puts the notes it
+  recalls into a task when it is made, and a task's report is shared into
+  knowledge when it ends. (Both built.)
+- A hub may serve one side alone: a developer's hub with no sources, or an
+  organization's hub with no runners, which runs no task and still keeps
+  knowledge.
+- Reaching an outside system is a means, not a responsibility: an adapter
+  reaches one system for one responsibility (a tracker for work, a source for
+  knowledge). Whether one connection to a system serves several, such as one
+  Microsoft 365 connection for mail, the directory and notices, is open
+  question 8.
+
+Not Ensemble's:
+
+- **Signing people in to other systems.** Ensemble is no sign-on provider,
+  and nobody signs in to it with another system's account.
+- **Being the record of what other systems keep**: the CRM, the ERP, the
+  calendar, the HR directory, a tracker's issues. Ensemble reads them and
+  keeps what it learned; the system itself stays the truth, and anything
+  Ensemble writes to one is for a responsibility above, such as a comment on
+  an issue for work.
+- **Automating an organization's processes in general**: no workflow engine,
+  and no rules on events beyond what a responsibility above needs.
 
 ## Hub, connectors and runners
 
@@ -1621,3 +1664,15 @@ adapters like the web UI.
    assignee is left alone now; the decision model could suggest a person
    for it, from what each person's account says they do, for a person to
    confirm. Not built; raised 2026-11-25.
+8. Who a person is in outside systems. Discussed 2026-11-25 and 2026-11-26:
+   a person is today's account, always signing in with the hub's own name
+   and password, and nobody else is a person; a person links their outside
+   accounts (Microsoft, Google, GitHub, a tracker's name, Telegram, an
+   email) by proving each, through the provider's consent page from the web
+   UI, or from the person's computer when the hub has no HTTPS name, and
+   Telegram by a code sent to the hub's bot; an outside account belongs to
+   one person at most, and a link nobody proved is only a suggestion for the
+   person or an admin to confirm. An admin registers the hub with each
+   provider once. Not decided: whether one connection to an outside system
+   serves several responsibilities (sources and trackers as one `services`),
+   and what the vault keeps about a person.
