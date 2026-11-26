@@ -675,8 +675,9 @@ Not Ensemble's:
   keeps what it learned; the system itself stays the truth, and anything
   Ensemble writes to one is for a responsibility above, such as a comment on
   an issue for work.
-- **Automating an organization's processes in general**: no workflow engine,
-  and no rules on events beyond what a responsibility above needs.
+
+Automating an organization's processes in general may become Ensemble's; it
+is open question 9.
 
 ## Hub, connectors and runners
 
@@ -1676,3 +1677,9 @@ adapters like the web UI.
    provider once. Not decided: whether one connection to an outside system
    serves several responsibilities (sources and trackers as one `services`),
    and what the vault keeps about a person.
+9. Automating an organization's processes in general: work started by an
+   event or a time rather than by a person, across outside systems. Raised
+   2026-11-26 as possibly Ensemble's: whether it is, and if so whether it is
+   a responsibility of its own or part of work (a process as tasks that
+   events and times start) and of reaching people, which needs the same
+   triggers.
