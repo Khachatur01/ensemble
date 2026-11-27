@@ -191,7 +191,7 @@ fn setup(
         }
     }
     println!(
-        "Next: give it a model server with `ensemble-hub provider add <name> --type openai-compatible-api --url <url> --max-concurrent <n>`, add the models you want with `ensemble-hub model add <name>:<model>`, choose those that distill shares with `ensemble-hub knowledge models <name>:<model>`, and have the task tracker watch a tracker with `ensemble-hub integration add`. `ensemble-hub settings show` shows every setting."
+        "Next: give it a model server with `ensemble-hub provider add <name> --type openai-compatible-api --url <url> --max-concurrent <n>`, add the models you want with `ensemble-hub model add <name>:<model>`, choose those that distill shares with `ensemble-hub knowledge models <name>:<model>`, and have the task tracker watch a tracker with `ensemble-hub tasks tracker add`. `ensemble-hub settings show` shows every setting."
     );
     Ok(ExitCode::SUCCESS)
 }

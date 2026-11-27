@@ -2540,7 +2540,7 @@ fn a_running_hub_uses_changed_settings_at_once_or_starts_again() {
     let roles = stdout_of(&ensemble_hub(&s, &["role", "list"]));
     assert!(roles.contains("reader: recall, share"), "{roles}");
     // The trackers it watches: it starts again, where it listened.
-    let out = ensemble_hub(&s, &["integration", "remove", "issues"]);
+    let out = ensemble_hub(&s, &["tasks", "tracker", "remove", "issues"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stderr_of(&out).contains("starts again"),
@@ -2779,17 +2779,17 @@ fn an_admin_adds_providers_and_their_keys_without_naming_a_variable_and_adds_mod
 
     // The task picker: decision models alone, how sure of the worker they
     // must be, and the questions they are asked first.
-    let out = hub_with_stdin(&s, &["picker", "set", "--off"], "");
+    let out = hub_with_stdin(&s, &["tasks", "picker", "set", "--off"], "");
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let shown = stdout_of(&hub_with_stdin(&s, &["picker", "show"], ""));
+    let shown = stdout_of(&hub_with_stdin(&s, &["tasks", "picker", "show"], ""));
     assert!(shown.contains("There is no task picker"), "{shown}");
-    let out = hub_with_stdin(&s, &["picker", "set", "central:qwen3.5-72b"], "");
+    let out = hub_with_stdin(&s, &["tasks", "picker", "set", "central:qwen3.5-72b"], "");
     assert!(
         stderr_of(&out).contains("is not a decision model"),
         "{}",
         stderr_of(&out)
     );
-    let out = hub_with_stdin(&s, &["picker", "set", "laya:laya"], "");
+    let out = hub_with_stdin(&s, &["tasks", "picker", "set", "laya:laya"], "");
     assert!(
         stderr_of(&out).contains("how sure of the worker"),
         "{}",
@@ -2797,15 +2797,23 @@ fn an_admin_adds_providers_and_their_keys_without_naming_a_variable_and_adds_mod
     );
     let out = hub_with_stdin(
         &s,
-        &["picker", "set", "laya:laya", "--min-confidence", "0.6"],
+        &[
+            "tasks",
+            "picker",
+            "set",
+            "laya:laya",
+            "--min-confidence",
+            "0.6",
+        ],
         "",
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let out = hub_with_stdin(&s, &["picker", "template", "basic"], "");
+    let out = hub_with_stdin(&s, &["tasks", "picker", "template", "basic"], "");
     assert!(out.status.success(), "{}", stderr_of(&out));
     let out = hub_with_stdin(
         &s,
         &[
+            "tasks",
             "picker",
             "question",
             "kind",
@@ -2826,6 +2834,7 @@ fn an_admin_adds_providers_and_their_keys_without_naming_a_variable_and_adds_mod
     let out = hub_with_stdin(
         &s,
         &[
+            "tasks",
             "picker",
             "question",
             "kind2",
@@ -2843,7 +2852,7 @@ fn an_admin_adds_providers_and_their_keys_without_naming_a_variable_and_adds_mod
         "{}",
         stderr_of(&out)
     );
-    let shown = stdout_of(&hub_with_stdin(&s, &["picker", "show"], ""));
+    let shown = stdout_of(&hub_with_stdin(&s, &["tasks", "picker", "show"], ""));
     assert!(
         shown.contains("Decision models, in order: laya:laya")
             && shown.contains("difficulty (score")
@@ -2857,7 +2866,7 @@ fn an_admin_adds_providers_and_their_keys_without_naming_a_variable_and_adds_mod
     let picker = &yaml()["task_picker"];
     assert_eq!(picker["worker_min_confidence"], json!(0.6));
     assert_eq!(picker["questions"].as_array().unwrap().len(), 4);
-    let out = hub_with_stdin(&s, &["picker", "remove-question", "tools"], "");
+    let out = hub_with_stdin(&s, &["tasks", "picker", "remove-question", "tools"], "");
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(
         yaml()["task_picker"]["questions"].as_array().unwrap().len(),
@@ -3154,7 +3163,8 @@ fn an_admin_chooses_the_hubs_models_integrations_roles_and_sign_up_by_what_they_
 
     // Integrations with trackers: each with a folder of its own.
     ok(&[
-        "integration",
+        "tasks",
+        "tracker",
         "add",
         "work",
         "--type",
@@ -3163,7 +3173,8 @@ fn an_admin_chooses_the_hubs_models_integrations_roles_and_sign_up_by_what_they_
         "work",
     ]);
     let out = run(&[
-        "integration",
+        "tasks",
+        "tracker",
         "add",
         "again",
         "--type",
@@ -3176,13 +3187,13 @@ fn an_admin_chooses_the_hubs_models_integrations_roles_and_sign_up_by_what_they_
         "{}",
         stderr_of(&out)
     );
-    let list = ok(&["integration", "list"]);
+    let list = ok(&["tasks", "tracker", "list"]);
     assert!(
         list.contains("work  local_markdown in") && list.contains("label ensemble"),
         "{list}"
     );
     assert!(list.contains("issues"), "{list}");
-    ok(&["integration", "remove", "issues"]);
+    ok(&["tasks", "tracker", "remove", "issues"]);
 
     // Roles, and who may sign up.
     ok(&["role", "set", "auditor", "recall,share"]);

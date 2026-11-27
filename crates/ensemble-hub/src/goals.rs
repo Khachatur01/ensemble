@@ -14,7 +14,7 @@
 //! | `knowledge.recall` | how much one recall returns |
 //! | `knowledge.intake-filter` | the models that collect and filter what arrives without being shared on purpose, and what is confidential, or none |
 //! | `knowledge.try-intake` | what the intake filter would leave of a text, shared nowhere |
-//! | `integration.list`, `integration.add`, `integration.remove` | the task tracker's integrations with trackers whose issues become tasks |
+//! | `tasks.tracker.list`, `tasks.tracker.add`, `tasks.tracker.remove` | the task tracker's integrations with trackers whose issues become tasks |
 //! | `role.set`, `role.remove` | what each role may do |
 //! | `registration.set` | whether people sign up, and how many may wait |
 //!
@@ -429,7 +429,7 @@ pub fn operations() -> Vec<Operation<HubContext>> {
         ),
         operation(
             Spec {
-                name: "integration.list",
+                name: "tasks.tracker.list",
                 summary: "List the task tracker's integrations with trackers whose issues become tasks.",
                 access: ADMIN,
                 input: &[],
@@ -438,25 +438,25 @@ pub fn operations() -> Vec<Operation<HubContext>> {
         ),
         operation(
             Spec {
-                name: "integration.add",
+                name: "tasks.tracker.add",
                 summary: "Add an integration with a tracker whose issues, with its label, become tasks of the people they are assigned to.",
                 access: ADMIN,
                 input: INTEGRATION_ADD,
             },
             |c: &HubContext, caller: &Caller, input: IntegrationAdd| {
-                let change = changed(caller, "integration.add", &input);
+                let change = changed(caller, "tasks.tracker.add", &input);
                 add_integration(c, input, change)
             },
         ),
         operation(
             Spec {
-                name: "integration.remove",
+                name: "tasks.tracker.remove",
                 summary: "Take an integration out: its tracker is no longer watched.",
                 access: ADMIN,
                 input: NAMED_INTEGRATION,
             },
             |c: &HubContext, caller: &Caller, input: Named| {
-                let change = changed(caller, "integration.remove", &input);
+                let change = changed(caller, "tasks.tracker.remove", &input);
                 edit(
                     c,
                     change,
@@ -773,7 +773,8 @@ fn integrations(c: &HubContext) -> Result<Value, Error> {
     }
     if said.is_empty() {
         said.push(
-            "no integrations: tasks come from MCP clients alone; `integration add` adds one".into(),
+            "no integrations: tasks come from MCP clients alone; `tasks tracker add` adds one"
+                .into(),
         );
     }
     Ok(json!({ "said": said.join("\n"), "integrations": rows }))

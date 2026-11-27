@@ -57,14 +57,14 @@ const SHOWN: &[&str] = &[
     "knowledge.find",
     "knowledge.intake-filter",
     "knowledge.try-intake",
-    "integration.list",
-    "integration.add",
-    "integration.remove",
-    "picker.show",
-    "picker.set",
-    "picker.question",
-    "picker.remove-question",
-    "picker.template",
+    "tasks.tracker.list",
+    "tasks.tracker.add",
+    "tasks.tracker.remove",
+    "tasks.picker.show",
+    "tasks.picker.set",
+    "tasks.picker.question",
+    "tasks.picker.remove-question",
+    "tasks.picker.template",
 ];
 
 /// The groups of operations that are settings.
@@ -76,8 +76,7 @@ const GROUPS: &[&str] = &[
     "runner",
     "knowledge",
     "provider",
-    "integration",
-    "picker",
+    "tasks",
 ];
 
 /// The hub's settings, as `settings.show` says, for every section: a type of
@@ -886,7 +885,7 @@ const TRACKER_TYPES: &[(&str, &str)] = &[("local_markdown", "A folder of markdow
 
 #[component]
 fn Integrations() -> Element {
-    let mut integrations = use_op("integration.list");
+    let mut integrations = use_op("tasks.tracker.list");
     let (mut shown, _) = settings();
     let mut changed = move || {
         integrations.restart();
@@ -912,7 +911,7 @@ fn Integrations() -> Element {
                                     td { "{text(&t, \"poll_seconds\")}s" }
                                     td { class: "end",
                                         OpForm {
-                                            op: "integration.remove",
+                                            op: "tasks.tracker.remove",
                                             fixed: vec![("name".to_string(), json!(text(&t, "name")))],
                                             submit: "Remove",
                                             danger: true,
@@ -932,7 +931,7 @@ fn Integrations() -> Element {
             h3 { "Add an integration" }
             p { class: "muted", "The hub starts again to use it; runners connect again by themselves." }
             OpForm {
-                op: "integration.add",
+                op: "tasks.tracker.add",
                 values: vec![value("type", "local_markdown")],
                 picks: vec![Pick::named("type", TRACKER_TYPES)],
                 when: vec![When::new("dir", "type", &["local_markdown"])],
@@ -959,7 +958,7 @@ const TEMPLATES: &[(&str, &str)] = &[(
     "How hard the task is, and whether it needs to run tools",
 )];
 
-/// A question's answers as `picker.question` takes them: one per line,
+/// A question's answers as `tasks.picker.question` takes them: one per line,
 /// `name: what it means`; none for a noul.
 fn answer_lines(q: &Value) -> String {
     if text(q, "type") == "noul" {
@@ -984,7 +983,7 @@ fn effect(e: &Value) -> String {
     }
 }
 
-/// A question's effects as `picker.question` takes them: `answer:effect`.
+/// A question's effects as `tasks.picker.question` takes them: `answer:effect`.
 fn effect_lines(q: &Value) -> String {
     q["answers"]
         .as_array()
@@ -1020,7 +1019,7 @@ fn Picker() -> Element {
         section { class: "panel",
             h3 { "Decision models" }
             OpForm {
-                op: "picker.set",
+                op: "tasks.picker.set",
                 values: vec![
                     value("off", picker.is_null()),
                     value("models", model_lines(&picker["decision_models"])),
@@ -1073,7 +1072,7 @@ fn Picker() -> Element {
                                     td { "{text(&q, \"min_confidence\")}" }
                                     td { class: "end",
                                         OpForm {
-                                            op: "picker.remove-question",
+                                            op: "tasks.picker.remove-question",
                                             fixed: vec![("name".to_string(), json!(text(&q, "name")))],
                                             submit: "Remove",
                                             danger: true,
@@ -1084,7 +1083,7 @@ fn Picker() -> Element {
                                         details {
                                             summary { "Change" }
                                             OpForm {
-                                                op: "picker.question",
+                                                op: "tasks.picker.question",
                                                 values: vec![
                                                     value("name", text(&q, "name")),
                                                     value("type", text(&q, "type")),
@@ -1110,7 +1109,7 @@ fn Picker() -> Element {
             section { class: "panel",
                 h3 { "Add a question" }
                 OpForm {
-                    op: "picker.question",
+                    op: "tasks.picker.question",
                     values: vec![value("type", "choice")],
                     picks: vec![Pick::named("type", QUESTION_TYPES)],
                     when: vec![When::new("answers", "type", &["choice", "score"])],
@@ -1128,7 +1127,7 @@ fn Picker() -> Element {
             section { class: "panel",
                 h3 { "Start from a template" }
                 OpForm {
-                    op: "picker.template",
+                    op: "tasks.picker.template",
                     values: vec![value("name", "basic")],
                     picks: vec![Pick::named("name", TEMPLATES)],
                     submit: "Use the template",

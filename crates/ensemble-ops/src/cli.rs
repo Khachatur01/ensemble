@@ -3,7 +3,8 @@
 //!
 //! Each operation the one who runs a hub or a runner may run is a command,
 //! made from its spec. A name's dots are the command's path (`user.add` is
-//! `ensemble-hub user add`), its fields its arguments: positional ones by
+//! `ensemble-hub user add`, `tasks.tracker.add` is `ensemble-hub tasks
+//! tracker add`), its fields its arguments: positional ones by
 //! their place, the others as `--options`. A secret is never an argument: when
 //! an operation needs one, it is asked for, without echo, or read from stdin,
 //! and the operation runs again.
@@ -33,27 +34,43 @@ pub fn mount<C>(
         }
         let path: Vec<&'static str> = op.spec.name.split('.').collect();
         let leaf = leaf(path[path.len() - 1], op.spec.summary, op.spec.input);
-        command = match path.as_slice() {
-            [_] => command.subcommand(leaf),
-            [group, _] => {
-                if command.find_subcommand(group).is_none() {
-                    let about = groups
-                        .iter()
-                        .find(|(g, _)| g == group)
-                        .map_or("", |(_, about)| about);
-                    command = command.subcommand(
-                        clap::Command::new(*group)
-                            .about(line(about))
-                            .subcommand_required(true)
-                            .arg_required_else_help(true),
-                    );
-                }
-                command.mut_subcommand(group, |g| g.subcommand(leaf))
-            }
-            _ => panic!("operation {} is more than a group and a verb", op.spec.name),
-        };
+        command = place(command, "", &path[..path.len() - 1], leaf, groups);
     }
     command
+}
+
+/// `command` with `leaf` under the groups `path` names, below `above` (the
+/// groups already gone through, joined by dots), each made when it is not
+/// there yet with its words of `groups`, found by its dotted path.
+fn place(
+    command: clap::Command,
+    above: &str,
+    path: &[&'static str],
+    leaf: clap::Command,
+    groups: &[(&'static str, &'static str)],
+) -> clap::Command {
+    let Some((group, rest)) = path.split_first() else {
+        return command.subcommand(leaf);
+    };
+    let here = if above.is_empty() {
+        group.to_string()
+    } else {
+        format!("{above}.{group}")
+    };
+    let mut command = command;
+    if command.find_subcommand(group).is_none() {
+        let about = groups
+            .iter()
+            .find(|(g, _)| *g == here)
+            .map_or("", |(_, about)| about);
+        command = command.subcommand(
+            clap::Command::new(*group)
+                .about(line(about))
+                .subcommand_required(true)
+                .arg_required_else_help(true),
+        );
+    }
+    command.mut_subcommand(group, |g| place(g, &here, rest, leaf, groups))
 }
 
 /// The flag every operation's command has, which prints its output as JSON.
@@ -106,11 +123,12 @@ pub fn matched<'m, C>(
     registry: &Registry<C>,
     matches: &'m clap::ArgMatches,
 ) -> Option<(&'static str, &'m clap::ArgMatches)> {
-    let (first, sub) = matches.subcommand()?;
-    let (name, leaf) = match sub.subcommand() {
-        Some((second, leaf)) => (format!("{first}.{second}"), leaf),
-        None => (first.to_string(), sub),
-    };
+    let (first, mut leaf) = matches.subcommand()?;
+    let mut name = first.to_string();
+    while let Some((next, below)) = leaf.subcommand() {
+        name = format!("{name}.{next}");
+        leaf = below;
+    }
     let op = registry.get(&name)?;
     Some((op.spec.name, leaf))
 }

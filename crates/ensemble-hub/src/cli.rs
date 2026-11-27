@@ -40,11 +40,15 @@ pub fn command<H>(hub: &Registry<H>) -> clap::Command {
         ("role", "The hub's roles."),
         ("runner", "The runners connected to the hub."),
         (
-            "integration",
+            "tasks",
+            "The task tracker: its integrations with trackers, and its task picker.",
+        ),
+        (
+            "tasks.tracker",
             "The task tracker's integrations with trackers whose issues become tasks.",
         ),
         (
-            "picker",
+            "tasks.picker",
             "The task picker: the decision models that choose who works on each task, and what they are asked.",
         ),
         ("registration", "How people join the hub."),

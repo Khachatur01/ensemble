@@ -4,11 +4,11 @@
 //!
 //! | Operation | Does |
 //! |---|---|
-//! | `picker.show` | the task picker: its decision models, the least confidence of the worker, its questions |
-//! | `picker.set` | the decision models, in order, and the least confidence of the worker; or none |
-//! | `picker.question` | add a question, or change the one of its name |
-//! | `picker.remove-question` | take a question out |
-//! | `picker.template` | replace the questions with a starting template |
+//! | `tasks.picker.show` | the task picker: its decision models, the least confidence of the worker, its questions |
+//! | `tasks.picker.set` | the decision models, in order, and the least confidence of the worker; or none |
+//! | `tasks.picker.question` | add a question, or change the one of its name |
+//! | `tasks.picker.remove-question` | take a question out |
+//! | `tasks.picker.template` | replace the questions with a starting template |
 //!
 //! Each changes the hub's settings through `Kept`, as every setting does.
 
@@ -126,7 +126,7 @@ pub fn operations() -> Vec<Operation<HubContext>> {
     vec![
         operation(
             Spec {
-                name: "picker.show",
+                name: "tasks.picker.show",
                 summary: "Show the task picker: the decision models that choose who works on each task, and what they are asked.",
                 access: ADMIN,
                 input: &[],
@@ -135,37 +135,37 @@ pub fn operations() -> Vec<Operation<HubContext>> {
         ),
         operation(
             Spec {
-                name: "picker.set",
+                name: "tasks.picker.set",
                 summary: "Choose the decision models that choose who works on each task, in order, and how sure of the worker they must be; or none, and no task is given to a runner.",
                 access: ADMIN,
                 input: SET,
             },
             |c: &HubContext, caller: &Caller, input: Set| {
-                let change = changed(caller, "picker.set", &input);
+                let change = changed(caller, "tasks.picker.set", &input);
                 set(c, input, change)
             },
         ),
         operation(
             Spec {
-                name: "picker.question",
+                name: "tasks.picker.question",
                 summary: "Add a question the decision models are asked of each task before they choose its worker, or change the one of its name.",
                 access: ADMIN,
                 input: QUESTION,
             },
             |c: &HubContext, caller: &Caller, input: Question| {
-                let change = changed(caller, "picker.question", &input);
+                let change = changed(caller, "tasks.picker.question", &input);
                 question(c, input, change)
             },
         ),
         operation(
             Spec {
-                name: "picker.remove-question",
+                name: "tasks.picker.remove-question",
                 summary: "Take a question of the task picker out.",
                 access: ADMIN,
                 input: NAMED,
             },
             |c: &HubContext, caller: &Caller, input: Named| {
-                let change = changed(caller, "picker.remove-question", &input);
+                let change = changed(caller, "tasks.picker.remove-question", &input);
                 let said = format!("the question {} is gone", input.name);
                 edit(c, change, said, |s| {
                     let picker = picker_of(&mut s.task_picker)?;
@@ -184,13 +184,13 @@ pub fn operations() -> Vec<Operation<HubContext>> {
         ),
         operation(
             Spec {
-                name: "picker.template",
+                name: "tasks.picker.template",
                 summary: "Replace the task picker's questions with a starting template, to change as you like.",
                 access: ADMIN,
                 input: TEMPLATE,
             },
             |c: &HubContext, caller: &Caller, input: Named| {
-                let change = changed(caller, "picker.template", &input);
+                let change = changed(caller, "tasks.picker.template", &input);
                 let questions = template(&input.name).ok_or_else(|| {
                     Error::invalid(format!("there is no template '{}'", input.name)).on("name")
                 })?;

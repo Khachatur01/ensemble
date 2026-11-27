@@ -436,7 +436,7 @@ for scripts. JSON in and out.
 | `DELETE /api/v1/users/{name}` | admin | removes an account, or turns a sign-up down |
 
 | `GET /api/v1/ops` | any token | the operations it may run, each with the JSON Schema of its input (secrets `writeOnly`) and its fields in order, for a UI to make its forms from |
-| `POST /api/v1/ops/{name}` `{…its input}` | as the operation says | runs any operation by its name, such as `provider.add`, `knowledge.models` or `integration.add` |
+| `POST /api/v1/ops/{name}` `{…its input}` | as the operation says | runs any operation by its name, such as `provider.add`, `knowledge.models` or `tasks.tracker.add` |
 | `GET /api/v1/openapi.json` | anyone | this API as an OpenAPI 3.1 document: every path above and every operation, with its body and who may call it |
 
 Point an OpenAPI tool at `/api/v1/openapi.json` to browse the API or make a
@@ -754,7 +754,7 @@ has an integration with, each with an inbox of its own and a folder of its
 own; with none, tasks come from your agent alone.
 
 ```console
-$ ensemble-hub integration add issues --type local_markdown --dir issues --label ensemble --poll-seconds 30
+$ ensemble-hub tasks tracker add issues --type local_markdown --dir issues --label ensemble --poll-seconds 30
 ```
 
 An issue is a markdown file anyone can write:
@@ -1302,16 +1302,16 @@ $ ensemble-hub model list [provider]                  # each model added: what i
 $ ensemble-hub knowledge models central:qwen3.5:9b claude:claude-haiku-4-5
 $ ensemble-hub knowledge embedding central:embeddinggemma   # or --off
 $ ensemble-hub knowledge recall --max-notes 8 --max-chars 6000
-$ ensemble-hub integration add issues --type local_markdown --dir issues  # integration list | remove
+$ ensemble-hub tasks tracker add issues --type local_markdown --dir issues  # tasks tracker list | remove
 $ ensemble-hub role set auditor recall,share                              # role remove
 $ ensemble-hub registration set approval --max-pending 20                 # or closed
 $ ensemble-hub knowledge intake-filter central:qwen3.5-72b --prompt "Salaries; clients' names."  # or --off
 $ ensemble-hub knowledge try-intake "Bob: deploys go out on Tuesdays now"
-$ ensemble-hub picker set laya:laya --min-confidence 0.6      # the task picker; picker show, or --off
-$ ensemble-hub picker template basic                         # how hard, and whether it runs tools
-$ ensemble-hub picker question kind --type choice --instructions "What does the task change?" \
+$ ensemble-hub tasks picker set laya:laya --min-confidence 0.6      # the task picker; tasks picker show, or --off
+$ ensemble-hub tasks picker template basic                         # how hard, and whether it runs tools
+$ ensemble-hub tasks picker question kind --type choice --instructions "What does the task change?" \
     --min-confidence 0.5 --answers $'code: It changes the code.\ndocs: The documentation alone.' \
-    --effects code:min_tier=medium,docs:prefer=opencode       # picker remove-question
+    --effects code:min_tier=medium,docs:prefer=opencode       # tasks picker remove-question
 $ ensemble-runner provider add local --type openai-compatible-api --url http://127.0.0.1:11434/v1 --max-concurrent 1
 $ ensemble-runner model share local:qwen3.5:9b      # model unshare
 $ ensemble-runner harness add builtin --max-seconds 1800 --max-steps 50 --max-concurrent 1 --max-tokens 4000   # harness remove | set | refresh | add-model | remove-model
@@ -1331,16 +1331,16 @@ $ ensemble-runner harness add builtin --max-seconds 1800 --max-steps 50 --max-co
   answers it as a service, and so sees what it is asked. What such a provider
   serves are decision models, and `provider test` asks one a yes or no. A
   runner keeps none: the hub decides.
-- **The task picker is the task tracker's, one for the hub.** `picker set` names the
+- **The task picker is the task tracker's, one for the hub.** `tasks picker set` names the
   decision models of the hub's pool asked, in order, the next when one fails,
-  and the least probability the worker chosen must have. `picker question`
+  and the least probability the worker chosen must have. `tasks picker question`
   adds a question they are asked of each task first: a `choice`, a `score`
   (its answers lowest first) or a `noul` (yes or no), each answer `name: what
   it means`, its least confidence, and what each answer means for the worker,
   from a fixed list: `min_tier=<small|medium|strong>`, `min_context=<tokens>`,
   `needs_tools`, `prefer=<harness or model>`, `avoid=<harness or model>`,
   and `model_alone`: the task only needs an answer, and a model alone
-  answers it. `picker template basic` asks whether the task only needs an
+  answers it. `tasks picker template basic` asks whether the task only needs an
   answer, how hard it is and whether it needs to run tools, and replaces the
   questions with that start to change; no
   template is ever used unless chosen. A decision model the picker uses is not

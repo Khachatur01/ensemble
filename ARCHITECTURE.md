@@ -1636,8 +1636,8 @@ crate holds it today.
     workers, what each model is and its abilities, and how busy each harness
     and provider is, link protocol 13; `task_picker` in the hub's settings,
     its decision models to try, its questions, what each answer does and
-    how sure it must be, and a starting template (`picker set`, `picker
-    question`, `picker template`, the web UI's Task picker); the hub
+    how sure it must be, and a starting template (`tasks picker set`, `tasks
+    picker question`, `tasks picker template`, the web UI's Task picker); the hub
     choosing each task's worker and offering the task to its runner alone,
     a task waiting for its person to choose when the decision model is not
     sure (`task.choose`, MCP's `choose`), the choice kept with the decision,
