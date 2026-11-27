@@ -106,10 +106,10 @@ fn start(dir: &HubDir, owner: &str) -> Result<(), String> {
         hub.owner,
         dir.database().display()
     );
-    ensemble_knowledge::Vault::new(&hub.connectors.knowledge.vault).init()?;
+    ensemble_knowledge::Vault::new(&hub.modules.knowledge.vault).init()?;
     println!(
         "Made the knowledge vault, a git repository: {}",
-        hub.connectors.knowledge.vault.display()
+        hub.modules.knowledge.vault.display()
     );
     Ok(())
 }
@@ -191,7 +191,7 @@ fn setup(
         }
     }
     println!(
-        "Next: give it a model server with `ensemble-hub provider add <name> --type openai-compatible-api --url <url> --max-concurrent <n>`, add the models you want with `ensemble-hub model add <name>:<model>`, choose those that distill shares with `ensemble-hub knowledge models <name>:<model>`, and watch a tracker with `ensemble-hub tracker add`. `ensemble-hub settings show` shows every setting."
+        "Next: give it a model server with `ensemble-hub provider add <name> --type openai-compatible-api --url <url> --max-concurrent <n>`, add the models you want with `ensemble-hub model add <name>:<model>`, choose those that distill shares with `ensemble-hub knowledge models <name>:<model>`, and have the task tracker watch a tracker with `ensemble-hub integration add`. `ensemble-hub settings show` shows every setting."
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -199,7 +199,7 @@ fn setup(
 fn check(ctx: &Ctx) -> Result<ExitCode, String> {
     let hub = load(ctx)?;
     println!("{}: valid, for {}", kept::SETTINGS_NAME, hub.owner);
-    let knowledge = &hub.connectors.knowledge;
+    let knowledge = &hub.modules.knowledge;
     println!("knowledge vault: {}", knowledge.vault.display());
     if !ensemble_knowledge::Vault::new(&knowledge.vault).exists() {
         println!("  it is not a git repository yet; `ensemble-hub serve` makes it");
@@ -348,10 +348,10 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
             .starts_with(ensemble_knowledge::RECALL_HEADER)
             .then_some(found)
     };
-    // An inbox for each tracker the settings name.
+    // An inbox for each integration of the task tracker the settings name.
     let mut inboxes: Vec<&'static crate::inbox::ServerInbox> = Vec::new();
-    for (name, tracker) in &hub.connectors.tasks.trackers {
-        let inbox = crate::inbox::ServerInbox::new(name, tracker, &hub.accounts.roles, &dir)
+    for (name, integration) in &hub.modules.tasks.integrations {
+        let inbox = crate::inbox::ServerInbox::new(name, integration, &hub.accounts.roles, &dir)
             .map_err(|e| format!("serve: {e}"))?
             .with_notes(notes);
         inboxes.push(Box::leak(Box::new(inbox)));
@@ -402,7 +402,7 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
     // The task picker chooses the worker of each task of the runners
     // connected now.
     let dispatcher = crate::dispatch::Dispatcher::new(&dir.tasks(), move || server.routes.now());
-    dispatcher.apply(hub.task_picker.as_ref(), &hub.llm.direct);
+    dispatcher.apply(hub.modules.tasks.task_picker.as_ref(), &hub.llm.direct);
     let dispatcher: &'static crate::dispatch::Dispatcher = Box::leak(Box::new(dispatcher));
     // A change to its settings, or to a key they name: used at once where it
     // can be, else it starts again.
@@ -411,7 +411,7 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
             Ok(now) => now,
             Err(e) => return Some(format!("The running hub could not read it: {e}")),
         };
-        if now.connectors.tasks != hub.connectors.tasks {
+        if now.modules.tasks.integrations != hub.modules.tasks.integrations {
             local::restart();
             return Some(
                 "The running hub starts again to use it; runners connect again by themselves."
@@ -423,7 +423,7 @@ fn serve_once(ctx: &Ctx, listen: SocketAddr) -> Result<(), String> {
         }
         loopback.set_names(now.llm.routes());
         memory.apply(&now);
-        dispatcher.apply(now.task_picker.as_ref(), &now.llm.direct);
+        dispatcher.apply(now.modules.tasks.task_picker.as_ref(), &now.llm.direct);
         Some("The running hub uses it now.".into())
     });
     std::thread::scope(|scope| {

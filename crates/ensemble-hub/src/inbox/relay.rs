@@ -25,7 +25,7 @@ use super::tracker::{Issue, IssueTracker, Status};
 use super::work::{self, AUTHOR, Update, reply_after};
 use crate::board::{DbBoard, Recall, recall_query};
 use crate::users::Users;
-use ensemble_config::{Permission, Tracker};
+use ensemble_config::{Integration, Permission};
 use ensemble_core::state::HubDir;
 use ensemble_store as store;
 use serde::{Deserialize, Serialize};
@@ -101,12 +101,12 @@ fn load(dir: &std::path::Path, tracker: &str) -> Result<BTreeMap<String, Deliver
     })
 }
 
-/// A hub server's task inbox, for one tracker.
+/// A hub server's task inbox, for one integration with a tracker.
 pub struct ServerInbox {
-    /// The tracker's name in `connectors.tasks.trackers`.
+    /// The integration's name in the task tracker's `integrations`.
     name: String,
-    /// The tracker's settings: its label, and how often it is looked at.
-    settings: Tracker,
+    /// The integration's settings: its label, and how often it is looked at.
+    settings: Integration,
     tracker: Box<dyn IssueTracker + Send>,
     roles: BTreeMap<String, Vec<Permission>>,
     /// The hub's folder: its users in its core, their tasks, and the
@@ -122,7 +122,7 @@ pub struct ServerInbox {
 impl ServerInbox {
     pub fn new(
         name: &str,
-        settings: &Tracker,
+        settings: &Integration,
         roles: &BTreeMap<String, Vec<Permission>>,
         dir: &HubDir,
     ) -> Result<Self, String> {
@@ -448,7 +448,7 @@ mod tests {
         users.set_tracker_user("ana", Some("ana.p")).unwrap();
         users.add("rex", "reader", &roles).unwrap();
         users.save().unwrap();
-        let tracker = Tracker {
+        let tracker = Integration {
             kind: Kind::LocalMarkdown {
                 dir: tmp.0.join("issues"),
             },
@@ -651,7 +651,7 @@ mod tests {
     fn two_trackers_keep_their_issues_apart_though_their_ids_are_the_same() {
         let w = world();
         std::fs::create_dir_all(w.tmp.0.join("work")).unwrap();
-        let work = Tracker {
+        let work = Integration {
             kind: Kind::LocalMarkdown {
                 dir: w.tmp.0.join("work"),
             },

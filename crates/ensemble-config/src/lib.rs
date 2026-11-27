@@ -215,9 +215,9 @@ pub use harness::{
     BuiltinHarness, CliHarness, Harness, HarnessChange, HarnessKind, HarnessModel, HarnessesSetting,
 };
 pub use hub::{
-    AccountRules, Accounts, Connectors, Embed, EmbedSetting, Hub, HubSettings, IssueTracker,
-    Knowledge, ModelSetting, ModelsSetting, Permission, Recall, Registration, RegistrationSetting,
-    SourceFilter, SourceFilterSetting, Sources, Tasks, Tracker, TrackerSetting,
+    AccountRules, Accounts, Embed, EmbedSetting, Hub, HubSettings, IntakeFilter,
+    IntakeFilterSetting, Integration, IntegrationSetting, IssueTracker, Knowledge, ModelSetting,
+    ModelsSetting, Modules, Permission, Recall, Registration, RegistrationSetting, Tasks,
 };
 pub use picker::{Effect, PickerAnswer, PickerQuestion, QuestionKind, TaskPickerSetting};
 pub use runner::{Runner, RunnerSettings};

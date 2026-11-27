@@ -5,7 +5,7 @@
 //! asks the same way for a client agent. Shares go into the organization
 //! vault under the signed-in user's name, never a name the client sends.
 //!
-//! The one port serves every connector over HTTP: the runners' link at
+//! The one port serves every module over HTTP: the runners' link at
 //! `/link` and their relay sockets at `/relay`, both WebSockets; MCP at
 //! `/mcp` (`mcp`); and the REST API under `/api/v1/` (`api`).
 //!

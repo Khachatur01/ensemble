@@ -10,8 +10,8 @@
 
 use ensemble_config::kept::{Change, Keep};
 use ensemble_config::{
-    EmbedSetting, Hub, HubSettings, ModelSetting, ModelsSetting, Permission, PickerQuestion,
-    RegistrationSetting, SourceFilterSetting, TaskPickerSetting, TrackerSetting, WhenNone,
+    EmbedSetting, Hub, HubSettings, IntakeFilterSetting, IntegrationSetting, ModelSetting,
+    ModelsSetting, Permission, PickerQuestion, RegistrationSetting, TaskPickerSetting, WhenNone,
 };
 use ensemble_core::state::HubDir;
 use ensemble_store::kept::{
@@ -70,9 +70,9 @@ CREATE TABLE IF NOT EXISTS hub_settings (
     embed_provider TEXT,
     embed_model TEXT,
     embed_min_similarity REAL,
-    filter_when_none TEXT,
-    filter_max_tokens INTEGER,
-    filter_prompt TEXT,
+    intake_when_none TEXT,
+    intake_max_tokens INTEGER,
+    intake_prompt TEXT,
     picker_min_confidence REAL
 );
 CREATE TABLE IF NOT EXISTS roles (
@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS picker_questions (
     min_confidence REAL NOT NULL,
     answers TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS trackers (
+CREATE TABLE IF NOT EXISTS integrations (
     name TEXT PRIMARY KEY,
     type TEXT NOT NULL,
     dir TEXT NOT NULL,
@@ -103,9 +103,9 @@ CREATE TABLE IF NOT EXISTS trackers (
 );
 ";
 
-/// What the distiller's models are kept as, and the source filter's.
+/// What the distiller's models are kept as, and the intake filter's.
 const DISTILL: &str = "distill";
-const FILTER: &str = "source_filter";
+const INTAKE: &str = "intake_filter";
 /// What the task picker's decision models are kept as.
 const PICKER: &str = "task_picker";
 
@@ -180,7 +180,7 @@ impl Keep<HubSettings> for HubStore {
         core(&self.dir, async |c| {
             let found = rows(
                 c,
-                "SELECT owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_provider, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt, picker_min_confidence FROM hub_settings WHERE id = 1",
+                "SELECT owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_provider, embed_model, embed_min_similarity, intake_when_none, intake_max_tokens, intake_prompt, picker_min_confidence FROM hub_settings WHERE id = 1",
                 vec![],
             )
             .await?;
@@ -211,23 +211,23 @@ impl Keep<HubSettings> for HubStore {
                         model: some_text(&m[2], "models.model")?,
                     });
             }
-            let mut trackers = BTreeMap::new();
+            let mut integrations = BTreeMap::new();
             for t in rows(
                 c,
-                "SELECT name, type, dir, label, poll_seconds FROM trackers",
+                "SELECT name, type, dir, label, poll_seconds FROM integrations",
                 vec![],
             )
             .await?
             {
-                let name = some_text(&t[0], "trackers.name")?;
-                let at = format!("trackers.{name}");
+                let name = some_text(&t[0], "integrations.name")?;
+                let at = format!("integrations.{name}");
                 let kind = some_text(&t[1], &at)?;
                 if kind != ensemble_config::hub::LOCAL_MARKDOWN_TRACKER {
                     return Err(format!("{at}: the type '{kind}' is unknown"));
                 }
-                trackers.insert(
+                integrations.insert(
                     name,
-                    TrackerSetting::LocalMarkdown {
+                    IntegrationSetting::LocalMarkdown {
                         dir: some_text(&t[2], &at)?,
                         label: some_text(&t[3], &at)?,
                         poll_seconds: num(&t[4], &at)?,
@@ -249,14 +249,14 @@ impl Keep<HubSettings> for HubStore {
                 }),
                 None => None,
             };
-            let source_filter = match text(&r[13]) {
-                Some(_) => Some(SourceFilterSetting {
+            let intake_filter = match text(&r[13]) {
+                Some(_) => Some(IntakeFilterSetting {
                     models: ModelsSetting {
-                        candidates: models.remove(FILTER).unwrap_or_default(),
-                        when_none: named(&r[13], "source_filter.when_none")?,
-                        max_tokens: num(&r[14], "source_filter.max_tokens")?,
+                        candidates: models.remove(INTAKE).unwrap_or_default(),
+                        when_none: named(&r[13], "intake_filter.when_none")?,
+                        max_tokens: num(&r[14], "intake_filter.max_tokens")?,
                     },
-                    prompt: some_text(&r[15], "source_filter.prompt")?,
+                    prompt: some_text(&r[15], "intake_filter.prompt")?,
                 }),
                 None => None,
             };
@@ -305,8 +305,8 @@ impl Keep<HubSettings> for HubStore {
                 embed,
                 recall_max_notes: num(&r[8], "recall_max_notes")?,
                 recall_max_chars: num(&r[9], "recall_max_chars")?,
-                trackers,
-                source_filter,
+                intake_filter,
+                integrations,
                 task_picker,
             }))
         })
@@ -325,7 +325,7 @@ impl Keep<HubSettings> for HubStore {
             ),
             None => (Value::Null, Value::Null, Value::Null),
         };
-        let (filter_when_none, filter_max_tokens, filter_prompt) = match &s.source_filter {
+        let (intake_when_none, intake_max_tokens, intake_prompt) = match &s.intake_filter {
             Some(f) => (
                 txt(&name_of(&f.models.when_none)),
                 int(f.models.max_tokens),
@@ -336,7 +336,7 @@ impl Keep<HubSettings> for HubStore {
         let mut statements = vec![
             ("DELETE FROM hub_settings", vec![]),
             (
-                "INSERT INTO hub_settings (id, owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_provider, embed_model, embed_min_similarity, filter_when_none, filter_max_tokens, filter_prompt, picker_min_confidence) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                "INSERT INTO hub_settings (id, owner, registration, max_pending, session_hours, lockout_failures, lockout_minutes, distill_when_none, distill_max_tokens, recall_max_notes, recall_max_chars, embed_provider, embed_model, embed_min_similarity, intake_when_none, intake_max_tokens, intake_prompt, picker_min_confidence) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 vec![
                     txt(&s.owner),
                     txt(registration),
@@ -351,9 +351,9 @@ impl Keep<HubSettings> for HubStore {
                     embed_provider,
                     embed_model,
                     embed_min,
-                    filter_when_none,
-                    filter_max_tokens,
-                    filter_prompt,
+                    intake_when_none,
+                    intake_max_tokens,
+                    intake_prompt,
                     s.task_picker
                         .as_ref()
                         .map_or(Value::Null, |p| Value::Real(p.worker_min_confidence)),
@@ -361,7 +361,7 @@ impl Keep<HubSettings> for HubStore {
             ),
             ("DELETE FROM roles", vec![]),
             ("DELETE FROM models", vec![]),
-            ("DELETE FROM trackers", vec![]),
+            ("DELETE FROM integrations", vec![]),
             ("DELETE FROM picker_questions", vec![]),
         ];
         for (name, permissions) in &s.roles {
@@ -371,13 +371,13 @@ impl Keep<HubSettings> for HubStore {
                 vec![txt(name), txt(&permissions)],
             ));
         }
-        let filter = s
-            .source_filter
+        let intake = s
+            .intake_filter
             .iter()
-            .map(|f| (FILTER, &f.models.candidates));
+            .map(|f| (INTAKE, &f.models.candidates));
         let picker = s.task_picker.iter().map(|p| (PICKER, &p.decision_models));
         let distill = std::iter::once((DISTILL, &s.distill.candidates));
-        for (purpose, models) in distill.chain(filter).chain(picker) {
+        for (purpose, models) in distill.chain(intake).chain(picker) {
             for (i, m) in models.iter().enumerate() {
                 statements.push((
                     "INSERT INTO models (purpose, position, provider, model) VALUES (?1, ?2, ?3, ?4)",
@@ -385,14 +385,14 @@ impl Keep<HubSettings> for HubStore {
                 ));
             }
         }
-        for (name, t) in &s.trackers {
-            let TrackerSetting::LocalMarkdown {
+        for (name, t) in &s.integrations {
+            let IntegrationSetting::LocalMarkdown {
                 dir,
                 label,
                 poll_seconds,
             } = t;
             statements.push((
-                "INSERT INTO trackers (name, type, dir, label, poll_seconds) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO integrations (name, type, dir, label, poll_seconds) VALUES (?1, ?2, ?3, ?4, ?5)",
                 vec![
                     txt(name),
                     txt(ensemble_config::hub::LOCAL_MARKDOWN_TRACKER),
@@ -492,7 +492,7 @@ mod tests {
             model: "nomic".into(),
             min_similarity: 0.45,
         });
-        hub.source_filter = Some(SourceFilterSetting {
+        hub.intake_filter = Some(IntakeFilterSetting {
             models: ModelsSetting {
                 candidates: vec![model("claude", "haiku")],
                 when_none: WhenNone::Fail,
@@ -505,9 +505,9 @@ mod tests {
             worker_min_confidence: 0.55,
             questions: ensemble_config::picker::template("basic").unwrap(),
         });
-        hub.trackers.insert(
+        hub.integrations.insert(
             "issues".into(),
-            TrackerSetting::LocalMarkdown {
+            IntegrationSetting::LocalMarkdown {
                 dir: "issues".into(),
                 label: "ensemble".into(),
                 poll_seconds: 30,

@@ -12,11 +12,11 @@
 //! | `knowledge.models` | the models that turn shares into notes, each asked whether it serves the model |
 //! | `knowledge.embedding` | the embedding model, asked to embed once, or none |
 //! | `knowledge.recall` | how much one recall returns |
-//! | `tracker.list`, `tracker.add`, `tracker.remove` | the trackers whose issues become tasks |
+//! | `knowledge.intake-filter` | the models that collect and filter what arrives without being shared on purpose, and what is confidential, or none |
+//! | `knowledge.try-intake` | what the intake filter would leave of a text, shared nowhere |
+//! | `integration.list`, `integration.add`, `integration.remove` | the task tracker's integrations with trackers whose issues become tasks |
 //! | `role.set`, `role.remove` | what each role may do |
 //! | `registration.set` | whether people sign up, and how many may wait |
-//! | `source.filter` | the model that collects and filters what sources bring in, and what is confidential, or none |
-//! | `source.try` | what the filter would leave of a text, shared nowhere |
 //!
 //! Each changes the hub's settings through [`Kept`], in its database, so a
 //! change is loaded before it is kept, kept in the audit log with who made
@@ -29,8 +29,8 @@ use ensemble_backends::ops::WithPool;
 use ensemble_config::ann::Use;
 use ensemble_config::kept::{Change, WithKept};
 use ensemble_config::{
-    EmbedSetting, HubSettings, LlmBackend, ModelSetting, ModelsSetting, Permission,
-    RegistrationSetting, SourceFilterSetting, TrackerSetting, WhenNone,
+    EmbedSetting, HubSettings, IntakeFilterSetting, IntegrationSetting, LlmBackend, ModelSetting,
+    ModelsSetting, Permission, RegistrationSetting, WhenNone,
 };
 use ensemble_ops::{Access, Caller, Code, Error, Field, Kind, Operation, Spec, operation};
 use serde::{Deserialize, Serialize};
@@ -89,11 +89,14 @@ const RECALL: &[Field] = &[
         "Most characters one recall returns, all notes together.",
     ),
 ];
-const TRACKER_NAME: Field = Field::text("name", "The tracker's name: letters, digits, '-' or '_'.")
-    .required()
-    .positional();
-const TRACKER_ADD: &[Field] = &[
-    TRACKER_NAME,
+const INTEGRATION_NAME: Field = Field::text(
+    "name",
+    "The integration's name: letters, digits, '-' or '_'.",
+)
+.required()
+.positional();
+const INTEGRATION_ADD: &[Field] = &[
+    INTEGRATION_NAME,
     Field::new(
         "type",
         Kind::Choice(&["local_markdown"]),
@@ -114,7 +117,7 @@ const TRACKER_ADD: &[Field] = &[
         "Seconds between two looks at it; 30 when left out.",
     ),
 ];
-const NAMED_TRACKER: &[Field] = &[TRACKER_NAME];
+const NAMED_INTEGRATION: &[Field] = &[INTEGRATION_NAME];
 const ROLE_NAME: Field = Field::text("name", "The role's name, one word.")
     .required()
     .positional();
@@ -129,7 +132,7 @@ const ROLE_SET: &[Field] = &[
     .positional(),
 ];
 const NAMED_ROLE: &[Field] = &[ROLE_NAME];
-const SOURCE_FILTER: &[Field] = &[
+const INTAKE_FILTER: &[Field] = &[
     Field::new(
         "models",
         Kind::List,
@@ -153,13 +156,13 @@ const SOURCE_FILTER: &[Field] = &[
     Field::new(
         "off",
         Kind::Flag,
-        "No filter: no source may be connected.",
+        "No filter: nothing may arrive without being shared on purpose.",
     ),
     NO_CHECK,
 ];
-const SOURCE_TRY: &[Field] = &[Field::text(
+const TRY_INTAKE: &[Field] = &[Field::text(
     "text",
-    "A text as a source might bring it, such as a few messages of a chat.",
+    "A text as an integration might bring it, such as a few messages of a chat.",
 )
 .required()
 .positional()];
@@ -204,7 +207,7 @@ struct Recall {
 }
 
 #[derive(Deserialize, Serialize)]
-struct TrackerAdd {
+struct IntegrationAdd {
     name: String,
     #[serde(rename = "type")]
     kind: String,
@@ -286,7 +289,7 @@ const IMPORT: &[Field] = &[Field::text(
 .positional()];
 
 #[derive(Deserialize, Serialize)]
-struct SourceFilter {
+struct IntakeFilter {
     #[serde(default)]
     models: Vec<String>,
     prompt: Option<String>,
@@ -299,7 +302,7 @@ struct SourceFilter {
 }
 
 #[derive(Deserialize, Serialize)]
-struct SourceTry {
+struct TryIntake {
     text: String,
 }
 
@@ -426,43 +429,43 @@ pub fn operations() -> Vec<Operation<HubContext>> {
         ),
         operation(
             Spec {
-                name: "tracker.list",
-                summary: "List the trackers whose issues become tasks.",
+                name: "integration.list",
+                summary: "List the task tracker's integrations with trackers whose issues become tasks.",
                 access: ADMIN,
                 input: &[],
             },
-            |c: &HubContext, _: &Caller, _: Nothing| trackers(c),
+            |c: &HubContext, _: &Caller, _: Nothing| integrations(c),
         ),
         operation(
             Spec {
-                name: "tracker.add",
-                summary: "Add a tracker whose issues, with its label, become tasks of the people they are assigned to.",
+                name: "integration.add",
+                summary: "Add an integration with a tracker whose issues, with its label, become tasks of the people they are assigned to.",
                 access: ADMIN,
-                input: TRACKER_ADD,
+                input: INTEGRATION_ADD,
             },
-            |c: &HubContext, caller: &Caller, input: TrackerAdd| {
-                let change = changed(caller, "tracker.add", &input);
-                add_tracker(c, input, change)
+            |c: &HubContext, caller: &Caller, input: IntegrationAdd| {
+                let change = changed(caller, "integration.add", &input);
+                add_integration(c, input, change)
             },
         ),
         operation(
             Spec {
-                name: "tracker.remove",
-                summary: "Stop watching a tracker.",
+                name: "integration.remove",
+                summary: "Take an integration out: its tracker is no longer watched.",
                 access: ADMIN,
-                input: NAMED_TRACKER,
+                input: NAMED_INTEGRATION,
             },
             |c: &HubContext, caller: &Caller, input: Named| {
-                let change = changed(caller, "tracker.remove", &input);
+                let change = changed(caller, "integration.remove", &input);
                 edit(
                     c,
                     change,
-                    format!("the hub no longer watches the tracker {}", input.name),
+                    format!("the task tracker no longer watches {}", input.name),
                     |s| {
-                        s.trackers
+                        s.integrations
                             .remove(&input.name)
                             .map(|_| ())
-                            .ok_or_else(|| no_such("tracker", &input.name))
+                            .ok_or_else(|| no_such("integration", &input.name))
                     },
                 )
             },
@@ -505,24 +508,24 @@ pub fn operations() -> Vec<Operation<HubContext>> {
         ),
         operation(
             Spec {
-                name: "source.filter",
-                summary: "Choose the model that collects and filters what sources bring in, and say what is confidential.",
+                name: "knowledge.intake-filter",
+                summary: "Choose the models that collect and filter what arrives without being shared on purpose, and say what is confidential.",
                 access: ADMIN,
-                input: SOURCE_FILTER,
+                input: INTAKE_FILTER,
             },
-            |c: &HubContext, caller: &Caller, input: SourceFilter| {
-                let change = changed(caller, "source.filter", &input);
-                source_filter(c, input, change)
+            |c: &HubContext, caller: &Caller, input: IntakeFilter| {
+                let change = changed(caller, "knowledge.intake-filter", &input);
+                intake_filter(c, input, change)
             },
         ),
         operation(
             Spec {
-                name: "source.try",
-                summary: "Show what the source filter would leave of a text, without sharing it.",
+                name: "knowledge.try-intake",
+                summary: "Show what the intake filter would leave of a text, without sharing it.",
                 access: ADMIN,
-                input: SOURCE_TRY,
+                input: TRY_INTAKE,
             },
-            |c: &HubContext, _: &Caller, input: SourceTry| source_try(c, input),
+            |c: &HubContext, _: &Caller, input: TryIntake| try_intake(c, input),
         ),
     ]
 }
@@ -556,15 +559,20 @@ fn distill(c: &HubContext, input: Distill, change: Change) -> Result<Value, Erro
     })
 }
 
-fn source_filter(c: &HubContext, input: SourceFilter, change: Change) -> Result<Value, Error> {
+fn intake_filter(c: &HubContext, input: IntakeFilter, change: Change) -> Result<Value, Error> {
     if input.off {
         if !input.models.is_empty() || input.prompt.is_some() {
             return Err(Error::invalid("give models and a prompt, or `off`, not both").on("off"));
         }
-        return edit(c, change, "no source may be connected now".into(), |s| {
-            s.source_filter = None;
-            Ok(())
-        });
+        return edit(
+            c,
+            change,
+            "nothing may arrive now without being shared on purpose".into(),
+            |s| {
+                s.intake_filter = None;
+                Ok(())
+            },
+        );
     }
     let mut candidates = Vec::new();
     for given in &input.models {
@@ -582,7 +590,7 @@ fn source_filter(c: &HubContext, input: SourceFilter, change: Change) -> Result<
         return Err(Error::invalid("`max_tokens` must be greater than 0").on("max_tokens"));
     }
     let when = input.when_none.as_deref().map(when_none).transpose()?;
-    let now = c.kept()?.read()?.source_filter;
+    let now = c.kept()?.read()?.intake_filter;
     if candidates.is_empty()
         && now.is_some()
         && prompt.is_none()
@@ -617,7 +625,7 @@ fn source_filter(c: &HubContext, input: SourceFilter, change: Change) -> Result<
             let Some(p) = prompt else {
                 return Err(Error::invalid("say what is confidential").on("prompt"));
             };
-            SourceFilterSetting {
+            IntakeFilterSetting {
                 models: ModelsSetting {
                     candidates,
                     when_none: when.unwrap_or(WhenNone::Wait),
@@ -630,17 +638,17 @@ fn source_filter(c: &HubContext, input: SourceFilter, change: Change) -> Result<
     edit(
         c,
         change,
-        "what sources bring in is filtered so now".into(),
+        "what arrives without being shared on purpose is filtered so now".into(),
         |s| {
-            s.source_filter = Some(filter.clone());
+            s.intake_filter = Some(filter.clone());
             Ok(())
         },
     )
 }
 
-fn source_try(c: &HubContext, input: SourceTry) -> Result<Value, Error> {
+fn try_intake(c: &HubContext, input: TryIntake) -> Result<Value, Error> {
     let memory = ensemble_knowledge::Memory::new(&c.hub()?, None);
-    let message = ensemble_knowledge::sources::Message {
+    let message = ensemble_knowledge::intake::Message {
         id: "try".into(),
         from: "someone".into(),
         at: ensemble_core::time::utc(std::time::SystemTime::now()),
@@ -743,11 +751,11 @@ fn recall(c: &HubContext, input: Recall, change: Change) -> Result<Value, Error>
     })
 }
 
-fn trackers(c: &HubContext) -> Result<Value, Error> {
+fn integrations(c: &HubContext) -> Result<Value, Error> {
     let hub = c.hub()?;
     let mut said = Vec::new();
     let mut rows = Vec::new();
-    for (name, t) in &hub.connectors.tasks.trackers {
+    for (name, t) in &hub.modules.tasks.integrations {
         let ensemble_config::IssueTracker::LocalMarkdown { dir } = &t.kind;
         said.push(format!(
             "{name}  local_markdown in {}, label {}, every {}s",
@@ -765,19 +773,19 @@ fn trackers(c: &HubContext) -> Result<Value, Error> {
     }
     if said.is_empty() {
         said.push(
-            "no trackers: tasks come from client agents alone; `tracker add` adds one".into(),
+            "no integrations: tasks come from MCP clients alone; `integration add` adds one".into(),
         );
     }
-    Ok(json!({ "said": said.join("\n"), "trackers": rows }))
+    Ok(json!({ "said": said.join("\n"), "integrations": rows }))
 }
 
-fn add_tracker(c: &HubContext, input: TrackerAdd, change: Change) -> Result<Value, Error> {
+fn add_integration(c: &HubContext, input: IntegrationAdd, change: Change) -> Result<Value, Error> {
     let name = input.name.trim().to_string();
     word(&name, "name")?;
-    if c.kept()?.read()?.trackers.contains_key(&name) {
+    if c.kept()?.read()?.integrations.contains_key(&name) {
         return Err(Error::new(
             Code::Conflict,
-            format!("there is a tracker '{name}' already"),
+            format!("there is an integration '{name}' already"),
         )
         .on("name"));
     }
@@ -790,7 +798,7 @@ fn add_tracker(c: &HubContext, input: TrackerAdd, change: Change) -> Result<Valu
             Error::invalid("`dir` is required for local_markdown: the folder of its issues")
                 .on("dir")
         })?;
-    let tracker = TrackerSetting::LocalMarkdown {
+    let integration = IntegrationSetting::LocalMarkdown {
         dir: dir.to_string(),
         label: input
             .label
@@ -800,9 +808,9 @@ fn add_tracker(c: &HubContext, input: TrackerAdd, change: Change) -> Result<Valu
             .to_string(),
         poll_seconds: clamp(input.poll_seconds.unwrap_or(30)),
     };
-    let said = format!("the hub watches the tracker {name}");
+    let said = format!("the task tracker watches {name}");
     edit(c, change, said, |s| {
-        s.trackers.insert(name.clone(), tracker.clone());
+        s.integrations.insert(name.clone(), integration.clone());
         Ok(())
     })
 }

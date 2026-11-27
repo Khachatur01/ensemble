@@ -20,10 +20,11 @@
 //! Everything the hub keeps is in its folder, `hub/` in `--config-dir`
 //! (`ensemble_core::state::HubDir`): its core's database, with its settings
 //! and the keys of its backends (`kept`) and its users and their tokens
-//! (`users`), and a folder for each connector that keeps anything. Its
+//! (`users`), and a folder for each module that keeps anything. Its
 //! operations are in `accounts`. `server` is the hub's side of the link.
 //! The same port serves a REST API (`api`, over a little `http`) for signing
-//! up and for admins. Issues of the hub's tracker become tasks (`inbox`).
+//! up and for admins. Issues of the trackers the task tracker has integrations with become tasks
+//! (`inbox`).
 //!
 //! The command line (`cli`), and what each command does (`cmd`), is for the
 //! one who runs the hub; [`main`] is the executable's.

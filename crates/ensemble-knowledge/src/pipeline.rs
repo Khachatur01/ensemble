@@ -18,8 +18,8 @@
 //! nobody can guess, so it cannot close them. The answer must be the JSON asked
 //! for, an item, a merge or a link may only touch the notes it was offered, and
 //! everything is capped in size; anything else goes to `review/` with why. Every
-//! note names the shares it came from, so what one source brought in can be
-//! found and removed.
+//! note names the shares it came from, so what one person or feed brought in
+//! can be found and removed.
 
 use crate::Memory;
 use crate::vault::{Audience, Note, Processed, Share, Vault, random_hex};

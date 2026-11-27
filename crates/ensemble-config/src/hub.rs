@@ -4,9 +4,9 @@
 //! server (`ensemble-hub serve`), for a team or for one person on their own
 //! computer; where it listens is what `serve` is given, not a setting. Its
 //! core is its accounts, their roles and what each may do, and its ANN
-//! pool, the providers it calls and their models. Everything else
-//! reaches it through a **connector**, each always on: the REST API, MCP, the
-//! runners' link, knowledge, tasks and sources.
+//! pool, the providers it calls and their models. Everything else is a
+//! **module**, each always on: the REST API, MCP, the runners' link, the
+//! knowledge base and the task tracker.
 //!
 //! No setting has a default value: a new hub starts with every one written
 //! ([`HubSettings::starting`]), and secrets are named by the variable that
@@ -27,10 +27,7 @@ pub struct Hub {
     /// their links.
     pub llm: AnnPool,
     pub accounts: Accounts,
-    pub connectors: Connectors,
-    /// Who works on each task, as the decision models choose; none: no task
-    /// is given to a runner.
-    pub task_picker: Option<TaskPickerSetting>,
+    pub modules: Modules,
     /// Where it was loaded from, for error messages.
     pub source: PathBuf,
 }
@@ -55,30 +52,23 @@ pub struct AccountRules {
     pub lockout_minutes: u32,
 }
 
-/// The connectors with settings. The REST API, MCP and the runners' link have
-/// none: they are written as `{}`, and are always on all the same.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Connectors {
+/// The modules with settings. The REST API, MCP and the runners' link have
+/// none, and are always on all the same.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Modules {
     pub knowledge: Knowledge,
     pub tasks: Tasks,
-    pub sources: Sources,
 }
 
-/// Knowledge brought in from outside: how what a source brings is collected
-/// and filtered before the distiller. No source adapter is built yet.
+/// The knowledge base's intake filter: the one model that collects and
+/// filters what arrives without anyone sharing it on purpose, such as what an
+/// integration will bring in, and what the admin counts as confidential.
+/// Shares and task reports never pass it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sources {
-    /// Absent: no source may be connected.
-    pub filter: Option<SourceFilter>,
-}
-
-/// The one model that collects and filters what every source brings in,
-/// and what the admin counts as confidential.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceFilter {
+pub struct IntakeFilter {
     pub model: DirectAdapter,
     /// What is confidential, in the admin's words: it is removed before what
-    /// a source brought becomes a share the whole hub may recall.
+    /// arrived becomes a share the whole hub may recall.
     pub prompt: String,
 }
 
@@ -96,20 +86,26 @@ pub struct Knowledge {
     pub embed: Option<Embed>,
     /// The models that turn shares into notes, and the most tokens of an answer.
     pub distill: DirectAdapter,
+    /// Absent: nothing may arrive without being shared on purpose.
+    pub intake_filter: Option<IntakeFilter>,
     pub recall: Recall,
 }
 
-/// The tasks the hub keeps, and the trackers whose issues become tasks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The task tracker: the tasks the hub keeps, its integrations with trackers
+/// whose issues become tasks, and its task picker.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Tasks {
     /// By the name the admin gives each; empty for no inbox.
-    pub trackers: BTreeMap<String, Tracker>,
+    pub integrations: BTreeMap<String, Integration>,
+    /// Who works on each task, as the decision models choose; none: no task
+    /// is given to a runner.
+    pub task_picker: Option<TaskPickerSetting>,
 }
 
-/// A tracker: issues in it that carry the label become tasks of the person
-/// they are assigned to.
+/// An integration of the task tracker with a tracker: issues in it that carry
+/// the label become tasks of the person they are assigned to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Tracker {
+pub struct Integration {
     pub kind: IssueTracker,
     /// The signal: an issue with this label is for the runners of the person
     /// it is assigned to.
@@ -218,11 +214,12 @@ pub struct HubSettings {
     pub embed: Option<EmbedSetting>,
     pub recall_max_notes: u32,
     pub recall_max_chars: u32,
-    /// The trackers whose issues become tasks, by the name given each.
-    pub trackers: BTreeMap<String, TrackerSetting>,
-    /// None: no source may be connected.
-    pub source_filter: Option<SourceFilterSetting>,
-    /// The decision models that choose who works on each task, and what they
+    /// None: nothing may arrive without being shared on purpose.
+    pub intake_filter: Option<IntakeFilterSetting>,
+    /// The task tracker's integrations with trackers whose issues become
+    /// tasks, by the name given each.
+    pub integrations: BTreeMap<String, IntegrationSetting>,
+    /// The task tracker's task picker: the decision models that choose who works on each task, and what they
     /// are asked. None: the hub gives no task to a runner.
     pub task_picker: Option<TaskPickerSetting>,
 }
@@ -264,10 +261,10 @@ pub struct EmbedSetting {
     pub min_similarity: f64,
 }
 
-/// A tracker, as kept.
+/// An integration of the task tracker with a tracker, as kept.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum TrackerSetting {
+pub enum IntegrationSetting {
     LocalMarkdown {
         /// The folder of issues; a relative path is in the hub's
         /// `trackers/`.
@@ -277,10 +274,10 @@ pub enum TrackerSetting {
     },
 }
 
-/// The source filter, as kept.
+/// The knowledge base's intake filter, as kept.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SourceFilterSetting {
+pub struct IntakeFilterSetting {
     pub models: ModelsSetting,
     /// What is confidential, in the admin's words.
     pub prompt: String,
@@ -288,7 +285,7 @@ pub struct SourceFilterSetting {
 
 impl HubSettings {
     /// The settings a new hub starts with: `owner`'s, on this computer
-    /// alone, closed to sign-ups, with no provider, model or tracker yet.
+    /// alone, closed to sign-ups, with no provider, model or integration yet.
     /// Shares wait until a model is chosen; recall finds notes by their words.
     pub fn starting(owner: &str) -> Self {
         let roles = [
@@ -326,8 +323,8 @@ impl HubSettings {
             embed: None,
             recall_max_notes: 8,
             recall_max_chars: 6000,
-            trackers: BTreeMap::new(),
-            source_filter: None,
+            intake_filter: None,
+            integrations: BTreeMap::new(),
             task_picker: None,
         }
     }
@@ -405,26 +402,39 @@ impl HubSettings {
                 min_similarity_permille: (e.min_similarity.clamp(0.0, 1.0) * 1000.0).round() as u32,
             }
         });
+        let intake_filter = self.intake_filter.as_ref().map(|f| {
+            let model = models("intake_filter", &f.models, false, &self.ann_pool, &mut problems);
+            if f.prompt.trim().is_empty() {
+                problems.push(
+                    "intake_filter.prompt: is empty; say what is confidential, such as salaries and clients' names".into(),
+                );
+            }
+            IntakeFilter {
+                model,
+                prompt: f.prompt.trim().to_string(),
+            }
+        });
         let knowledge = Knowledge {
             vault: dir.vault(),
             embeddings: dir.knowledge().join("embeddings.db"),
             embed,
             distill,
+            intake_filter,
             recall: Recall {
                 max_notes: self.recall_max_notes,
                 max_chars: self.recall_max_chars,
             },
         };
         let trackers_dir = dir.trackers();
-        let mut trackers = BTreeMap::new();
-        for (name, t) in &self.trackers {
-            let at = format!("trackers.{name}");
+        let mut integrations = BTreeMap::new();
+        for (name, t) in &self.integrations {
+            let at = format!("integrations.{name}");
             if !super::runner::valid_name(name) {
                 problems.push(format!(
                     "{at}: the name must be letters, digits, '-', '_' or '.'"
                 ));
             }
-            let TrackerSetting::LocalMarkdown {
+            let IntegrationSetting::LocalMarkdown {
                 dir,
                 label,
                 poll_seconds,
@@ -441,40 +451,29 @@ impl HubSettings {
             if *poll_seconds == 0 {
                 problems.push(format!("{at}: `poll_seconds` must be greater than 0"));
             }
-            let tracker = Tracker {
+            let integration = Integration {
                 kind: IssueTracker::LocalMarkdown {
                     dir: trackers_dir.join(dir.trim()),
                 },
                 label: label.to_string(),
                 poll_seconds: *poll_seconds,
             };
-            trackers.insert(name.clone(), tracker);
+            integrations.insert(name.clone(), integration);
         }
         // Two inboxes on one folder would each take its issues.
         let mut watched: BTreeMap<&Path, &str> = BTreeMap::new();
-        for (name, tracker) in &trackers {
-            let IssueTracker::LocalMarkdown { dir } = &tracker.kind;
+        for (name, integration) in &integrations {
+            let IssueTracker::LocalMarkdown { dir } = &integration.kind;
             if let Some(first) = watched.insert(dir, name) {
                 problems.push(format!(
-                    "trackers.{name}: watches {}, as {first} does; give each tracker a folder of its own",
+                    "integrations.{name}: watches {}, as {first} does; give each integration a folder of its own",
                     dir.display()
                 ));
             }
         }
-        let tasks = Tasks { trackers };
-        let sources = Sources {
-            filter: self.source_filter.as_ref().map(|f| {
-                let model = models("source_filter", &f.models, false, &self.ann_pool, &mut problems);
-                if f.prompt.trim().is_empty() {
-                    problems.push(
-                        "source_filter.prompt: is empty; say what is confidential, such as salaries and clients' names".into(),
-                    );
-                }
-                SourceFilter {
-                    model,
-                    prompt: f.prompt.trim().to_string(),
-                }
-            }),
+        let tasks = Tasks {
+            integrations,
+            task_picker: self.task_picker.clone(),
         };
         if let Some(picker) = &self.task_picker {
             picker.check(&self.ann_pool.known(), &mut problems);
@@ -484,12 +483,7 @@ impl HubSettings {
                 owner: self.owner.trim().to_string(),
                 llm,
                 accounts,
-                connectors: Connectors {
-                    knowledge,
-                    tasks,
-                    sources,
-                },
-                task_picker: self.task_picker.clone(),
+                modules: Modules { knowledge, tasks },
                 source: source.to_path_buf(),
             }),
             _ => Err(ConfigError::Invalid {

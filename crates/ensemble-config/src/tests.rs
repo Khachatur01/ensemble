@@ -199,14 +199,14 @@ fn hub_problems(hub: &HubSettings) -> String {
 }
 
 #[test]
-fn a_new_hub_starts_on_this_computer_closed_with_no_source_and_loads() {
+fn a_new_hub_starts_on_this_computer_closed_with_no_intake_filter_and_loads() {
     let hub = HubSettings::starting("Ana")
         .resolve(&ensemble_core::state::HubDir::new("/hubs/ana"), &env(&[]))
         .unwrap();
     assert_eq!(hub.owner, "Ana");
     assert_eq!(hub.accounts.rules.registration, Registration::Closed);
     assert!(hub.llm.direct.is_empty() && hub.llm.relayed.is_empty());
-    let k = &hub.connectors.knowledge;
+    let k = &hub.modules.knowledge;
     assert_eq!(
         k.vault,
         Path::new("/hubs/ana/knowledge/vault"),
@@ -214,8 +214,8 @@ fn a_new_hub_starts_on_this_computer_closed_with_no_source_and_loads() {
     );
     assert!(k.distill.fallback.candidates.is_empty(), "shares wait");
     assert_eq!(k.distill.fallback.when_none, WhenNone::Wait);
-    assert!(k.embed.is_none() && hub.connectors.sources.filter.is_none());
-    assert!(hub.connectors.tasks.trackers.is_empty());
+    assert!(k.embed.is_none() && k.intake_filter.is_none());
+    assert!(hub.modules.tasks.integrations.is_empty());
     assert_eq!(hub.accounts.roles["admin"].len(), 4);
 }
 
@@ -257,7 +257,7 @@ fn a_hub_uses_only_a_model_of_its_pool_that_is_on_and_of_the_kind_it_needs() {
         .unwrap();
     assert_eq!(
         resolved
-            .connectors
+            .modules
             .knowledge
             .embed
             .unwrap()
@@ -324,9 +324,9 @@ fn a_model_of_the_pool_is_of_one_of_its_providers_once() {
 }
 
 #[test]
-fn the_source_filter_is_one_of_the_hubs_models_and_the_admins_prompt() {
+fn the_intake_filter_is_one_of_the_hubs_models_and_the_admins_prompt() {
     let mut hub = hub_settings();
-    hub.source_filter = Some(SourceFilterSetting {
+    hub.intake_filter = Some(IntakeFilterSetting {
         models: hub.distill.clone(),
         prompt: "Salaries.".into(),
     });
@@ -334,12 +334,12 @@ fn the_source_filter_is_one_of_the_hubs_models_and_the_admins_prompt() {
         .resolve(&ensemble_core::state::HubDir::new("/h"), &env(&[]))
         .unwrap();
     assert_eq!(
-        resolved.connectors.sources.filter.unwrap().prompt,
+        resolved.modules.knowledge.intake_filter.unwrap().prompt,
         "Salaries."
     );
     // Unlike the distiller's, its list is never empty, and it says what is
     // confidential.
-    hub.source_filter = Some(SourceFilterSetting {
+    hub.intake_filter = Some(IntakeFilterSetting {
         models: ModelsSetting {
             candidates: Vec::new(),
             ..hub.distill.clone()
@@ -347,24 +347,24 @@ fn the_source_filter_is_one_of_the_hubs_models_and_the_admins_prompt() {
         prompt: " ".into(),
     });
     let said = hub_problems(&hub);
-    assert!(said.contains("source_filter: `try` is empty"), "{said}");
-    assert!(said.contains("source_filter.prompt: is empty"), "{said}");
+    assert!(said.contains("intake_filter: `try` is empty"), "{said}");
+    assert!(said.contains("intake_filter.prompt: is empty"), "{said}");
 }
 
 #[test]
-fn a_hub_inbox_names_its_tracker_and_label_and_each_tracker_its_own_folder() {
+fn a_tracker_integration_names_its_folder_and_label_and_each_its_own_folder() {
     let mut hub = hub_settings();
-    let tracker = |dir: &str, label: &str| TrackerSetting::LocalMarkdown {
+    let tracker = |dir: &str, label: &str| IntegrationSetting::LocalMarkdown {
         dir: dir.into(),
         label: label.into(),
         poll_seconds: 30,
     };
-    hub.trackers
+    hub.integrations
         .insert("issues".into(), tracker("issues", "ensemble"));
     let resolved = hub
         .resolve(&ensemble_core::state::HubDir::new("/h"), &env(&[]))
         .unwrap();
-    let t = &resolved.connectors.tasks.trackers["issues"];
+    let t = &resolved.modules.tasks.integrations["issues"];
     assert_eq!(
         t.kind,
         IssueTracker::LocalMarkdown {
@@ -372,11 +372,11 @@ fn a_hub_inbox_names_its_tracker_and_label_and_each_tracker_its_own_folder() {
         }
     );
     assert_eq!(t.label, "ensemble");
-    hub.trackers
+    hub.integrations
         .insert("again".into(), tracker("issues", "a:b"));
     let said = hub_problems(&hub);
     assert!(
-        said.contains("trackers.again.label: 'a:b' must be one word"),
+        said.contains("integrations.again.label: 'a:b' must be one word"),
         "{said}"
     );
     assert!(

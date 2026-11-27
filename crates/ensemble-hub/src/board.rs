@@ -1,4 +1,4 @@
-//! The hub's tasks, kept in the tasks connector's database per account and
+//! The hub's tasks, kept in the task tracker's database per account and
 //! project and leased to runners, as `ensemble_tasks::board` says. [`DbBoard`] is one project's
 //! tasks of one account; [`Service`] answers the link's task methods with
 //! them, as the server passes those on ([`TaskService`]), with the runners
@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
-/// The tasks the hub keeps, in the tasks connector's database
+/// The tasks the hub keeps, in the task tracker's database
 /// (`<config-dir>/hub/tasks/`).
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS tasks (

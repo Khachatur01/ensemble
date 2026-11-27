@@ -1,6 +1,7 @@
 //! The hub's settings, a section each, with what each is now: the hub and
 //! its logins and sign-ups, the roles, the ANN pool (its providers and their
-//! models), the models of the knowledge vault, the source filter, the trackers, the task picker, and who changed what.
+//! models), the knowledge base's models and intake filter, the task
+//! tracker's integrations and task picker, and who changed what.
 //! Each change is an operation's form, filled in with the setting as it is.
 //! An operation of the settings no section shows has a page of its own, so a
 //! new one is reached before a section shows it.
@@ -18,9 +19,8 @@ const SECTIONS: &[(&str, &str)] = &[
     ("general", "Hub and logins"),
     ("roles", "Roles"),
     ("models", "Models"),
-    ("knowledge", "Knowledge"),
-    ("sources", "Sources"),
-    ("trackers", "Trackers"),
+    ("knowledge", "Knowledge base"),
+    ("integrations", "Tracker integrations"),
     ("picker", "Task picker"),
     ("history", "History"),
     ("other", "Other operations"),
@@ -55,11 +55,11 @@ const SHOWN: &[&str] = &[
     "knowledge.recall",
     "knowledge.share",
     "knowledge.find",
-    "source.filter",
-    "source.try",
-    "tracker.list",
-    "tracker.add",
-    "tracker.remove",
+    "knowledge.intake-filter",
+    "knowledge.try-intake",
+    "integration.list",
+    "integration.add",
+    "integration.remove",
     "picker.show",
     "picker.set",
     "picker.question",
@@ -76,8 +76,7 @@ const GROUPS: &[&str] = &[
     "runner",
     "knowledge",
     "provider",
-    "source",
-    "tracker",
+    "integration",
     "picker",
 ];
 
@@ -121,9 +120,8 @@ pub fn SettingsPage(section: String) -> Element {
                     "general" => rsx! { General {} },
                     "roles" => rsx! { Roles {} },
                     "models" => rsx! { Models {} },
-                    "knowledge" => rsx! { KnowledgeModels {} },
-                    "sources" => rsx! { Sources {} },
-                    "trackers" => rsx! { Trackers {} },
+                    "knowledge" => rsx! { KnowledgeModels {} IntakeFilter {} },
+                    "integrations" => rsx! { Integrations {} },
                     "picker" => rsx! { Picker {} },
                     "history" => rsx! { History {} },
                     "other" => rsx! { Other {} },
@@ -409,7 +407,7 @@ fn RoleRow(
 }
 
 /// What each type of provider is, as a person reads it.
-const SOURCE_TYPES: &[(&str, &str)] = &[
+const PROVIDER_TYPES: &[(&str, &str)] = &[
     ("openai-compatible-api", "OpenAI-compatible server"),
     ("anthropic-api", "Anthropic's API"),
     (
@@ -512,7 +510,7 @@ fn Models() -> Element {
             OpForm {
                 op: "provider.add",
                 picks: vec![
-                    Pick::named("type", SOURCE_TYPES),
+                    Pick::named("type", PROVIDER_TYPES),
                     Pick::suggest("runner", runners),
                 ],
                 when: vec![
@@ -563,7 +561,7 @@ fn ProviderCard(provider: Value, models: Vec<Value>, on_changed: EventHandler<()
     let mut tested = use_signal(|| None::<Result<Value, Failure>>);
     let mut keying = use_signal(|| false);
     let kind = text(&provider, "type");
-    let shown_kind = SOURCE_TYPES
+    let shown_kind = PROVIDER_TYPES
         .iter()
         .find(|(t, _)| *t == kind)
         .map(|(_, l)| l.to_string())
@@ -830,23 +828,23 @@ fn KnowledgeModels() -> Element {
 }
 
 #[component]
-fn Sources() -> Element {
+fn IntakeFilter() -> Element {
     let (mut shown, now) = settings();
     let pool = use_op("model.list");
     let Some(now) = now else {
         return waiting(&shown);
     };
     let models = lookup::pool_models(&pool, "llm");
-    let filter = &now["source_filter"];
+    let filter = &now["intake_filter"];
     let used = &filter["models"];
     rsx! {
         section { class: "panel",
-            h3 { "Filter" }
+            h3 { "Intake filter" }
             p { class: "muted",
-                "What sources bring in is collected by a model, which first takes out what is confidential. Without a filter, no source may be connected."
+                "What arrives without anyone sharing it on purpose, such as what an integration brings in, is collected by a model, which first takes out what is confidential. Shares and task reports skip it. Without a filter, nothing may arrive that way."
             }
             OpForm {
-                op: "source.filter",
+                op: "knowledge.intake-filter",
                 values: vec![
                     value("off", filter.is_null()),
                     value("models", model_lines(&used["try"])),
@@ -876,31 +874,31 @@ fn Sources() -> Element {
         }
         if !filter.is_null() {
             section { class: "panel",
-                h3 { "Try it" }
-                OpForm { op: "source.try", submit: "Filter this text", summary: true }
+                h3 { "Try the intake filter" }
+                OpForm { op: "knowledge.try-intake", submit: "Filter this text", summary: true }
             }
         }
     }
 }
 
-/// What each kind of tracker is, as a person reads it.
+/// What each kind of tracker an integration reaches is, as a person reads it.
 const TRACKER_TYPES: &[(&str, &str)] = &[("local_markdown", "A folder of markdown issues")];
 
 #[component]
-fn Trackers() -> Element {
-    let mut trackers = use_op("tracker.list");
+fn Integrations() -> Element {
+    let mut integrations = use_op("integration.list");
     let (mut shown, _) = settings();
     let mut changed = move || {
-        trackers.restart();
+        integrations.restart();
         shown.restart();
     };
     rsx! {
-        p { class: "muted", "Issues with the tracker's label become tasks of the people they are assigned to." }
-        {loaded(&trackers.read(), |out| {
-            let list = out["trackers"].as_array().cloned().unwrap_or_default();
+        p { class: "muted", "The task tracker's integrations with trackers: issues with an integration's label become tasks of the people they are assigned to." }
+        {loaded(&integrations.read(), |out| {
+            let list = out["integrations"].as_array().cloned().unwrap_or_default();
             rsx! {
                 if list.is_empty() {
-                    p { class: "muted", "No tracker: tasks come from client agents alone." }
+                    p { class: "muted", "No integration: tasks come from MCP clients alone." }
                 } else {
                     table {
                         thead { tr { th { "Name" } th { "Kind" } th { "Where" } th { "Label" } th { "Every" } th {} } }
@@ -914,7 +912,7 @@ fn Trackers() -> Element {
                                     td { "{text(&t, \"poll_seconds\")}s" }
                                     td { class: "end",
                                         OpForm {
-                                            op: "tracker.remove",
+                                            op: "integration.remove",
                                             fixed: vec![("name".to_string(), json!(text(&t, "name")))],
                                             submit: "Remove",
                                             danger: true,
@@ -931,16 +929,16 @@ fn Trackers() -> Element {
             }
         })}
         section { class: "panel",
-            h3 { "Add a tracker" }
+            h3 { "Add an integration" }
             p { class: "muted", "The hub starts again to use it; runners connect again by themselves." }
             OpForm {
-                op: "tracker.add",
+                op: "integration.add",
                 values: vec![value("type", "local_markdown")],
                 picks: vec![Pick::named("type", TRACKER_TYPES)],
                 when: vec![When::new("dir", "type", &["local_markdown"])],
                 labels: vec![label("dir", "folder"), label("poll_seconds", "look every, in seconds")],
                 more: vec!["label".to_string(), "poll_seconds".to_string()],
-                submit: "Add the tracker",
+                submit: "Add the integration",
                 clear: true,
                 on_done: move |_| changed(),
             }

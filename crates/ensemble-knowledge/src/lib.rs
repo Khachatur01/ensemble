@@ -14,7 +14,7 @@
 
 use async_trait::async_trait;
 use ensemble_backends::resolve::Resolver;
-use ensemble_config::{Hub, Knowledge, LlmBackend, RelayAt, SourceFilter};
+use ensemble_config::{Hub, Knowledge, LlmBackend, RelayAt};
 use ensemble_core::runtime;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -22,11 +22,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+pub mod intake;
 mod meaning;
 pub mod pipeline;
 pub mod search;
 pub mod secrets;
-pub mod sources;
 pub mod vault;
 
 pub use pipeline::{PIPELINE_VERSION, Step};
@@ -110,8 +110,6 @@ pub struct Memory {
     /// its settings say now: replaced when they change ([`Memory::apply`]).
     owner: RwLock<String>,
     knowledge: RwLock<Arc<Knowledge>>,
-    /// How what sources bring in is collected and filtered, when it is.
-    filter: RwLock<Option<Arc<SourceFilter>>>,
     /// The working folder's name, never its path.
     project: Option<String>,
     /// The agent CLI on the other end, once it has said its name.
@@ -138,8 +136,7 @@ impl Memory {
     pub fn new(hub: &Hub, project: Option<String>) -> Memory {
         Memory {
             owner: RwLock::new(hub.owner.clone()),
-            knowledge: RwLock::new(Arc::new(hub.connectors.knowledge.clone())),
-            filter: RwLock::new(hub.connectors.sources.filter.clone().map(Arc::new)),
+            knowledge: RwLock::new(Arc::new(hub.modules.knowledge.clone())),
             project,
             client: Mutex::new(None),
             backends: RwLock::new(Arc::new(hub.llm.backends(None))),
@@ -154,9 +151,7 @@ impl Memory {
     pub fn apply(&self, hub: &Hub) {
         *self.owner.write().unwrap_or_else(|e| e.into_inner()) = hub.owner.clone();
         *self.knowledge.write().unwrap_or_else(|e| e.into_inner()) =
-            Arc::new(hub.connectors.knowledge.clone());
-        *self.filter.write().unwrap_or_else(|e| e.into_inner()) =
-            hub.connectors.sources.filter.clone().map(Arc::new);
+            Arc::new(hub.modules.knowledge.clone());
         *self.backends.write().unwrap_or_else(|e| e.into_inner()) =
             Arc::new(hub.llm.backends(self.relay.as_ref()));
     }
@@ -185,11 +180,12 @@ impl Memory {
         &self.meaning
     }
 
-    /// The source filter, as the hub's settings say now.
-    pub(crate) fn filter(&self) -> Option<Arc<SourceFilter>> {
-        self.filter
+    /// The intake filter, as the knowledge base's settings say now.
+    pub(crate) fn intake_filter(&self) -> Option<ensemble_config::IntakeFilter> {
+        self.knowledge
             .read()
             .unwrap_or_else(|e| e.into_inner())
+            .intake_filter
             .clone()
     }
 

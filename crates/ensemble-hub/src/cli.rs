@@ -10,17 +10,17 @@ Files, in --config-dir (by default ~/.local/state/ensemble):
   hub/core/        database.db (settings, accounts, sealed keys), master.key
   hub/knowledge/   vault/ (the notes, a git repository), embeddings.db
   hub/tasks/       database.db (the tasks it keeps)
-  hub/trackers/    database.db (which issue became which task)
+  hub/trackers/    database.db (which issue of an integration became which task)
 
 The hub's settings are kept in its core's database, and changed with its
 commands, its REST API or a web UI; `settings show` shows them, `settings
 history` who changed what. `provider add` and `provider key` keep a provider's
 key sealed there by master.key: back up both, as without master.key no key can
-be read. A key a secrets manager keeps is read from the environment. Client
-agents reach the hub over MCP, with an account's token.";
+be read. A key a secrets manager keeps is read from the environment. MCP
+clients reach the hub over MCP, with an account's token.";
 
-/// An Ensemble hub, run by this computer: accounts, tasks, knowledge, MCP for
-/// client agents, and the link runners connect to.
+/// An Ensemble hub, run by this computer: accounts, the task tracker, the
+/// knowledge base, MCP for MCP clients, and the link runners connect to.
 #[derive(Debug, Parser)]
 #[command(name = "ensemble-hub", version, after_help = AFTER_HELP, max_term_width = 100)]
 pub struct Cli {
@@ -39,7 +39,10 @@ pub fn command<H>(hub: &Registry<H>) -> clap::Command {
         ("user", "The hub's accounts."),
         ("role", "The hub's roles."),
         ("runner", "The runners connected to the hub."),
-        ("tracker", "The trackers whose issues become tasks."),
+        (
+            "integration",
+            "The task tracker's integrations with trackers whose issues become tasks.",
+        ),
         (
             "picker",
             "The task picker: the decision models that choose who works on each task, and what they are asked.",
@@ -48,10 +51,6 @@ pub fn command<H>(hub: &Registry<H>) -> clap::Command {
         (
             "provider",
             "The providers of the hub's ANN pool, the servers and APIs that serve its models, and their keys.",
-        ),
-        (
-            "source",
-            "How what knowledge sources bring in is collected and filtered.",
         ),
         (
             "model",
@@ -99,7 +98,7 @@ pub enum Command {
     Check,
     /// Run the hub until Ctrl-C or SIGTERM.
     Serve {
-        /// The address every connector over HTTP is served on: 0.0.0.0 for
+        /// The address every module over HTTP is served on: 0.0.0.0 for
         /// other computers too.
         #[arg(long, value_name = "ADDRESS", default_value = "127.0.0.1")]
         http_host: std::net::IpAddr,
@@ -107,7 +106,8 @@ pub enum Command {
         #[arg(long, value_name = "PORT", default_value_t = 7700)]
         http_port: u16,
     },
-    /// The hub's knowledge vault.
+    /// The knowledge base: its vault, the models that distill it, and its
+    /// intake filter.
     #[command(subcommand)]
     Knowledge(KnowledgeCommand),
     /// Print a completion script for a shell, such as `ensemble-hub

@@ -1,6 +1,6 @@
 //! Turso databases, each a `database.db` in a folder only its owner may
 //! enter ([`with`]), with the tables its schema makes: the hub has one for
-//! its core and one for each connector that keeps anything, a runner one
+//! its core and one for each module that keeps anything, a runner one
 //! for its core. What a hub's core and a runner's both keep, their settings'
 //! audit log, the ANN pool and the keys of its providers, sealed, is [`kept`].
 //! [`open`] opens another Turso file, such as the knowledge vault's cache of

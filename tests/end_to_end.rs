@@ -1139,10 +1139,10 @@ fn hub_server_of(scratch: &Scratch) -> PathBuf {
     s["distill"]["try"] = central.clone();
     s["embed"] =
         json!({ "provider": "central", "model": "nomic-embed-text", "min_similarity": 0.5 });
-    s["trackers"] = json!({ "issues": {
+    s["integrations"] = json!({ "issues": {
         "type": "local_markdown", "dir": "issues", "label": "ensemble", "poll_seconds": 30,
     } });
-    s["source_filter"] = json!({
+    s["intake_filter"] = json!({
         "models": { "try": central, "when_none": "wait", "max_tokens": 2000 },
         "prompt": "Salaries, and prices agreed with clients.",
     });
@@ -1679,7 +1679,7 @@ fn an_issue_on_the_hub_server_is_worked_on_a_members_runner_and_reported_back() 
     std::fs::write(shop.join("a.txt"), "foo\n").unwrap();
     let (hub, address, token) = hub_server(&s);
     let mut settings = read_hub(&hub);
-    settings["trackers"]["issues"]["poll_seconds"] = json!(1);
+    settings["integrations"]["issues"]["poll_seconds"] = json!(1);
     write_hub(&hub, settings).unwrap();
     let out = hub_command(&s)
         .args(["user", "tracker", "ana", "ana.p"])
@@ -1815,7 +1815,7 @@ fn a_model_one_runner_shares_serves_another_runners_harness_and_the_hub_through_
         .insert(0, model_added("gpu", "local:small"));
     let gpu = json!([{ "provider": "gpu", "model": "local:small" }]);
     settings["distill"]["try"] = gpu.clone();
-    settings["source_filter"]["models"]["try"] = gpu;
+    settings["intake_filter"]["models"]["try"] = gpu;
     write_hub(&hub, settings).unwrap();
     let _hub = serve_hub(&s, &address);
     let url = format!("ws://{address}");
@@ -2540,7 +2540,7 @@ fn a_running_hub_uses_changed_settings_at_once_or_starts_again() {
     let roles = stdout_of(&ensemble_hub(&s, &["role", "list"]));
     assert!(roles.contains("reader: recall, share"), "{roles}");
     // The trackers it watches: it starts again, where it listened.
-    let out = ensemble_hub(&s, &["tracker", "remove", "issues"]);
+    let out = ensemble_hub(&s, &["integration", "remove", "issues"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
         stderr_of(&out).contains("starts again"),
@@ -3064,7 +3064,7 @@ fn a_runners_owner_adds_providers_and_shares_their_models() {
 }
 
 #[test]
-fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean() {
+fn an_admin_chooses_the_hubs_models_integrations_roles_and_sign_up_by_what_they_mean() {
     let s = Scratch::new("hub-goals");
     let hub = hub_server_of(&s);
     let yaml = || read_hub(&hub);
@@ -3152,9 +3152,9 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
     ok(&["knowledge", "recall", "--max-notes", "5"]);
     assert_eq!(yaml()["recall_max_notes"], 5);
 
-    // Trackers: each with a folder of its own.
+    // Integrations with trackers: each with a folder of its own.
     ok(&[
-        "tracker",
+        "integration",
         "add",
         "work",
         "--type",
@@ -3163,7 +3163,7 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
         "work",
     ]);
     let out = run(&[
-        "tracker",
+        "integration",
         "add",
         "again",
         "--type",
@@ -3172,17 +3172,17 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
         "work",
     ]);
     assert!(
-        stderr_of(&out).contains("give each tracker a folder of its own"),
+        stderr_of(&out).contains("give each integration a folder of its own"),
         "{}",
         stderr_of(&out)
     );
-    let list = ok(&["tracker", "list"]);
+    let list = ok(&["integration", "list"]);
     assert!(
         list.contains("work  local_markdown in") && list.contains("label ensemble"),
         "{list}"
     );
     assert!(list.contains("issues"), "{list}");
-    ok(&["tracker", "remove", "issues"]);
+    ok(&["integration", "remove", "issues"]);
 
     // Roles, and who may sign up.
     ok(&["role", "set", "auditor", "recall,share"]);
@@ -3212,24 +3212,24 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
         yaml()
     );
 
-    // What sources bring in: no filter, then one.
-    ok(&["source", "filter", "--off"]);
-    assert!(yaml()["source_filter"].is_null(), "{}", yaml());
-    let out = run(&["source", "filter", "local:gpt-5-mini"]);
+    // What arrives without being shared on purpose: no intake filter, then one.
+    ok(&["knowledge", "intake-filter", "--off"]);
+    assert!(yaml()["intake_filter"].is_null(), "{}", yaml());
+    let out = run(&["knowledge", "intake-filter", "local:gpt-5-mini"]);
     assert!(
         stderr_of(&out).contains("say what is confidential"),
         "{}",
         stderr_of(&out)
     );
     ok(&[
-        "source",
-        "filter",
+        "knowledge",
+        "intake-filter",
         "local:gpt-5-mini",
         "--prompt",
         "Salaries.",
     ]);
     assert!(
-        yaml()["source_filter"]
+        yaml()["intake_filter"]
             == json!({
                 "models": { "try": [{ "provider": "local", "model": "gpt-5-mini" }], "when_none": "wait", "max_tokens": 2000 },
                 "prompt": "Salaries.",
@@ -3237,9 +3237,9 @@ fn an_admin_chooses_the_hubs_models_trackers_roles_and_sign_up_by_what_they_mean
         "{}",
         yaml()
     );
-    ok(&["source", "filter", "--when-none", "fail"]);
+    ok(&["knowledge", "intake-filter", "--when-none", "fail"]);
     assert!(
-        yaml()["source_filter"]["models"]["when_none"] == "fail",
+        yaml()["intake_filter"]["models"]["when_none"] == "fail",
         "{}",
         yaml()
     );

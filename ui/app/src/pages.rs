@@ -162,7 +162,7 @@ pub fn Home() -> Element {
                 }
                 Link { class: "card", to: Route::Settings {},
                     h2 { "Settings" }
-                    p { "The hub, roles, models, knowledge, sources and trackers." }
+                    p { "The hub, roles, models, the knowledge base, tracker integrations and the task picker." }
                 }
             }
         }

@@ -58,7 +58,7 @@ pub fn root() -> Result<PathBuf, String> {
 }
 
 /// The folder of a hub, `<config-dir>/hub/`: a folder for its core and one
-/// for each of its connectors that keeps anything. A computer runs one hub;
+/// for each of its modules that keeps anything. A computer runs one hub;
 /// its lock and its socket are named for this folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubDir(PathBuf);
@@ -90,7 +90,7 @@ impl HubDir {
         self.core().join(DB_FILE)
     }
 
-    /// The knowledge connector's: the vault, and the vectors of its notes.
+    /// The knowledge base's: the vault, and the vectors of its notes.
     pub fn knowledge(&self) -> PathBuf {
         self.0.join("knowledge")
     }
@@ -101,13 +101,14 @@ impl HubDir {
         self.knowledge().join("vault")
     }
 
-    /// The tasks connector's: the tasks the hub keeps for its accounts.
+    /// The task tracker's: the tasks the hub keeps for its accounts.
     pub fn tasks(&self) -> PathBuf {
         self.0.join("tasks")
     }
 
-    /// The trackers': which issue of which tracker became which task; and a
-    /// local tracker's folder, when it names a relative one.
+    /// The task tracker's integrations with trackers: which issue of which
+    /// tracker became which task; and a markdown tracker's folder, when an
+    /// integration names a relative one.
     pub fn trackers(&self) -> PathBuf {
         self.0.join("trackers")
     }

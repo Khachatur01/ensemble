@@ -1,21 +1,23 @@
 # ensemble
 
-An agentic development system with a **hub** at its center. Everything else
-reaches the hub through its **connectors**: your agent over MCP, scripts over
-the REST API, trackers whose issues become tasks, and the **runners** that do
-the work on the computers you have.
+An agentic development system and an organization's knowledge base, with a
+**hub** at its center. Everything else is one of the hub's **modules**: MCP
+for your agent, the REST API for scripts and the web UI, the knowledge base,
+the task tracker, whose integrations with trackers turn issues into tasks, and
+the link for the **runners** that do the work on the computers you have.
 
 - **The hub** is the core: accounts, their roles and what each may do, the
   port it listens on, and its ANN pool, the models it uses. It runs no
   harnesses. It is its own process, `ensemble-hub serve`, on a server for a
   team or on your own computer when you work alone.
-- **Connectors** are everything that reaches the hub, each always on: the
-  REST API, MCP for client agents, the link for runners, the knowledge vault,
-  the tasks it keeps, and sources of knowledge from outside. Some connectors
-  hold **adapters** the admin picks, such as the trackers of `tasks`
-  (markdown issues today; Jira, GitHub and others later) or the providers of
-  `sources` (Microsoft 365 and Telegram, to come).
-- **Runners** are one of those connectors: computational resources, each a
+- **Modules** are the parts of the hub beside its core, each always on: the
+  REST API (the web UI sits on top of it), MCP for MCP clients, the link for
+  runners, the knowledge base, and the task tracker with its task picker.
+  Some modules hold **integrations** with external services the admin picks,
+  such as the task tracker's integrations with trackers (markdown issues
+  today; Jira, GitLab and GitHub later). Integrations with Microsoft 365,
+  Google and Telegram come later.
+- **Runners** are reached through one of those modules: computational resources, each a
   computer's **harnesses** (Claude Code, Codex, OpenCode, or Ensemble's own
   loop) and the models of its **ANN pool**. A runner works through the tasks
   the hub keeps for you, like a person handed work: in the project's
@@ -27,13 +29,13 @@ the work on the computers you have.
   tasks for your runners, and follows them.
 
 ```text
-   your agent CLI         scripts, a web UI       a tracker     sources
-   (Claude Code, …)                               (issues)      (to come)
-        │ MCP /mcp             │ REST /api/v1/         │             │
-        ▼                      ▼                       ▼             ▼
+   your MCP client        scripts, the web UI     a tracker
+   (Claude Code, …)                                (an integration)
+        │ MCP /mcp             │ REST /api/v1/          │
+        ▼                      ▼                        ▼
    ┌──────────────────────────── hub ─────────────────────────────────┐
    │ core: accounts · roles · the port · ANN pool                      │
-   │ connectors: rest · mcp · runners · knowledge · tasks · sources    │
+   │ modules: rest · mcp · runners · knowledge base · task tracker     │
    └──────────────────────────────────────────────────────────────────┘
         ║ the runners' link: WebSockets at /link and /relay
         ║
@@ -43,7 +45,7 @@ the work on the computers you have.
 ```
 
 Nobody writes a team. A runner offers what its computer has, and a task
-names no agent: for each task, the hub's **task picker**, a decision model,
+names no agent: for each task, the task tracker's **task picker**, a decision model,
 chooses which of your runners works on it, with which harness and LLM, from
 what the task says and what each model is good at. Nothing of Ensemble lives
 in your projects.
@@ -72,9 +74,9 @@ installed on the computer is used until you add it.
         |  MCP over HTTP: share, recall, make and follow tasks
         v
   ensemble-hub serve   core: accounts, roles, the port, ANN pool
-        ^              connectors: rest, mcp, runners, knowledge, tasks, sources
+        ^              modules: rest, mcp, runners, knowledge base, task tracker
         |
-        |  the runners' connector: a WebSocket at /link (tasks leased, how
+        |  the runners' module: a WebSocket at /link (tasks leased, how
         |  each run ended) and one at /relay (model calls between runners)
         |
   ensemble-runner serve   (this computer's runner, long-running)
@@ -89,10 +91,10 @@ installed on the computer is used until you add it.
 
 - **The hub is the center.** `ensemble-hub serve`, on a server for a team or
   on your own computer, keeps the accounts and decides what each may do. One
-  port serves every connector over HTTP: the REST API at `/api/v1/`, MCP at
-  `/mcp`, and the runners' link at `/link` and `/relay`. Its connectors are
-  always on, and each is written in its settings, which it keeps in its
-  database and changes through its commands, its REST API or a web UI.
+  port serves every module over HTTP: the REST API at `/api/v1/`, MCP at
+  `/mcp`, and the runners' link at `/link` and `/relay`. Its modules are
+  always on, and their settings are kept in its database and changed
+  through its commands, its REST API or the web UI.
 - **Your agent reaches the hub over MCP.** It adds the hub with its address and
   your token, and sees tools: `share` and `recall` for knowledge, and
   `submit`, `tasks`, `task`, `answer`, `gate`, `cancel` and `runners` for
@@ -214,14 +216,14 @@ several; a path that leaves the repository is refused.
 
 The **hub** is the center of the system. Its core is small: the accounts,
 their roles and what each may do; the one port it listens on; and its ANN
-pool, the providers of models it calls. Everything else is a connector (see
-[Connectors](#connectors)). It has no harnesses and runs no tasks. It is
+pool, the providers of models it calls. Everything else is a module (see
+[Modules](#modules)). It has no harnesses and runs no tasks. It is
 always its own process, `ensemble-hub serve`: a team runs one on a server, and
 one person runs one on their own computer beside their runner. The hub and
 the runner know nothing of each other's files: a runner reaches the hub over
 the link, wherever it runs. Everything Ensemble keeps is in one folder,
 `--config-dir` (by default `~/.local/state/ensemble`), the hub in its `hub/`,
-a folder for its core and one for each connector that keeps anything, each
+a folder for its core and one for each module that keeps anything, each
 readable only by you:
 
 ```text
@@ -236,7 +238,8 @@ readable only by you:
   tasks/
     database.db    the tasks it keeps for its accounts
   trackers/
-    database.db    which issue of which tracker became which task
+    database.db    the task tracker's integrations: which issue of which
+                   tracker became which task
 ```
 
 Its settings are kept in its database, as a GitLab instance keeps its
@@ -291,6 +294,8 @@ distill:
       provider: central
   when_none: wait
 embed: none
+intake_filter: none
+integrations: none
 lockout_failures: 5
 lockout_minutes: 15
 owner: Acme
@@ -303,20 +308,18 @@ roles:
   member: share, recall, tasks
   reader: recall
 session_hours: 12
-source_filter: none
-trackers: none
+task_picker: none
 ```
 
 Its core is its owner, its accounts and roles, and its ANN pool, the
-providers of models it calls; the rest reaches it through connectors, each always on: the
-REST API at `/api/v1/`, MCP at `/mcp`, the runners' link, knowledge, tasks
-and sources. `ensemble-hub settings history` says who changed what, when,
+providers of models it calls; the rest are its modules, each always on: the
+REST API at `/api/v1/`, MCP at `/mcp`, the runners' link, the knowledge base
+and the task tracker. `ensemble-hub settings history` says who changed what, when,
 and with which operation. The hub's command line, `ensemble-hub …` on its
 computer, is always on and has no settings.
 
 **The port.** `serve` listens on one port (`--http-host`, `--http-port`) for
-every connector over
-HTTP: the REST API at `/api/v1/`, MCP at `/mcp`, and the runners' WebSockets at
+every module over HTTP: the REST API at `/api/v1/`, MCP at `/mcp`, and the runners' WebSockets at
 `/link` and `/relay`. A WebSocket anywhere else is refused. The hub speaks
 plain HTTP and WebSocket. For the internet, put a TLS reverse proxy in front,
 so passwords and tokens never cross the network in the clear; with Caddy,
@@ -367,7 +370,7 @@ both sent as `Authorization: Bearer <token>`, and only their SHA-256 is kept:
   `sessions.hours`. It is what a UI holds. Only a session may change the
   password or make and revoke access tokens, so a stolen access token cannot
   make more. A password change ends every session.
-- An **access token** is made from a session, for a runner, a client agent or
+- An **access token** is made from a session, for a runner, an MCP client or
   a script: named (`laptop`), with an optional expiry, and optional **scopes**
   that narrow the account's role, such as `["recall"]`. It is shown once,
   listed by id and name, and revoked one by one. Scopes hold on the link, on
@@ -385,21 +388,22 @@ $ curl -X POST https://hub.example.com/api/v1/register -d '{"name":"ana","passwo
 $ ensemble-hub user approve ana --role member     # on the hub's computer, or the API, below
 ```
 
-## Connectors
+## Modules
 
-Everything that reaches the hub is a **connector**, and each is always on:
+Every part of the hub beside its core is a **module**, and each is always on:
 
-| connector | what it is | adapters |
+| module | what it is | integrations |
 | --- | --- | --- |
-| `rest` | the REST API at `/api/v1/`, for scripts and the web UI | |
-| `mcp` | MCP over HTTP at `/mcp`, for client agents | |
+| `rest` | the REST API at `/api/v1/`, for scripts and the web UI, which sits on top of it and is not a module | |
+| `mcp` | MCP over HTTP at `/mcp`, for MCP clients: Claude Code, OpenCode, Codex, … | |
 | `runners` | the runners' link, WebSockets at `/link` and `/relay` | |
-| `knowledge` | the vault, and the models that turn shares into notes | |
-| `tasks` | the tasks the hub keeps, and the trackers whose issues become tasks | `trackers`: `local_markdown`; Jira, GitHub and others later |
-| `sources` | knowledge from outside, such as a mailbox or a chat | `adapters`: none yet; Microsoft 365 and Telegram later |
+| `knowledge` | the knowledge base: the vault, the models that turn shares into notes, and the intake filter | |
+| `tasks` | the task tracker: the tasks the hub keeps, its task picker, and its integrations with trackers whose issues become tasks | `integrations`: `local_markdown`; Jira, GitLab and GitHub later |
 
-A connector with adapters names each one the admin picks, by a name of their
-choosing, with its `type` and the settings of that type.
+A module with integrations names each one the admin picks, by a name of
+their choosing, with its `type` and the settings of that type. Integrations
+with Microsoft 365, Google and Telegram come later; which modules each serves
+is designed then.
 
 ### The REST API
 
@@ -432,7 +436,7 @@ for scripts. JSON in and out.
 | `DELETE /api/v1/users/{name}` | admin | removes an account, or turns a sign-up down |
 
 | `GET /api/v1/ops` | any token | the operations it may run, each with the JSON Schema of its input (secrets `writeOnly`) and its fields in order, for a UI to make its forms from |
-| `POST /api/v1/ops/{name}` `{…its input}` | as the operation says | runs any operation by its name, such as `provider.add`, `knowledge.models` or `tracker.add` |
+| `POST /api/v1/ops/{name}` `{…its input}` | as the operation says | runs any operation by its name, such as `provider.add`, `knowledge.models` or `integration.add` |
 | `GET /api/v1/openapi.json` | anyone | this API as an OpenAPI 3.1 document: every path above and every operation, with its body and who may call it |
 
 Point an OpenAPI tool at `/api/v1/openapi.json` to browse the API or make a
@@ -478,8 +482,9 @@ hub. It shows what your account may do:
   in with each setting as it is now: the hub and its logins and sign-ups;
   the roles, a box for each permission; the models: each provider tested,
   given a model it serves, asked again, given a key or taken out, and each
-  model added said how strong it is or taken out; the models of the knowledge vault and the source
-  filter; the trackers; who changed what; and a page for each operation of
+  model added said how strong it is or taken out; the knowledge base: its
+  models and its intake filter; the task tracker's integrations and its task
+  picker; who changed what; and a page for each operation of
   the settings no section shows yet.
 
 Every form is made from what `GET /api/v1/ops` says of the operation it runs,
@@ -621,7 +626,7 @@ the runner says it in `login`, `join`, `status` and as `serve` connects.
 ### Knowledge
 
 The hub keeps knowledge: what agents share becomes notes in its vault, and
-later work recalls them. Its settings are the `knowledge` connector in
+later work recalls them. Its settings are the `knowledge` module's in
 the hub's settings (see [The hub](#the-hub)): the vault, the models that distill, and
 how much a recall returns.
 
@@ -716,20 +721,40 @@ decides when to follow them. A run gets no knowledge tools: a task carries
 what its ticket says and the notes the hub put in it, so your agent puts in
 it what the run needs, from what it recalled.
 
+### The intake filter
+
+Anything in the system may feed the knowledge base: what you and your agents
+share, and what tasks report, goes to the distiller as it is. What arrives
+without anyone sharing it on purpose, such as what an integration with a
+mailbox or a chat will bring in, goes through the knowledge base's **intake
+filter** first. Its models first keep what is worth knowing, then remove
+what your `prompt` calls confidential. Only what is left becomes a share,
+for everyone who may recall, and the raw messages are dropped. With no
+intake filter, nothing may arrive that way. Nothing does yet: integrations
+with Microsoft 365, Google and Telegram come later.
+
+```console
+$ ensemble-hub knowledge intake-filter central:qwen3.5-72b --prompt "Salaries, contracts and prices agreed with clients; clients' names."
+$ ensemble-hub knowledge intake-filter --when-none fail   # what came in is dropped, saying why, when no model can be used
+$ ensemble-hub knowledge try-intake "…"                    # what the filter would leave of a text, shared nowhere
+$ ensemble-hub knowledge intake-filter --off               # no filter: nothing may arrive without being shared on purpose
+```
+
 ### Tasks from a tracker
 
 Issues live in a tracker and are assigned to **people**. When an issue is
 assigned to you and carries the hub's label, the hub's inbox makes it a task of
 yours, which the hub keeps like any other, and writes what happens back on the
-issue. A run never touches the tracker itself. A tracker is an
-adapter of the `tasks` connector, added by name with its `type`, its `label`
-and how often it is looked at (`poll_seconds`). The first type is a folder of markdown files on the hub's
-computer (`local_markdown`, with its `dir`); GitLab, GitHub and Jira come
-later. A hub watches every tracker it names, each with an inbox of its own
-and a folder of its own; with none, tasks come from your agent alone.
+issue. A run never touches the tracker itself. The task tracker reaches a
+tracker through an **integration**, added by name with its `type`, its
+`label` and how often it is looked at (`poll_seconds`). The first type is a
+folder of markdown files on the hub's computer (`local_markdown`, with its
+`dir`); Jira, GitLab and GitHub come later. A hub watches every tracker it
+has an integration with, each with an inbox of its own and a folder of its
+own; with none, tasks come from your agent alone.
 
 ```console
-$ ensemble-hub tracker add issues --type local_markdown --dir issues --label ensemble --poll-seconds 30
+$ ensemble-hub integration add issues --type local_markdown --dir issues --label ensemble --poll-seconds 30
 ```
 
 An issue is a markdown file anyone can write:
@@ -781,27 +806,6 @@ What the hub does, every `poll_seconds` of the tracker:
 Ensemble changes only an issue's `status:` line and appends comments
 (`## Comment by ensemble at <time>`); everything else in the file stays as you
 wrote it.
-
-### Sources
-
-A source brings knowledge in from outside, such as a mailbox or a chat, so
-what a team decides there reaches the vault too. Each is an adapter of the
-`sources` connector, which an admin connects for the whole hub: Microsoft 365
-(Outlook mail and Teams) and Telegram (a bot in the team's groups) are to
-come. None is built yet.
-
-What a source brings goes through one model before the distiller, the
-`filter`. It first keeps what is worth knowing, then removes what your
-`prompt` calls confidential. Only what is left becomes a share, for everyone
-who may recall, and the raw messages are dropped. With no filter, no source
-may be connected.
-
-```console
-$ ensemble-hub source filter central:qwen3.5-72b --prompt "Salaries, contracts and prices agreed with clients; clients' names."
-$ ensemble-hub source filter --when-none fail   # what came in is dropped, saying why, when no model can be used
-$ ensemble-hub source try "…"                    # what the filter would leave of a text, shared nowhere
-$ ensemble-hub source filter --off               # no filter: no source may be connected
-```
 
 ## Runners
 
@@ -1298,11 +1302,11 @@ $ ensemble-hub model list [provider]                  # each model added: what i
 $ ensemble-hub knowledge models central:qwen3.5:9b claude:claude-haiku-4-5
 $ ensemble-hub knowledge embedding central:embeddinggemma   # or --off
 $ ensemble-hub knowledge recall --max-notes 8 --max-chars 6000
-$ ensemble-hub tracker add issues --type local_markdown --dir issues      # tracker list | remove
+$ ensemble-hub integration add issues --type local_markdown --dir issues  # integration list | remove
 $ ensemble-hub role set auditor recall,share                              # role remove
 $ ensemble-hub registration set approval --max-pending 20                 # or closed
-$ ensemble-hub source filter central:qwen3.5-72b --prompt "Salaries; clients' names."  # or --off
-$ ensemble-hub source try "Bob: deploys go out on Tuesdays now"
+$ ensemble-hub knowledge intake-filter central:qwen3.5-72b --prompt "Salaries; clients' names."  # or --off
+$ ensemble-hub knowledge try-intake "Bob: deploys go out on Tuesdays now"
 $ ensemble-hub picker set laya:laya --min-confidence 0.6      # the task picker; picker show, or --off
 $ ensemble-hub picker template basic                         # how hard, and whether it runs tools
 $ ensemble-hub picker question kind --type choice --instructions "What does the task change?" \
@@ -1327,7 +1331,7 @@ $ ensemble-runner harness add builtin --max-seconds 1800 --max-steps 50 --max-co
   answers it as a service, and so sees what it is asked. What such a provider
   serves are decision models, and `provider test` asks one a yes or no. A
   runner keeps none: the hub decides.
-- **The task picker is the hub's, one for the hub.** `picker set` names the
+- **The task picker is the task tracker's, one for the hub.** `picker set` names the
   decision models of the hub's pool asked, in order, the next when one fails,
   and the least probability the worker chosen must have. `picker question`
   adds a question they are asked of each task first: a `choice`, a `score`
@@ -1362,7 +1366,7 @@ $ ensemble-runner harness add builtin --max-seconds 1800 --max-steps 50 --max-co
   embedding` takes only an embedding model of the pool, and asks it to embed
   once.
 - **What something uses stays.** A provider or a model the distiller, the
-  embedding model or the source filter uses is not removed, nor a role an
+  embedding model or the intake filter uses is not removed, nor a role an
   account has.
 
 ### Every other setting
@@ -1386,7 +1390,7 @@ operation, with what input, its secrets hidden.
 While the hub or the runner runs, `ensemble-hub …` and `ensemble-runner …` ask it, over its socket, and it
 makes the change itself and uses it at once: the hub's roles, how
 people sign up and how long a login lasts, its models and knowledge settings,
-its owner. A change the hub cannot use as it runs (its trackers) has it start
+its owner. A change the hub cannot use as it runs (its integrations) has it start
 again, in the same process;
 runners connect again by themselves. A change to the runner's settings has it
 start again, in the same process: running tasks start again from where their
@@ -1806,7 +1810,7 @@ scripts stand in for the CLIs.
   and wait for an admin; the web UI has no sign-up page yet, and does not
   browse the vault's notes, only recalls them. There is no password reset by
   mail, and no second factor. The API sends no CORS headers: the web UI
-  reaches it through `ensemble-ui`, on the UI's own origin. Connectors to
+  reaches it through `ensemble-ui`, on the UI's own origin. Integrations with
   chats and mail are not built either.
 - **Recall needs an embedding model to find by meaning.** Without one
   (`knowledge embedding`), or while its model cannot be asked, it finds notes
@@ -1820,6 +1824,6 @@ scripts stand in for the CLIs.
   least busy. A runner's models are reached at `/chat/completions` and `/completions` only.
   The hub keeps nothing of a runner once it disconnects.
 - **Markdown issues only so far.** Each inbox reads a folder of markdown
-  issues; GitLab, GitHub and Jira adapters are not built, and an issue cannot name a
+  issues; integrations with Jira, GitLab and GitHub are not built, and an issue cannot name a
   `repository`: a runner without a copy asks on the issue. A member's runner
   runs a hub's tasks only while it runs.

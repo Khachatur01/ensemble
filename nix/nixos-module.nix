@@ -67,7 +67,7 @@ in
           Whose hub it is: it runs as them, and its files are in their
           `~/.local/state/ensemble/hub/`: `core/`, its database, with its
           settings and the keys of its backends, sealed by `master.key` beside
-          it, and a folder for each connector, such as `knowledge/vault/`.
+          it, and a folder for each module, such as `knowledge/vault/`.
           Back up the whole folder. For a hub of an account of its own, make
           that user, and run `ensemble-hub …` as it.
         '';
